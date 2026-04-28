@@ -1,2 +1,2 @@
 # primer
-A educational primer for children  based on agentic teaxhers using socratic questioning and knowledgebases
+An educational primer for children  based on agentic teachers using socratic questioning and knowledgebases
