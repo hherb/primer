@@ -110,12 +110,6 @@ cargo run --bin primer -- --backend cloud --name Binti --age 8
 
 **Comprehension is verified, not assumed.** The Primer probes understanding through transfer questions ("Can you explain it to someone who's never heard of it?"), application challenges ("What would happen if gravity were twice as strong?"), and contradiction probing ("Someone told me plants eat soil — what would you say to them?").
 
-## Team
-
-- **Horst** — emergency physician, software developer, ongoing maintainer
-- **Son-in-law** — PhD in electrical engineering, teaches ML at UTAS, two children (the Primer's first users)
-- **Younger son** — mathematician/chemist, PhD in ML for analytical chemistry
-
 ## License
 
 AGPL-3.0 — see [LICENSE](LICENSE).
