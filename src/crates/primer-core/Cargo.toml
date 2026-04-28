@@ -1,0 +1,16 @@
+[package]
+name = "primer-core"
+description = "Core traits, types, and abstractions for the Primer learning companion"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+async-trait.workspace = true
+tokio.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+chrono.workspace = true
+uuid.workspace = true
+thiserror.workspace = true
+tracing.workspace = true
+futures.workspace = true

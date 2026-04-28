@@ -1,0 +1,16 @@
+[package]
+name = "primer-pedagogy"
+description = "Socratic dialogue engine and pedagogical intelligence for the Primer"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+primer-core.workspace = true
+async-trait.workspace = true
+tokio.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+chrono.workspace = true
+uuid.workspace = true
+tracing.workspace = true
+thiserror.workspace = true

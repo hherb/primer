@@ -1,0 +1,60 @@
+[workspace]
+resolver = "2"
+members = [
+    "crates/primer-core",
+    "crates/primer-inference",
+    "crates/primer-speech",
+    "crates/primer-knowledge",
+    "crates/primer-pedagogy",
+    "crates/primer-cli",
+]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2024"
+license = "Apache-2.0"
+repository = "https://github.com/hherb/primer"
+
+[workspace.dependencies]
+# Async runtime
+tokio = { version = "1", features = ["full"] }
+async-trait = "0.1"
+futures = "0.3"
+
+# Serialisation
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+toml = "0.8"
+
+# Database (knowledge base, learner model persistence)
+rusqlite = { version = "0.39", features = ["bundled"] }
+
+# HTTP (cloud API backend)
+reqwest = { version = "0.12", default-features = false, features = ["json", "stream", "rustls-tls"] }
+
+# Error handling
+anyhow = "1"
+thiserror = "2"
+
+# Logging
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+
+# Date/time
+chrono = { version = "0.4", features = ["serde"] }
+
+# UUID for session/entity IDs
+uuid = { version = "1", features = ["v4", "serde"] }
+
+# Audio I/O
+# cpal = "0.15"  # uncomment when integrating hardware audio
+
+# CLI
+clap = { version = "4", features = ["derive", "env"] }
+
+# Workspace crates
+primer-core = { path = "crates/primer-core" }
+primer-inference = { path = "crates/primer-inference" }
+primer-speech = { path = "crates/primer-speech" }
+primer-knowledge = { path = "crates/primer-knowledge" }
+primer-pedagogy = { path = "crates/primer-pedagogy" }

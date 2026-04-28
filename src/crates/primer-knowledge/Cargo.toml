@@ -1,0 +1,14 @@
+[package]
+name = "primer-knowledge"
+description = "Knowledge base and RAG retrieval for the Primer"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+primer-core.workspace = true
+async-trait.workspace = true
+tokio.workspace = true
+rusqlite.workspace = true
+tracing.workspace = true
+thiserror.workspace = true
+serde.workspace = true

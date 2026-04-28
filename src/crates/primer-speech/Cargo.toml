@@ -1,0 +1,18 @@
+[package]
+name = "primer-speech"
+description = "Speech-to-text and text-to-speech backends for the Primer"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+primer-core.workspace = true
+async-trait.workspace = true
+tokio.workspace = true
+tracing.workspace = true
+thiserror.workspace = true
+
+# Whisper bindings — uncomment when integrating:
+# whisper-rs = "0.12"
+
+# Audio I/O — uncomment when integrating:
+# cpal = "0.15"
