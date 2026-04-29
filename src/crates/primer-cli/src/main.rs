@@ -73,6 +73,16 @@ fn create_learner(name: &str, age: u8) -> LearnerModel {
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
+    // Load env files. Project-local `.env` first (searches cwd and ancestors),
+    // then a user-global `~/.primer_env` for secrets that should live outside
+    // any single repo. Earlier sources win — `from_path` does not override
+    // existing env vars by default. Must run before clap parses `--api-key`.
+    let _ = dotenvy::dotenv();
+    if let Ok(home) = std::env::var("HOME") {
+        let path = std::path::PathBuf::from(home).join(".primer_env");
+        let _ = dotenvy::from_path(&path);
+    }
+
     // Initialise tracing (set RUST_LOG=debug for verbose output).
     tracing_subscriber::fmt()
         .with_env_filter(
@@ -174,13 +184,34 @@ async fn main() -> anyhow::Result<()> {
             break;
         }
 
-        // Generate the Primer's response.
-        match dm.respond_to(input).await {
-            Ok(response) => {
-                println!("\nPrimer: {response}\n");
+        // Generate the Primer's response, printing tokens as they arrive.
+        // The "Primer: " prefix is held back until the first non-empty chunk
+        // so that an immediate failure (no API key, ollama down) doesn't leave
+        // a dangling "Primer: " above the error message.
+        let mut prefix_printed = false;
+        let result = dm
+            .respond_to_streaming(input, |chunk| {
+                if !prefix_printed {
+                    print!("\nPrimer: ");
+                    prefix_printed = true;
+                }
+                print!("{chunk}");
+                let _ = io::stdout().flush();
+            })
+            .await;
+        match result {
+            Ok(_) => {
+                if prefix_printed {
+                    println!("\n");
+                } else {
+                    eprintln!("\n(no response generated)\n");
+                }
             }
             Err(e) => {
-                eprintln!("Error generating response: {e}");
+                if prefix_printed {
+                    println!();
+                }
+                eprintln!("Error generating response: {e}\n");
             }
         }
 

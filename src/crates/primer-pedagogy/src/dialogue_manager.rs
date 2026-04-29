@@ -12,6 +12,7 @@
 //! injected as trait objects, keeping this module testable with stubs.
 
 use chrono::Utc;
+use futures::StreamExt;
 use primer_core::config::PedagogyConfig;
 use primer_core::conversation::{PedagogicalIntent, Session, Speaker, Turn};
 use primer_core::error::{PrimerError, Result};
@@ -77,16 +78,31 @@ impl<'a> DialogueManager<'a> {
     }
 
     /// Process the child's input and generate the Primer's response.
-    ///
-    /// This is the core conversation loop step:
-    /// 1. Record the child's turn.
-    /// 2. Decide pedagogical intent.
-    /// 3. Retrieve relevant knowledge.
-    /// 4. Build the prompt.
-    /// 5. Generate the response.
-    /// 6. Record the Primer's turn.
-    /// 7. Update the learner model.
+    /// Convenience wrapper around `respond_to_streaming` that discards
+    /// per-chunk callbacks. See that method for the full contract.
     pub async fn respond_to(&mut self, child_input: &str) -> Result<String> {
+        self.respond_to_streaming(child_input, |_| {}).await
+    }
+
+    /// Streaming variant of `respond_to`: invokes `on_chunk` for every
+    /// non-empty token chunk emitted by the inference backend, in order.
+    ///
+    /// On a clean stream the closure receives chunks like
+    /// `["Hel", "lo", " there"]`; the returned `String` is the full
+    /// accumulation (`"Hello there"`).
+    ///
+    /// On a mid-stream error, the partial accumulation is discarded:
+    /// the Primer turn is **not** recorded, the learner model is not
+    /// updated, and the error is returned. The child's turn (recorded
+    /// at step 1) stays in the session.
+    pub async fn respond_to_streaming<F>(
+        &mut self,
+        child_input: &str,
+        mut on_chunk: F,
+    ) -> Result<String>
+    where
+        F: FnMut(&str),
+    {
         // 1. Record the child's turn.
         let child_turn = Turn {
             speaker: Speaker::Child,
@@ -112,19 +128,38 @@ impl<'a> DialogueManager<'a> {
             self.config.context_window_turns,
         );
 
-        // 5. Generate the response.
+        // 5. Stream the response, accumulating into a single String while
+        //    forwarding each chunk to the caller.
         let params = GenerationParams::default();
-        let response = self
+        let mut stream = self
             .inference
-            .generate(&prompt, &params)
+            .generate_stream(&prompt, &params)
             .await
             .map_err(|e| PrimerError::Inference(format!("Generation failed: {e}")))?;
 
-        // 6. Record the Primer's turn.
+        let mut accumulated = String::new();
+        while let Some(item) = stream.next().await {
+            let chunk = item.inspect_err(|e| {
+                tracing::warn!("Stream error mid-generation: {e}");
+            })?;
+            if !chunk.text.is_empty() {
+                on_chunk(&chunk.text);
+                accumulated.push_str(&chunk.text);
+            }
+            if chunk.done {
+                break;
+            }
+        }
+
+        if accumulated.is_empty() {
+            tracing::warn!("Inference stream produced no text");
+        }
+
+        // 6. Record the Primer's turn (only on a clean stream).
         let active_concepts = prompt_builder::extract_active_concepts(&self.session, 4);
         let primer_turn = Turn {
             speaker: Speaker::Primer,
-            text: response.clone(),
+            text: accumulated.clone(),
             timestamp: Utc::now(),
             intent: Some(intent),
             concepts: active_concepts,
@@ -135,7 +170,7 @@ impl<'a> DialogueManager<'a> {
         //    would assess comprehension from the child's response).
         self.update_learner_model(child_input, &intent);
 
-        Ok(response)
+        Ok(accumulated)
     }
 
     /// Check whether the session has run long enough that the Primer
@@ -198,5 +233,231 @@ impl<'a> DialogueManager<'a> {
         } else {
             EngagementState::Engaged
         };
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use async_trait::async_trait;
+    use chrono::Utc;
+    use futures::stream;
+    use primer_core::config::PedagogyConfig;
+    use primer_core::inference::{
+        GenerationParams, InferenceBackend, Prompt, TokenChunk, TokenStream,
+    };
+    use primer_core::knowledge::{KnowledgeBase, Passage, RetrievalParams};
+    use primer_core::learner::{
+        EngagementState, LearnerModel, LearnerProfile, LearningPreferences,
+    };
+    use std::sync::Mutex;
+    use uuid::Uuid;
+
+    /// Test inference backend that emits a pre-configured sequence of stream items.
+    struct ScriptedBackend {
+        // Wrap in Mutex<Option> so we can take ownership in `generate_stream`
+        // even though the trait method takes `&self`.
+        script: Mutex<Option<Vec<Result<TokenChunk>>>>,
+    }
+
+    impl ScriptedBackend {
+        fn new(items: Vec<Result<TokenChunk>>) -> Self {
+            Self {
+                script: Mutex::new(Some(items)),
+            }
+        }
+    }
+
+    #[async_trait]
+    impl InferenceBackend for ScriptedBackend {
+        fn name(&self) -> &str {
+            "scripted-test"
+        }
+        async fn is_available(&self) -> bool {
+            true
+        }
+        async fn generate_stream(
+            &self,
+            _prompt: &Prompt,
+            _params: &GenerationParams,
+        ) -> Result<TokenStream> {
+            let items = self
+                .script
+                .lock()
+                .unwrap()
+                .take()
+                .expect("ScriptedBackend script already consumed");
+            Ok(Box::pin(stream::iter(items)))
+        }
+    }
+
+    /// Empty knowledge base for tests — never returns any passages.
+    struct EmptyKnowledge;
+    #[async_trait]
+    impl KnowledgeBase for EmptyKnowledge {
+        async fn retrieve(&self, _query: &str, _params: &RetrievalParams) -> Result<Vec<Passage>> {
+            Ok(vec![])
+        }
+    }
+
+    fn test_learner() -> LearnerModel {
+        LearnerModel {
+            profile: LearnerProfile {
+                id: Uuid::new_v4(),
+                name: "Tester".to_string(),
+                age: 8,
+                languages: vec!["en".to_string()],
+                created_at: Utc::now(),
+                last_active: Utc::now(),
+            },
+            concepts: vec![],
+            preferences: LearningPreferences::default(),
+            current_engagement: EngagementState::Engaged,
+        }
+    }
+
+    fn chunk(text: &str, done: bool) -> TokenChunk {
+        TokenChunk {
+            text: text.to_string(),
+            done,
+        }
+    }
+
+    #[tokio::test]
+    async fn respond_to_streaming_invokes_callback_per_chunk() {
+        let backend = ScriptedBackend::new(vec![
+            Ok(chunk("Hel", false)),
+            Ok(chunk("lo", false)),
+            Ok(chunk(" there", false)),
+            Ok(chunk("", true)),
+        ]);
+        let knowledge = EmptyKnowledge;
+        let mut dm = DialogueManager::new(
+            test_learner(),
+            &backend,
+            &knowledge,
+            PedagogyConfig::default(),
+        );
+
+        let received: Mutex<Vec<String>> = Mutex::new(vec![]);
+        let _ = dm
+            .respond_to_streaming("why is the sky blue", |c| {
+                received.lock().unwrap().push(c.to_string());
+            })
+            .await
+            .unwrap();
+
+        let joined: String = received.lock().unwrap().join("");
+        assert_eq!(joined, "Hello there");
+    }
+
+    #[tokio::test]
+    async fn respond_to_streaming_returns_full_accumulated_text() {
+        let backend = ScriptedBackend::new(vec![
+            Ok(chunk("Hel", false)),
+            Ok(chunk("lo", false)),
+            Ok(chunk(" there", false)),
+            Ok(chunk("", true)),
+        ]);
+        let knowledge = EmptyKnowledge;
+        let mut dm = DialogueManager::new(
+            test_learner(),
+            &backend,
+            &knowledge,
+            PedagogyConfig::default(),
+        );
+
+        let result = dm
+            .respond_to_streaming("hi", |_| {})
+            .await
+            .unwrap();
+        assert_eq!(result, "Hello there");
+    }
+
+    #[tokio::test]
+    async fn respond_to_streaming_records_full_primer_turn() {
+        let backend = ScriptedBackend::new(vec![
+            Ok(chunk("part one ", false)),
+            Ok(chunk("part two", false)),
+            Ok(chunk("", true)),
+        ]);
+        let knowledge = EmptyKnowledge;
+        let mut dm = DialogueManager::new(
+            test_learner(),
+            &backend,
+            &knowledge,
+            PedagogyConfig::default(),
+        );
+
+        let _ = dm
+            .respond_to_streaming("question", |_| {})
+            .await
+            .unwrap();
+        let last = dm.session.turns.last().unwrap();
+        assert_eq!(last.speaker, Speaker::Primer);
+        assert_eq!(last.text, "part one part two");
+    }
+
+    #[tokio::test]
+    async fn respond_to_streaming_does_not_record_primer_turn_on_stream_error() {
+        let backend = ScriptedBackend::new(vec![
+            Ok(chunk("partial", false)),
+            Err(PrimerError::Inference("simulated network drop".into())),
+        ]);
+        let knowledge = EmptyKnowledge;
+        let mut dm = DialogueManager::new(
+            test_learner(),
+            &backend,
+            &knowledge,
+            PedagogyConfig::default(),
+        );
+
+        let result = dm.respond_to_streaming("question", |_| {}).await;
+        assert!(result.is_err(), "expected Err on mid-stream failure");
+
+        // Child turn should be recorded; Primer turn should NOT be.
+        assert_eq!(dm.session.turns.len(), 1);
+        assert_eq!(dm.session.turns[0].speaker, Speaker::Child);
+    }
+
+    #[tokio::test]
+    async fn respond_to_streaming_returns_empty_string_when_stream_yields_no_text() {
+        // Backend completes cleanly with only an empty done-chunk. The call
+        // should succeed with an empty accumulated string and still record
+        // the (empty) Primer turn — the consumer is responsible for noticing
+        // and surfacing this as a user-facing problem if they care.
+        let backend = ScriptedBackend::new(vec![Ok(chunk("", true))]);
+        let knowledge = EmptyKnowledge;
+        let mut dm = DialogueManager::new(
+            test_learner(),
+            &backend,
+            &knowledge,
+            PedagogyConfig::default(),
+        );
+
+        let result = dm.respond_to_streaming("hi", |_| {}).await.unwrap();
+        assert_eq!(result, "");
+        let last = dm.session.turns.last().unwrap();
+        assert_eq!(last.speaker, Speaker::Primer);
+        assert_eq!(last.text, "");
+    }
+
+    #[tokio::test]
+    async fn respond_to_thin_wrapper_still_works() {
+        let backend = ScriptedBackend::new(vec![
+            Ok(chunk("alpha ", false)),
+            Ok(chunk("beta", false)),
+            Ok(chunk("", true)),
+        ]);
+        let knowledge = EmptyKnowledge;
+        let mut dm = DialogueManager::new(
+            test_learner(),
+            &backend,
+            &knowledge,
+            PedagogyConfig::default(),
+        );
+
+        let result = dm.respond_to("hi").await.unwrap();
+        assert_eq!(result, "alpha beta");
     }
 }

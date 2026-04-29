@@ -14,9 +14,9 @@ This roadmap is organised around one principle: **get a working conversation loo
 
 ### 0.1 — Make the cloud backend conversationally useful
 
-- [ ] Wire up SSE streaming in `CloudBackend` (currently collects the full response before returning — streaming lets us show tokens as they arrive, which matters for perceived latency)
-- [ ] Add a `--model` CLI flag to select between Claude models (sonnet for speed, opus for depth)
-- [ ] Handle API errors gracefully (rate limits, network drops, invalid key) with clear user-facing messages
+- [x] Wire up SSE streaming in `CloudBackend` — done. NDJSON streaming for `OllamaBackend` landed in the same pass. Tokens drip through to the terminal as they arrive.
+- [x] Add a `--model` CLI flag to select between Claude models (sonnet for speed, opus for depth) — done. Defaults to `claude-sonnet-4-6`; required for ollama.
+- [ ] Handle API errors gracefully (rate limits, network drops, invalid key) with clear user-facing messages — partial. Mid-stream errors propagate cleanly and the partial Primer turn is dropped. Full retry/backoff on rate limits is still TODO.
 - [ ] Add conversation persistence — save/load sessions as JSON so a child can pick up where they left off
 
 ### 0.2 — Knowledge base bootstrapping
@@ -37,10 +37,11 @@ This roadmap is organised around one principle: **get a working conversation loo
 
 ### 0.4 — Developer experience
 
-- [ ] Add `cargo test` coverage for all crates (core trait contracts, prompt builder output, dialogue manager state transitions, knowledge base retrieval)
+- [ ] Add `cargo test` coverage for all crates (core trait contracts, prompt builder output, dialogue manager state transitions, knowledge base retrieval) — partial. Streaming parsers and `respond_to_streaming` are well-covered (24 tests). `decide_intent()`, prompt builder, and knowledge base still untested.
 - [ ] Set up CI (GitHub Actions) — build + test on Linux and macOS
-- [ ] Add a `CLAUDE.md` to the repo with codebase conventions
+- [x] Add a `CLAUDE.md` to the repo with codebase conventions — done.
 - [ ] Add `--verbose` flag that prints pedagogical decisions (intent chosen, knowledge passages retrieved, engagement state) alongside the conversation — invaluable for debugging the Socratic behaviour
+- [x] `.env` / `~/.primer_env` auto-loading via dotenvy — done. Secrets can live in either a project-local `.env` or a user-global `~/.primer_env`.
 
 **Phase 0 exit criteria:** You can sit a child in front of a terminal, type `cargo run --bin primer -- --backend cloud --name Binti --age 8`, and have a 15-minute Socratic conversation about a topic of their choosing that feels qualitatively different from ChatGPT. The Primer asks more questions than it answers. It catches parroting. It suggests breaks. It remembers what was discussed last time.
 

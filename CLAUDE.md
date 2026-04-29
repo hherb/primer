@@ -18,7 +18,7 @@ cargo run --bin primer                               # REPL with stub backend (n
 cargo run --bin primer -- --backend cloud --name Binti --age 8                # uses ANTHROPIC_API_KEY env var
 cargo run --bin primer -- --backend cloud --model claude-opus-4-7             # override the default cloud model
 cargo run --bin primer -- --backend ollama --model llama3.2                   # local Ollama at http://localhost:11434
-cargo test                                           # run all tests (currently very few)
+cargo test                                           # run all tests (parser + dialogue manager coverage)
 cargo test -p primer-pedagogy                        # tests for one crate
 cargo test -p primer-pedagogy decide_intent          # single test by name substring
 cargo clippy --workspace --all-targets               # lint
@@ -27,6 +27,8 @@ RUST_LOG=debug cargo run --bin primer                # verbose tracing output
 ```
 
 CLI flags exposed by `primer-cli`: `--backend stub|cloud|ollama`, `--model` (Anthropic id for cloud, defaults to `claude-sonnet-4-6`; required local tag for ollama), `--ollama-url` (default `http://localhost:11434`), `--name`, `--age`, `--knowledge-db <path>` (defaults to `:memory:`), `--api-key` (or `ANTHROPIC_API_KEY` env). Type `quit`, `exit`, or `bye` to end the REPL.
+
+Env files are auto-loaded at startup. Two locations checked, in order: (1) project-local `.env` (dotenvy searches cwd and ancestors), then (2) user-global `~/.primer_env`. Earlier sources win, so a per-repo `.env` overrides the home file. Copy `.env.example` → `.env` for a per-repo config, or drop `ANTHROPIC_API_KEY=...` into `~/.primer_env` to share across projects. Both `.env` and `*.local` variants are gitignored.
 
 ## Architecture: trait-based hardware abstraction
 
@@ -53,8 +55,9 @@ primer-cli  →  primer-pedagogy  →  primer-core  ←  primer-inference, prime
 
 - **The workspace root is `src/Cargo.toml`, not the repo root.** All workspace deps are pinned there via `[workspace.dependencies]`; per-crate `Cargo.toml` files use `.workspace = true`.
 - The binary is named `primer` (see `[[bin]]` in `primer-cli/Cargo.toml`), so `cargo run --bin primer`.
-- **`CloudBackend::generate_stream` is not actually streaming yet** — it calls the non-streaming Messages API and emits one final chunk. `OllamaBackend` is the same: it sets `stream: false` and emits one chunk. SSE streaming is a Phase 0.1 TODO. Don't assume token-level streaming works.
+- **Real-backend streaming is live.** `CloudBackend::generate_stream` consumes Anthropic SSE (`event:`/`data:` framing, hand-rolled `SseBuffer` + `parse_anthropic_event`). `OllamaBackend::generate_stream` consumes NDJSON (one JSON object per `\n`-terminated line, `NdjsonBuffer` + `parse_ollama_line`). Both forward chunks via a `futures::channel::mpsc::unbounded` driven by a spawned tokio task. The stub backend still emits one final chunk by design — that's a degenerate but valid stream and shouldn't be "fixed".
 - **`CloudBackend` currently maps `Role::System` to `"user"` in the messages array** (system instructions are a top-level field on the Anthropic API). `OllamaBackend` instead prepends a `system`-role message because Ollama's chat API has no separate system field. Watch this divergence when reworking prompt assembly.
+- **`DialogueManager` exposes both `respond_to` and `respond_to_streaming(input, FnMut(&str))`.** The non-streaming method is now a thin wrapper around the streaming one with a no-op callback. On a mid-stream error, the partial Primer turn is **not** recorded into the session — the child turn stays, the Primer turn is dropped, and the error is returned.
 - **Cloud model defaults to `claude-sonnet-4-6`** but is now overridable via `--model`. For ollama, `--model` is required (e.g., `--model llama3.2`).
 - **`update_learner_model` in `dialogue_manager.rs` is a deliberate placeholder** — it only does a crude word-count heuristic for `EngagementState`. Real comprehension assessment is a Phase 0.3 task. Concept extraction from child input is also a placeholder (always empty `concepts` vec).
 - **`decide_intent()` is the brain of the Socratic behaviour.** It is the most important function to test rigorously when adding pedagogical features. Tests are listed as a Phase 0.3 priority.

@@ -13,6 +13,14 @@ target
 # Contains mutation testing data
 **/mutants.out*/
 
+# Environment files — secrets must never be committed
+.env
+.env.local
+.env.*.local
+
+# Claude Code local settings (per-checkout, not project state)
+.claude/
+
 # RustRover
 #  JetBrains specific template is maintained in a separate JetBrains.gitignore that can
 #  be found at https://github.com/github/gitignore/blob/main/Global/JetBrains.gitignore

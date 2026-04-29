@@ -16,6 +16,7 @@ primer-knowledge = { path = "../primer-knowledge" }
 primer-pedagogy = { path = "../primer-pedagogy" }
 tokio.workspace = true
 clap.workspace = true
+dotenvy.workspace = true
 tracing.workspace = true
 tracing-subscriber.workspace = true
 chrono.workspace = true

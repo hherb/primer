@@ -1,200 +1,113 @@
 # Primer — Next Session Brief
 
 **Audience:** future Claude Code session continuing work on this repo.
-**Last updated by previous session:** 2026-04-29.
+**Last updated by previous session:** 2026-04-29 (after streaming + review fixes + cloud verification).
 
 ## First moves when you start
 
-1. Read [CLAUDE.md](CLAUDE.md) — repo conventions, gotchas, build commands. Workspace root is `src/`, not the repo root.
-2. Skim [ROADMAP.md](ROADMAP.md) — Phase 0 is the active work; the items here come from Phase 0.1.
-3. Run `cd src && cargo build` to confirm a clean baseline before changing anything. The previous session left it green.
-4. Don't assume nothing changed since this brief was written. Read the current `cloud.rs`, `ollama.rs`, `dialogue_manager.rs`, and `primer-cli/src/main.rs` first — the user may have done work in between, and you don't want to undo it.
+1. Read [CLAUDE.md](CLAUDE.md) — repo conventions, gotchas, build commands. **Workspace root is `src/`, not the repo root** — every cargo command runs from `src/`.
+2. Skim [ROADMAP.md](ROADMAP.md). Phase 0.1 streaming + `--model` are checked off. The next-up items are mostly in Phase 0.3 (pedagogical engine refinement) and the rest of Phase 0.1 (conversation persistence, graceful API-error handling).
+3. From `src/`: `cargo build && cargo test`. The previous session left both green with **24 tests** total (parser-level + dialogue-manager + serialisation guard).
+4. Don't assume nothing changed since this brief was written. Read the current `cloud.rs`, `ollama.rs`, `dialogue_manager.rs`, `prompt_builder.rs`, and `primer-cli/src/main.rs` first — the user may have made interim changes.
 
 ## What the previous session shipped (so you don't redo it)
 
-- **Ollama backend** in `primer-inference/src/ollama.rs`. Posts to `/api/chat` non-streaming. `think: false` is set so reasoning models (Qwen3 etc.) don't burn the `num_predict` budget on hidden traces. Empty content is now an explicit error, not a silent blank.
-- **`--model` CLI flag**, optional override for cloud (defaults to `claude-sonnet-4-6`), required for ollama. New `--ollama-url` flag, default `http://localhost:11434`.
-- **Stronger age-banded language guidance** in `prompt_builder.rs`: a `language_guidance_for_age()` helper plus an explicit "Vocabulary discipline" section in the system prompt. Includes a staged-repetition rule for newly-introduced words.
-- **Roadmap entries**: per-child vocabulary spaced-repetition store added to Phase 0.3; consented cross-child language corpus added to Phase 4. Schema constraint linking the two is recorded in 0.3.
-- **CLAUDE.md** created.
+End-to-end token streaming, fully verified with real backends, plus a small pile of review fixes and ergonomics:
 
-End-to-end conversation against a real local model (Qwen3 via Ollama) is verified working.
+### Streaming (Phase 0.1)
 
-## The next task: end-to-end streaming
+- **Ollama NDJSON streaming** (`primer-inference/src/ollama.rs`). `stream: true`, drains `bytes_stream()` into `NdjsonBuffer` (handles partial lines split across HTTP chunks, lossy UTF-8 decoding so bad bytes surface as U+FFFD instead of vanishing), parses each line with `parse_ollama_line` into a `TokenChunk`, forwards via `futures::channel::mpsc::unbounded`. **8 unit tests** cover line-splitting, JSON parsing, and the lossy-UTF-8 path.
+- **Anthropic SSE streaming** (`primer-inference/src/cloud.rs`). `"stream": true`, hand-rolled `SseBuffer` (handles `event:`/`data:` framing, blank-line terminators, `:keepalive` heartbeats, CRLF, exact-one-space stripping after `data:` per spec). `parse_anthropic_event` translates `content_block_delta` → text token, `message_stop` → done, `error` → `Err`, ignores `ping`/`message_start`/`content_block_start`/`content_block_stop`/`message_delta`. **10 unit tests** including a serialisation guard locking in that `top_p` is NOT in the request body.
+- **Wire pattern** (identical in both backends): build `(tx, rx)` from `mpsc::unbounded::<Result<TokenChunk>>()`, spawn a tokio task that drains `bytes_stream`, feeds the parser buffer, forwards each parsed chunk via `tx.send(...)`. Return `Ok(Box::pin(rx))`. The spawn is fire-and-forget — see the comment in each backend explaining the cancellation-token TODO.
+- **`DialogueManager::respond_to_streaming(input, FnMut(&str))`** (`primer-pedagogy/src/dialogue_manager.rs`). The original `respond_to` is a thin wrapper with a no-op closure. **On a mid-stream error, the partial Primer turn is NOT recorded** — child turn stays, Primer turn dropped, error returned. **6 unit tests** with a `ScriptedBackend` test fixture and an `EmptyKnowledge` stub.
+- **CLI** (`primer-cli/src/main.rs`). Uses `respond_to_streaming` with `print!`+`flush` per chunk. The `"Primer: "` prefix is held back until the first non-empty chunk, so a connection failure doesn't leave a dangling label above the error message.
 
-**Goal:** when the user types a question, tokens appear progressively in the terminal as the model generates them, instead of the whole response landing at once after a 3–5 second wait.
+### Review-driven fixes from the same session
 
-**Why now:**
-- Time-to-first-token dominates perceived latency for conversational UX. The current "wait, then dump" feels worse than a slower model that drips tokens.
-- Phase 2 (TTS) absolutely needs this — Piper synthesises sentence-by-sentence; without streaming LLM output, you can't begin TTS until full generation completes, doubling end-to-end latency.
-- The trait already supports it: `InferenceBackend::generate_stream()` returns a `TokenStream` (`Pin<Box<dyn Stream<Item = Result<TokenChunk>> + Send>>`). Both real backends just stub it by emitting one final chunk. No trait change needed — fix the implementations.
+- `NdjsonBuffer::pop_line` no longer silently drops invalid-UTF-8 lines (lossy decode + log via the normal parse-error path).
+- Removed double-wrapped error in `respond_to_streaming` (`inspect_err` instead of redundant `map_err`).
+- Anthropic API request now omits `top_p` entirely — `claude-sonnet-4-6` and later 400 if both `temperature` and `top_p` are set. We picked `temperature` as the canonical knob; `GenerationParams.top_p` is still respected by Ollama. Locked in by the `api_request_omits_top_p` test.
+- SSE parser strips exactly one space after `data:` (per RFC) instead of `trim_start()`. Test guards against regression.
+- Doc comment in `parse_anthropic_event` notes that we currently treat `message_delta` as benign — `stop_reason` from this event (e.g. `max_tokens` truncation) is silently ignored.
 
-## Implementation plan, in order
+### Dev ergonomics
 
-Do these sequentially. Don't try to land all three in one commit — the diffs interact through the dialogue manager.
+- **`.env` and `~/.primer_env` auto-loaded at startup** via `dotenvy`. Project-local `.env` wins over `~/.primer_env`. Both `*.local` patterns gitignored. `.env.example` template at the repo root.
+- README and ROADMAP updated to reflect current state.
 
-### Step 1 — Ollama streaming (do this first; simpler protocol, no auth, fastest feedback loop)
+### Verification status
 
-Ollama's chat API streams NDJSON when `stream: true`. One JSON object per line:
+- `cargo build --workspace` → clean.
+- `cargo test --workspace` → **24 passed, 0 failed**.
+- `cargo clippy --workspace --all-targets` → clean, except for one **pre-existing** unrelated warning on `StubBackend::new` (suggests `Default` impl).
+- **Stub** REPL: works (single-chunk degenerate stream).
+- **Ollama** REPL with `qwen3.5:4b-q8_0`: produces correct Socratic output. Tokens visibly drip in an interactive terminal. Independently confirmed via `curl -N http://localhost:11434/api/chat` → NDJSON arrives 20–50 ms apart per token.
+- **Cloud** REPL with `claude-sonnet-4-6`: produces a clean Socratic response. Independently confirmed via raw `curl -N` against `/v1/messages` → SSE `content_block_delta` events arrive 100–300 ms apart for a longer prompt. The pipeline preserves that timing.
 
-```
-{"model":"...", "message":{"role":"assistant","content":"Hello"}, "done":false}
-{"model":"...", "message":{"role":"assistant","content":" there"}, "done":false}
-{"model":"...", "message":{"role":"assistant","content":""}, "done":true, "total_duration":...}
-```
+## The next task: pick one
 
-Implementation:
-- Flip `stream: true` in `ChatRequest`.
-- Get the response body as a byte stream (`reqwest::Response::bytes_stream()`).
-- Build a `Stream<Item = Result<TokenChunk>>` that:
-  - Buffers incoming bytes.
-  - Splits on `\n` (use `tokio_util::codec::LinesCodec` or hand-roll — bytes from reqwest are already chunked, but a single chunk may contain a partial line, and a line may straddle two chunks).
-  - Parses each complete line as a `ChatChunk` (existing struct) and emits `TokenChunk { text: chunk.message.content, done: chunk.done }`.
-  - Propagates parse errors as `Result::Err` items in the stream.
+All Phase 0.1 streaming work is done. The unblocked items, in order of recommended priority:
 
-Watch-outs:
-- A network chunk might end mid-line. Buffer the remainder until the next chunk delivers a `\n`.
-- The final `done: true` chunk has empty `content`. Don't error out on empty content for that one — the previous-session check for empty content was on the whole response, which won't apply to streaming. Drop that check or move it to "no content received across the entire stream".
-- UTF-8 boundaries: lines are full JSON, so multi-byte chars are inside JSON strings — no special handling needed if you split on `\n` byte and parse the whole line.
+### Option A (recommended) — `decide_intent()` unit tests (Phase 0.3)
 
-### Step 2 — Anthropic SSE streaming
+`primer-pedagogy/src/prompt_builder.rs` contains `decide_intent()`, the heuristic that picks the next `PedagogicalIntent` from learner state, recent turns, and conversation length. **The Primer's brain is currently untested** — the previous session put TDD scaffolding in place (`ScriptedBackend`, `EmptyKnowledge`, `test_learner()` factory in `dialogue_manager.rs::tests`) but didn't reach into `prompt_builder`.
 
-Anthropic's Messages API streams via Server-Sent Events when `"stream": true`. Format is `event: <type>\ndata: <json>\n\n`.
+Cheap to start: `decide_intent` is pure, no IO, no async. Read it first, write tests for what it actually does, then add tests for what it *should* do (and propose fixes as a follow-up if the actual and the should-be diverge).
 
-Event types you need to handle:
-- `content_block_delta` — `{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"Hello"}}` — emit a `TokenChunk`.
-- `message_stop` — emit final `TokenChunk { text: "", done: true }`.
-- Others (`message_start`, `content_block_start`, `content_block_stop`, `message_delta`, `ping`) — ignore or trace-log.
-- `error` events — propagate as `Result::Err`.
+Suggested cases to consider — verify by reading the function first, the heuristic may already do some of this:
+- Engaged child, normal-length response → default `SocraticQuestion`.
+- `EngagementState::Frustrated` → `Scaffolding` or `Encouragement`.
+- `EngagementState::Disengaging` → `SessionClose` near session end, or `Encouragement` early.
+- Very short child response → `ComprehensionCheck`.
+- Pure factual question pattern ("what is X?") → `DirectAnswer`, with a `AnswerThenPivot` follow-up at the next turn.
+- Long session, child still engaged → `Extension`.
 
-Implementation:
-- Add `"stream": true` to `ApiRequest`.
-- Parse SSE either by hand (small parser, ~30 lines) or with `reqwest-eventsource`. Recommendation: hand-roll. The format is simple, the dependency footprint matters for embedded targets later, and the parser is independent of any reqwest version.
-- A line-based SSE parser:
-  - Split incoming bytes by `\n`.
-  - Accumulate lines starting with `event:` and `data:` until you hit a blank line (= end of event).
-  - Dispatch on event type.
+Add tests to a new `prompt_builder::tests` module (or follow whatever pattern is already there). They should be sync `#[test]` fns — no tokio runtime needed.
 
-Watch-outs:
-- The Anthropic API ignores empty `system` strings but rejects empty `messages`. Make sure you're still constructing valid requests.
-- `Role::System` is currently mapped to `"user"` in the messages array (system is the top-level field). Don't break that during the refactor.
-- A `TokenChunk` with empty text and `done: false` is fine but pointless — filter them out at the source if you can.
+### Option B — Conversation persistence (remaining Phase 0.1 item)
 
-### Step 3 — Make `DialogueManager` stream tokens out to the caller
+ROADMAP.md's last open Phase-0.1 task. Shape:
+- `--load-session <path>` to deserialise a `Session` from JSON at startup.
+- `--save-session <path>` (or auto-save on graceful exit) to serialise the current `Session`.
+- `Session` already derives `Serialize`/`Deserialize` (see `primer-core/src/conversation.rs:62`). The actual disk I/O is small.
 
-`respond_to()` currently does `inference.generate(...)` which collects internally. The dialogue manager still needs the full accumulated response (to record the turn and update the learner model), so we don't want to push streaming all the way through as a `Stream` return type — we want a callback.
+Decisions to make: (1) When loading, do you re-use the loaded session's `learner_id` or assign a new one? Probably the former; offer a flag for the latter. (2) Auto-save on `quit`/`exit`/`bye` only, or also on `Ctrl-C`? The latter wants `tokio::signal`.
 
-Add a sibling method:
+### Option C — Graceful API-error handling (Phase 0.1, partial)
 
-```rust
-pub async fn respond_to_streaming<F>(
-    &mut self,
-    child_input: &str,
-    mut on_chunk: F,
-) -> Result<String>
-where
-    F: FnMut(&str),
-```
+The brief flagged this and the previous session only got partway: mid-stream errors propagate cleanly, but rate-limit / network-drop / invalid-key cases just bubble up as raw `PrimerError::Inference`. A minimal improvement: detect 401/403 (bad key), 429 (rate limit), 5xx (server) at the top of `generate_stream` for `CloudBackend` and surface a user-friendly message via a new `PrimerError` variant. Could pair with a small retry-with-jittered-backoff for 429.
 
-Behaviour:
-1. Same setup as `respond_to`: record child turn, decide intent, retrieve knowledge, build prompt.
-2. Call `inference.generate_stream(&prompt, &params).await?` to get a `TokenStream`.
-3. Loop with `stream.next().await`, accumulating `TokenChunk::text` into a `String` AND calling `on_chunk(&chunk.text)` for each.
-4. After the stream completes, do the existing post-generation work (record Primer turn, update learner model) using the accumulated string.
-5. Return the full accumulated string.
+### Option D — Knowledge base bootstrapping (Phase 0.2, heavier)
 
-Keep `respond_to` as a thin wrapper that calls `respond_to_streaming` with a no-op closure, so existing callers don't break.
+Needs a Python ingestion script for Simple English Wikipedia → SQLite FTS5. Skip unless explicitly asked; A/B/C are faster value.
 
-### Step 4 — CLI prints tokens incrementally
+## Files most relevant to start in
 
-In `primer-cli/src/main.rs`, replace the current call:
+- `src/crates/primer-pedagogy/src/prompt_builder.rs` — for Option A. Where `decide_intent()` lives.
+- `src/crates/primer-pedagogy/src/dialogue_manager.rs` — read the existing `tests` module for the test-fixture pattern (`ScriptedBackend`, `EmptyKnowledge`).
+- `src/crates/primer-cli/src/main.rs` — for Option B.
+- `src/crates/primer-core/src/conversation.rs` — for Option B, `Session` is already Serde-able.
+- `src/crates/primer-inference/src/cloud.rs` — for Option C, plus see the `parse_anthropic_event` error branch as the template.
 
-```rust
-match dm.respond_to(input).await {
-    Ok(response) => println!("\nPrimer: {response}\n"),
-    ...
-}
-```
+## Patterns to reuse, not reinvent
 
-with:
+- **Streaming bridge**: `bytes_stream` → parser buffer → `mpsc::unbounded` → `Box::pin(rx)`. Don't add `tokio-stream` or `reqwest-eventsource`; the workspace deliberately keeps the dep tree small. See `ollama.rs::generate_stream` for the canonical shape.
+- **Test fixtures for dialogue manager tests**: `ScriptedBackend`, `EmptyKnowledge`, `test_learner()` in `dialogue_manager::tests`. Lift into a shared `pub(crate)` location only when a second consumer actually needs them.
+- **TDD discipline expected.** Watch tests fail. Watch them pass. Don't write production code first. The previous session followed this religiously and every implementation step landed first-try, including the two bugs the cloud test caught (the `top_p` 400 and the silent-UTF-8 drop).
+- **`.env` and `~/.primer_env`** are auto-loaded — don't tell the user to `export` again. If you need a new secret/env var, document it in `.env.example`.
 
-```rust
-print!("\nPrimer: ");
-stdout.flush()?;
-let result = dm.respond_to_streaming(input, |chunk| {
-    print!("{chunk}");
-    let _ = io::stdout().flush();
-}).await;
-println!("\n");
-match result {
-    Ok(_) => {}
-    Err(e) => eprintln!("Error generating response: {e}"),
-}
-```
+## Watch-outs (still relevant)
 
-The break-suggestion check and prompt redraw stay where they are.
-
-### Step 5 — Update CLAUDE.md
-
-Remove the gotcha line that says streaming isn't actually implemented yet. Replace with whatever's true after the change. The prompt-assembly divergence between Cloud and Ollama (system as top-level field vs leading message) still applies — don't delete that note.
-
-## Files you'll touch
-
-- `src/crates/primer-inference/src/ollama.rs` — streaming impl
-- `src/crates/primer-inference/src/cloud.rs` — streaming impl + SSE parser
-- `src/crates/primer-pedagogy/src/dialogue_manager.rs` — add `respond_to_streaming`, keep `respond_to` as wrapper
-- `src/crates/primer-cli/src/main.rs` — print incrementally
-- `CLAUDE.md` — update gotchas
-
-You shouldn't need to touch `primer-core`. The traits and types already support streaming; only the implementations need to actually do it.
-
-## Acceptance criteria — how you know you're done
-
-Run all three:
-
-```bash
-cd src
-# 1. Stub backend still works (one-shot chunk, fine)
-cargo run --bin primer
-
-# 2. Ollama streams visibly token-by-token
-cargo run --bin primer -- --backend ollama --model llama3.2 --name Aiyana --age 8
-
-# 3. Cloud streams visibly token-by-token
-cargo run --bin primer -- --backend cloud --name Aiyana --age 8
-```
-
-For 2 and 3:
-- Tokens must appear progressively, not in one burst.
-- The recorded turn (in `session.turns`) must contain the full assembled response — verify by adding `RUST_LOG=debug` and a `tracing::debug!` log of the final accumulated text, or by adding a quick `--debug-print-session` flag if you want a clean test path.
-- Conversation flow is unchanged: the next prompt redraw appears only after the stream completes, learner-model updates still happen, break suggestions still fire.
-
-If you can't get streaming visibly working, **say so explicitly** in your final report — don't claim success because the code compiles. The whole point of this task is the user-facing latency change. Verify in the terminal.
-
-## Watch-outs and gotchas (read before starting)
-
-- **Don't break the stub backend.** It already emits one final chunk, which is a degenerate but valid stream. Fine to leave as-is. Test it after the changes to confirm.
-- **Mid-stream errors.** A network drop during generation should propagate as `Result::Err` from `next().await`. The dialogue manager should stop accumulating, log the error, and either return the partial response or an error — your call, but be deliberate. Recording a half-formed Primer turn into the session is bad; better to skip the record on error.
-- **The Ollama empty-content error in `ollama.rs` is non-streaming logic.** It applies to the current single-shot path. When you switch to streaming, that check is wrong (per-chunk content is often empty). Move the "did we get anything?" check to "after the stream completes, was the accumulated string non-empty?".
-- **Don't add new dependencies casually.** The repo deliberately keeps the dep tree small (rustls, no native-tls, no eventsource crate). Adding `reqwest-eventsource` is fine if it pulls in nothing surprising; check `cargo tree` first. Hand-rolling a 30-line SSE parser is also fine and probably preferred.
-- **Streaming changes parser locality.** With non-streaming, malformed JSON kills the request cleanly. With streaming, a single bad line can desync your parser for the rest of the stream. Be defensive: skip unparseable lines with a `tracing::warn!` rather than aborting.
-- **Backpressure is automatic.** `TokenStream` is pull-based via `next().await`. The CLI's blocking `print!` + `flush()` per chunk creates natural backpressure on the underlying HTTP read. Don't add buffers or channels you don't need.
-
-## Queued behind streaming (don't do these in the same session)
-
-These are next on the Phase 0 list once streaming lands:
-
-- **Conversation persistence** — save/load `Session` as JSON so a child can pick up where they left off. Touches `primer-core::conversation`, `primer-cli`. Probably an `--load-session <path>` and auto-save on exit.
-- **Knowledge base bootstrapping** — Python ingestion script for Simple English Wikipedia → SQLite FTS5. Tune `RetrievalParams` defaults against real queries.
-- **Tests for `decide_intent()`** — unit tests covering frustration → scaffolding, disengagement → close, short response → comprehension check, etc. The Primer's brain is currently untested.
-- **Concept extraction** — replace the placeholder empty `concepts: vec![]` in turn metadata with at least keyword-matching against a small concept taxonomy.
-
-If you finish streaming with time to spare and the user hasn't redirected you, ask which of these to start on rather than picking unilaterally — they have priorities you can't see from the code.
+- `Role::System → "user"` mapping in `cloud.rs` and the leading `system` message in `ollama.rs` are different on purpose. Both are correct for their respective APIs.
+- `update_learner_model` in `dialogue_manager.rs` is still a placeholder (word-count heuristic only). Real comprehension assessment is Phase 0.3.
+- Concept extraction (`turn.concepts`) is still always `vec![]` for child turns. Also Phase 0.3.
+- The stub backend still emits one final chunk by design — that's a degenerate but valid stream. Don't "fix" it.
+- `top_p` is silently dropped from cloud requests. If you ever extend the cloud backend to use it conditionally, the `api_request_omits_top_p` test will fail and remind you to update it.
+- The two streaming-task spawns are fire-and-forget. Long-lived deployments (Phase 2/3) will want a cancellation token; for the CLI today the consumer-drop semantic is fine.
 
 ## Reporting back
 
-When you've finished or hit a blocker:
-
+When you finish or hit a blocker:
 - State plainly what you got working and what you didn't, by acceptance criterion.
-- If you verified streaming in the terminal, say so. If you only verified that `cargo build` is clean, say only that.
-- If you discovered the user did interim work that changes the plan, flag it explicitly.
+- If `decide_intent()` tests exposed bugs in the heuristic, flag those separately from the test work — the user should decide whether to fix the heuristic now or file it.
+- If you discover the user did interim work that changes the plan, flag it explicitly.

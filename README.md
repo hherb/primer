@@ -6,7 +6,7 @@ The Primer doesn't teach by telling. It teaches by asking. When a child says "Wh
 
 ## Status
 
-**Early skeleton** — the trait architecture and module boundaries are in place, the code compiles, and you can run a text-mode REPL against either a stub backend (canned Socratic responses) or the Anthropic Claude API. There is no local inference, no speech pipeline, and no hardware integration yet. See [ROADMAP.md](ROADMAP.md) for what comes next.
+**Phase 0.1 — cloud-backed proof of concept, mostly working.** The trait architecture and module boundaries are in place, you can hold a real Socratic conversation against either the Anthropic Claude API or a local Ollama model with **tokens streaming progressively** into the terminal. Phase 0.2/0.3 work (knowledge-base bootstrapping, comprehension assessment, learner-model persistence) is still ahead. There is no local llama.cpp inference, no speech pipeline, and no hardware integration yet. See [ROADMAP.md](ROADMAP.md) for what comes next.
 
 ## Architecture
 
@@ -36,10 +36,11 @@ Also defines the learner model types: `LearnerProfile`, `ConceptState` (Bloom's 
 
 ### primer-inference
 
-Two backends today:
+Three backends today, all implementing `InferenceBackend::generate_stream()`:
 
 - **StubBackend** — returns canned Socratic responses. No model, no network, no dependencies. Use this for developing and testing the dialogue engine.
-- **CloudBackend** — calls the Anthropic Messages API. Requires an API key. This is the path to a working proof of concept before local models are integrated.
+- **CloudBackend** — streams from the Anthropic Messages API via SSE (`event:`/`data:` framing). Requires an API key.
+- **OllamaBackend** — streams from a local Ollama server via NDJSON (one JSON object per `\n`-terminated line). Useful for prototype testing against real local models without integrating llama.cpp directly.
 
 Future backends (not yet implemented): `LlamaCppBackend` (CPU/Vulkan), `QnnBackend` (Qualcomm Hexagon NPU), `RknnBackend` (Rockchip RK1828 NPU).
 
@@ -80,24 +81,45 @@ The stub backend returns canned Socratic responses. Useful for testing the dialo
 ### Cloud mode (Anthropic Claude)
 
 ```bash
-cargo run --bin primer -- --backend cloud --api-key $ANTHROPIC_API_KEY --name Binti --age 8
+cargo run --bin primer -- --backend cloud --name Binti --age 8
+# uses ANTHROPIC_API_KEY from the environment
 ```
 
-Or set the environment variable:
+Or override the model:
 
 ```bash
-export ANTHROPIC_API_KEY=sk-ant-...
-cargo run --bin primer -- --backend cloud --name Binti --age 8
+cargo run --bin primer -- --backend cloud --model claude-opus-4-7 --name Binti --age 8
 ```
+
+### Ollama mode (local model via Ollama)
+
+```bash
+cargo run --bin primer -- --backend ollama --model llama3.2 --name Binti --age 8
+# defaults to http://localhost:11434; override with --ollama-url
+```
+
+`--model` is required for ollama (e.g. `llama3.2`, `qwen2.5:7b`). The model must already be pulled (`ollama pull llama3.2`).
+
+### Configuring secrets
+
+Both `.env` (project-local) and `~/.primer_env` (user-global) are auto-loaded at startup. Drop your `ANTHROPIC_API_KEY` into either:
+
+```
+ANTHROPIC_API_KEY=sk-ant-...
+```
+
+Project-local `.env` wins over the home file. Both are gitignored. See `.env.example` for the format.
 
 ### CLI options
 
 ```
---backend <stub|cloud>     Inference backend (default: stub)
---name <name>              Child's name for the learner profile (default: Explorer)
---age <age>                Child's age in years (default: 8)
---knowledge-db <path>      Path to SQLite knowledge base (default: in-memory)
---api-key <key>            Anthropic API key (or set ANTHROPIC_API_KEY)
+--backend <stub|cloud|ollama>   Inference backend (default: stub)
+--model <id>                    Model id (cloud default: claude-sonnet-4-6; required for ollama)
+--ollama-url <url>              Ollama server URL (default: http://localhost:11434)
+--name <name>                   Child's name for the learner profile (default: Explorer)
+--age <age>                     Child's age in years (default: 8)
+--knowledge-db <path>           Path to SQLite knowledge base (default: in-memory)
+--api-key <key>                 Anthropic API key (or set ANTHROPIC_API_KEY)
 ```
 
 ## Design Principles
