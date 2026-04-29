@@ -31,6 +31,7 @@ This roadmap is organised around one principle: **get a working conversation loo
 - [ ] Implement concept extraction from child responses (currently a placeholder — even simple keyword matching against a concept taxonomy would be a major improvement)
 - [ ] Add LLM-based comprehension assessment: after the child responds, use a short classifier prompt to gauge whether the response demonstrates genuine understanding, parroting, or confusion
 - [ ] Implement learner model persistence (SQLite) so the Primer remembers what a child knows across sessions
+- [ ] Per-child vocabulary tracking with spaced repetition — when the Primer introduces a new technical word ("repel", "plasma", "insulator"), record it in the same SQLite store as concepts (vocabulary as a flavour of `ConceptState`, e.g. `concept_id = "vocab:repel"`, with the plain-language explanation given and the child's apparent grasp). The dialogue manager uses last-encountered timestamps and encounter counts to weave recently-introduced words back into the prompt at expanding intervals — within-session, next-session, then a week later — so children leave the conversation having *gained* new words rather than having them quietly avoided. **Schema constraint:** capture vocabulary entries in a form that can later be anonymised (no child name, no session-specific personal details inside the term record itself) so the Phase 4 corpus-contribution path remains open
 - [ ] Add session time tracking with gentle break suggestions ("We've been exploring for 25 minutes — want to take a break and come back to this?")
 - [ ] Write unit tests for `decide_intent()` — the pedagogical intent heuristics are the Primer's brain and need to be tested rigorously
 
@@ -141,6 +142,7 @@ This roadmap is organised around one principle: **get a working conversation loo
 - [ ] Parental dashboard — a simple web UI showing what the child has been exploring, where they're strong, where they're struggling (read-only, no surveillance)
 - [ ] Collaborative mode — two children sharing a Primer, with the dialogue engine adapting to multiple learners
 - [ ] Assessment without testing — the Primer continuously assesses understanding through conversation, never through quizzes or scores
+- [ ] Aggregated age-appropriate language corpus — opt-in, explicitly parent-consented contribution of (age, technical-term, plain-language explanation, child-comprehension signal) tuples to a shared dataset for fine-tuning future small models on genuinely age-calibrated language. PII scrubbing happens on-device before anything leaves: child names, family members, locations, and any free-form notes are stripped. The vocabulary store from Phase 0.3 is the source. No data ever leaves a device without an explicit per-child, per-export consent action by a parent
 
 ---
 

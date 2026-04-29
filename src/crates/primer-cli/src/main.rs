@@ -3,9 +3,11 @@
 //! E Ink display). Just a terminal and a conversation.
 //!
 //! Usage:
-//!   primer                         # Stub backend (canned responses, no model needed)
-//!   primer --backend cloud          # Anthropic Claude API
-//!   primer --name Binti --age 8    # Set learner profile
+//!   primer                                              # Stub backend (canned responses, no model needed)
+//!   primer --backend cloud                              # Anthropic Claude API (default model)
+//!   primer --backend cloud --model claude-opus-4-7      # Override the cloud model
+//!   primer --backend ollama --model llama3.2            # Local Ollama server
+//!   primer --name Binti --age 8                         # Set learner profile
 
 use chrono::Utc;
 use clap::Parser;
@@ -22,9 +24,18 @@ use uuid::Uuid;
 #[derive(Parser, Debug)]
 #[command(name = "primer", about = "The Primer — a Socratic learning companion")]
 struct Cli {
-    /// Inference backend: "stub" or "cloud".
+    /// Inference backend: "stub", "cloud", or "ollama".
     #[arg(long, default_value = "stub")]
     backend: String,
+
+    /// Model identifier. For cloud: Anthropic model id (default: claude-sonnet-4-6).
+    /// For ollama: local model tag (e.g., "llama3.2", "qwen2.5:7b") — required.
+    #[arg(long)]
+    model: Option<String>,
+
+    /// Ollama server URL (used when --backend ollama).
+    #[arg(long, default_value = "http://localhost:11434")]
+    ollama_url: String,
 
     /// Child's name (for the learner profile).
     #[arg(long, default_value = "Explorer")]
@@ -74,8 +85,6 @@ async fn main() -> anyhow::Result<()> {
 
     // ─── Create backends ─────────────────────────────────────────────
 
-    // For now, only the stub backend is fully wired. Cloud backend
-    // requires the API key and is a TODO for the next iteration.
     let inference: Box<dyn primer_core::inference::InferenceBackend> = match cli.backend.as_str() {
         "stub" => {
             eprintln!("Using stub inference backend (canned Socratic responses).");
@@ -86,15 +95,34 @@ async fn main() -> anyhow::Result<()> {
                 eprintln!("Error: --api-key or ANTHROPIC_API_KEY required for cloud backend.");
                 std::process::exit(1);
             });
-            eprintln!("Using cloud inference backend (Anthropic Claude).");
+            let model = cli
+                .model
+                .unwrap_or_else(|| "claude-sonnet-4-6".to_string());
+            eprintln!("Using cloud inference backend (Anthropic {model}).");
             Box::new(primer_inference::cloud::CloudBackend::new(
                 "https://api.anthropic.com".to_string(),
                 api_key,
-                "claude-sonnet-4-6".to_string(),
+                model,
+            ))
+        }
+        "ollama" => {
+            let model = cli.model.unwrap_or_else(|| {
+                eprintln!(
+                    "Error: --model required for ollama backend (e.g., --model llama3.2)."
+                );
+                std::process::exit(1);
+            });
+            eprintln!(
+                "Using ollama backend at {} with model {model}.",
+                cli.ollama_url
+            );
+            Box::new(primer_inference::ollama::OllamaBackend::new(
+                cli.ollama_url,
+                model,
             ))
         }
         other => {
-            eprintln!("Unknown backend: {other}. Use 'stub' or 'cloud'.");
+            eprintln!("Unknown backend: {other}. Use 'stub', 'cloud', or 'ollama'.");
             std::process::exit(1);
         }
     };
