@@ -14,10 +14,10 @@ This roadmap is organised around one principle: **get a working conversation loo
 
 ### 0.1 — Make the cloud backend conversationally useful
 
-- [x] Wire up SSE streaming in `CloudBackend` — done. NDJSON streaming for `OllamaBackend` landed in the same pass. Tokens drip through to the terminal as they arrive.
-- [x] Add a `--model` CLI flag to select between Claude models (sonnet for speed, opus for depth) — done. Defaults to `claude-sonnet-4-6`; required for ollama.
+- ✅ Wire up SSE streaming in `CloudBackend` — done. NDJSON streaming for `OllamaBackend` landed in the same pass. Tokens drip through to the terminal as they arrive.
+- ✅ Add a `--model` CLI flag to select between Claude models (sonnet for speed, opus for depth) — done. Defaults to `claude-sonnet-4-6`; required for ollama.
 - [ ] Handle API errors gracefully (rate limits, network drops, invalid key) with clear user-facing messages — partial. Mid-stream errors propagate cleanly and the partial Primer turn is dropped. Full retry/backoff on rate limits is still TODO.
-- [x] Add conversation persistence — sessions persist to SQLite via `primer-storage` (per-turn save). Load/resume CLI surface deferred — see [docs/superpowers/specs/2026-04-30-session-persistence-sqlite-design.md](docs/superpowers/specs/2026-04-30-session-persistence-sqlite-design.md)
+- ✅ Add conversation persistence — sessions persist to SQLite via `primer-storage` (per-turn save). Load/resume CLI surface deferred — see [docs/superpowers/specs/2026-04-30-session-persistence-sqlite-design.md](docs/superpowers/specs/2026-04-30-session-persistence-sqlite-design.md)
 
 ### 0.2 — Knowledge base bootstrapping
 
@@ -33,7 +33,7 @@ This roadmap is organised around one principle: **get a working conversation loo
 - [ ] Implement learner model persistence (SQLite) so the Primer remembers what a child knows across sessions
 - [ ] Per-child vocabulary tracking with spaced repetition — when the Primer introduces a new technical word ("repel", "plasma", "insulator"), record it in the same SQLite store as concepts (vocabulary as a flavour of `ConceptState`, e.g. `concept_id = "vocab:repel"`, with the plain-language explanation given and the child's apparent grasp). The dialogue manager uses last-encountered timestamps and encounter counts to weave recently-introduced words back into the prompt at expanding intervals — within-session, next-session, then a week later — so children leave the conversation having *gained* new words rather than having them quietly avoided. **Schema constraint:** capture vocabulary entries in a form that can later be anonymised (no child name, no session-specific personal details inside the term record itself) so the Phase 4 corpus-contribution path remains open
 - [ ] Add session time tracking with gentle break suggestions ("We've been exploring for 25 minutes — want to take a break and come back to this?")
-- [x] Write unit tests for `decide_intent()` — characterization tests landed (18 tests in `prompt_builder::tests`); they pin down current behaviour and document the gaps below
+- ✅ Write unit tests for `decide_intent()` — characterization tests landed (18 tests in `prompt_builder::tests`); they pin down current behaviour and document the gaps below
 - [ ] Make `Encouragement` reachable from `decide_intent` — currently Frustrated always returns `Scaffolding` and Disengaging always returns `SessionClose`. The split needs comprehension/engagement signal: "frustrated and making no progress" → Scaffolding; "frustrated but still trying" → Encouragement
 - [ ] Detect factual-question patterns in `decide_intent` so "what is X?" / "how does Y work?" route to `DirectAnswer`, with `AnswerThenPivot` on the next turn. Both intents are unreachable today
 - [ ] Make `Disengaging` session-length-aware — route to `Encouragement` early in a session, `SessionClose` only after a meaningful duration. Pairs naturally with the session time tracking bullet above
@@ -42,9 +42,9 @@ This roadmap is organised around one principle: **get a working conversation loo
 
 - [ ] Add `cargo test` coverage for all crates (core trait contracts, prompt builder output, dialogue manager state transitions, knowledge base retrieval) — partial. 71 tests across the workspace: streaming parsers (18 in `primer-inference`), `decide_intent` and prompt builder (18 characterization tests in `primer-pedagogy::prompt_builder`), `dialogue_manager` including the engine-save spy (10 in `primer-pedagogy::dialogue_manager`), session persistence (23 in `primer-storage`), and the enum-variant arrays (2 in `primer-core`). `primer-knowledge` retrieval is the only crate still without coverage.
 - [ ] Set up CI (GitHub Actions) — build + test on Linux and macOS
-- [x] Add a `CLAUDE.md` to the repo with codebase conventions — done.
+- ✅ Add a `CLAUDE.md` to the repo with codebase conventions — done.
 - [ ] Add `--verbose` flag that prints pedagogical decisions (intent chosen, knowledge passages retrieved, engagement state) alongside the conversation — invaluable for debugging the Socratic behaviour
-- [x] `.env` / `~/.primer_env` auto-loading via dotenvy — done. Secrets can live in either a project-local `.env` or a user-global `~/.primer_env`.
+- ✅ `.env` / `~/.primer_env` auto-loading via dotenvy — done. Secrets can live in either a project-local `.env` or a user-global `~/.primer_env`.
 
 **Phase 0 exit criteria:** You can sit a child in front of a terminal, type `cargo run --bin primer -- --backend cloud --name Binti --age 8`, and have a 15-minute Socratic conversation about a topic of their choosing that feels qualitatively different from ChatGPT. The Primer asks more questions than it answers. It catches parroting. It suggests breaks. It remembers what was discussed last time.
 
@@ -152,15 +152,16 @@ This roadmap is organised around one principle: **get a working conversation loo
 
 ## Who works on what
 
-The crate boundaries are designed so contributors can work in parallel without stepping on each other:
+The crate boundaries are designed so contributors can work in parallel without stepping on each other.
 
 | Contributor | Natural focus areas |
 |---|---|
-| **Horst** | `primer-pedagogy` (dialogue engine, prompt engineering), `primer-cli` (developer UX), `primer-knowledge` (corpus curation), integration testing, project coordination |
-| **Son-in-law (EE/ML)** | `primer-inference` (local backends — llama.cpp, QNN, RKNN), Phase 3 hardware (display, audio, enclosure, power), thermal design |
-| **Younger son (ML/math)** | `primer-inference` (model quantisation, benchmark harness), `primer-pedagogy` (comprehension assessment classifier, learner model ML), `primer-knowledge` (embedding-based semantic search) |
+| **Horst Herb** | `primer-pedagogy` (dialogue engine, prompt engineering), `primer-cli` (developer UX), `primer-knowledge` (corpus curation), integration testing, project coordination |
+| **Bernd Brinkmann** *(EE/ML)* | `primer-inference` (local backends — llama.cpp, QNN, RKNN), Phase 3 hardware (display, audio, enclosure, power), thermal design |
+| **Frithjof Herb** *(ML / math)* | `primer-inference` (model quantisation, benchmark harness), `primer-pedagogy` (comprehension assessment classifier, learner model ML), `primer-knowledge` (embedding-based semantic search) |
+| **Claude** *(Anthropic AI pair-programmer, via Claude Code)* | Implementation pairing on Phase 0 work, code review, refactoring, test scaffolding, documentation upkeep — under Horst's direction. Commits that include AI work are tagged with a `Co-Authored-By: Claude …` trailer. |
 
-Everyone can contribute to Phase 0 immediately — it's pure Rust, runs anywhere, and needs no special hardware.
+Bernd and Frithjof are listed as planned contributors — both are currently busy with other commitments and have not yet committed code. The Phase 1 hardware/local-inference work is genuinely waiting on them. Everyone can contribute to Phase 0 immediately: it's pure Rust, runs anywhere, and needs no special hardware.
 
 ---
 
