@@ -1,5 +1,9 @@
 # The Primer
 
+<p align="center">
+  <img src="assets/curious_childs_primer.png" alt="Primer logo" width="280">
+</p>
+
 A Socratic AI learning companion for children — inspired by the Young Lady's Illustrated Primer in Neal Stephenson's *The Diamond Age*.
 
 The Primer doesn't teach by telling. It teaches by asking. When a child says "Why is the sky blue?", the Primer doesn't recite Rayleigh scattering — it asks "What colour does the sky turn at sunset? Why do you think it changes?" and walks the child toward discovering the answer themselves.
