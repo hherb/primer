@@ -249,3 +249,349 @@ pub fn decide_intent(
     // Default: ask a Socratic question.
     PedagogicalIntent::SocraticQuestion
 }
+
+#[cfg(test)]
+mod tests {
+    //! Characterization tests for `decide_intent`.
+    //!
+    //! These pin down the heuristic's *current* behaviour, not its ideal
+    //! behaviour. The brief in `primer_next_session.md` lists several
+    //! pedagogical cases (e.g. Encouragement on frustration, DirectAnswer
+    //! on "what is X?") that the current implementation does **not** cover;
+    //! those gaps are flagged in the session report rather than encoded as
+    //! failing tests here.
+    use super::*;
+    use chrono::Utc;
+    use primer_core::conversation::{PedagogicalIntent, Session, Speaker, Turn};
+    use primer_core::learner::{
+        ConceptState, EngagementState, LearnerModel, LearnerProfile, LearningPreferences,
+        UnderstandingDepth,
+    };
+    use uuid::Uuid;
+
+    fn learner_with(engagement: EngagementState, concepts: Vec<ConceptState>) -> LearnerModel {
+        LearnerModel {
+            profile: LearnerProfile {
+                id: Uuid::new_v4(),
+                name: "Tester".to_string(),
+                age: 8,
+                languages: vec!["en".to_string()],
+                created_at: Utc::now(),
+                last_active: Utc::now(),
+            },
+            concepts,
+            preferences: LearningPreferences::default(),
+            current_engagement: engagement,
+        }
+    }
+
+    fn empty_session() -> Session {
+        Session::new(Uuid::new_v4())
+    }
+
+    fn child_turn(text: &str, concepts: Vec<String>) -> Turn {
+        Turn {
+            speaker: Speaker::Child,
+            text: text.to_string(),
+            timestamp: Utc::now(),
+            intent: None,
+            concepts,
+        }
+    }
+
+    fn primer_turn(text: &str, concepts: Vec<String>) -> Turn {
+        Turn {
+            speaker: Speaker::Primer,
+            text: text.to_string(),
+            timestamp: Utc::now(),
+            intent: Some(PedagogicalIntent::SocraticQuestion),
+            concepts,
+        }
+    }
+
+    fn concept_at(id: &str, depth: UnderstandingDepth) -> ConceptState {
+        ConceptState {
+            concept_id: id.to_string(),
+            depth,
+            confidence: 0.8,
+            encounter_count: 1,
+            last_encountered: Some(Utc::now()),
+            notes: vec![],
+        }
+    }
+
+    // ─── Engagement state takes precedence over turn analysis ─────────
+
+    #[test]
+    fn frustrated_returns_scaffolding() {
+        let learner = learner_with(EngagementState::Frustrated, vec![]);
+        let session = empty_session();
+        assert_eq!(
+            decide_intent(&learner, &session),
+            PedagogicalIntent::Scaffolding,
+        );
+    }
+
+    #[test]
+    fn frustrated_overrides_short_child_turn_branch() {
+        // Without frustration, a 1-word child turn would yield ComprehensionCheck.
+        // The engagement check fires first.
+        let learner = learner_with(EngagementState::Frustrated, vec![]);
+        let mut session = empty_session();
+        session.add_turn(child_turn("yes", vec![]));
+        assert_eq!(
+            decide_intent(&learner, &session),
+            PedagogicalIntent::Scaffolding,
+        );
+    }
+
+    #[test]
+    fn disengaging_returns_session_close() {
+        let learner = learner_with(EngagementState::Disengaging, vec![]);
+        let session = empty_session();
+        assert_eq!(
+            decide_intent(&learner, &session),
+            PedagogicalIntent::SessionClose,
+        );
+    }
+
+    #[test]
+    fn disengaging_overrides_short_child_turn_branch() {
+        let learner = learner_with(EngagementState::Disengaging, vec![]);
+        let mut session = empty_session();
+        session.add_turn(child_turn("ok", vec![]));
+        assert_eq!(
+            decide_intent(&learner, &session),
+            PedagogicalIntent::SessionClose,
+        );
+    }
+
+    // ─── Default path: engaged with no last child turn ────────────────
+
+    #[test]
+    fn empty_session_returns_socratic_question() {
+        let learner = learner_with(EngagementState::Engaged, vec![]);
+        let session = empty_session();
+        assert_eq!(
+            decide_intent(&learner, &session),
+            PedagogicalIntent::SocraticQuestion,
+        );
+    }
+
+    #[test]
+    fn last_turn_primer_returns_socratic_question() {
+        // The turn-based branches only fire when the last turn was the
+        // child's. A bare Primer greeting falls through to the default.
+        let learner = learner_with(EngagementState::Engaged, vec![]);
+        let mut session = empty_session();
+        session.add_turn(primer_turn(
+            "Hello, what are you curious about today?",
+            vec![],
+        ));
+        assert_eq!(
+            decide_intent(&learner, &session),
+            PedagogicalIntent::SocraticQuestion,
+        );
+    }
+
+    #[test]
+    fn reflecting_engagement_falls_through_to_turn_logic() {
+        // Reflecting is not Frustrated/Disengaging, so the heuristic
+        // proceeds to inspect the last turn.
+        let learner = learner_with(EngagementState::Reflecting, vec![]);
+        let mut session = empty_session();
+        session.add_turn(child_turn("yes", vec![]));
+        assert_eq!(
+            decide_intent(&learner, &session),
+            PedagogicalIntent::ComprehensionCheck,
+        );
+    }
+
+    // ─── Short child turn → ComprehensionCheck (boundary <10 words) ──
+
+    #[test]
+    fn short_child_turn_returns_comprehension_check() {
+        let learner = learner_with(EngagementState::Engaged, vec![]);
+        let mut session = empty_session();
+        session.add_turn(child_turn("I think it's a star", vec![]));
+        assert_eq!(
+            decide_intent(&learner, &session),
+            PedagogicalIntent::ComprehensionCheck,
+        );
+    }
+
+    #[test]
+    fn nine_word_child_turn_is_short() {
+        // 9 < 10 → short branch fires.
+        let learner = learner_with(EngagementState::Engaged, vec![]);
+        let mut session = empty_session();
+        session.add_turn(child_turn(
+            "one two three four five six seven eight nine",
+            vec![],
+        ));
+        assert_eq!(
+            decide_intent(&learner, &session),
+            PedagogicalIntent::ComprehensionCheck,
+        );
+    }
+
+    #[test]
+    fn ten_word_child_turn_is_not_short() {
+        // 10 < 10 is false → falls through to the concept-depth check,
+        // and with no understood concepts it lands on the default.
+        let learner = learner_with(EngagementState::Engaged, vec![]);
+        let mut session = empty_session();
+        session.add_turn(child_turn(
+            "one two three four five six seven eight nine ten",
+            vec![],
+        ));
+        assert_eq!(
+            decide_intent(&learner, &session),
+            PedagogicalIntent::SocraticQuestion,
+        );
+    }
+
+    #[test]
+    fn empty_child_turn_treated_as_short() {
+        // split_whitespace() on "" yields 0; 0 < 10 → short branch.
+        // Documents the current behaviour even though an empty input
+        // arguably deserves a different response.
+        let learner = learner_with(EngagementState::Engaged, vec![]);
+        let mut session = empty_session();
+        session.add_turn(child_turn("", vec![]));
+        assert_eq!(
+            decide_intent(&learner, &session),
+            PedagogicalIntent::ComprehensionCheck,
+        );
+    }
+
+    // ─── Extension when an active concept is at Comprehension depth ──
+
+    #[test]
+    fn long_child_turn_with_understood_concept_returns_extension() {
+        let learner = learner_with(
+            EngagementState::Engaged,
+            vec![concept_at("gravity", UnderstandingDepth::Comprehension)],
+        );
+        let mut session = empty_session();
+        session.add_turn(child_turn(
+            "gravity pulls everything down toward the centre of the earth always",
+            vec!["gravity".to_string()],
+        ));
+        assert_eq!(
+            decide_intent(&learner, &session),
+            PedagogicalIntent::Extension,
+        );
+    }
+
+    #[test]
+    fn long_child_turn_with_concept_below_comprehension_returns_socratic_question() {
+        // Recall < Comprehension, so the Extension gate stays closed.
+        let learner = learner_with(
+            EngagementState::Engaged,
+            vec![concept_at("gravity", UnderstandingDepth::Recall)],
+        );
+        let mut session = empty_session();
+        session.add_turn(child_turn(
+            "gravity pulls everything down toward the centre of the earth always",
+            vec!["gravity".to_string()],
+        ));
+        assert_eq!(
+            decide_intent(&learner, &session),
+            PedagogicalIntent::SocraticQuestion,
+        );
+    }
+
+    #[test]
+    fn long_child_turn_with_concept_at_analysis_returns_extension() {
+        // Analysis > Comprehension also opens the Extension gate.
+        let learner = learner_with(
+            EngagementState::Engaged,
+            vec![concept_at("gravity", UnderstandingDepth::Analysis)],
+        );
+        let mut session = empty_session();
+        session.add_turn(child_turn(
+            "gravity is what makes apples fall and keeps the moon in orbit too",
+            vec!["gravity".to_string()],
+        ));
+        assert_eq!(
+            decide_intent(&learner, &session),
+            PedagogicalIntent::Extension,
+        );
+    }
+
+    #[test]
+    fn long_child_turn_with_unrelated_concept_returns_socratic_question() {
+        // Active concept doesn't match any tracked concept_id → no Extension.
+        let learner = learner_with(
+            EngagementState::Engaged,
+            vec![concept_at(
+                "photosynthesis",
+                UnderstandingDepth::Application,
+            )],
+        );
+        let mut session = empty_session();
+        session.add_turn(child_turn(
+            "I think gravity is what holds the planets together in space somehow",
+            vec!["gravity".to_string()],
+        ));
+        assert_eq!(
+            decide_intent(&learner, &session),
+            PedagogicalIntent::SocraticQuestion,
+        );
+    }
+
+    #[test]
+    fn extension_picks_up_concept_attached_to_recent_primer_turn() {
+        // extract_active_concepts scans the last 4 turns regardless of
+        // speaker, so a concept tagged on a Primer turn is still "active"
+        // for the purposes of the Extension check.
+        let learner = learner_with(
+            EngagementState::Engaged,
+            vec![concept_at("gravity", UnderstandingDepth::Comprehension)],
+        );
+        let mut session = empty_session();
+        session.add_turn(primer_turn(
+            "So gravity makes things fall down. Why do you think that is?",
+            vec!["gravity".to_string()],
+        ));
+        // Long child turn with no concepts of its own.
+        session.add_turn(child_turn(
+            "because the earth is heavy and pulls everything toward its centre always",
+            vec![],
+        ));
+        assert_eq!(
+            decide_intent(&learner, &session),
+            PedagogicalIntent::Extension,
+        );
+    }
+
+    // ─── Currently-unreachable intents (regression guards) ───────────
+    //
+    // The current heuristic never returns these intents. If a future
+    // change starts emitting them these guards will fail and prompt a
+    // deliberate update — they are NOT a claim that the intents
+    // shouldn't ever be returned.
+
+    #[test]
+    fn frustrated_does_not_currently_return_encouragement() {
+        let learner = learner_with(EngagementState::Frustrated, vec![]);
+        let session = empty_session();
+        assert_ne!(
+            decide_intent(&learner, &session),
+            PedagogicalIntent::Encouragement,
+        );
+    }
+
+    #[test]
+    fn factual_question_pattern_does_not_currently_return_direct_answer() {
+        // "what is X?" is not detected as a factual query; the heuristic
+        // routes purely on engagement state and turn length.
+        let learner = learner_with(EngagementState::Engaged, vec![]);
+        let mut session = empty_session();
+        session.add_turn(child_turn("what is gravity?", vec![]));
+        let intent = decide_intent(&learner, &session);
+        assert_ne!(intent, PedagogicalIntent::DirectAnswer);
+        assert_ne!(intent, PedagogicalIntent::AnswerThenPivot);
+    }
+}

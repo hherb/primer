@@ -33,7 +33,10 @@ This roadmap is organised around one principle: **get a working conversation loo
 - [ ] Implement learner model persistence (SQLite) so the Primer remembers what a child knows across sessions
 - [ ] Per-child vocabulary tracking with spaced repetition — when the Primer introduces a new technical word ("repel", "plasma", "insulator"), record it in the same SQLite store as concepts (vocabulary as a flavour of `ConceptState`, e.g. `concept_id = "vocab:repel"`, with the plain-language explanation given and the child's apparent grasp). The dialogue manager uses last-encountered timestamps and encounter counts to weave recently-introduced words back into the prompt at expanding intervals — within-session, next-session, then a week later — so children leave the conversation having *gained* new words rather than having them quietly avoided. **Schema constraint:** capture vocabulary entries in a form that can later be anonymised (no child name, no session-specific personal details inside the term record itself) so the Phase 4 corpus-contribution path remains open
 - [ ] Add session time tracking with gentle break suggestions ("We've been exploring for 25 minutes — want to take a break and come back to this?")
-- [ ] Write unit tests for `decide_intent()` — the pedagogical intent heuristics are the Primer's brain and need to be tested rigorously
+- [x] Write unit tests for `decide_intent()` — characterization tests landed (18 tests in `prompt_builder::tests`); they pin down current behaviour and document the gaps below
+- [ ] Make `Encouragement` reachable from `decide_intent` — currently Frustrated always returns `Scaffolding` and Disengaging always returns `SessionClose`. The split needs comprehension/engagement signal: "frustrated and making no progress" → Scaffolding; "frustrated but still trying" → Encouragement
+- [ ] Detect factual-question patterns in `decide_intent` so "what is X?" / "how does Y work?" route to `DirectAnswer`, with `AnswerThenPivot` on the next turn. Both intents are unreachable today
+- [ ] Make `Disengaging` session-length-aware — route to `Encouragement` early in a session, `SessionClose` only after a meaningful duration. Pairs naturally with the session time tracking bullet above
 
 ### 0.4 — Developer experience
 
