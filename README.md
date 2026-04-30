@@ -10,22 +10,23 @@ The Primer doesn't teach by telling. It teaches by asking. When a child says "Wh
 
 ## Status
 
-**Phase 0.1 — cloud-backed proof of concept, mostly working.** The trait architecture and module boundaries are in place, you can hold a real Socratic conversation against either the Anthropic Claude API or a local Ollama model with **tokens streaming progressively** into the terminal. Phase 0.2/0.3 work (knowledge-base bootstrapping, comprehension assessment, learner-model persistence) is still ahead. There is no local llama.cpp inference, no speech pipeline, and no hardware integration yet. See [ROADMAP.md](ROADMAP.md) for what comes next.
+**Phase 0.1 — cloud-backed proof of concept, mostly working.** The trait architecture and module boundaries are in place, you can hold a real Socratic conversation against either the Anthropic Claude API or a local Ollama model with **tokens streaming progressively** into the terminal, and conversations now **persist to a normalised SQLite store** on every turn (one DB per child, kept separate from the RAG corpus on privacy grounds). Phase 0.2/0.3 work (knowledge-base bootstrapping, comprehension assessment, learner-model persistence, resume-a-past-session UX) is still ahead. There is no local llama.cpp inference, no speech pipeline, and no hardware integration yet. See [ROADMAP.md](ROADMAP.md) for what comes next.
 
 ## Architecture
 
-The codebase is a Rust workspace under `src/`, organised into six crates. The core design principle is **trait-based hardware abstraction**: the pedagogical engine doesn't know or care whether it's talking to a local 7B model on a phone's NPU, llama.cpp on a laptop, or Claude over the network. Backend selection is a runtime config choice, not a code change.
+The codebase is a Rust workspace under `src/`, organised into seven crates. The core design principle is **trait-based hardware abstraction**: the pedagogical engine doesn't know or care whether it's talking to a local 7B model on a phone's NPU, llama.cpp on a laptop, or Claude over the network. Backend selection is a runtime config choice, not a code change.
 
 ```
 src/
 ├── Cargo.toml                  # workspace root
 └── crates/
     ├── primer-core/            # traits + shared types (everyone depends on this)
-    ├── primer-inference/        # LLM backends (stub, cloud; later: llama.cpp, QNN, RKNN)
-    ├── primer-speech/           # STT/TTS backends (stub; later: Whisper, Piper)
-    ├── primer-knowledge/        # SQLite FTS5 knowledge base for RAG retrieval
-    ├── primer-pedagogy/         # Socratic dialogue engine (prompt builder + dialogue manager)
-    └── primer-cli/              # text-mode REPL binary
+    ├── primer-inference/       # LLM backends (stub, cloud, ollama; later: llama.cpp, QNN, RKNN)
+    ├── primer-speech/          # STT/TTS backends (stub; later: Whisper, Piper)
+    ├── primer-knowledge/       # SQLite FTS5 knowledge base for RAG retrieval
+    ├── primer-storage/         # SQLite session persistence (per-child conversation history)
+    ├── primer-pedagogy/        # Socratic dialogue engine (prompt builder + dialogue manager)
+    └── primer-cli/             # text-mode REPL binary
 ```
 
 ### primer-core
@@ -58,6 +59,10 @@ The Socratic engine — where the Primer's personality lives. Two modules:
 ### primer-knowledge
 
 SQLite FTS5-backed knowledge base. Stores passages from Wikipedia, curated encyclopedias, and curriculum materials. Retrieves relevant passages via full-text search with BM25 ranking. The pedagogical engine uses retrieved passages to ground the LLM's responses in verified information.
+
+### primer-storage
+
+SQLite-backed conversation persistence. Every child turn, every Primer turn, and every `close_session` writes through to disk in an append-only schema (turn rowids stay stable across saves). Categorical text columns (`speaker`, `pedagogical_intent`, `concept`) are normalised into integer-keyed lookup tables; the `Speaker` and `PedagogicalIntent` Rust enums are the canonical source of truth and the storage layer validates the on-disk lookup tables against them on every `open()` — drift is a hard error. The session DB is intentionally separate from the RAG corpus on privacy grounds (different file, different lifecycle).
 
 ### primer-cli
 
@@ -123,6 +128,7 @@ Project-local `.env` wins over the home file. Both are gitignored. See `.env.exa
 --name <name>                   Child's name for the learner profile (default: Explorer)
 --age <age>                     Child's age in years (default: 8)
 --knowledge-db <path>           Path to SQLite knowledge base (default: in-memory)
+--session-db <path>             Path to SQLite session store (default: in-memory; sessions are not persisted)
 --api-key <key>                 Anthropic API key (or set ANTHROPIC_API_KEY)
 ```
 

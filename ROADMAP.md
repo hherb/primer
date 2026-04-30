@@ -40,7 +40,7 @@ This roadmap is organised around one principle: **get a working conversation loo
 
 ### 0.4 — Developer experience
 
-- [ ] Add `cargo test` coverage for all crates (core trait contracts, prompt builder output, dialogue manager state transitions, knowledge base retrieval) — partial. Streaming parsers and `respond_to_streaming` are well-covered (24 tests). `decide_intent()`, prompt builder, and knowledge base still untested.
+- [ ] Add `cargo test` coverage for all crates (core trait contracts, prompt builder output, dialogue manager state transitions, knowledge base retrieval) — partial. 71 tests across the workspace: streaming parsers (18 in `primer-inference`), `decide_intent` and prompt builder (18 characterization tests in `primer-pedagogy::prompt_builder`), `dialogue_manager` including the engine-save spy (10 in `primer-pedagogy::dialogue_manager`), session persistence (23 in `primer-storage`), and the enum-variant arrays (2 in `primer-core`). `primer-knowledge` retrieval is the only crate still without coverage.
 - [ ] Set up CI (GitHub Actions) — build + test on Linux and macOS
 - [x] Add a `CLAUDE.md` to the repo with codebase conventions — done.
 - [ ] Add `--verbose` flag that prints pedagogical decisions (intent chosen, knowledge passages retrieved, engagement state) alongside the conversation — invaluable for debugging the Socratic behaviour
