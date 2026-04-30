@@ -59,6 +59,14 @@ impl SqliteSessionStore {
                 .map_err(|e| PrimerError::Storage(format!("set user_version failed: {e}")))?;
         }
 
+        // Validate-and-seed the lookup tables. Borrows the connection
+        // directly; no transaction needed because the writes are
+        // idempotent INSERTs.
+        let speakers = catalog::expected_speakers();
+        let intents = catalog::expected_intents();
+        schema::validate_and_seed_lookup(&conn, "speakers", &speakers)?;
+        schema::validate_and_seed_lookup(&conn, "pedagogical_intents", &intents)?;
+
         Ok(Self {
             conn: Mutex::new(conn),
         })
@@ -140,6 +148,120 @@ mod tests {
             .query_row("PRAGMA user_version", [], |r| r.get(0))
             .unwrap();
         assert_eq!(v, 1);
+        drop(conn);
+        drop(store);
+        let _ = std::fs::remove_file(&tmp);
+    }
+
+    #[test]
+    fn open_seeds_lookup_tables_on_fresh_db() {
+        let store = open_memory();
+        let conn = store.conn.lock().unwrap();
+
+        let speaker_count: i64 = conn
+            .query_row("SELECT COUNT(*) FROM speakers", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(speaker_count, 2);
+
+        let intent_count: i64 = conn
+            .query_row("SELECT COUNT(*) FROM pedagogical_intents", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(intent_count, 8);
+
+        // Spot-check a specific row.
+        let name: String = conn
+            .query_row(
+                "SELECT name FROM pedagogical_intents WHERE id = 1",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(name, "SocraticQuestion");
+    }
+
+    #[test]
+    fn reopen_is_a_no_op_on_seeded_tables() {
+        let tmp = tempfile_path();
+        {
+            let _store = SqliteSessionStore::open(&tmp).unwrap();
+        }
+        let store = SqliteSessionStore::open(&tmp).unwrap();
+        let conn = store.conn.lock().unwrap();
+        let speaker_count: i64 = conn
+            .query_row("SELECT COUNT(*) FROM speakers", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(speaker_count, 2, "second open should not duplicate seed rows");
+        drop(conn);
+        drop(store);
+        let _ = std::fs::remove_file(&tmp);
+    }
+
+    #[test]
+    fn validate_rejects_name_mismatch() {
+        let tmp = tempfile_path();
+        {
+            let conn = Connection::open(&tmp).unwrap();
+            conn.execute_batch(
+                "
+                PRAGMA foreign_keys = ON;
+                CREATE TABLE pedagogical_intents (id INTEGER PRIMARY KEY, name TEXT NOT NULL UNIQUE);
+                INSERT INTO pedagogical_intents (id, name) VALUES (1, 'WrongName');
+                PRAGMA user_version = 1;
+                ",
+            )
+            .unwrap();
+        }
+        let err = SqliteSessionStore::open(&tmp).unwrap_err();
+        let msg = format!("{err}");
+        assert!(msg.contains("WrongName") || msg.contains("SocraticQuestion"),
+            "error should mention the conflict: {msg}");
+        let _ = std::fs::remove_file(&tmp);
+    }
+
+    #[test]
+    fn validate_rejects_unknown_id() {
+        let tmp = tempfile_path();
+        {
+            let conn = Connection::open(&tmp).unwrap();
+            conn.execute_batch(
+                "
+                PRAGMA foreign_keys = ON;
+                CREATE TABLE pedagogical_intents (id INTEGER PRIMARY KEY, name TEXT NOT NULL UNIQUE);
+                INSERT INTO pedagogical_intents (id, name) VALUES (99, 'FromTheFuture');
+                PRAGMA user_version = 1;
+                ",
+            )
+            .unwrap();
+        }
+        let err = SqliteSessionStore::open(&tmp).unwrap_err();
+        let msg = format!("{err}");
+        assert!(msg.contains("99") || msg.contains("unknown"),
+            "error should mention the unknown id: {msg}");
+        let _ = std::fs::remove_file(&tmp);
+    }
+
+    #[test]
+    fn validate_seeds_missing_rows() {
+        // Pre-populate one valid row; the validator should fill the others in.
+        let tmp = tempfile_path();
+        {
+            let conn = Connection::open(&tmp).unwrap();
+            conn.execute_batch(
+                "
+                PRAGMA foreign_keys = ON;
+                CREATE TABLE pedagogical_intents (id INTEGER PRIMARY KEY, name TEXT NOT NULL UNIQUE);
+                INSERT INTO pedagogical_intents (id, name) VALUES (1, 'SocraticQuestion');
+                PRAGMA user_version = 1;
+                ",
+            )
+            .unwrap();
+        }
+        let store = SqliteSessionStore::open(&tmp).unwrap();
+        let conn = store.conn.lock().unwrap();
+        let count: i64 = conn
+            .query_row("SELECT COUNT(*) FROM pedagogical_intents", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(count, 8, "missing rows should have been seeded");
         drop(conn);
         drop(store);
         let _ = std::fs::remove_file(&tmp);
