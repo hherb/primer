@@ -18,4 +18,5 @@ pub mod speech;
 pub mod knowledge;
 pub mod learner;
 pub mod conversation;
+pub mod storage;
 pub mod config;
