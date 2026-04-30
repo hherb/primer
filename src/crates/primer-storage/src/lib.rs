@@ -102,7 +102,29 @@ impl primer_core::storage::SessionStore for SqliteSessionStore {
         )
         .map_err(|e| PrimerError::Storage(format!("delete old turns: {e}")))?;
 
-        // Turns and concepts are added in the next tasks.
+        // Insert each turn with its speaker_id and intent_id integer FKs.
+        let mut insert_turn = tx
+            .prepare(
+                "INSERT INTO turns (session_id, turn_index, speaker_id, text, timestamp, intent_id)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+            )
+            .map_err(|e| PrimerError::Storage(format!("prepare insert turn: {e}")))?;
+
+        for (idx, turn) in session.turns.iter().enumerate() {
+            let speaker_id = catalog::speaker_id(turn.speaker);
+            let intent_id = turn.intent.map(catalog::intent_id);
+            insert_turn
+                .execute(rusqlite::params![
+                    session.id.to_string(),
+                    idx as i64,
+                    speaker_id,
+                    turn.text,
+                    turn.timestamp.to_rfc3339(),
+                    intent_id,
+                ])
+                .map_err(|e| PrimerError::Storage(format!("insert turn {idx}: {e}")))?;
+        }
+        drop(insert_turn);
 
         tx.commit()
             .map_err(|e| PrimerError::Storage(format!("commit: {e}")))?;
@@ -122,6 +144,18 @@ mod tests {
 
     fn open_memory() -> SqliteSessionStore {
         SqliteSessionStore::open(&PathBuf::from(":memory:")).expect("open :memory:")
+    }
+
+    fn make_turn(speaker: primer_core::conversation::Speaker, text: &str,
+                 intent: Option<primer_core::conversation::PedagogicalIntent>,
+                 concepts: Vec<String>) -> Turn {
+        Turn {
+            speaker,
+            text: text.to_string(),
+            timestamp: Utc::now(),
+            intent,
+            concepts,
+        }
     }
 
     #[test]
@@ -334,6 +368,46 @@ mod tests {
             .query_row("SELECT COUNT(*) FROM turns", [], |r| r.get(0))
             .unwrap();
         assert_eq!(turn_count, 0);
+    }
+
+    #[tokio::test]
+    async fn save_session_persists_turns_in_order() {
+        use primer_core::conversation::{PedagogicalIntent, Speaker};
+
+        let store = open_memory();
+        let mut session = Session::new(Uuid::new_v4());
+        session.add_turn(make_turn(Speaker::Child, "why is the sky blue", None, vec![]));
+        session.add_turn(make_turn(
+            Speaker::Primer,
+            "What do you notice about the sky during the day?",
+            Some(PedagogicalIntent::SocraticQuestion),
+            vec![],
+        ));
+
+        store.save_session(&session).await.unwrap();
+
+        let conn = store.conn.lock().unwrap();
+        let mut stmt = conn
+            .prepare("SELECT turn_index, speaker_id, text, intent_id FROM turns
+                     WHERE session_id = ?1 ORDER BY turn_index")
+            .unwrap();
+        let rows: Vec<(i64, i64, String, Option<i64>)> = stmt
+            .query_map(rusqlite::params![session.id.to_string()], |r| {
+                Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?))
+            })
+            .unwrap()
+            .map(|r| r.unwrap())
+            .collect();
+
+        assert_eq!(rows.len(), 2);
+        assert_eq!(rows[0].0, 0); // turn_index
+        assert_eq!(rows[0].1, 1); // Child = 1
+        assert_eq!(rows[0].2, "why is the sky blue");
+        assert_eq!(rows[0].3, None);
+
+        assert_eq!(rows[1].0, 1);
+        assert_eq!(rows[1].1, 2); // Primer = 2
+        assert_eq!(rows[1].3, Some(1)); // SocraticQuestion = 1
     }
 
     /// Returns a unique tempfile path using a UUID to avoid collisions
