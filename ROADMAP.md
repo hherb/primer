@@ -17,7 +17,7 @@ This roadmap is organised around one principle: **get a working conversation loo
 - [x] Wire up SSE streaming in `CloudBackend` — done. NDJSON streaming for `OllamaBackend` landed in the same pass. Tokens drip through to the terminal as they arrive.
 - [x] Add a `--model` CLI flag to select between Claude models (sonnet for speed, opus for depth) — done. Defaults to `claude-sonnet-4-6`; required for ollama.
 - [ ] Handle API errors gracefully (rate limits, network drops, invalid key) with clear user-facing messages — partial. Mid-stream errors propagate cleanly and the partial Primer turn is dropped. Full retry/backoff on rate limits is still TODO.
-- [ ] Add conversation persistence — save/load sessions as JSON so a child can pick up where they left off
+- [x] Add conversation persistence — sessions persist to SQLite via `primer-storage` (per-turn save). Load/resume CLI surface deferred — see [docs/superpowers/specs/2026-04-30-session-persistence-sqlite-design.md](docs/superpowers/specs/2026-04-30-session-persistence-sqlite-design.md)
 
 ### 0.2 — Knowledge base bootstrapping
 

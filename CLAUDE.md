@@ -18,6 +18,7 @@ cargo run --bin primer                               # REPL with stub backend (n
 cargo run --bin primer -- --backend cloud --name Binti --age 8                # uses ANTHROPIC_API_KEY env var
 cargo run --bin primer -- --backend cloud --model claude-opus-4-7             # override the default cloud model
 cargo run --bin primer -- --backend ollama --model llama3.2                   # local Ollama at http://localhost:11434
+cargo run --bin primer -- --session-db ~/primer-sessions.db                   # persist conversations to SQLite (default :memory:)
 cargo test                                           # run all tests (parser + dialogue manager coverage)
 cargo test -p primer-pedagogy                        # tests for one crate
 cargo test -p primer-pedagogy decide_intent          # single test by name substring
@@ -26,7 +27,7 @@ cargo fmt                                            # format
 RUST_LOG=debug cargo run --bin primer                # verbose tracing output
 ```
 
-CLI flags exposed by `primer-cli`: `--backend stub|cloud|ollama`, `--model` (Anthropic id for cloud, defaults to `claude-sonnet-4-6`; required local tag for ollama), `--ollama-url` (default `http://localhost:11434`), `--name`, `--age`, `--knowledge-db <path>` (defaults to `:memory:`), `--api-key` (or `ANTHROPIC_API_KEY` env). Type `quit`, `exit`, or `bye` to end the REPL.
+CLI flags exposed by `primer-cli`: `--backend stub|cloud|ollama`, `--model` (Anthropic id for cloud, defaults to `claude-sonnet-4-6`; required local tag for ollama), `--ollama-url` (default `http://localhost:11434`), `--name`, `--age`, `--knowledge-db <path>` (defaults to `:memory:`), `--session-db <path>` (defaults to `:memory:`; sessions persist on every turn when a real path is given), `--api-key` (or `ANTHROPIC_API_KEY` env). Type `quit`, `exit`, or `bye` to end the REPL.
 
 Env files are auto-loaded at startup. Two locations checked, in order: (1) project-local `.env` (dotenvy searches cwd and ancestors), then (2) user-global `~/.primer_env`. Earlier sources win, so a per-repo `.env` overrides the home file. Copy `.env.example` → `.env` for a per-repo config, or drop `ANTHROPIC_API_KEY=...` into `~/.primer_env` to share across projects. Both `.env` and `*.local` variants are gitignored.
 
@@ -37,13 +38,14 @@ The central design principle is that **the pedagogical engine is decoupled from 
 The six crates form a layered dependency graph:
 
 ```
-primer-cli  →  primer-pedagogy  →  primer-core  ←  primer-inference, primer-speech, primer-knowledge
+primer-cli  →  primer-pedagogy  →  primer-core  ←  primer-inference, primer-speech, primer-knowledge, primer-storage
 ```
 
 - **`primer-core`** — the only crate that defines public traits (`InferenceBackend`, `KnowledgeBase`, `SpeechToText`, `TextToSpeech`) plus shared types (`LearnerModel`, `Session`, `Turn`, `PedagogicalIntent`, `EngagementState`, `UnderstandingDepth`, `Prompt`, `Passage`). Everything else depends on this.
 - **`primer-inference`** — `StubBackend` (canned Socratic responses, no model), `CloudBackend` (Anthropic Messages API), and `OllamaBackend` (local Ollama `/api/chat`, useful for prototype testing against real models without integrating llama.cpp directly). `LlamaCppBackend`, `QnnBackend`, `RknnBackend` are TODOs.
 - **`primer-speech`** — stub-only today; speech is a Phase 2 concern.
 - **`primer-knowledge`** — `SqliteKnowledgeBase` using FTS5 with BM25 ranking. The schema is created on `open()` if missing. The retrieve path negates FTS5's negative rank so higher-score = more-relevant in the public API.
+- **`primer-storage`** — `SqliteSessionStore` persists every conversation `Session` (one DB per child, separate from the RAG corpus on privacy grounds). Schema is normalised: every categorical text column (`speaker`, `pedagogical_intent`, `concept_id`) is a foreign key into a lookup table. The `speakers` and `pedagogical_intents` lookup tables are seeded and validated against the canonical Rust enums on every `open()` — drift is a hard error. `concepts` is open-vocabulary and lazily populated. `DialogueManager` accepts an optional `&dyn SessionStore`; when set, it saves after every turn (success or mid-stream error). Save failures `tracing::warn!` instead of propagating.
 - **`primer-pedagogy`** — the Primer's "soul". Two modules:
   - `prompt_builder` builds the system prompt (encoding the Socratic method as instructions, varying by age, engagement, and intent), assembles messages from session turns, and contains `decide_intent()` — the heuristic that picks the next `PedagogicalIntent`.
   - `dialogue_manager` orchestrates a session: record child turn → decide intent → retrieve knowledge → build prompt → call inference → record Primer turn → update learner model.
@@ -63,6 +65,7 @@ primer-cli  →  primer-pedagogy  →  primer-core  ←  primer-inference, prime
 - **`decide_intent()` is the brain of the Socratic behaviour.** It is the most important function to test rigorously when adding pedagogical features. Tests are listed as a Phase 0.3 priority.
 - Knowledge base default is `:memory:` (empty). Retrieval just returns no passages and the prompt builder gracefully omits the knowledge section. Bootstrapping a corpus is a Phase 0.2 task.
 - Errors: use `primer_core::error::PrimerError` (variants per subsystem) and the `Result<T>` alias. Wrap external errors via `.map_err(|e| PrimerError::Inference(format!("...: {e}")))`-style.
+- **Categorical text columns are normalised into lookup tables and stored as integer foreign keys.** Applies to every SQLite schema in this codebase (sessions, learner-model concepts when Phase 0.3 lands, etc.). For closed Rust enums (`Speaker`, `PedagogicalIntent`, `UnderstandingDepth`), the Rust enum is the single source of truth; the DB lookup table is a derived projection that the storage layer regenerates and validates against on every `open()`. Drift (mismatched name on a known id, unknown id) is a hard error — there is **no** API exposed for mutating lookup tables. Adding a new variant means: edit the Rust source, recompile, next `open()` seeds the new row. Retired integer IDs are never reused.
 
 ## Pedagogical principles encoded in the system prompt
 
