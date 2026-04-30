@@ -198,9 +198,17 @@ impl<'a> DialogueManager<'a> {
         elapsed >= self.config.max_session_minutes as i64
     }
 
-    /// End the session gracefully.
-    pub fn close_session(&mut self) {
+    /// End the session gracefully. Records `ended_at` and, if storage is
+    /// configured, fires a final save so the timestamp lands on disk. Save
+    /// failures are logged via `tracing::warn!` rather than propagated —
+    /// matching `respond_to_streaming`'s save-failure semantics.
+    pub async fn close_session(&mut self) {
         self.session.ended_at = Some(Utc::now());
+        if let Some(store) = self.storage {
+            if let Err(e) = store.save_session(&self.session).await {
+                tracing::warn!("session save failed during close: {e}");
+            }
+        }
     }
 
     // ─── Private helpers ─────────────────────────────────────────────
@@ -557,6 +565,32 @@ mod tests {
         assert_eq!(store.last_turn_count(), 1);
         assert_eq!(dm.session.turns.len(), 1);
         assert_eq!(dm.session.turns[0].speaker, Speaker::Child);
+    }
+
+    #[tokio::test]
+    async fn close_session_fires_engine_save_with_ended_at() {
+        use primer_core::storage::SessionStore;
+
+        let backend = ScriptedBackend::new(vec![Ok(chunk("Hi", false)), Ok(chunk("", true))]);
+        let knowledge = EmptyKnowledge;
+        let store = CountingStore::new();
+        let mut dm = DialogueManager::new(
+            test_learner(),
+            &backend,
+            &knowledge,
+            Some(&store as &dyn SessionStore),
+            PedagogyConfig::default(),
+        );
+
+        let _ = dm.respond_to_streaming("hello", |_| {}).await.unwrap();
+        // First save fired during respond_to_streaming.
+        let saves_after_response = store.save_count();
+
+        dm.close_session().await;
+
+        // close_session also fires a save, this time with ended_at populated.
+        assert_eq!(store.save_count(), saves_after_response + 1);
+        assert!(dm.session.ended_at.is_some());
     }
 
     #[tokio::test]

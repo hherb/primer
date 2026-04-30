@@ -185,7 +185,7 @@ async fn main() -> anyhow::Result<()> {
             || input.eq_ignore_ascii_case("exit")
             || input.eq_ignore_ascii_case("bye")
         {
-            dm.close_session();
+            dm.close_session().await;
             println!("\nPrimer: That was a good conversation. Until next time.\n");
             break;
         }

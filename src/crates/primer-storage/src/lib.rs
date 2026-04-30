@@ -8,8 +8,11 @@
 //! synchronous bodies (acceptable at our turn rate; revisit if profiling
 //! ever shows contention).
 
-// catalog functions are wired in by tasks 8 and 12; suppress dead-code
-// warnings until then.
+// `intent_from_id` and `speaker_from_id` round out the catalog's symmetric
+// API. The `_to_id` directions are consumed by `save_session`; the reverse
+// directions will be needed when `load_session` lands. Keep the suppression
+// scoped to this module rather than per-function so future additions don't
+// each need their own `#[allow]`.
 #[allow(dead_code)]
 mod catalog;
 mod schema;
@@ -667,8 +670,99 @@ mod tests {
             let v = catalog::intent_from_id(id).expect("known id");
             variants_seen.push(v);
         }
-        let expected: Vec<PedagogicalIntent> = PedagogicalIntent::ALL.iter().copied().collect();
+        let expected: Vec<PedagogicalIntent> = PedagogicalIntent::ALL.to_vec();
         assert_eq!(variants_seen, expected);
+    }
+
+    #[tokio::test]
+    async fn deleting_session_cascades_turns_and_links_but_keeps_concepts() {
+        use primer_core::conversation::Speaker;
+
+        let store = open_memory();
+        let mut session = Session::new(Uuid::new_v4());
+        session.add_turn(make_turn(
+            Speaker::Child,
+            "what is gravity",
+            None,
+            vec!["gravity".to_string()],
+        ));
+        store.save_session(&session).await.unwrap();
+
+        let conn = store.conn.lock().unwrap();
+        // Pre-conditions: rows exist in all three tables we expect to touch.
+        let pre_turns: i64 = conn
+            .query_row("SELECT COUNT(*) FROM turns", [], |r| r.get(0))
+            .unwrap();
+        let pre_links: i64 = conn
+            .query_row("SELECT COUNT(*) FROM turn_concepts", [], |r| r.get(0))
+            .unwrap();
+        let pre_concepts: i64 = conn
+            .query_row("SELECT COUNT(*) FROM concepts", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(pre_turns, 1);
+        assert_eq!(pre_links, 1);
+        assert_eq!(pre_concepts, 1);
+
+        // Delete the session row directly. The schema's ON DELETE CASCADE
+        // should propagate through turns → turn_concepts. The concepts row
+        // is intentionally session-agnostic and should remain.
+        conn.execute(
+            "DELETE FROM sessions WHERE id = ?1",
+            rusqlite::params![session.id.to_string()],
+        )
+        .unwrap();
+
+        let post_turns: i64 = conn
+            .query_row("SELECT COUNT(*) FROM turns", [], |r| r.get(0))
+            .unwrap();
+        let post_links: i64 = conn
+            .query_row("SELECT COUNT(*) FROM turn_concepts", [], |r| r.get(0))
+            .unwrap();
+        let post_concepts: i64 = conn
+            .query_row("SELECT COUNT(*) FROM concepts", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(post_turns, 0, "turns should cascade-delete");
+        assert_eq!(post_links, 0, "turn_concepts should cascade-delete");
+        assert_eq!(
+            post_concepts, 1,
+            "concept rows are not session-scoped and should remain"
+        );
+    }
+
+    #[test]
+    fn foreign_key_enforcement_rejects_unknown_speaker_id() {
+        // Proves that PRAGMA foreign_keys = ON is honoured at write time,
+        // not just queryable as a flag. Inserting a turn with an unknown
+        // speaker_id must fail.
+        let store = open_memory();
+        let session_id = Uuid::new_v4().to_string();
+        let conn = store.conn.lock().unwrap();
+        // Insert a session row first so the turn's session_id FK is satisfied.
+        conn.execute(
+            "INSERT INTO sessions (id, learner_id, started_at) VALUES (?1, ?2, ?3)",
+            rusqlite::params![
+                &session_id,
+                Uuid::new_v4().to_string(),
+                "2026-04-30T00:00:00+00:00"
+            ],
+        )
+        .unwrap();
+
+        let result = conn.execute(
+            "INSERT INTO turns (session_id, turn_index, speaker_id, text, timestamp)
+             VALUES (?1, ?2, ?3, ?4, ?5)",
+            rusqlite::params![
+                &session_id,
+                0_i64,
+                9999_i64,
+                "hi",
+                "2026-04-30T00:00:00+00:00"
+            ],
+        );
+        assert!(
+            result.is_err(),
+            "FK enforcement should reject speaker_id=9999"
+        );
     }
 
     /// Returns a unique tempfile path using a UUID to avoid collisions
