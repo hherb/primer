@@ -577,6 +577,100 @@ mod tests {
         assert_eq!(link_count, 2, "gravity should be linked to both turns");
     }
 
+    #[tokio::test]
+    async fn idempotent_re_save_does_not_duplicate_rows() {
+        use primer_core::conversation::Speaker;
+
+        let store = open_memory();
+        let mut session = Session::new(Uuid::new_v4());
+        session.add_turn(make_turn(
+            Speaker::Child,
+            "hi",
+            None,
+            vec!["greeting".to_string()],
+        ));
+
+        store.save_session(&session).await.unwrap();
+        store.save_session(&session).await.unwrap();
+
+        let conn = store.conn.lock().unwrap();
+        let session_count: i64 = conn
+            .query_row("SELECT COUNT(*) FROM sessions", [], |r| r.get(0))
+            .unwrap();
+        let turn_count: i64 = conn
+            .query_row("SELECT COUNT(*) FROM turns", [], |r| r.get(0))
+            .unwrap();
+        let concept_count: i64 = conn
+            .query_row("SELECT COUNT(*) FROM concepts", [], |r| r.get(0))
+            .unwrap();
+        let link_count: i64 = conn
+            .query_row("SELECT COUNT(*) FROM turn_concepts", [], |r| r.get(0))
+            .unwrap();
+
+        assert_eq!(session_count, 1);
+        assert_eq!(turn_count, 1);
+        assert_eq!(concept_count, 1);
+        assert_eq!(link_count, 1);
+    }
+
+    #[tokio::test]
+    async fn append_a_turn_grows_the_persisted_session() {
+        use primer_core::conversation::Speaker;
+
+        let store = open_memory();
+        let mut session = Session::new(Uuid::new_v4());
+        session.add_turn(make_turn(Speaker::Child, "first", None, vec![]));
+        store.save_session(&session).await.unwrap();
+        session.add_turn(make_turn(Speaker::Primer, "second", None, vec![]));
+        store.save_session(&session).await.unwrap();
+
+        let conn = store.conn.lock().unwrap();
+        let turn_count: i64 = conn
+            .query_row("SELECT COUNT(*) FROM turns", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(turn_count, 2);
+
+        let last_text: String = conn
+            .query_row("SELECT text FROM turns WHERE turn_index = 1", [], |r| {
+                r.get(0)
+            })
+            .unwrap();
+        assert_eq!(last_text, "second");
+    }
+
+    #[tokio::test]
+    async fn every_intent_variant_round_trips() {
+        use primer_core::conversation::{PedagogicalIntent, Speaker};
+
+        let store = open_memory();
+        let mut session = Session::new(Uuid::new_v4());
+        // One turn per intent variant.
+        for &variant in PedagogicalIntent::ALL {
+            session.add_turn(make_turn(Speaker::Primer, "_", Some(variant), vec![]));
+        }
+        store.save_session(&session).await.unwrap();
+
+        let conn = store.conn.lock().unwrap();
+        let mut stmt = conn
+            .prepare("SELECT intent_id FROM turns ORDER BY turn_index")
+            .unwrap();
+        let ids: Vec<i64> = stmt
+            .query_map([], |r| r.get::<_, Option<i64>>(0))
+            .unwrap()
+            .map(|r| r.unwrap().unwrap())
+            .collect();
+        assert_eq!(ids.len(), PedagogicalIntent::ALL.len());
+
+        // Every persisted id must reverse-map to the original variant.
+        let mut variants_seen = Vec::new();
+        for id in ids {
+            let v = catalog::intent_from_id(id).expect("known id");
+            variants_seen.push(v);
+        }
+        let expected: Vec<PedagogicalIntent> = PedagogicalIntent::ALL.iter().copied().collect();
+        assert_eq!(variants_seen, expected);
+    }
+
     /// Returns a unique tempfile path using a UUID to avoid collisions
     /// between parallel test threads.
     fn tempfile_path() -> PathBuf {
