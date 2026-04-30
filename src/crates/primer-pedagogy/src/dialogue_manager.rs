@@ -313,6 +313,39 @@ mod tests {
         }
     }
 
+    /// Session-store spy: counts `save_session` calls and records the turn
+    /// count of the most recent save. Lets the dialogue-manager tests prove
+    /// the engine actually fired a save (rather than relying on idempotence
+    /// of a manual save after the fact).
+    struct CountingStore {
+        saves: Mutex<u32>,
+        last_turn_count: Mutex<usize>,
+    }
+
+    impl CountingStore {
+        fn new() -> Self {
+            Self {
+                saves: Mutex::new(0),
+                last_turn_count: Mutex::new(0),
+            }
+        }
+        fn save_count(&self) -> u32 {
+            *self.saves.lock().unwrap()
+        }
+        fn last_turn_count(&self) -> usize {
+            *self.last_turn_count.lock().unwrap()
+        }
+    }
+
+    #[async_trait]
+    impl primer_core::storage::SessionStore for CountingStore {
+        async fn save_session(&self, session: &Session) -> Result<()> {
+            *self.saves.lock().unwrap() += 1;
+            *self.last_turn_count.lock().unwrap() = session.turns.len();
+            Ok(())
+        }
+    }
+
     fn test_learner() -> LearnerModel {
         LearnerModel {
             profile: LearnerProfile {
@@ -475,14 +508,12 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn respond_to_streaming_persists_session_on_success() {
+    async fn respond_to_streaming_fires_engine_save_on_success() {
         use primer_core::storage::SessionStore;
-        use primer_storage::SqliteSessionStore;
-        use std::path::PathBuf;
 
         let backend = ScriptedBackend::new(vec![Ok(chunk("Hi", false)), Ok(chunk("", true))]);
         let knowledge = EmptyKnowledge;
-        let store = SqliteSessionStore::open(&PathBuf::from(":memory:")).unwrap();
+        let store = CountingStore::new();
         let mut dm = DialogueManager::new(
             test_learner(),
             &backend,
@@ -493,23 +524,22 @@ mod tests {
 
         let _ = dm.respond_to_streaming("hello", |_| {}).await.unwrap();
 
-        // Saving again is a clean no-op (idempotent). Row inspection is
-        // covered by primer-storage's own tests.
-        store.save_session(&dm.session).await.unwrap();
+        // Engine fired exactly one save. Persisted session has both the
+        // child input and the Primer response.
+        assert_eq!(store.save_count(), 1);
+        assert_eq!(store.last_turn_count(), 2);
     }
 
     #[tokio::test]
-    async fn respond_to_streaming_persists_child_turn_on_stream_error() {
+    async fn respond_to_streaming_fires_engine_save_on_stream_error() {
         use primer_core::storage::SessionStore;
-        use primer_storage::SqliteSessionStore;
-        use std::path::PathBuf;
 
         let backend = ScriptedBackend::new(vec![
             Ok(chunk("partial", false)),
             Err(PrimerError::Inference("simulated drop".into())),
         ]);
         let knowledge = EmptyKnowledge;
-        let store = SqliteSessionStore::open(&PathBuf::from(":memory:")).unwrap();
+        let store = CountingStore::new();
         let mut dm = DialogueManager::new(
             test_learner(),
             &backend,
@@ -521,8 +551,33 @@ mod tests {
         let result = dm.respond_to_streaming("question", |_| {}).await;
         assert!(result.is_err());
 
+        // Engine fired the save even though the stream errored. Persisted
+        // session has only the child turn (Primer turn was dropped).
+        assert_eq!(store.save_count(), 1);
+        assert_eq!(store.last_turn_count(), 1);
         assert_eq!(dm.session.turns.len(), 1);
         assert_eq!(dm.session.turns[0].speaker, Speaker::Child);
-        store.save_session(&dm.session).await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn open_session_fires_engine_save() {
+        use primer_core::storage::SessionStore;
+
+        let backend = ScriptedBackend::new(vec![Ok(chunk("", true))]);
+        let knowledge = EmptyKnowledge;
+        let store = CountingStore::new();
+        let mut dm = DialogueManager::new(
+            test_learner(),
+            &backend,
+            &knowledge,
+            Some(&store as &dyn SessionStore),
+            PedagogyConfig::default(),
+        );
+
+        let _ = dm.open_session().await.unwrap();
+
+        // The greeting turn was recorded and persisted.
+        assert_eq!(store.save_count(), 1);
+        assert_eq!(store.last_turn_count(), 1);
     }
 }
