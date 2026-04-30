@@ -14,6 +14,7 @@ primer-inference = { path = "../primer-inference" }
 primer-speech = { path = "../primer-speech" }
 primer-knowledge = { path = "../primer-knowledge" }
 primer-pedagogy = { path = "../primer-pedagogy" }
+primer-storage = { path = "../primer-storage" }
 tokio.workspace = true
 clap.workspace = true
 dotenvy.workspace = true

@@ -50,6 +50,11 @@ struct Cli {
     #[arg(long)]
     knowledge_db: Option<PathBuf>,
 
+    /// Path to session database SQLite file.
+    /// If omitted, uses an in-memory database (sessions are not persisted).
+    #[arg(long)]
+    session_db: Option<PathBuf>,
+
     /// Anthropic API key (for cloud backend).
     #[arg(long, env = "ANTHROPIC_API_KEY")]
     api_key: Option<String>,
@@ -105,9 +110,7 @@ async fn main() -> anyhow::Result<()> {
                 eprintln!("Error: --api-key or ANTHROPIC_API_KEY required for cloud backend.");
                 std::process::exit(1);
             });
-            let model = cli
-                .model
-                .unwrap_or_else(|| "claude-sonnet-4-6".to_string());
+            let model = cli.model.unwrap_or_else(|| "claude-sonnet-4-6".to_string());
             eprintln!("Using cloud inference backend (Anthropic {model}).");
             Box::new(primer_inference::cloud::CloudBackend::new(
                 "https://api.anthropic.com".to_string(),
@@ -117,9 +120,7 @@ async fn main() -> anyhow::Result<()> {
         }
         "ollama" => {
             let model = cli.model.unwrap_or_else(|| {
-                eprintln!(
-                    "Error: --model required for ollama backend (e.g., --model llama3.2)."
-                );
+                eprintln!("Error: --model required for ollama backend (e.g., --model llama3.2).");
                 std::process::exit(1);
             });
             eprintln!(
@@ -143,6 +144,10 @@ async fn main() -> anyhow::Result<()> {
         .unwrap_or_else(|| PathBuf::from(":memory:"));
     let knowledge = SqliteKnowledgeBase::open(&knowledge_path)?;
 
+    // Session store — in-memory by default (sessions are not persisted).
+    let session_path = cli.session_db.unwrap_or_else(|| PathBuf::from(":memory:"));
+    let session_store = primer_storage::SqliteSessionStore::open(&session_path)?;
+
     // Learner model.
     let learner = create_learner(&cli.name, cli.age);
 
@@ -155,6 +160,7 @@ async fn main() -> anyhow::Result<()> {
         learner,
         inference.as_ref(),
         &knowledge as &dyn KnowledgeBase,
+        Some(&session_store as &dyn primer_core::storage::SessionStore),
         pedagogy_config,
     );
 
