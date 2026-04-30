@@ -1,7 +1,7 @@
 # The Primer
 
 <p align="center">
-  <img src="assets/curious_childs_primer.png" alt="Primer logo" width="280">
+  <img src="assets/curious_childs_primer.png" alt="Primer logo" width="380">
 </p>
 
 A Socratic AI learning companion for children — inspired by the Young Lady's Illustrated Primer in Neal Stephenson's *The Diamond Age*.
