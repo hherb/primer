@@ -21,6 +21,10 @@ use std::io::{self, BufRead, Write};
 use std::path::PathBuf;
 use uuid::Uuid;
 
+/// SQLite path token for an in-memory database — used as the default
+/// for both `--knowledge-db` and `--session-db` when no path is given.
+const IN_MEMORY: &str = ":memory:";
+
 #[derive(Parser, Debug)]
 #[command(name = "primer", about = "The Primer — a Socratic learning companion")]
 struct Cli {
@@ -139,13 +143,11 @@ async fn main() -> anyhow::Result<()> {
     };
 
     // Knowledge base — in-memory by default (empty, but functional).
-    let knowledge_path = cli
-        .knowledge_db
-        .unwrap_or_else(|| PathBuf::from(":memory:"));
+    let knowledge_path = cli.knowledge_db.unwrap_or_else(|| PathBuf::from(IN_MEMORY));
     let knowledge = SqliteKnowledgeBase::open(&knowledge_path)?;
 
     // Session store — in-memory by default (sessions are not persisted).
-    let session_path = cli.session_db.unwrap_or_else(|| PathBuf::from(":memory:"));
+    let session_path = cli.session_db.unwrap_or_else(|| PathBuf::from(IN_MEMORY));
     let session_store = primer_storage::SqliteSessionStore::open(&session_path)?;
 
     // Learner model.

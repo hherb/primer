@@ -7,13 +7,16 @@
 //! single `Connection` wrapped in `Mutex`, async trait methods with
 //! synchronous bodies (acceptable at our turn rate; revisit if profiling
 //! ever shows contention).
+//!
+//! ## Concurrency caveat
+//!
+//! The lock is `std::sync::Mutex`, taken from inside an async fn. On a
+//! slow disk that means we block the tokio runtime while the SQLite
+//! write completes. Acceptable for a single-user CLI; if a future
+//! deployment ever has multiple concurrent writers (parallel learners
+//! sharing a runtime, or a multi-process consumer), revisit with a
+//! `tokio::sync::Mutex` and/or `spawn_blocking`.
 
-// `intent_from_id` and `speaker_from_id` round out the catalog's symmetric
-// API. The `_to_id` directions are consumed by `save_session`; the reverse
-// directions will be needed when `load_session` lands. Keep the suppression
-// scoped to this module rather than per-function so future additions don't
-// each need their own `#[allow]`.
-#[allow(dead_code)]
 mod catalog;
 mod schema;
 
@@ -79,19 +82,33 @@ impl SqliteSessionStore {
 
 #[async_trait]
 impl primer_core::storage::SessionStore for SqliteSessionStore {
+    /// Append-only persist. Re-saving a session that hasn't grown is a
+    /// true row-level no-op for `turns` and `turn_concepts` (no DELETEs,
+    /// no re-INSERTs) — only the `sessions` row is upserted to capture
+    /// `ended_at` updates. Turns persisted in earlier saves keep their
+    /// auto-incremented `id`s across subsequent saves, which matters for
+    /// any future feature that wants to FK into `turns.id`.
+    ///
+    /// Pre-condition: `session.turns` is append-only in memory. This
+    /// codebase's `Session` type only ever appends, so we exploit that
+    /// to skip the work of reconciling deletions or modifications to
+    /// already-persisted turns.
     async fn save_session(&self, session: &primer_core::conversation::Session) -> Result<()> {
-        let conn = self.conn.lock().unwrap();
-        // `&mut Connection` is unavailable through MutexGuard, so we use the
-        // documented `unchecked_transaction` variant — the transaction itself is
-        // a real SQLite BEGIN; only the Rust-side open-tx tracking is skipped.
+        let mut conn = self.conn.lock().unwrap();
         let tx = conn
-            .unchecked_transaction()
+            .transaction()
             .map_err(|e| PrimerError::Storage(format!("begin tx: {e}")))?;
 
-        // Upsert session metadata.
+        // Upsert session metadata. Plain `INSERT OR REPLACE` would do a
+        // DELETE-then-INSERT, which cascades through the FK and wipes
+        // every turn we've already persisted. The proper SQLite UPSERT
+        // (ON CONFLICT … DO UPDATE) updates in place. Only `ended_at`
+        // is allowed to change after creation; `learner_id` and
+        // `started_at` are pinned at session start.
         tx.execute(
-            "INSERT OR REPLACE INTO sessions (id, learner_id, started_at, ended_at)
-             VALUES (?1, ?2, ?3, ?4)",
+            "INSERT INTO sessions (id, learner_id, started_at, ended_at)
+             VALUES (?1, ?2, ?3, ?4)
+             ON CONFLICT(id) DO UPDATE SET ended_at = excluded.ended_at",
             rusqlite::params![
                 session.id.to_string(),
                 session.learner_id.to_string(),
@@ -101,101 +118,87 @@ impl primer_core::storage::SessionStore for SqliteSessionStore {
         )
         .map_err(|e| PrimerError::Storage(format!("upsert session: {e}")))?;
 
-        // Clear turns; they get fully rebuilt below. Note: when re-saving an
-        // existing session, INSERT OR REPLACE on `sessions` already cascades
-        // through the FK + ON DELETE CASCADE, so this DELETE is redundant on
-        // that path. It IS load-bearing on a path where the row pre-existed
-        // but the schema cascade was somehow skipped (e.g. PRAGMA foreign_keys
-        // off). Keeping it explicit makes the data-flow obvious without having
-        // to reason about the cascade. Cascades to turn_concepts.
-        tx.execute(
-            "DELETE FROM turns WHERE session_id = ?1",
-            rusqlite::params![session.id.to_string()],
-        )
-        .map_err(|e| PrimerError::Storage(format!("delete old turns: {e}")))?;
-
-        // Insert each turn with its speaker_id and intent_id integer FKs.
-        let mut insert_turn = tx
-            .prepare(
-                "INSERT INTO turns (session_id, turn_index, speaker_id, text, timestamp, intent_id)
-                 VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+        // How many turns are already on disk for this session. Append
+        // anything in memory beyond that.
+        let persisted_count: i64 = tx
+            .query_row(
+                "SELECT COUNT(*) FROM turns WHERE session_id = ?1",
+                rusqlite::params![session.id.to_string()],
+                |r| r.get(0),
             )
-            .map_err(|e| PrimerError::Storage(format!("prepare insert turn: {e}")))?;
+            .map_err(|e| PrimerError::Storage(format!("count persisted turns: {e}")))?;
+        let persisted_count = persisted_count as usize;
 
-        for (idx, turn) in session.turns.iter().enumerate() {
-            let speaker_id = catalog::speaker_id(turn.speaker);
-            let intent_id = turn.intent.map(catalog::intent_id);
-            insert_turn
-                .execute(rusqlite::params![
-                    session.id.to_string(),
-                    idx as i64,
-                    speaker_id,
-                    turn.text,
-                    turn.timestamp.to_rfc3339(),
-                    intent_id,
-                ])
-                .map_err(|e| PrimerError::Storage(format!("insert turn {idx}: {e}")))?;
-        }
-        drop(insert_turn);
+        if persisted_count < session.turns.len() {
+            let mut insert_turn = tx
+                .prepare(
+                    "INSERT INTO turns (session_id, turn_index, speaker_id, text, timestamp, intent_id)
+                     VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+                )
+                .map_err(|e| PrimerError::Storage(format!("prepare insert turn: {e}")))?;
+            let mut insert_concept = tx
+                .prepare("INSERT OR IGNORE INTO concepts (name) VALUES (?1)")
+                .map_err(|e| PrimerError::Storage(format!("prepare insert concept: {e}")))?;
+            let mut select_concept = tx
+                .prepare("SELECT id FROM concepts WHERE name = ?1")
+                .map_err(|e| PrimerError::Storage(format!("prepare select concept: {e}")))?;
+            let mut link_concept = tx
+                .prepare(
+                    "INSERT OR IGNORE INTO turn_concepts (turn_id, concept_id) VALUES (?1, ?2)",
+                )
+                .map_err(|e| PrimerError::Storage(format!("prepare link concept: {e}")))?;
 
-        // Concepts: lazy upsert with a per-call cache to avoid re-querying
-        // the same concept_id within one save.
-        let mut concept_id_cache: std::collections::HashMap<String, i64> =
-            std::collections::HashMap::new();
+            // Per-call cache so the same concept name within one save
+            // doesn't hit the DB twice.
+            let mut concept_name_cache: std::collections::HashMap<String, i64> =
+                std::collections::HashMap::new();
 
-        let mut insert_concept = tx
-            .prepare("INSERT OR IGNORE INTO concepts (concept_id) VALUES (?1)")
-            .map_err(|e| PrimerError::Storage(format!("prepare insert concept: {e}")))?;
-        let mut select_concept = tx
-            .prepare("SELECT id FROM concepts WHERE concept_id = ?1")
-            .map_err(|e| PrimerError::Storage(format!("prepare select concept: {e}")))?;
-        let mut link_concept = tx
-            .prepare("INSERT OR IGNORE INTO turn_concepts (turn_id, concept_id) VALUES (?1, ?2)")
-            .map_err(|e| PrimerError::Storage(format!("prepare link concept: {e}")))?;
+            for (idx, turn) in session.turns.iter().enumerate().skip(persisted_count) {
+                let speaker_id = catalog::speaker_id(turn.speaker);
+                let intent_id = turn.intent.map(catalog::intent_id);
+                insert_turn
+                    .execute(rusqlite::params![
+                        session.id.to_string(),
+                        idx as i64,
+                        speaker_id,
+                        turn.text,
+                        turn.timestamp.to_rfc3339(),
+                        intent_id,
+                    ])
+                    .map_err(|e| PrimerError::Storage(format!("insert turn {idx}: {e}")))?;
+                // Capture the turn's rowid before we INSERT anything else
+                // (concept inserts would shift `last_insert_rowid`).
+                let turn_db_id = tx.last_insert_rowid();
 
-        // Re-query the turns we just inserted to obtain their auto-incremented ids.
-        let mut select_turn_id = tx
-            .prepare("SELECT id FROM turns WHERE session_id = ?1 AND turn_index = ?2")
-            .map_err(|e| PrimerError::Storage(format!("prepare select turn id: {e}")))?;
-
-        for (idx, turn) in session.turns.iter().enumerate() {
-            if turn.concepts.is_empty() {
-                continue;
+                for name in &turn.concepts {
+                    let id = match concept_name_cache.get(name).copied() {
+                        Some(id) => id,
+                        None => {
+                            insert_concept
+                                .execute(rusqlite::params![name])
+                                .map_err(|e| {
+                                    PrimerError::Storage(format!("upsert concept {name}: {e}"))
+                                })?;
+                            let id: i64 = select_concept
+                                .query_row(rusqlite::params![name], |r| r.get(0))
+                                .map_err(|e| {
+                                    PrimerError::Storage(format!("select concept {name}: {e}"))
+                                })?;
+                            concept_name_cache.insert(name.clone(), id);
+                            id
+                        }
+                    };
+                    link_concept
+                        .execute(rusqlite::params![turn_db_id, id])
+                        .map_err(|e| PrimerError::Storage(format!("link concept {name}: {e}")))?;
+                }
             }
-            let turn_db_id: i64 = select_turn_id
-                .query_row(rusqlite::params![session.id.to_string(), idx as i64], |r| {
-                    r.get(0)
-                })
-                .map_err(|e| PrimerError::Storage(format!("look up turn id {idx}: {e}")))?;
-
-            for concept_id in &turn.concepts {
-                let cached = concept_id_cache.get(concept_id).copied();
-                let id = match cached {
-                    Some(id) => id,
-                    None => {
-                        insert_concept
-                            .execute(rusqlite::params![concept_id])
-                            .map_err(|e| {
-                                PrimerError::Storage(format!("upsert concept {concept_id}: {e}"))
-                            })?;
-                        let id: i64 = select_concept
-                            .query_row(rusqlite::params![concept_id], |r| r.get(0))
-                            .map_err(|e| {
-                                PrimerError::Storage(format!("select concept {concept_id}: {e}"))
-                            })?;
-                        concept_id_cache.insert(concept_id.clone(), id);
-                        id
-                    }
-                };
-                link_concept
-                    .execute(rusqlite::params![turn_db_id, id])
-                    .map_err(|e| PrimerError::Storage(format!("link concept {concept_id}: {e}")))?;
-            }
+            // Drop borrows of `tx` before commit consumes it.
+            drop(link_concept);
+            drop(select_concept);
+            drop(insert_concept);
+            drop(insert_turn);
         }
-        drop(select_turn_id);
-        drop(link_concept);
-        drop(select_concept);
-        drop(insert_concept);
 
         tx.commit()
             .map_err(|e| PrimerError::Storage(format!("commit: {e}")))?;
@@ -533,9 +536,9 @@ mod tests {
         // The concept names round-trip via the lookup.
         let mut stmt = conn
             .prepare(
-                "SELECT c.concept_id FROM turn_concepts tc
+                "SELECT c.name FROM turn_concepts tc
                  JOIN concepts c ON c.id = tc.concept_id
-                 ORDER BY c.concept_id",
+                 ORDER BY c.name",
             )
             .unwrap();
         let names: Vec<String> = stmt
@@ -762,6 +765,49 @@ mod tests {
         assert!(
             result.is_err(),
             "FK enforcement should reject speaker_id=9999"
+        );
+    }
+
+    #[tokio::test]
+    async fn turn_ids_are_stable_across_appending_saves() {
+        // Append-only writes mean a turn's auto-incremented `id` should
+        // stay the same when a later save appends new turns. The previous
+        // DELETE+INSERT scheme failed this — every save gave every turn a
+        // fresh id. Future tables that FK into `turns.id` will rely on
+        // this stability.
+        use primer_core::conversation::Speaker;
+
+        let store = open_memory();
+        let mut session = Session::new(Uuid::new_v4());
+        session.add_turn(make_turn(Speaker::Child, "first", None, vec![]));
+        store.save_session(&session).await.unwrap();
+
+        let id_before: i64 = {
+            let conn = store.conn.lock().unwrap();
+            conn.query_row(
+                "SELECT id FROM turns WHERE session_id = ?1 AND turn_index = 0",
+                rusqlite::params![session.id.to_string()],
+                |r| r.get(0),
+            )
+            .unwrap()
+        };
+
+        session.add_turn(make_turn(Speaker::Primer, "second", None, vec![]));
+        store.save_session(&session).await.unwrap();
+
+        let id_after: i64 = {
+            let conn = store.conn.lock().unwrap();
+            conn.query_row(
+                "SELECT id FROM turns WHERE session_id = ?1 AND turn_index = 0",
+                rusqlite::params![session.id.to_string()],
+                |r| r.get(0),
+            )
+            .unwrap()
+        };
+
+        assert_eq!(
+            id_before, id_after,
+            "turn 0's row id must not change when turn 1 is appended"
         );
     }
 
