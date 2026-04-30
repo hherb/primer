@@ -16,6 +16,9 @@ pub enum PrimerError {
     #[error("Learner model error: {0}")]
     LearnerModel(String),
 
+    #[error("Storage error: {0}")]
+    Storage(String),
+
     #[error("Configuration error: {0}")]
     Config(String),
 
