@@ -34,6 +34,12 @@ pub enum Speaker {
     Primer,
 }
 
+impl Speaker {
+    /// Every variant, in declaration order. Source for the storage layer's
+    /// validate-and-seed pass.
+    pub const ALL: &'static [Self] = &[Self::Child, Self::Primer];
+}
+
 /// What the Primer was trying to accomplish with a given response.
 /// This is metadata for the pedagogical engine's own use — the child
 /// never sees it.
@@ -55,6 +61,21 @@ pub enum PedagogicalIntent {
     AnswerThenPivot,
     /// Suggesting the session end (the Primer never tries to maximise engagement).
     SessionClose,
+}
+
+impl PedagogicalIntent {
+    /// Every variant, in declaration order. Source for the storage layer's
+    /// validate-and-seed pass.
+    pub const ALL: &'static [Self] = &[
+        Self::SocraticQuestion,
+        Self::ComprehensionCheck,
+        Self::Scaffolding,
+        Self::Encouragement,
+        Self::Extension,
+        Self::DirectAnswer,
+        Self::AnswerThenPivot,
+        Self::SessionClose,
+    ];
 }
 
 /// A complete conversation session.
@@ -86,5 +107,25 @@ impl Session {
     pub fn recent_turns(&self, n: usize) -> &[Turn] {
         let start = self.turns.len().saturating_sub(n);
         &self.turns[start..]
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn speaker_all_lists_every_variant() {
+        assert_eq!(Speaker::ALL.len(), 2);
+        assert!(Speaker::ALL.contains(&Speaker::Child));
+        assert!(Speaker::ALL.contains(&Speaker::Primer));
+    }
+
+    #[test]
+    fn pedagogical_intent_all_lists_every_variant() {
+        assert_eq!(PedagogicalIntent::ALL.len(), 8);
+        // Spot-check a few representatives.
+        assert!(PedagogicalIntent::ALL.contains(&PedagogicalIntent::SocraticQuestion));
+        assert!(PedagogicalIntent::ALL.contains(&PedagogicalIntent::SessionClose));
     }
 }
