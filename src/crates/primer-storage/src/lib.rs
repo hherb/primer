@@ -17,6 +17,7 @@ mod schema;
 use std::path::Path;
 use std::sync::Mutex;
 
+use async_trait::async_trait;
 use primer_core::error::{PrimerError, Result};
 use rusqlite::Connection;
 
@@ -73,10 +74,51 @@ impl SqliteSessionStore {
     }
 }
 
+#[async_trait]
+impl primer_core::storage::SessionStore for SqliteSessionStore {
+    async fn save_session(&self, session: &primer_core::conversation::Session) -> Result<()> {
+        let conn = self.conn.lock().unwrap();
+        let tx = conn
+            .unchecked_transaction()
+            .map_err(|e| PrimerError::Storage(format!("begin tx: {e}")))?;
+
+        // Upsert session metadata.
+        tx.execute(
+            "INSERT OR REPLACE INTO sessions (id, learner_id, started_at, ended_at)
+             VALUES (?1, ?2, ?3, ?4)",
+            rusqlite::params![
+                session.id.to_string(),
+                session.learner_id.to_string(),
+                session.started_at.to_rfc3339(),
+                session.ended_at.map(|t| t.to_rfc3339()),
+            ],
+        )
+        .map_err(|e| PrimerError::Storage(format!("upsert session: {e}")))?;
+
+        // Clear turns; they get fully rebuilt below. Cascades to turn_concepts.
+        tx.execute(
+            "DELETE FROM turns WHERE session_id = ?1",
+            rusqlite::params![session.id.to_string()],
+        )
+        .map_err(|e| PrimerError::Storage(format!("delete old turns: {e}")))?;
+
+        // Turns and concepts are added in the next tasks.
+
+        tx.commit()
+            .map_err(|e| PrimerError::Storage(format!("commit: {e}")))?;
+        Ok(())
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use std::path::PathBuf;
+
+    use chrono::Utc;
+    use primer_core::conversation::{Session, Turn};
+    use primer_core::storage::SessionStore;
+    use uuid::Uuid;
 
     fn open_memory() -> SqliteSessionStore {
         SqliteSessionStore::open(&PathBuf::from(":memory:")).expect("open :memory:")
@@ -265,6 +307,33 @@ mod tests {
         drop(conn);
         drop(store);
         let _ = std::fs::remove_file(&tmp);
+    }
+
+    #[tokio::test]
+    async fn save_empty_session_persists_metadata_only() {
+        let store = open_memory();
+        let learner_id = Uuid::new_v4();
+        let session = Session::new(learner_id);
+
+        store.save_session(&session).await.unwrap();
+
+        let conn = store.conn.lock().unwrap();
+        let row: (String, String, String, Option<String>) = conn
+            .query_row(
+                "SELECT id, learner_id, started_at, ended_at FROM sessions",
+                [],
+                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)),
+            )
+            .unwrap();
+        assert_eq!(row.0, session.id.to_string());
+        assert_eq!(row.1, learner_id.to_string());
+        assert!(!row.2.is_empty());
+        assert!(row.3.is_none());
+
+        let turn_count: i64 = conn
+            .query_row("SELECT COUNT(*) FROM turns", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(turn_count, 0);
     }
 
     /// Returns a unique tempfile path using a UUID to avoid collisions
