@@ -54,7 +54,10 @@ pub fn intent_name(intent: PedagogicalIntent) -> &'static str {
 /// Reverse lookup: integer ID → `PedagogicalIntent`.
 /// Returns `None` for IDs the current build doesn't know about.
 pub fn intent_from_id(id: i64) -> Option<PedagogicalIntent> {
-    PedagogicalIntent::ALL.iter().copied().find(|v| intent_id(*v) == id)
+    PedagogicalIntent::ALL
+        .iter()
+        .copied()
+        .find(|v| intent_id(*v) == id)
 }
 
 pub fn speaker_from_id(id: i64) -> Option<Speaker> {
@@ -64,13 +67,19 @@ pub fn speaker_from_id(id: i64) -> Option<Speaker> {
 /// All `(id, name)` pairs the storage layer expects to see in the
 /// `speakers` lookup table. Used by the validate-and-seed pass.
 pub fn expected_speakers() -> Vec<(i64, &'static str)> {
-    Speaker::ALL.iter().map(|s| (speaker_id(*s), speaker_name(*s))).collect()
+    Speaker::ALL
+        .iter()
+        .map(|s| (speaker_id(*s), speaker_name(*s)))
+        .collect()
 }
 
 /// All `(id, name)` pairs the storage layer expects to see in the
 /// `pedagogical_intents` lookup table.
 pub fn expected_intents() -> Vec<(i64, &'static str)> {
-    PedagogicalIntent::ALL.iter().map(|i| (intent_id(*i), intent_name(*i))).collect()
+    PedagogicalIntent::ALL
+        .iter()
+        .map(|i| (intent_id(*i), intent_name(*i)))
+        .collect()
 }
 
 #[cfg(test)]
@@ -93,7 +102,10 @@ mod tests {
 
     #[test]
     fn intent_ids_are_unique() {
-        let mut ids: Vec<i64> = PedagogicalIntent::ALL.iter().map(|i| intent_id(*i)).collect();
+        let mut ids: Vec<i64> = PedagogicalIntent::ALL
+            .iter()
+            .map(|i| intent_id(*i))
+            .collect();
         ids.sort();
         let len = ids.len();
         ids.dedup();

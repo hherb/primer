@@ -78,6 +78,9 @@ impl SqliteSessionStore {
 impl primer_core::storage::SessionStore for SqliteSessionStore {
     async fn save_session(&self, session: &primer_core::conversation::Session) -> Result<()> {
         let conn = self.conn.lock().unwrap();
+        // `&mut Connection` is unavailable through MutexGuard, so we use the
+        // documented `unchecked_transaction` variant — the transaction itself is
+        // a real SQLite BEGIN; only the Rust-side open-tx tracking is skipped.
         let tx = conn
             .unchecked_transaction()
             .map_err(|e| PrimerError::Storage(format!("begin tx: {e}")))?;
@@ -95,7 +98,13 @@ impl primer_core::storage::SessionStore for SqliteSessionStore {
         )
         .map_err(|e| PrimerError::Storage(format!("upsert session: {e}")))?;
 
-        // Clear turns; they get fully rebuilt below. Cascades to turn_concepts.
+        // Clear turns; they get fully rebuilt below. Note: when re-saving an
+        // existing session, INSERT OR REPLACE on `sessions` already cascades
+        // through the FK + ON DELETE CASCADE, so this DELETE is redundant on
+        // that path. It IS load-bearing on a path where the row pre-existed
+        // but the schema cascade was somehow skipped (e.g. PRAGMA foreign_keys
+        // off). Keeping it explicit makes the data-flow obvious without having
+        // to reason about the cascade. Cascades to turn_concepts.
         tx.execute(
             "DELETE FROM turns WHERE session_id = ?1",
             rusqlite::params![session.id.to_string()],
@@ -143,9 +152,7 @@ impl primer_core::storage::SessionStore for SqliteSessionStore {
 
         // Re-query the turns we just inserted to obtain their auto-incremented ids.
         let mut select_turn_id = tx
-            .prepare(
-                "SELECT id FROM turns WHERE session_id = ?1 AND turn_index = ?2",
-            )
+            .prepare("SELECT id FROM turns WHERE session_id = ?1 AND turn_index = ?2")
             .map_err(|e| PrimerError::Storage(format!("prepare select turn id: {e}")))?;
 
         for (idx, turn) in session.turns.iter().enumerate() {
@@ -153,10 +160,9 @@ impl primer_core::storage::SessionStore for SqliteSessionStore {
                 continue;
             }
             let turn_db_id: i64 = select_turn_id
-                .query_row(
-                    rusqlite::params![session.id.to_string(), idx as i64],
-                    |r| r.get(0),
-                )
+                .query_row(rusqlite::params![session.id.to_string(), idx as i64], |r| {
+                    r.get(0)
+                })
                 .map_err(|e| PrimerError::Storage(format!("look up turn id {idx}: {e}")))?;
 
             for concept_id in &turn.concepts {
@@ -180,9 +186,7 @@ impl primer_core::storage::SessionStore for SqliteSessionStore {
                 };
                 link_concept
                     .execute(rusqlite::params![turn_db_id, id])
-                    .map_err(|e| {
-                        PrimerError::Storage(format!("link concept {concept_id}: {e}"))
-                    })?;
+                    .map_err(|e| PrimerError::Storage(format!("link concept {concept_id}: {e}")))?;
             }
         }
         drop(select_turn_id);
@@ -210,9 +214,12 @@ mod tests {
         SqliteSessionStore::open(&PathBuf::from(":memory:")).expect("open :memory:")
     }
 
-    fn make_turn(speaker: primer_core::conversation::Speaker, text: &str,
-                 intent: Option<primer_core::conversation::PedagogicalIntent>,
-                 concepts: Vec<String>) -> Turn {
+    fn make_turn(
+        speaker: primer_core::conversation::Speaker,
+        text: &str,
+        intent: Option<primer_core::conversation::PedagogicalIntent>,
+        concepts: Vec<String>,
+    ) -> Turn {
         Turn {
             speaker,
             text: text.to_string(),
@@ -269,8 +276,14 @@ mod tests {
         }
         let err = SqliteSessionStore::open(&tmp).unwrap_err();
         let msg = format!("{err}");
-        assert!(msg.contains("99"), "error should mention the bad version: {msg}");
-        assert!(msg.contains("Storage"), "error should be a Storage variant: {msg}");
+        assert!(
+            msg.contains("99"),
+            "error should mention the bad version: {msg}"
+        );
+        assert!(
+            msg.contains("Storage"),
+            "error should be a Storage variant: {msg}"
+        );
         let _ = std::fs::remove_file(&tmp);
     }
 
@@ -330,7 +343,10 @@ mod tests {
         let speaker_count: i64 = conn
             .query_row("SELECT COUNT(*) FROM speakers", [], |r| r.get(0))
             .unwrap();
-        assert_eq!(speaker_count, 2, "second open should not duplicate seed rows");
+        assert_eq!(
+            speaker_count, 2,
+            "second open should not duplicate seed rows"
+        );
         drop(conn);
         drop(store);
         let _ = std::fs::remove_file(&tmp);
@@ -353,8 +369,10 @@ mod tests {
         }
         let err = SqliteSessionStore::open(&tmp).unwrap_err();
         let msg = format!("{err}");
-        assert!(msg.contains("WrongName") || msg.contains("SocraticQuestion"),
-            "error should mention the conflict: {msg}");
+        assert!(
+            msg.contains("WrongName") || msg.contains("SocraticQuestion"),
+            "error should mention the conflict: {msg}"
+        );
         let _ = std::fs::remove_file(&tmp);
     }
 
@@ -375,8 +393,10 @@ mod tests {
         }
         let err = SqliteSessionStore::open(&tmp).unwrap_err();
         let msg = format!("{err}");
-        assert!(msg.contains("99") || msg.contains("unknown"),
-            "error should mention the unknown id: {msg}");
+        assert!(
+            msg.contains("99") || msg.contains("unknown"),
+            "error should mention the unknown id: {msg}"
+        );
         let _ = std::fs::remove_file(&tmp);
     }
 
@@ -440,7 +460,12 @@ mod tests {
 
         let store = open_memory();
         let mut session = Session::new(Uuid::new_v4());
-        session.add_turn(make_turn(Speaker::Child, "why is the sky blue", None, vec![]));
+        session.add_turn(make_turn(
+            Speaker::Child,
+            "why is the sky blue",
+            None,
+            vec![],
+        ));
         session.add_turn(make_turn(
             Speaker::Primer,
             "What do you notice about the sky during the day?",
@@ -452,8 +477,10 @@ mod tests {
 
         let conn = store.conn.lock().unwrap();
         let mut stmt = conn
-            .prepare("SELECT turn_index, speaker_id, text, intent_id FROM turns
-                     WHERE session_id = ?1 ORDER BY turn_index")
+            .prepare(
+                "SELECT turn_index, speaker_id, text, intent_id FROM turns
+                     WHERE session_id = ?1 ORDER BY turn_index",
+            )
             .unwrap();
         let rows: Vec<(i64, i64, String, Option<i64>)> = stmt
             .query_map(rusqlite::params![session.id.to_string()], |r| {
@@ -523,10 +550,18 @@ mod tests {
         let store = open_memory();
         let mut session = Session::new(Uuid::new_v4());
         // "gravity" appears in two turns — should be one concepts row, two turn_concepts rows.
-        session.add_turn(make_turn(Speaker::Child, "what is gravity",
-            None, vec!["gravity".to_string()]));
-        session.add_turn(make_turn(Speaker::Primer, "good question",
-            None, vec!["gravity".to_string()]));
+        session.add_turn(make_turn(
+            Speaker::Child,
+            "what is gravity",
+            None,
+            vec!["gravity".to_string()],
+        ));
+        session.add_turn(make_turn(
+            Speaker::Primer,
+            "good question",
+            None,
+            vec!["gravity".to_string()],
+        ));
 
         store.save_session(&session).await.unwrap();
 
@@ -545,7 +580,6 @@ mod tests {
     /// Returns a unique tempfile path using a UUID to avoid collisions
     /// between parallel test threads.
     fn tempfile_path() -> PathBuf {
-        std::env::temp_dir()
-            .join(format!("primer-storage-test-{}.db", uuid::Uuid::new_v4()))
+        std::env::temp_dir().join(format!("primer-storage-test-{}.db", uuid::Uuid::new_v4()))
     }
 }

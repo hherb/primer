@@ -80,7 +80,9 @@ pub fn validate_and_seed_lookup(
             .prepare(&sql)
             .map_err(|e| PrimerError::Storage(format!("prepare for {table}: {e}")))?;
         let rows = stmt
-            .query_map([], |row| Ok((row.get::<_, i64>(0)?, row.get::<_, String>(1)?)))
+            .query_map([], |row| {
+                Ok((row.get::<_, i64>(0)?, row.get::<_, String>(1)?))
+            })
             .map_err(|e| PrimerError::Storage(format!("query {table}: {e}")))?;
         let mut map = HashMap::new();
         for row in rows {
@@ -116,9 +118,7 @@ pub fn validate_and_seed_lookup(
             }
             None => {
                 conn.execute(&insert_sql, rusqlite::params![id, expected_name])
-                    .map_err(|e| {
-                        PrimerError::Storage(format!("insert into {table}: {e}"))
-                    })?;
+                    .map_err(|e| PrimerError::Storage(format!("insert into {table}: {e}")))?;
             }
         }
     }
