@@ -171,43 +171,39 @@ CREATE INDEX IF NOT EXISTS idx_turn_concepts_concept
 PRAGMA user_version = 1;
 ```
 
-### Lookup-table seeding
+### Lookup-table seeding and drift detection
 
-`speakers` and `pedagogical_intents` are static — every variant is known at compile time, and the integer ID assignment is **part of the on-disk contract**. They are seeded by `SqliteSessionStore::open` with `INSERT OR IGNORE`:
+**Single source of truth: the Rust enum.** The `speakers` and `pedagogical_intents` rows in the DB are a *derived projection* of the corresponding Rust types, regenerated and validated on every `SqliteSessionStore::open(...)` call. The crate exposes no public API for inserting, updating, or deleting rows in either lookup table — the only way to add a new variant is to change the Rust source and recompile. New categories will almost always require pedagogical-engine changes anyway, so the recompile cost is buying genuine safety, not bureaucratic friction.
 
-```sql
-INSERT OR IGNORE INTO speakers (id, name) VALUES (1, 'child'), (2, 'primer');
-INSERT OR IGNORE INTO pedagogical_intents (id, name) VALUES
-    (1, 'SocraticQuestion'),
-    (2, 'ComprehensionCheck'),
-    (3, 'Scaffolding'),
-    (4, 'Encouragement'),
-    (5, 'Extension'),
-    (6, 'DirectAnswer'),
-    (7, 'AnswerThenPivot'),
-    (8, 'SessionClose');
-```
+Each lookup table maps to a pair of pieces of Rust data co-located with the type definition (or in a small `primer-storage` companion module if we don't want `primer-core` to know its IDs):
 
-The Rust mapping uses **explicit numeric values**, not `as i64` over the variant index, so adding or reordering variants in `primer-core` cannot silently shift the IDs that already exist on disk:
+- A list of every variant (e.g. `PedagogicalIntent::ALL: &'static [Self]`).
+- A canonical `(variant) → (id, name)` mapping via an exhaustive `match`. Explicit integer IDs (never `as i64`), since variant declaration order in Rust must not be allowed to silently shift on-disk identity.
 
-```rust
-fn intent_id(intent: PedagogicalIntent) -> i64 {
-    match intent {
-        PedagogicalIntent::SocraticQuestion   => 1,
-        PedagogicalIntent::ComprehensionCheck => 2,
-        PedagogicalIntent::Scaffolding        => 3,
-        PedagogicalIntent::Encouragement      => 4,
-        PedagogicalIntent::Extension          => 5,
-        PedagogicalIntent::DirectAnswer       => 6,
-        PedagogicalIntent::AnswerThenPivot    => 7,
-        PedagogicalIntent::SessionClose       => 8,
-    }
-}
-```
+On every `open()`, **before any reads or writes are accepted**, the storage layer runs a *validate-and-seed* pass per lookup table:
 
-Adding a new variant means: pick the next free integer, add a row to the seed `INSERT OR IGNORE`, extend the `match`. Retired variants keep their ID forever and are never re-used — their on-disk rows can sit untouched.
+1. Read every existing `(id, name)` row from the table.
+2. For each Rust variant in `ALL`:
+   - Compute `(expected_id, expected_name)` via the canonical match.
+   - If the DB has a row at `expected_id` with a different `name` → return `PrimerError::Storage` with a clear message ("`pedagogical_intents` row id=4 has name 'Scaffolding' but Rust expects 'Encouragement' — incompatible schema/code mismatch"). Do **not** rewrite — drift this severe means a code/data mismatch the user has to investigate.
+   - If the DB has no row at `expected_id` → insert it.
+3. For each row in the DB whose `id` is not in the Rust `ALL` set → return `PrimerError::Storage` ("`pedagogical_intents` has unknown row id=9 'NewIntent' — database may be from a newer build"). Don't delete: the row may be load-bearing for the newer code.
 
-`concepts` is **not** seeded — entries are created lazily on first save via `INSERT OR IGNORE INTO concepts (concept_id) VALUES (?)` followed by `SELECT id FROM concepts WHERE concept_id = ?`. Two round-trips per new concept; cached for the rest of the save call.
+This gives:
+- **Automatic seeding** on first open (empty DB → fully populated tables).
+- **Drift detection** at startup (mismatched names, missing IDs, unknown IDs all surface immediately).
+- **One source of truth** (Rust). The DB never authoritatively defines what categories exist; it just stores a snapshot for FK-integrity purposes.
+- **Safe upgrades**: opening a current DB with current code is a no-op. Opening an older DB with current code seeds the new variant. Opening a *newer* DB with older code fails loudly.
+
+**Adding a new variant** in future is therefore mechanical:
+1. Add the Rust variant.
+2. Append an entry to `ALL`.
+3. Add the arm to the canonical match (with a fresh integer ID — never reuse a retired one).
+4. Recompile. First `open()` against an existing DB seeds the new row.
+
+**Renaming a variant** is mechanical too: update the Rust name, update the canonical match (keeping the integer ID stable). The validate-and-seed pass detects the name change and updates the DB row in step 2 (well — the spec above currently treats name mismatch as an error rather than a rewrite; see Risk Register for the trade-off).
+
+**Concepts** are **not** treated this way. They're an open, runtime-populated vocabulary — there is no Rust source of truth, only "whatever `turn.concepts` contained at save time." Entries are created lazily via `INSERT OR IGNORE INTO concepts (concept_id) VALUES (?)` followed by `SELECT id FROM concepts WHERE concept_id = ?`, with a `HashMap<String, i64>` cache for the duration of the enclosing transaction.
 
 ### Future-proofing — additive tables
 
@@ -304,7 +300,10 @@ Wrapping at the `SqliteSessionStore` boundary so callers see one variant for bot
 Connection-against-`:memory:` for all unit tests. Uses `tokio::test` since the trait is async.
 
 1. **Schema bootstrap** — opening a fresh DB sets `user_version = 1`, creates all six tables (3 lookup, 3 conversation), foreign keys enabled.
-2. **Lookup-table seed** — `speakers` and `pedagogical_intents` are populated with the expected (id, name) rows on first open. Re-opening an existing DB does not duplicate or reorder them.
+2. **Lookup-table seed (fresh DB)** — `speakers` and `pedagogical_intents` are populated with every Rust variant on first open, with the IDs from the canonical match. Re-opening the same DB is a clean no-op (no duplicates, no errors).
+2a. **Lookup-table drift detection — name mismatch** — pre-populate `pedagogical_intents` with `(1, 'Wrong')` then call `open()` → returns `Storage` error mentioning the id, the expected name, and the found name.
+2b. **Lookup-table drift detection — unknown row** — pre-populate `pedagogical_intents` with `(99, 'FromTheFuture')` then call `open()` → returns `Storage` error mentioning the unknown id.
+2c. **Lookup-table partial seed** — pre-populate with a subset of expected rows, call `open()` → the missing rows are inserted; existing matching rows are untouched; no error.
 3. **Round-trip** — build a `Session` with one Child turn (text + concepts) and one Primer turn (text + intent + concepts) → `save_session` → query the DB directly via raw SQL **joined to the lookup tables** → all fields equal, including timestamps preserved as RFC 3339, intent name resolved correctly, concept set per turn.
 4. **Idempotent re-save** — call `save_session` twice with the same `Session` → turn-row count and content unchanged, no duplicate rows in `concepts`, no duplicate rows in `turn_concepts`.
 5. **Append-a-turn** — save → mutate in-memory `session.turns.push(...)` → save again → second turn appears with correct `turn_index`, first turn preserved.
@@ -327,8 +326,9 @@ One new test: build a `DialogueManager` with `Some(&store)` (in-memory `SqliteSe
 
 - **Save-on-error masking inference errors.** Mitigated by `tracing::warn!`-only on save failure, and by saving only after the child turn is recorded (never replacing inference's `Err` with a save's `Err`).
 - **Schema drift breaking existing DBs.** `PRAGMA user_version` gate makes corruption explicit, not silent. Future additive tables only — no destructive migrations until / unless the schema changes meaningfully.
-- **`PedagogicalIntent` variant rename.** Mitigated by the integer-FK design: the on-disk record is `intent_id`, not the variant name. Renaming a variant in Rust requires updating the `match` in `intent_id(...)` (the compiler enforces exhaustiveness), updating the seeded `name` in the lookup table, and possibly bumping `user_version` if you want the rename to be visible to old code. The integer ID does not change, so existing rows stay valid.
-- **Adding a new `PedagogicalIntent` variant.** Pick a previously-unused integer ID, add it to the seed `INSERT OR IGNORE`, extend the `match`. The exhaustive `match` makes forgetting an arm a compile error; the new test (#11 above) catches the runtime mapping side. Retired variants keep their ID forever — never reuse.
+- **`PedagogicalIntent` variant rename.** As specified, the validate-and-seed pass treats a name mismatch on a known ID as an *error* rather than silently rewriting the row. This is deliberately strict — it forces the developer to acknowledge that an existing DB is being upgraded — but means a rename is a two-step migration in production: ship code that accepts both old and new names for a release, then drop the old. Alternative we considered and rejected for v1: silently `UPDATE pedagogical_intents SET name = ? WHERE id = ?` to overwrite the DB to match the Rust source. Rejected because it disguises code/data mismatches that are sometimes a sign of operator error (wrong DB file, wrong build). If renames become frequent, we'll revisit.
+- **Adding a new `PedagogicalIntent` variant.** Mechanical: pick a previously-unused integer ID, append to `ALL`, extend the canonical match. The exhaustive match enforces the Rust side at compile time; the validate-and-seed pass populates the DB on next `open()`. Retired variants keep their ID forever — never reuse.
+- **Source-of-truth duplication.** The Rust enum is canonical; the DB is a derived projection. `primer-storage` exposes no API to mutate lookup tables, so the only way to introduce drift is to edit the DB by hand — and that's caught at next startup by the validate-and-seed pass.
 - **`turn.concepts` is currently always `vec![]` for child turns.** This PR persists what's there. Phase 0.3 concept-extraction will start populating it; no schema change needed.
 - **Multi-process access.** SQLite supports it, but we're single-process today. WAL mode is **not** enabled in this PR; default rollback-journal mode is fine for one writer. Revisit when a parent-dashboard process appears.
 
@@ -336,15 +336,17 @@ One new test: build a `DialogueManager` with `Some(&store)` (in-memory `SqliteSe
 
 - [ ] `primer-storage` crate compiles, is in the workspace, has `rusqlite` (with `bundled` feature, matching `primer-knowledge`).
 - [ ] `SessionStore` trait added to `primer-core::storage`, re-exported from the lib root.
-- [ ] `SqliteSessionStore::open(path)` creates schema, sets `PRAGMA foreign_keys = ON`, asserts/sets `user_version = 1`, and seeds `speakers` + `pedagogical_intents` (idempotently).
+- [ ] `SqliteSessionStore::open(path)` creates schema, sets `PRAGMA foreign_keys = ON`, asserts/sets `user_version = 1`, and runs the **validate-and-seed** pass for `speakers` and `pedagogical_intents`.
+- [ ] Validate-and-seed: rejects name mismatches and unknown IDs with a clear `Storage` error; inserts missing rows; no-op on a fully-consistent DB.
+- [ ] No public function on `primer-storage` permits inserting/updating/deleting rows in `speakers` or `pedagogical_intents` (lookup tables are derived from Rust, not editable from outside).
 - [ ] `save_session` is transactional, idempotent, persists all turns + concepts, and uses integer FKs for speaker / intent / concept.
 - [ ] `intent_id`, `speaker_id` mappings use explicit integer values (no `as i64`).
 - [ ] `--session-db` flag added to `primer-cli`, defaulting to `:memory:`.
 - [ ] `DialogueManager::new` takes an optional `&dyn SessionStore`; `respond_to_streaming` saves on both Ok and Err paths; `open_session` saves the greeting.
 - [ ] Save failures `tracing::warn!`-log without propagating.
-- [ ] All eleven unit tests in `primer-storage` pass.
+- [ ] All fourteen unit tests in `primer-storage` pass.
 - [ ] Both new `dialogue_manager` integration tests pass.
-- [ ] `cargo test --workspace` clean (now ~55 tests; was 42).
+- [ ] `cargo test --workspace` clean (now ~58 tests; was 42).
 - [ ] `cargo clippy --workspace --all-targets` clean except the pre-existing `StubBackend::new` warning.
 - [ ] Manual REPL check: data round-trips, file is inspectable with `sqlite3`.
 - [ ] `ROADMAP.md` Phase 0.1 "conversation persistence" bullet checked off.
