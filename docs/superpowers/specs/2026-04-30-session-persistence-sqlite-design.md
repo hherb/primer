@@ -112,11 +112,36 @@ impl SessionStore for SqliteSessionStore {
 
 ### Schema (PRAGMA user_version = 1)
 
+**Project convention applied:** every categorical text value is normalised into a lookup table and referenced by integer foreign key — saves storage at scale, makes invalid values impossible at the schema level, and makes "what intents has this child seen?" a one-line query over a small table. This applies to `speaker`, `intent`, and `concept_id`.
+
 ```sql
+-- ─── Lookup tables (categorical text → integer FK) ───────────────
+
+CREATE TABLE IF NOT EXISTS speakers (
+    id    INTEGER PRIMARY KEY,
+    name  TEXT NOT NULL UNIQUE
+);
+
+CREATE TABLE IF NOT EXISTS pedagogical_intents (
+    id    INTEGER PRIMARY KEY,
+    name  TEXT NOT NULL UNIQUE
+);
+
+-- Concepts are an open vocabulary — populated on first encounter
+-- rather than seeded. Still normalised because concept_id strings
+-- repeat heavily across turns ("physics:gravity" appearing in
+-- dozens of sessions).
+CREATE TABLE IF NOT EXISTS concepts (
+    id          INTEGER PRIMARY KEY AUTOINCREMENT,
+    concept_id  TEXT NOT NULL UNIQUE
+);
+
+-- ─── Conversation tables ─────────────────────────────────────────
+
 CREATE TABLE IF NOT EXISTS sessions (
-    id          TEXT PRIMARY KEY,           -- SessionId UUID as TEXT
+    id          TEXT PRIMARY KEY,             -- SessionId UUID as TEXT
     learner_id  TEXT NOT NULL,
-    started_at  TEXT NOT NULL,               -- RFC 3339 / ISO 8601
+    started_at  TEXT NOT NULL,                 -- RFC 3339 / ISO 8601
     ended_at    TEXT
 );
 CREATE INDEX IF NOT EXISTS idx_sessions_learner
@@ -126,10 +151,10 @@ CREATE TABLE IF NOT EXISTS turns (
     id          INTEGER PRIMARY KEY AUTOINCREMENT,
     session_id  TEXT NOT NULL REFERENCES sessions(id) ON DELETE CASCADE,
     turn_index  INTEGER NOT NULL,
-    speaker     TEXT NOT NULL CHECK(speaker IN ('child','primer')),
+    speaker_id  INTEGER NOT NULL REFERENCES speakers(id),
     text        TEXT NOT NULL,
     timestamp   TEXT NOT NULL,
-    intent      TEXT,                         -- nullable for child turns
+    intent_id   INTEGER REFERENCES pedagogical_intents(id),  -- nullable
     UNIQUE(session_id, turn_index)
 );
 CREATE INDEX IF NOT EXISTS idx_turns_session
@@ -137,7 +162,7 @@ CREATE INDEX IF NOT EXISTS idx_turns_session
 
 CREATE TABLE IF NOT EXISTS turn_concepts (
     turn_id     INTEGER NOT NULL REFERENCES turns(id) ON DELETE CASCADE,
-    concept_id  TEXT NOT NULL,
+    concept_id  INTEGER NOT NULL REFERENCES concepts(id),
     PRIMARY KEY(turn_id, concept_id)
 );
 CREATE INDEX IF NOT EXISTS idx_turn_concepts_concept
@@ -146,30 +171,71 @@ CREATE INDEX IF NOT EXISTS idx_turn_concepts_concept
 PRAGMA user_version = 1;
 ```
 
-The `intent` column stores the `PedagogicalIntent` enum as a string. A pair of explicit `intent_to_str` / `str_to_intent` functions lives next to the impl, using a `match` over every variant — **not** the `Debug` derive, since `Debug`'s output is not part of `primer-core`'s contract and could change. The strings happen to look like the variant names (`"SocraticQuestion"`, etc.), but the mapping is owned by `primer-storage`. Acceptable risk: adding a new variant to `PedagogicalIntent` without updating the mapping is caught by an exhaustive `match` — the crate won't compile until the mapping is extended.
+### Lookup-table seeding
+
+`speakers` and `pedagogical_intents` are static — every variant is known at compile time, and the integer ID assignment is **part of the on-disk contract**. They are seeded by `SqliteSessionStore::open` with `INSERT OR IGNORE`:
+
+```sql
+INSERT OR IGNORE INTO speakers (id, name) VALUES (1, 'child'), (2, 'primer');
+INSERT OR IGNORE INTO pedagogical_intents (id, name) VALUES
+    (1, 'SocraticQuestion'),
+    (2, 'ComprehensionCheck'),
+    (3, 'Scaffolding'),
+    (4, 'Encouragement'),
+    (5, 'Extension'),
+    (6, 'DirectAnswer'),
+    (7, 'AnswerThenPivot'),
+    (8, 'SessionClose');
+```
+
+The Rust mapping uses **explicit numeric values**, not `as i64` over the variant index, so adding or reordering variants in `primer-core` cannot silently shift the IDs that already exist on disk:
+
+```rust
+fn intent_id(intent: PedagogicalIntent) -> i64 {
+    match intent {
+        PedagogicalIntent::SocraticQuestion   => 1,
+        PedagogicalIntent::ComprehensionCheck => 2,
+        PedagogicalIntent::Scaffolding        => 3,
+        PedagogicalIntent::Encouragement      => 4,
+        PedagogicalIntent::Extension          => 5,
+        PedagogicalIntent::DirectAnswer       => 6,
+        PedagogicalIntent::AnswerThenPivot    => 7,
+        PedagogicalIntent::SessionClose       => 8,
+    }
+}
+```
+
+Adding a new variant means: pick the next free integer, add a row to the seed `INSERT OR IGNORE`, extend the `match`. Retired variants keep their ID forever and are never re-used — their on-disk rows can sit untouched.
+
+`concepts` is **not** seeded — entries are created lazily on first save via `INSERT OR IGNORE INTO concepts (concept_id) VALUES (?)` followed by `SELECT id FROM concepts WHERE concept_id = ?`. Two round-trips per new concept; cached for the rest of the save call.
 
 ### Future-proofing — additive tables
 
 These are not built in this PR, but the schema is shaped so they slot in cleanly:
 
-- `turn_embeddings(turn_id INTEGER PRIMARY KEY REFERENCES turns(id), model TEXT, embedding BLOB)` — for sqlite-vec / sqlite-vss attached later.
-- `concept_relations(from_concept TEXT, to_concept TEXT, kind TEXT, weight REAL)` — for the simple-graph "topics that need addressing" use case.
-- `learner_concepts(learner_id, concept_id, depth, confidence, encounter_count, last_encountered, …)` — Phase 0.3 learner-model persistence.
+- `turn_embeddings(turn_id INTEGER PRIMARY KEY REFERENCES turns(id), model_id INTEGER REFERENCES embedding_models(id), embedding BLOB)` — for sqlite-vec / sqlite-vss attached later. Plus its own lookup table `embedding_models(id, name)`.
+- `concept_relations(from_concept INTEGER REFERENCES concepts(id), to_concept INTEGER REFERENCES concepts(id), kind_id INTEGER REFERENCES relation_kinds(id), weight REAL)` — for the simple-graph "topics that need addressing" use case. Reuses the existing `concepts` table.
+- `learner_concepts(learner_id, concept_id INTEGER REFERENCES concepts(id), depth_id INTEGER REFERENCES understanding_depths(id), confidence, encounter_count, last_encountered, …)` — Phase 0.3 learner-model persistence. Reuses `concepts`; new lookup table `understanding_depths` for the `UnderstandingDepth` enum.
 
-Each is purely additive and bumps `user_version` to `2`, `3`, etc. as needed. None require touching the three tables above.
+Each is purely additive, follows the same lookup-table convention, and bumps `user_version` to `2`, `3`, etc. as needed. None require touching the six tables above.
 
 ## Save semantics
 
 `save_session(&Session)` runs in a single SQLite transaction:
 
 1. `INSERT OR REPLACE INTO sessions (...)` — upserts session metadata.
-2. `DELETE FROM turns WHERE session_id = ?` — clears existing turns.
-3. For each turn in `session.turns` (in order), `INSERT INTO turns (...)` and then for each `concept_id` in `turn.concepts`, `INSERT INTO turn_concepts (...)`.
+2. `DELETE FROM turns WHERE session_id = ?` — clears existing turns. `ON DELETE CASCADE` removes the corresponding `turn_concepts` rows.
+3. For each turn in `session.turns` (in order):
+   - Look up the speaker integer ID via the in-memory `speaker_id(...)` mapping.
+   - Look up the intent integer ID (or `NULL`) via the in-memory `intent_id(...)` mapping.
+   - `INSERT INTO turns (session_id, turn_index, speaker_id, text, timestamp, intent_id)`.
+   - For each `concept_id` string in `turn.concepts`:
+     - `INSERT OR IGNORE INTO concepts (concept_id) VALUES (?)`.
+     - `SELECT id FROM concepts WHERE concept_id = ?` (cached in a `HashMap<String, i64>` for the duration of this save call to avoid re-querying within the transaction).
+     - `INSERT INTO turn_concepts (turn_id, concept_id) VALUES (?, ?)`.
 4. Commit.
 
-`ON DELETE CASCADE` on `turn_concepts` handles cleanup automatically.
-
-Cost: O(n) writes per save, n = turn count. At ≤100 turns/session, sub-millisecond. If profiling later shows this matters, switch to an append-only `record_turn` API path; the trait can grow the method without breaking callers.
+Cost: O(n + m) writes per save, n = turn count, m = total concept references. At ≤100 turns/session and a handful of concepts per turn, sub-millisecond. If profiling later shows this matters, switch to an append-only `record_turn` API path; the trait can grow the method without breaking callers.
 
 ## DialogueManager wiring
 
@@ -237,14 +303,17 @@ Wrapping at the `SqliteSessionStore` boundary so callers see one variant for bot
 
 Connection-against-`:memory:` for all unit tests. Uses `tokio::test` since the trait is async.
 
-1. **Schema bootstrap** — opening a fresh DB sets `user_version = 1`, creates all three tables, foreign keys enabled.
-2. **Round-trip** — build a `Session` with one Child turn (text + concepts), one Primer turn (text + intent + concepts) → `save_session` → query the DB directly via raw SQL → all fields equal, including timestamps preserved as RFC 3339 and concept set per turn.
-3. **Idempotent re-save** — call `save_session` twice with the same `Session` → row counts unchanged, content unchanged.
-4. **Append-a-turn** — save → mutate in-memory `session.turns.push(...)` → save again → second turn appears with correct `turn_index`, first turn preserved.
-5. **Concept persistence** — a turn with `concepts: ["gravity", "mass"]` round-trips both rows in `turn_concepts`.
-6. **Empty session** — saves with zero turn rows, no error.
-7. **Cascade** — `DELETE FROM sessions WHERE id = ?` removes its turns and turn-concept rows. Sanity check on the schema, not the API surface.
-8. **Schema-version mismatch** — open a DB pre-set to `user_version = 99` → `Storage` error mentioning the version.
+1. **Schema bootstrap** — opening a fresh DB sets `user_version = 1`, creates all six tables (3 lookup, 3 conversation), foreign keys enabled.
+2. **Lookup-table seed** — `speakers` and `pedagogical_intents` are populated with the expected (id, name) rows on first open. Re-opening an existing DB does not duplicate or reorder them.
+3. **Round-trip** — build a `Session` with one Child turn (text + concepts) and one Primer turn (text + intent + concepts) → `save_session` → query the DB directly via raw SQL **joined to the lookup tables** → all fields equal, including timestamps preserved as RFC 3339, intent name resolved correctly, concept set per turn.
+4. **Idempotent re-save** — call `save_session` twice with the same `Session` → turn-row count and content unchanged, no duplicate rows in `concepts`, no duplicate rows in `turn_concepts`.
+5. **Append-a-turn** — save → mutate in-memory `session.turns.push(...)` → save again → second turn appears with correct `turn_index`, first turn preserved.
+6. **Concept normalisation** — a session that uses `"gravity"` in three different turns produces exactly one row in `concepts` and three rows in `turn_concepts`. Re-saving across sessions reuses the same `concepts.id`.
+7. **Empty session** — saves with zero turn rows, no error.
+8. **Cascade** — `DELETE FROM sessions WHERE id = ?` removes its turns and turn-concept rows. Concept rows themselves remain (a concept once seen survives the deletion of any one session that referenced it). Sanity check on the schema.
+9. **Foreign-key enforcement** — a `turns` row with an unknown `speaker_id` or `intent_id` is rejected (proves `PRAGMA foreign_keys = ON` took effect).
+10. **Schema-version mismatch** — open a DB pre-set to `user_version = 99` → `Storage` error mentioning the version.
+11. **Every variant of `PedagogicalIntent` round-trips** — a single test that saves one turn per variant and reads them all back. Adding a new variant without updating `intent_id`/the seed will fail this exhaustively.
 
 ### `primer-pedagogy::dialogue_manager::tests`
 
@@ -258,7 +327,8 @@ One new test: build a `DialogueManager` with `Some(&store)` (in-memory `SqliteSe
 
 - **Save-on-error masking inference errors.** Mitigated by `tracing::warn!`-only on save failure, and by saving only after the child turn is recorded (never replacing inference's `Err` with a save's `Err`).
 - **Schema drift breaking existing DBs.** `PRAGMA user_version` gate makes corruption explicit, not silent. Future additive tables only — no destructive migrations until / unless the schema changes meaningfully.
-- **`PedagogicalIntent` variant rename.** Enum-as-string is fragile. Acceptable for v1 because the variant set is short and load-bearing; renames will be deliberate. If churn becomes a concern, switch to integer codes.
+- **`PedagogicalIntent` variant rename.** Mitigated by the integer-FK design: the on-disk record is `intent_id`, not the variant name. Renaming a variant in Rust requires updating the `match` in `intent_id(...)` (the compiler enforces exhaustiveness), updating the seeded `name` in the lookup table, and possibly bumping `user_version` if you want the rename to be visible to old code. The integer ID does not change, so existing rows stay valid.
+- **Adding a new `PedagogicalIntent` variant.** Pick a previously-unused integer ID, add it to the seed `INSERT OR IGNORE`, extend the `match`. The exhaustive `match` makes forgetting an arm a compile error; the new test (#11 above) catches the runtime mapping side. Retired variants keep their ID forever — never reuse.
 - **`turn.concepts` is currently always `vec![]` for child turns.** This PR persists what's there. Phase 0.3 concept-extraction will start populating it; no schema change needed.
 - **Multi-process access.** SQLite supports it, but we're single-process today. WAL mode is **not** enabled in this PR; default rollback-journal mode is fine for one writer. Revisit when a parent-dashboard process appears.
 
@@ -266,15 +336,16 @@ One new test: build a `DialogueManager` with `Some(&store)` (in-memory `SqliteSe
 
 - [ ] `primer-storage` crate compiles, is in the workspace, has `rusqlite` (with `bundled` feature, matching `primer-knowledge`).
 - [ ] `SessionStore` trait added to `primer-core::storage`, re-exported from the lib root.
-- [ ] `SqliteSessionStore::open(path)` creates schema, sets `PRAGMA foreign_keys = ON`, asserts/sets `user_version = 1`.
-- [ ] `save_session` is transactional, idempotent, and persists all turns + concepts.
+- [ ] `SqliteSessionStore::open(path)` creates schema, sets `PRAGMA foreign_keys = ON`, asserts/sets `user_version = 1`, and seeds `speakers` + `pedagogical_intents` (idempotently).
+- [ ] `save_session` is transactional, idempotent, persists all turns + concepts, and uses integer FKs for speaker / intent / concept.
+- [ ] `intent_id`, `speaker_id` mappings use explicit integer values (no `as i64`).
 - [ ] `--session-db` flag added to `primer-cli`, defaulting to `:memory:`.
 - [ ] `DialogueManager::new` takes an optional `&dyn SessionStore`; `respond_to_streaming` saves on both Ok and Err paths; `open_session` saves the greeting.
 - [ ] Save failures `tracing::warn!`-log without propagating.
-- [ ] All eight unit tests in `primer-storage` pass.
+- [ ] All eleven unit tests in `primer-storage` pass.
 - [ ] Both new `dialogue_manager` integration tests pass.
-- [ ] `cargo test --workspace` clean (now ~52 tests; was 42).
+- [ ] `cargo test --workspace` clean (now ~55 tests; was 42).
 - [ ] `cargo clippy --workspace --all-targets` clean except the pre-existing `StubBackend::new` warning.
 - [ ] Manual REPL check: data round-trips, file is inspectable with `sqlite3`.
 - [ ] `ROADMAP.md` Phase 0.1 "conversation persistence" bullet checked off.
-- [ ] `CLAUDE.md` updated: new crate in the dependency graph, `--session-db` flag listed in commands, `Mutex<Connection>` pattern noted.
+- [ ] `CLAUDE.md` updated: new crate in the dependency graph, `--session-db` flag listed in commands, `Mutex<Connection>` pattern noted, **lookup-table-for-categorical-text convention** added under "Conventions and gotchas worth knowing".
