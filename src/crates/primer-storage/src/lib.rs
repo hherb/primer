@@ -2,7 +2,15 @@
 //!
 //! SQLite-backed implementations of the persistence traits defined in
 //! `primer-core::storage`.
+//!
+//! Mirrors the locking and error patterns of `primer-knowledge`: a
+//! single `Connection` wrapped in `Mutex`, async trait methods with
+//! synchronous bodies (acceptable at our turn rate; revisit if profiling
+//! ever shows contention).
 
+// catalog functions are wired in by tasks 8 and 12; suppress dead-code
+// warnings until then.
+#[allow(dead_code)]
 mod catalog;
 mod schema;
 
@@ -118,13 +126,29 @@ mod tests {
         let _ = std::fs::remove_file(&tmp);
     }
 
-    /// Returns a unique tempfile path. We don't need the `tempfile` crate —
-    /// just a path with a sufficiently random suffix in the OS temp dir.
+    #[test]
+    fn open_existing_valid_db_is_a_no_op() {
+        // First open creates the schema and stamps user_version=1.
+        let tmp = tempfile_path();
+        {
+            let _store = SqliteSessionStore::open(&tmp).unwrap();
+        }
+        // Second open should succeed cleanly. user_version stays at 1.
+        let store = SqliteSessionStore::open(&tmp).unwrap();
+        let conn = store.conn.lock().unwrap();
+        let v: i64 = conn
+            .query_row("PRAGMA user_version", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(v, 1);
+        drop(conn);
+        drop(store);
+        let _ = std::fs::remove_file(&tmp);
+    }
+
+    /// Returns a unique tempfile path using a UUID to avoid collisions
+    /// between parallel test threads.
     fn tempfile_path() -> PathBuf {
-        let nanos = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .unwrap()
-            .as_nanos();
-        std::env::temp_dir().join(format!("primer-storage-test-{nanos}.db"))
+        std::env::temp_dir()
+            .join(format!("primer-storage-test-{}.db", uuid::Uuid::new_v4()))
     }
 }
