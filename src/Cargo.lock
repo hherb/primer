@@ -927,6 +927,7 @@ dependencies = [
  "primer-knowledge",
  "primer-pedagogy",
  "primer-speech",
+ "primer-storage",
  "serde",
  "serde_json",
  "tokio",
@@ -1004,6 +1005,20 @@ dependencies = [
  "thiserror",
  "tokio",
  "tracing",
+]
+
+[[package]]
+name = "primer-storage"
+version = "0.1.0"
+dependencies = [
+ "async-trait",
+ "chrono",
+ "primer-core",
+ "rusqlite",
+ "thiserror",
+ "tokio",
+ "tracing",
+ "uuid",
 ]
 
 [[package]]

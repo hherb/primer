@@ -12,12 +12,6 @@ use primer_core::inference::*;
 
 pub struct StubBackend;
 
-impl StubBackend {
-    pub fn new() -> Self {
-        Self
-    }
-}
-
 #[async_trait]
 impl InferenceBackend for StubBackend {
     fn name(&self) -> &str {

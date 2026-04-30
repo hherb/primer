@@ -36,6 +36,9 @@ pub struct DialogueManager<'a> {
     inference: &'a dyn InferenceBackend,
     /// Knowledge base for RAG retrieval.
     knowledge: &'a dyn KnowledgeBase,
+    /// Optional session persistence. When set, the session is saved after
+    /// every `respond_to_streaming` call (success or mid-stream error).
+    storage: Option<&'a dyn primer_core::storage::SessionStore>,
     /// Pedagogical configuration.
     config: PedagogyConfig,
 }
@@ -46,6 +49,7 @@ impl<'a> DialogueManager<'a> {
         learner: LearnerModel,
         inference: &'a dyn InferenceBackend,
         knowledge: &'a dyn KnowledgeBase,
+        storage: Option<&'a dyn primer_core::storage::SessionStore>,
         config: PedagogyConfig,
     ) -> Self {
         let session = Session::new(learner.profile.id);
@@ -54,6 +58,7 @@ impl<'a> DialogueManager<'a> {
             session,
             inference,
             knowledge,
+            storage,
             config,
         }
     }
@@ -62,9 +67,7 @@ impl<'a> DialogueManager<'a> {
     /// a topic. This is the very first turn in a session.
     pub async fn open_session(&mut self) -> Result<String> {
         let name = &self.learner.profile.name;
-        let greeting = format!(
-            "Hello, {name}. What are you curious about today?"
-        );
+        let greeting = format!("Hello, {name}. What are you curious about today?");
 
         self.session.add_turn(Turn {
             speaker: Speaker::Primer,
@@ -73,6 +76,12 @@ impl<'a> DialogueManager<'a> {
             intent: Some(PedagogicalIntent::SocraticQuestion),
             concepts: vec![],
         });
+
+        if let Some(store) = self.storage {
+            if let Err(e) = store.save_session(&self.session).await {
+                tracing::warn!("session save failed: {e}");
+            }
+        }
 
         Ok(greeting)
     }
@@ -109,17 +118,13 @@ impl<'a> DialogueManager<'a> {
             text: child_input.to_string(),
             timestamp: Utc::now(),
             intent: None,
-            concepts: vec![], // TODO: extract concepts from input
+            concepts: vec![],
         };
         self.session.add_turn(child_turn);
 
-        // 2. Decide what the Primer should do next.
+        // 2. Decide intent + retrieve knowledge + build prompt.
         let intent = prompt_builder::decide_intent(&self.learner, &self.session);
-
-        // 3. Retrieve relevant knowledge passages.
         let knowledge_context = self.retrieve_knowledge(child_input).await;
-
-        // 4. Build the complete prompt.
         let prompt = prompt_builder::build_prompt(
             &self.learner,
             &self.session,
@@ -128,49 +133,60 @@ impl<'a> DialogueManager<'a> {
             self.config.context_window_turns,
         );
 
-        // 5. Stream the response, accumulating into a single String while
-        //    forwarding each chunk to the caller.
+        // 3. Stream the response, accumulating into a single String.
+        // The result is captured in `result` so we can run the save call
+        // exactly once afterwards, regardless of which path we took.
         let params = GenerationParams::default();
-        let mut stream = self
-            .inference
-            .generate_stream(&prompt, &params)
-            .await
-            .map_err(|e| PrimerError::Inference(format!("Generation failed: {e}")))?;
+        let result: Result<String> = async {
+            let mut stream = self
+                .inference
+                .generate_stream(&prompt, &params)
+                .await
+                .map_err(|e| PrimerError::Inference(format!("Generation failed: {e}")))?;
 
-        let mut accumulated = String::new();
-        while let Some(item) = stream.next().await {
-            let chunk = item.inspect_err(|e| {
-                tracing::warn!("Stream error mid-generation: {e}");
-            })?;
-            if !chunk.text.is_empty() {
-                on_chunk(&chunk.text);
-                accumulated.push_str(&chunk.text);
+            let mut accumulated = String::new();
+            while let Some(item) = stream.next().await {
+                let chunk = item.inspect_err(|e| {
+                    tracing::warn!("Stream error mid-generation: {e}");
+                })?;
+                if !chunk.text.is_empty() {
+                    on_chunk(&chunk.text);
+                    accumulated.push_str(&chunk.text);
+                }
+                if chunk.done {
+                    break;
+                }
             }
-            if chunk.done {
-                break;
+            Ok(accumulated)
+        }
+        .await;
+
+        // 4. On success, record the Primer turn and update the learner.
+        if let Ok(accumulated) = &result {
+            if accumulated.is_empty() {
+                tracing::warn!("Inference stream produced no text");
+            }
+            let active_concepts = prompt_builder::extract_active_concepts(&self.session, 4);
+            let primer_turn = Turn {
+                speaker: Speaker::Primer,
+                text: accumulated.clone(),
+                timestamp: Utc::now(),
+                intent: Some(intent),
+                concepts: active_concepts,
+            };
+            self.session.add_turn(primer_turn);
+            self.update_learner_model(child_input, &intent);
+        }
+
+        // 5. Save the session if a store is configured. Runs on both Ok
+        //    and Err paths. Save failures are logged, not propagated.
+        if let Some(store) = self.storage {
+            if let Err(e) = store.save_session(&self.session).await {
+                tracing::warn!("session save failed: {e}");
             }
         }
 
-        if accumulated.is_empty() {
-            tracing::warn!("Inference stream produced no text");
-        }
-
-        // 6. Record the Primer's turn (only on a clean stream).
-        let active_concepts = prompt_builder::extract_active_concepts(&self.session, 4);
-        let primer_turn = Turn {
-            speaker: Speaker::Primer,
-            text: accumulated.clone(),
-            timestamp: Utc::now(),
-            intent: Some(intent),
-            concepts: active_concepts,
-        };
-        self.session.add_turn(primer_turn);
-
-        // 7. Update the learner model (placeholder — a production version
-        //    would assess comprehension from the child's response).
-        self.update_learner_model(child_input, &intent);
-
-        Ok(accumulated)
+        result
     }
 
     /// Check whether the session has run long enough that the Primer
@@ -182,19 +198,24 @@ impl<'a> DialogueManager<'a> {
         elapsed >= self.config.max_session_minutes as i64
     }
 
-    /// End the session gracefully.
-    pub fn close_session(&mut self) {
+    /// End the session gracefully. Records `ended_at` and, if storage is
+    /// configured, fires a final save so the timestamp lands on disk. Save
+    /// failures are logged via `tracing::warn!` rather than propagated —
+    /// matching `respond_to_streaming`'s save-failure semantics.
+    pub async fn close_session(&mut self) {
         self.session.ended_at = Some(Utc::now());
+        if let Some(store) = self.storage {
+            if let Err(e) = store.save_session(&self.session).await {
+                tracing::warn!("session save failed during close: {e}");
+            }
+        }
     }
 
     // ─── Private helpers ─────────────────────────────────────────────
 
     /// Retrieve knowledge passages relevant to the child's input.
     /// Falls back gracefully if the knowledge base is empty or errors.
-    async fn retrieve_knowledge(
-        &self,
-        query: &str,
-    ) -> Vec<primer_core::knowledge::Passage> {
+    async fn retrieve_knowledge(&self, query: &str) -> Vec<primer_core::knowledge::Passage> {
         let params = RetrievalParams {
             top_k: 3,
             min_score: 0.5,
@@ -300,6 +321,39 @@ mod tests {
         }
     }
 
+    /// Session-store spy: counts `save_session` calls and records the turn
+    /// count of the most recent save. Lets the dialogue-manager tests prove
+    /// the engine actually fired a save (rather than relying on idempotence
+    /// of a manual save after the fact).
+    struct CountingStore {
+        saves: Mutex<u32>,
+        last_turn_count: Mutex<usize>,
+    }
+
+    impl CountingStore {
+        fn new() -> Self {
+            Self {
+                saves: Mutex::new(0),
+                last_turn_count: Mutex::new(0),
+            }
+        }
+        fn save_count(&self) -> u32 {
+            *self.saves.lock().unwrap()
+        }
+        fn last_turn_count(&self) -> usize {
+            *self.last_turn_count.lock().unwrap()
+        }
+    }
+
+    #[async_trait]
+    impl primer_core::storage::SessionStore for CountingStore {
+        async fn save_session(&self, session: &Session) -> Result<()> {
+            *self.saves.lock().unwrap() += 1;
+            *self.last_turn_count.lock().unwrap() = session.turns.len();
+            Ok(())
+        }
+    }
+
     fn test_learner() -> LearnerModel {
         LearnerModel {
             profile: LearnerProfile {
@@ -336,6 +390,7 @@ mod tests {
             test_learner(),
             &backend,
             &knowledge,
+            None,
             PedagogyConfig::default(),
         );
 
@@ -364,13 +419,11 @@ mod tests {
             test_learner(),
             &backend,
             &knowledge,
+            None,
             PedagogyConfig::default(),
         );
 
-        let result = dm
-            .respond_to_streaming("hi", |_| {})
-            .await
-            .unwrap();
+        let result = dm.respond_to_streaming("hi", |_| {}).await.unwrap();
         assert_eq!(result, "Hello there");
     }
 
@@ -386,13 +439,11 @@ mod tests {
             test_learner(),
             &backend,
             &knowledge,
+            None,
             PedagogyConfig::default(),
         );
 
-        let _ = dm
-            .respond_to_streaming("question", |_| {})
-            .await
-            .unwrap();
+        let _ = dm.respond_to_streaming("question", |_| {}).await.unwrap();
         let last = dm.session.turns.last().unwrap();
         assert_eq!(last.speaker, Speaker::Primer);
         assert_eq!(last.text, "part one part two");
@@ -409,6 +460,7 @@ mod tests {
             test_learner(),
             &backend,
             &knowledge,
+            None,
             PedagogyConfig::default(),
         );
 
@@ -432,6 +484,7 @@ mod tests {
             test_learner(),
             &backend,
             &knowledge,
+            None,
             PedagogyConfig::default(),
         );
 
@@ -454,10 +507,111 @@ mod tests {
             test_learner(),
             &backend,
             &knowledge,
+            None,
             PedagogyConfig::default(),
         );
 
         let result = dm.respond_to("hi").await.unwrap();
         assert_eq!(result, "alpha beta");
+    }
+
+    #[tokio::test]
+    async fn respond_to_streaming_fires_engine_save_on_success() {
+        use primer_core::storage::SessionStore;
+
+        let backend = ScriptedBackend::new(vec![Ok(chunk("Hi", false)), Ok(chunk("", true))]);
+        let knowledge = EmptyKnowledge;
+        let store = CountingStore::new();
+        let mut dm = DialogueManager::new(
+            test_learner(),
+            &backend,
+            &knowledge,
+            Some(&store as &dyn SessionStore),
+            PedagogyConfig::default(),
+        );
+
+        let _ = dm.respond_to_streaming("hello", |_| {}).await.unwrap();
+
+        // Engine fired exactly one save. Persisted session has both the
+        // child input and the Primer response.
+        assert_eq!(store.save_count(), 1);
+        assert_eq!(store.last_turn_count(), 2);
+    }
+
+    #[tokio::test]
+    async fn respond_to_streaming_fires_engine_save_on_stream_error() {
+        use primer_core::storage::SessionStore;
+
+        let backend = ScriptedBackend::new(vec![
+            Ok(chunk("partial", false)),
+            Err(PrimerError::Inference("simulated drop".into())),
+        ]);
+        let knowledge = EmptyKnowledge;
+        let store = CountingStore::new();
+        let mut dm = DialogueManager::new(
+            test_learner(),
+            &backend,
+            &knowledge,
+            Some(&store as &dyn SessionStore),
+            PedagogyConfig::default(),
+        );
+
+        let result = dm.respond_to_streaming("question", |_| {}).await;
+        assert!(result.is_err());
+
+        // Engine fired the save even though the stream errored. Persisted
+        // session has only the child turn (Primer turn was dropped).
+        assert_eq!(store.save_count(), 1);
+        assert_eq!(store.last_turn_count(), 1);
+        assert_eq!(dm.session.turns.len(), 1);
+        assert_eq!(dm.session.turns[0].speaker, Speaker::Child);
+    }
+
+    #[tokio::test]
+    async fn close_session_fires_engine_save_with_ended_at() {
+        use primer_core::storage::SessionStore;
+
+        let backend = ScriptedBackend::new(vec![Ok(chunk("Hi", false)), Ok(chunk("", true))]);
+        let knowledge = EmptyKnowledge;
+        let store = CountingStore::new();
+        let mut dm = DialogueManager::new(
+            test_learner(),
+            &backend,
+            &knowledge,
+            Some(&store as &dyn SessionStore),
+            PedagogyConfig::default(),
+        );
+
+        let _ = dm.respond_to_streaming("hello", |_| {}).await.unwrap();
+        // First save fired during respond_to_streaming.
+        let saves_after_response = store.save_count();
+
+        dm.close_session().await;
+
+        // close_session also fires a save, this time with ended_at populated.
+        assert_eq!(store.save_count(), saves_after_response + 1);
+        assert!(dm.session.ended_at.is_some());
+    }
+
+    #[tokio::test]
+    async fn open_session_fires_engine_save() {
+        use primer_core::storage::SessionStore;
+
+        let backend = ScriptedBackend::new(vec![Ok(chunk("", true))]);
+        let knowledge = EmptyKnowledge;
+        let store = CountingStore::new();
+        let mut dm = DialogueManager::new(
+            test_learner(),
+            &backend,
+            &knowledge,
+            Some(&store as &dyn SessionStore),
+            PedagogyConfig::default(),
+        );
+
+        let _ = dm.open_session().await.unwrap();
+
+        // The greeting turn was recorded and persisted.
+        assert_eq!(store.save_count(), 1);
+        assert_eq!(store.last_turn_count(), 1);
     }
 }
