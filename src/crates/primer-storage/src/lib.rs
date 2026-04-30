@@ -126,6 +126,70 @@ impl primer_core::storage::SessionStore for SqliteSessionStore {
         }
         drop(insert_turn);
 
+        // Concepts: lazy upsert with a per-call cache to avoid re-querying
+        // the same concept_id within one save.
+        let mut concept_id_cache: std::collections::HashMap<String, i64> =
+            std::collections::HashMap::new();
+
+        let mut insert_concept = tx
+            .prepare("INSERT OR IGNORE INTO concepts (concept_id) VALUES (?1)")
+            .map_err(|e| PrimerError::Storage(format!("prepare insert concept: {e}")))?;
+        let mut select_concept = tx
+            .prepare("SELECT id FROM concepts WHERE concept_id = ?1")
+            .map_err(|e| PrimerError::Storage(format!("prepare select concept: {e}")))?;
+        let mut link_concept = tx
+            .prepare("INSERT OR IGNORE INTO turn_concepts (turn_id, concept_id) VALUES (?1, ?2)")
+            .map_err(|e| PrimerError::Storage(format!("prepare link concept: {e}")))?;
+
+        // Re-query the turns we just inserted to obtain their auto-incremented ids.
+        let mut select_turn_id = tx
+            .prepare(
+                "SELECT id FROM turns WHERE session_id = ?1 AND turn_index = ?2",
+            )
+            .map_err(|e| PrimerError::Storage(format!("prepare select turn id: {e}")))?;
+
+        for (idx, turn) in session.turns.iter().enumerate() {
+            if turn.concepts.is_empty() {
+                continue;
+            }
+            let turn_db_id: i64 = select_turn_id
+                .query_row(
+                    rusqlite::params![session.id.to_string(), idx as i64],
+                    |r| r.get(0),
+                )
+                .map_err(|e| PrimerError::Storage(format!("look up turn id {idx}: {e}")))?;
+
+            for concept_id in &turn.concepts {
+                let cached = concept_id_cache.get(concept_id).copied();
+                let id = match cached {
+                    Some(id) => id,
+                    None => {
+                        insert_concept
+                            .execute(rusqlite::params![concept_id])
+                            .map_err(|e| {
+                                PrimerError::Storage(format!("upsert concept {concept_id}: {e}"))
+                            })?;
+                        let id: i64 = select_concept
+                            .query_row(rusqlite::params![concept_id], |r| r.get(0))
+                            .map_err(|e| {
+                                PrimerError::Storage(format!("select concept {concept_id}: {e}"))
+                            })?;
+                        concept_id_cache.insert(concept_id.clone(), id);
+                        id
+                    }
+                };
+                link_concept
+                    .execute(rusqlite::params![turn_db_id, id])
+                    .map_err(|e| {
+                        PrimerError::Storage(format!("link concept {concept_id}: {e}"))
+                    })?;
+            }
+        }
+        drop(select_turn_id);
+        drop(link_concept);
+        drop(select_concept);
+        drop(insert_concept);
+
         tx.commit()
             .map_err(|e| PrimerError::Storage(format!("commit: {e}")))?;
         Ok(())
@@ -408,6 +472,74 @@ mod tests {
         assert_eq!(rows[1].0, 1);
         assert_eq!(rows[1].1, 2); // Primer = 2
         assert_eq!(rows[1].3, Some(1)); // SocraticQuestion = 1
+    }
+
+    #[tokio::test]
+    async fn save_session_persists_turn_concepts_with_lazy_creation() {
+        use primer_core::conversation::Speaker;
+
+        let store = open_memory();
+        let mut session = Session::new(Uuid::new_v4());
+        session.add_turn(make_turn(
+            Speaker::Child,
+            "why does gravity pull things down",
+            None,
+            vec!["gravity".to_string(), "mass".to_string()],
+        ));
+
+        store.save_session(&session).await.unwrap();
+
+        let conn = store.conn.lock().unwrap();
+        let concept_count: i64 = conn
+            .query_row("SELECT COUNT(*) FROM concepts", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(concept_count, 2);
+
+        let link_count: i64 = conn
+            .query_row("SELECT COUNT(*) FROM turn_concepts", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(link_count, 2);
+
+        // The concept names round-trip via the lookup.
+        let mut stmt = conn
+            .prepare(
+                "SELECT c.concept_id FROM turn_concepts tc
+                 JOIN concepts c ON c.id = tc.concept_id
+                 ORDER BY c.concept_id",
+            )
+            .unwrap();
+        let names: Vec<String> = stmt
+            .query_map([], |r| r.get::<_, String>(0))
+            .unwrap()
+            .map(|r| r.unwrap())
+            .collect();
+        assert_eq!(names, vec!["gravity".to_string(), "mass".to_string()]);
+    }
+
+    #[tokio::test]
+    async fn save_session_dedups_concepts_across_turns() {
+        use primer_core::conversation::Speaker;
+
+        let store = open_memory();
+        let mut session = Session::new(Uuid::new_v4());
+        // "gravity" appears in two turns — should be one concepts row, two turn_concepts rows.
+        session.add_turn(make_turn(Speaker::Child, "what is gravity",
+            None, vec!["gravity".to_string()]));
+        session.add_turn(make_turn(Speaker::Primer, "good question",
+            None, vec!["gravity".to_string()]));
+
+        store.save_session(&session).await.unwrap();
+
+        let conn = store.conn.lock().unwrap();
+        let concept_count: i64 = conn
+            .query_row("SELECT COUNT(*) FROM concepts", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(concept_count, 1, "gravity should be one concept row");
+
+        let link_count: i64 = conn
+            .query_row("SELECT COUNT(*) FROM turn_concepts", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(link_count, 2, "gravity should be linked to both turns");
     }
 
     /// Returns a unique tempfile path using a UUID to avoid collisions
