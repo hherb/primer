@@ -16,7 +16,7 @@ use std::sync::Arc;
 
 use chrono::Utc;
 use clap::Parser;
-use primer_classifier::{ClassifierSettings, EngagementClassifier, StubEngagementClassifier};
+use primer_classifier::{EngagementClassifier, StubEngagementClassifier};
 use primer_core::config::PedagogyConfig;
 use primer_core::knowledge::KnowledgeBase;
 use primer_core::learner::*;
@@ -90,6 +90,28 @@ struct Cli {
     /// Anthropic API key (for cloud backend).
     #[arg(long, env = "ANTHROPIC_API_KEY")]
     api_key: Option<String>,
+
+    /// Backend used for the engagement classifier. Defaults to the same
+    /// backend used for the chat (--backend); `stub` forces deterministic
+    /// classification regardless of main backend.
+    #[arg(long)]
+    classifier_backend: Option<String>,
+
+    /// Model used for the engagement classifier. Defaults to the same
+    /// model used for the chat (--model). Useful for haiku-as-classifier
+    /// + sonnet-as-chat configurations on bigger machines.
+    #[arg(long)]
+    classifier_model: Option<String>,
+
+    /// Maximum time to block awaiting the previous turn's classification
+    /// before the next intent decision. Default 500ms.
+    #[arg(long, default_value_t = 500)]
+    classifier_timeout_ms: u64,
+
+    /// Print pedagogical decisions (intent chosen, classifier output)
+    /// alongside the conversation, on stderr. Stdout stays clean.
+    #[arg(long)]
+    verbose: bool,
 }
 
 /// Slugify a learner name into a filesystem-safe filename stem.
@@ -331,7 +353,10 @@ async fn main() -> anyhow::Result<()> {
     // Stub classifier for now — Task 26 replaces this with real construction.
     let classifier: Arc<dyn EngagementClassifier> =
         Arc::new(StubEngagementClassifier::new());
-    let classifier_settings = ClassifierSettings::default();
+    let classifier_settings = primer_classifier::ClassifierSettings {
+        blocking_timeout: std::time::Duration::from_millis(cli.classifier_timeout_ms),
+        ..primer_classifier::ClassifierSettings::default()
+    };
 
     // ─── Dialogue manager ────────────────────────────────────────────
 
