@@ -16,6 +16,8 @@ pub mod settings;
 pub mod stub;
 pub mod llm;
 
+pub use settings::ClassifierSettings;
+
 /// Classifier of the child's engagement state.
 ///
 /// Implementations may be LLM-backed (via `Arc<dyn InferenceBackend>`),
