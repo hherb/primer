@@ -40,11 +40,11 @@ impl SqliteSessionStore {
     /// an in-memory database.
     ///
     /// Creates the schema if missing, sets `PRAGMA foreign_keys = ON`,
-    /// asserts/sets `PRAGMA user_version`, and applies v2 migrations
-    /// (summary fields + FTS index) to bring older DBs up to date. The
-    /// migrations are idempotent — safe to run on fresh, v1, or v2 DBs.
-    /// A version newer than this build understands is a hard error
-    /// rather than a silent downgrade.
+    /// asserts/sets `PRAGMA user_version`, and applies v2 and v3
+    /// migrations to bring older DBs up to date. The migrations are
+    /// idempotent — safe to run on fresh, v1, v2, or v3 DBs. A version
+    /// newer than this build understands is a hard error rather than a
+    /// silent downgrade.
     pub fn open(path: &Path) -> Result<Self> {
         let conn = Connection::open(path)
             .map_err(|e| PrimerError::Storage(format!("open failed: {e}")))?;
@@ -71,6 +71,10 @@ impl SqliteSessionStore {
         // v2 migrations: idempotent on every open. Adds summary columns
         // and the FTS5 turn-text index if not already present.
         schema::apply_v2_migrations(&conn)?;
+
+        // v3 migrations: idempotent on every open. Adds engagement_states,
+        // classifiers, and turn_classifications tables.
+        schema::apply_v3_migrations(&conn)?;
 
         if existing_version != schema::USER_VERSION {
             conn.execute_batch(&format!("PRAGMA user_version = {};", schema::USER_VERSION))
@@ -536,7 +540,7 @@ mod tests {
             .unwrap();
         assert_eq!(fk, 1);
 
-        // All six base tables exist, plus the v2 FTS index.
+        // All base tables exist, plus the v2 FTS index and the v3 tables.
         for table in &[
             "speakers",
             "pedagogical_intents",
@@ -545,6 +549,9 @@ mod tests {
             "turns",
             "turn_concepts",
             "turn_text_fts",
+            "engagement_states",
+            "classifiers",
+            "turn_classifications",
         ] {
             let count: i64 = conn
                 .query_row(
@@ -1564,5 +1571,59 @@ mod tests {
             .await
             .unwrap();
         assert!(hits.is_empty());
+    }
+
+    // ─── v3 migration ────────────────────────────────────────────────
+
+    #[test]
+    fn apply_v3_migrations_creates_all_three_tables() {
+        let conn = rusqlite::Connection::open_in_memory().unwrap();
+        // Set up v2 baseline: existing schema must be valid before v3 runs.
+        conn.execute_batch(schema::SCHEMA_SQL).unwrap();
+        schema::apply_v2_migrations(&conn).unwrap();
+
+        schema::apply_v3_migrations(&conn).unwrap();
+
+        for table in ["engagement_states", "classifiers", "turn_classifications"] {
+            let count: i64 = conn
+                .query_row(
+                    "SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name=?1",
+                    [table],
+                    |r| r.get(0),
+                )
+                .unwrap();
+            assert_eq!(count, 1, "{table} not created by v3 migration");
+        }
+    }
+
+    #[test]
+    fn apply_v3_migrations_is_idempotent() {
+        let conn = rusqlite::Connection::open_in_memory().unwrap();
+        conn.execute_batch(schema::SCHEMA_SQL).unwrap();
+        schema::apply_v2_migrations(&conn).unwrap();
+        schema::apply_v3_migrations(&conn).unwrap();
+        schema::apply_v3_migrations(&conn).unwrap(); // second call must succeed
+    }
+
+    #[test]
+    fn apply_v3_migrations_creates_index_on_turn_classifications() {
+        let conn = rusqlite::Connection::open_in_memory().unwrap();
+        conn.execute_batch(schema::SCHEMA_SQL).unwrap();
+        schema::apply_v2_migrations(&conn).unwrap();
+        schema::apply_v3_migrations(&conn).unwrap();
+
+        let count: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM sqlite_master WHERE type='index' AND name='idx_turn_classifications_turn_id'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(count, 1);
+    }
+
+    #[test]
+    fn user_version_is_three() {
+        assert_eq!(schema::USER_VERSION, 3);
     }
 }
