@@ -328,6 +328,7 @@ mod tests {
             concepts,
             preferences: LearningPreferences::default(),
             current_engagement: engagement,
+            recent_assessments: vec![],
         }
     }
 

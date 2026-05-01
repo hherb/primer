@@ -170,6 +170,7 @@ fn create_learner(name: &str, age: u8) -> LearnerModel {
         concepts: vec![],
         preferences: LearningPreferences::default(),
         current_engagement: EngagementState::Engaged,
+        recent_assessments: vec![],
     }
 }
 
