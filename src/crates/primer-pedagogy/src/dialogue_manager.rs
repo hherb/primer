@@ -65,7 +65,6 @@ pub struct DialogueManager<'a> {
     #[allow(dead_code)]
     classifier: Arc<dyn EngagementClassifier>,
     /// Tunable parameters for the classifier (thresholds, timeouts, etc.).
-    #[allow(dead_code)]
     classifier_settings: ClassifierSettings,
     /// Handle to the in-flight classifier task spawned after the previous
     /// turn. `None` when no task is running.
@@ -73,6 +72,31 @@ pub struct DialogueManager<'a> {
     classify_task: Option<JoinHandle<Option<EngagementAssessment>>>,
     /// Pedagogical configuration.
     config: PedagogyConfig,
+}
+
+/// Push an `EngagementAssessment` into the learner's history buffer and,
+/// when confidence is high enough, update `current_engagement`.
+///
+/// History is a FIFO ring of depth `settings.history_depth`. Every
+/// assessment — even low-confidence ones — is recorded so the trajectory
+/// is visible to later logic. Only assessments that meet or exceed
+/// `settings.confidence_threshold` update `current_engagement`; below
+/// that threshold the field is left unchanged so a single noisy read
+/// doesn't yank the intent-selection state.
+pub(crate) fn apply_assessment(
+    learner: &mut primer_core::learner::LearnerModel,
+    a: primer_core::classifier::EngagementAssessment,
+    settings: &primer_classifier::ClassifierSettings,
+) {
+    learner.recent_assessments.push(a.clone());
+    while learner.recent_assessments.len() > settings.history_depth {
+        learner.recent_assessments.remove(0);
+    }
+    if a.confidence >= settings.confidence_threshold {
+        learner.current_engagement = a.state;
+    }
+    // Low-confidence assessments are still recorded in history (signal for
+    // trajectory) but current_engagement stays unchanged.
 }
 
 impl<'a> DialogueManager<'a> {
@@ -285,6 +309,39 @@ impl<'a> DialogueManager<'a> {
         if let Some(ref store) = self.storage {
             if let Err(e) = store.save_session(&self.session).await {
                 tracing::warn!("session save failed during close: {e}");
+            }
+        }
+    }
+
+    // ─── Classifier helpers ───────────────────────────────────────────
+
+    /// Wait (up to `blocking_timeout`) for the classifier task spawned after
+    /// the previous turn, then apply its result to `learner`.
+    ///
+    /// Called at the start of each new turn so the prior turn's assessment
+    /// is consumed before intent is decided. On timeout the task is aborted
+    /// and we proceed with the existing (stale) engagement state — better
+    /// than blocking the conversation indefinitely.
+    async fn await_pending_classification(
+        &mut self,
+        learner: &mut primer_core::learner::LearnerModel,
+    ) {
+        let Some(task) = self.classify_task.take() else {
+            return;
+        };
+        let abort = task.abort_handle();
+        let timeout = self.classifier_settings.blocking_timeout;
+        match tokio::time::timeout(timeout, task).await {
+            Ok(Ok(Some(assessment))) => {
+                apply_assessment(learner, assessment, &self.classifier_settings)
+            }
+            Ok(Ok(None)) => { /* soft failure; nothing to apply */ }
+            Ok(Err(e)) => tracing::warn!(error = ?e, "classifier task panicked"),
+            Err(_) => {
+                abort.abort();
+                tracing::debug!(
+                    "classifier exceeded blocking timeout — proceeding with stale engagement state"
+                );
             }
         }
     }
@@ -1062,5 +1119,95 @@ mod tests {
         dm.session.turns = make_test_session_with_turns(21, dm.learner.profile.id).turns;
         let _ = dm.respond_to_streaming("hi", |_| {}).await.unwrap();
         assert_eq!(backend.summary_call_count(), 0);
+    }
+
+    // ─── apply_assessment ─────────────────────────────────────────────
+
+    #[test]
+    fn apply_assessment_pushes_to_recent_assessments() {
+        let mut learner = test_learner();
+        let settings = ClassifierSettings::default();
+        let a = primer_core::classifier::EngagementAssessment {
+            state: EngagementState::Reflecting,
+            confidence: 0.9,
+            reasoning: None,
+        };
+        apply_assessment(&mut learner, a.clone(), &settings);
+        assert_eq!(learner.recent_assessments.len(), 1);
+        assert_eq!(learner.recent_assessments[0].state, EngagementState::Reflecting);
+    }
+
+    #[test]
+    fn apply_assessment_evicts_oldest_when_buffer_full() {
+        let mut learner = test_learner();
+        let settings = ClassifierSettings {
+            history_depth: 2,
+            ..Default::default()
+        };
+        for state in [
+            EngagementState::Engaged,
+            EngagementState::Reflecting,
+            EngagementState::FrustratedStuck,
+        ] {
+            apply_assessment(
+                &mut learner,
+                primer_core::classifier::EngagementAssessment {
+                    state,
+                    confidence: 0.9,
+                    reasoning: None,
+                },
+                &settings,
+            );
+        }
+        assert_eq!(learner.recent_assessments.len(), 2);
+        assert_eq!(learner.recent_assessments[0].state, EngagementState::Reflecting);
+        assert_eq!(learner.recent_assessments[1].state, EngagementState::FrustratedStuck);
+    }
+
+    #[test]
+    fn apply_assessment_updates_current_engagement_when_confident() {
+        let mut learner = test_learner();
+        let settings = ClassifierSettings {
+            confidence_threshold: 0.6,
+            ..Default::default()
+        };
+        apply_assessment(
+            &mut learner,
+            primer_core::classifier::EngagementAssessment {
+                state: EngagementState::FrustratedTrying,
+                confidence: 0.8,
+                reasoning: None,
+            },
+            &settings,
+        );
+        assert_eq!(learner.current_engagement, EngagementState::FrustratedTrying);
+    }
+
+    #[test]
+    fn apply_assessment_keeps_current_engagement_when_low_confidence() {
+        let mut learner = test_learner();
+        let initial = learner.current_engagement;
+        let settings = ClassifierSettings {
+            confidence_threshold: 0.6,
+            ..Default::default()
+        };
+        apply_assessment(
+            &mut learner,
+            primer_core::classifier::EngagementAssessment {
+                state: EngagementState::FrustratedTrying,
+                confidence: 0.3,
+                reasoning: None,
+            },
+            &settings,
+        );
+        assert_eq!(
+            learner.current_engagement, initial,
+            "low-confidence assessment must NOT change current_engagement"
+        );
+        assert_eq!(
+            learner.recent_assessments.len(),
+            1,
+            "low-confidence assessment IS still recorded in history"
+        );
     }
 }
