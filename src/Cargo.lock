@@ -915,6 +915,20 @@ dependencies = [
 ]
 
 [[package]]
+name = "primer-classifier"
+version = "0.1.0"
+dependencies = [
+ "async-trait",
+ "chrono",
+ "futures",
+ "primer-core",
+ "serde",
+ "serde_json",
+ "tokio",
+ "tracing",
+]
+
+[[package]]
 name = "primer-cli"
 version = "0.1.0"
 dependencies = [

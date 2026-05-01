@@ -38,9 +38,9 @@ impl EngagementClassifier for LlmEngagementClassifier {
     async fn classify(&self, ctx: EngagementContext<'_>) -> Result<EngagementAssessment> {
         let prompt = build_classification_prompt(&ctx);
         let params = primer_core::inference::GenerationParams {
-            max_tokens: 256,
-            temperature: 0.2,
-            top_p: 0.9,
+            max_tokens: self.settings.generation_max_tokens,
+            temperature: self.settings.generation_temperature,
+            top_p: self.settings.generation_top_p,
             stop_sequences: vec![],
         };
         let raw = match self.backend.generate(&prompt, &params).await {
@@ -53,12 +53,8 @@ impl EngagementClassifier for LlmEngagementClassifier {
             }
         };
 
-        // Truncate to settings.max_output_chars before parsing.
-        let truncated = if raw.len() > self.settings.max_output_chars {
-            &raw[..self.settings.max_output_chars]
-        } else {
-            &raw[..]
-        };
+        // Truncate to settings.max_output_chars (char-boundary-safe) before parsing.
+        let truncated = truncate_to_chars(&raw, self.settings.max_output_chars);
 
         match parse_classification_output(truncated) {
             Ok(a) => Ok(a),
@@ -69,6 +65,19 @@ impl EngagementClassifier for LlmEngagementClassifier {
             }
         }
     }
+}
+
+// ── Helpers ───────────────────────────────────────────────────────────────────
+
+/// Return a prefix of `s` that is at most `max_chars` Unicode scalar values
+/// long. Unlike a raw byte-index slice, this never panics on multi-byte
+/// character boundaries.
+fn truncate_to_chars(s: &str, max_chars: usize) -> &str {
+    if s.chars().count() <= max_chars {
+        return s;
+    }
+    let end = s.char_indices().nth(max_chars).map(|(i, _)| i).unwrap_or(s.len());
+    &s[..end]
 }
 
 // ── Prompt builder ────────────────────────────────────────────────────────────
@@ -294,5 +303,43 @@ mod tests {
         let ctx = EngagementContext { recent_child_turns: &[], prior_assessments: &[] };
         let a = c.classify(ctx).await.unwrap();
         assert_eq!(a.state, EngagementState::Unknown);
+    }
+
+    #[tokio::test]
+    async fn classify_returns_unknown_on_backend_error() {
+        struct ErrorBackend;
+
+        #[async_trait]
+        impl InferenceBackend for ErrorBackend {
+            fn name(&self) -> &str { "error-test" }
+
+            async fn is_available(&self) -> bool { true }
+
+            async fn generate_stream(
+                &self,
+                _prompt: &Prompt,
+                _params: &GenerationParams,
+            ) -> Result<TokenStream> {
+                Err(primer_core::error::PrimerError::Inference(
+                    "simulated network error".into(),
+                ))
+            }
+        }
+
+        let backend = Arc::new(ErrorBackend) as Arc<dyn InferenceBackend>;
+        let c = LlmEngagementClassifier::new(
+            backend,
+            "test-model".into(),
+            ClassifierSettings::default(),
+        );
+        let ctx = EngagementContext { recent_child_turns: &[], prior_assessments: &[] };
+        let a = c.classify(ctx).await.unwrap();
+        assert_eq!(a.state, EngagementState::Unknown);
+        assert_eq!(a.confidence, 0.0);
+        assert!(a.reasoning.is_some());
+        assert!(
+            a.reasoning.unwrap().contains("backend error"),
+            "reasoning should mention backend error origin"
+        );
     }
 }
