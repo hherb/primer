@@ -263,7 +263,6 @@ pub fn extract_active_concepts(session: &Session, last_n: usize) -> Vec<String> 
 ///
 /// This is a private helper for `decide_intent`; Task 19 wires it into
 /// the intent-routing logic.
-#[allow(dead_code)]
 fn is_factual_question(text: &str) -> bool {
     const FACTUAL_PREFIXES: &[&str] = &[
         "what is ", "what are ", "what's ", "what does ",
@@ -317,6 +316,23 @@ pub fn decide_intent_at(
     // whether to probe comprehension or extend.
     if let Some(last) = session.turns.last() {
         if last.speaker == primer_core::conversation::Speaker::Child {
+            // Gap 2: factual-question pattern routing
+            if is_factual_question(&last.text) {
+                let prior_was_direct_answer = session.turns
+                    .iter()
+                    .rev()
+                    .skip(1)
+                    .find(|t| t.speaker == primer_core::conversation::Speaker::Primer)
+                    .and_then(|t| t.intent)
+                    .map(|i| i == PedagogicalIntent::DirectAnswer)
+                    .unwrap_or(false);
+                return if prior_was_direct_answer {
+                    PedagogicalIntent::AnswerThenPivot
+                } else {
+                    PedagogicalIntent::DirectAnswer
+                };
+            }
+
             // Simple heuristic: short responses likely need probing,
             // longer responses might demonstrate understanding.
             if last.text.split_whitespace().count() < crate::consts::SHORT_TURN_WORD_BOUNDARY {
@@ -712,23 +728,67 @@ mod tests {
         );
     }
 
-    // ─── Currently-unreachable intents (regression guards) ───────────
-    //
-    // The current heuristic never returns these intents. If a future
-    // change starts emitting them these guards will fail and prompt a
-    // deliberate update — they are NOT a claim that the intents
-    // shouldn't ever be returned.
+    // ─── Factual-question routing (Gap 2) ────────────────────────────
 
     #[test]
-    fn factual_question_pattern_does_not_currently_return_direct_answer() {
-        // "what is X?" is not detected as a factual query; the heuristic
-        // routes purely on engagement state and turn length.
+    fn factual_question_what_is_returns_direct_answer() {
         let learner = learner_with(EngagementState::Engaged, vec![]);
         let mut session = empty_session();
+        session.add_turn(child_turn("What is gravity?", vec![]));
+        assert_eq!(
+            decide_intent(&learner, &session),
+            PedagogicalIntent::DirectAnswer,
+        );
+    }
+
+    #[test]
+    fn factual_question_how_does_returns_direct_answer() {
+        let learner = learner_with(EngagementState::Engaged, vec![]);
+        let mut session = empty_session();
+        session.add_turn(child_turn("How does it work?", vec![]));
+        assert_eq!(
+            decide_intent(&learner, &session),
+            PedagogicalIntent::DirectAnswer,
+        );
+    }
+
+    #[test]
+    fn factual_question_after_direct_answer_returns_answer_then_pivot() {
+        let learner = learner_with(EngagementState::Engaged, vec![]);
+        let mut session = empty_session();
+        session.add_turn(child_turn("What is gravity?", vec![]));
+        let mut primer_t = primer_turn("Gravity is...", vec![]);
+        primer_t.intent = Some(PedagogicalIntent::DirectAnswer);
+        session.add_turn(primer_t);
+        session.add_turn(child_turn("What is mass?", vec![]));
+        assert_eq!(
+            decide_intent(&learner, &session),
+            PedagogicalIntent::AnswerThenPivot,
+        );
+    }
+
+    #[test]
+    fn factual_question_with_frustrated_state_still_routes_via_engagement() {
+        // Engagement-state precedence preserved: frustrated kid asking
+        // "what is X?" still gets the engagement branch (Scaffolding).
+        let learner = learner_with(EngagementState::FrustratedStuck, vec![]);
+        let mut session = empty_session();
         session.add_turn(child_turn("what is gravity?", vec![]));
-        let intent = decide_intent(&learner, &session);
-        assert_ne!(intent, PedagogicalIntent::DirectAnswer);
-        assert_ne!(intent, PedagogicalIntent::AnswerThenPivot);
+        assert_eq!(
+            decide_intent(&learner, &session),
+            PedagogicalIntent::Scaffolding,
+        );
+    }
+
+    #[test]
+    fn non_factual_short_turn_still_returns_comprehension_check() {
+        let learner = learner_with(EngagementState::Engaged, vec![]);
+        let mut session = empty_session();
+        session.add_turn(child_turn("yes", vec![]));
+        assert_eq!(
+            decide_intent(&learner, &session),
+            PedagogicalIntent::ComprehensionCheck,
+        );
     }
 
     // ─── Long-term memory injection (summary + retrieved older) ──────
