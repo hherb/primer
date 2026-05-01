@@ -86,8 +86,10 @@ impl SqliteSessionStore {
         // idempotent INSERTs.
         let speakers = catalog::expected_speakers();
         let intents = catalog::expected_intents();
+        let engagement_states = catalog::expected_engagement_states();
         schema::validate_and_seed_lookup(&conn, "speakers", &speakers)?;
         schema::validate_and_seed_lookup(&conn, "pedagogical_intents", &intents)?;
+        schema::validate_and_seed_lookup(&conn, "engagement_states", &engagement_states)?;
 
         Ok(Self {
             conn: Mutex::new(conn),
@@ -628,6 +630,64 @@ mod tests {
             )
             .unwrap();
         assert_eq!(name, "SocraticQuestion");
+    }
+
+    #[test]
+    fn open_seeds_engagement_states_on_fresh_db() {
+        let store = open_memory();
+        let conn = store.conn.lock().unwrap();
+
+        let count: i64 = conn
+            .query_row("SELECT COUNT(*) FROM engagement_states", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(
+            count,
+            primer_core::learner::EngagementState::ALL.len() as i64,
+            "engagement_states row count must equal EngagementState::ALL.len()"
+        );
+
+        // Verify every expected (id, name) pair is present.
+        for (id, name) in catalog::expected_engagement_states() {
+            let actual_name: String = conn
+                .query_row(
+                    "SELECT name FROM engagement_states WHERE id = ?1",
+                    rusqlite::params![id],
+                    |r| r.get(0),
+                )
+                .unwrap_or_else(|_| panic!("no engagement_states row with id={id}"));
+            assert_eq!(
+                actual_name, name,
+                "engagement_states id={id} name mismatch"
+            );
+        }
+    }
+
+    #[test]
+    fn open_validates_engagement_states_rejects_name_mismatch() {
+        // Hand-roll a DB with a corrupted engagement_states row, then open
+        // it via SqliteSessionStore::open — it must return an error.
+        let tmp = tempfile_path();
+        {
+            let conn = Connection::open(&tmp).unwrap();
+            // Create the table manually with one wrong name so the validator
+            // fires before any migration seeds the correct data.
+            conn.execute_batch(
+                "
+                PRAGMA foreign_keys = ON;
+                CREATE TABLE engagement_states (id INTEGER PRIMARY KEY, name TEXT NOT NULL UNIQUE);
+                INSERT INTO engagement_states (id, name) VALUES (1, 'WRONG_NAME');
+                PRAGMA user_version = 1;
+                ",
+            )
+            .unwrap();
+        }
+        let err = SqliteSessionStore::open(&tmp).unwrap_err();
+        let msg = format!("{err}");
+        assert!(
+            msg.contains("WRONG_NAME") || msg.contains("Engaged"),
+            "error should mention the conflict: {msg}"
+        );
+        let _ = std::fs::remove_file(&tmp);
     }
 
     #[test]
