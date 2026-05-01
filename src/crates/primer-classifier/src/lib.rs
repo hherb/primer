@@ -16,6 +16,7 @@ pub mod settings;
 pub mod stub;
 pub mod llm;
 
+pub use llm::LlmEngagementClassifier;
 pub use settings::ClassifierSettings;
 pub use stub::StubEngagementClassifier;
 
