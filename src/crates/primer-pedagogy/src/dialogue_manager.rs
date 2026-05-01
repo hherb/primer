@@ -493,6 +493,25 @@ mod tests {
         ) -> Result<Vec<Turn>> {
             Ok(vec![])
         }
+
+        async fn save_classification(
+            &self,
+            _session_id: primer_core::conversation::SessionId,
+            _turn_index: usize,
+            _assessment: &primer_core::classifier::EngagementAssessment,
+            _classifier_identifier: &str,
+        ) -> Result<()> {
+            Ok(())
+        }
+
+        async fn load_recent_assessments(
+            &self,
+            _session_id: primer_core::conversation::SessionId,
+            _classifier_identifier: &str,
+            _k: usize,
+        ) -> Result<Vec<primer_core::classifier::EngagementAssessment>> {
+            Ok(vec![])
+        }
     }
 
     fn test_learner() -> LearnerModel {

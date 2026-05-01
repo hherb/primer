@@ -6,7 +6,8 @@
 use async_trait::async_trait;
 use uuid::Uuid;
 
-use crate::conversation::{Session, Turn};
+use crate::classifier::EngagementAssessment;
+use crate::conversation::{Session, SessionId, Turn};
 use crate::error::Result;
 
 /// Persists conversation sessions.
@@ -61,4 +62,32 @@ pub trait SessionStore: Send + Sync {
         k: usize,
         exclude_indices_at_or_after: usize,
     ) -> Result<Vec<Turn>>;
+
+    /// Persist one classification of one child turn. Resolves
+    /// `(session_id, turn_index)` → `turn_id` internally; lazily creates
+    /// the `classifiers` lookup row if `classifier_identifier` is new.
+    ///
+    /// A UNIQUE constraint on `(turn_id, classifier_id)` means calling
+    /// this twice for the same turn and the same classifier is a hard
+    /// error — the caller has a logic bug if it tries.
+    async fn save_classification(
+        &self,
+        session_id: SessionId,
+        turn_index: usize,
+        assessment: &EngagementAssessment,
+        classifier_identifier: &str,
+    ) -> Result<()>;
+
+    /// Load the most recent `k` classifications for this session, filtered
+    /// by `classifier_identifier`. Ordered oldest-first within the result
+    /// so callers can use the slice directly as a trajectory buffer.
+    ///
+    /// Returns an empty `Vec` if the classifier has never produced output
+    /// for this session. Reserves `Err` for genuine I/O failures.
+    async fn load_recent_assessments(
+        &self,
+        session_id: SessionId,
+        classifier_identifier: &str,
+        k: usize,
+    ) -> Result<Vec<EngagementAssessment>>;
 }
