@@ -1244,7 +1244,10 @@ mod tests {
         };
         apply_assessment(&mut learner, a.clone(), &settings);
         assert_eq!(learner.recent_assessments.len(), 1);
-        assert_eq!(learner.recent_assessments[0].state, EngagementState::Reflecting);
+        assert_eq!(
+            learner.recent_assessments[0].state,
+            EngagementState::Reflecting
+        );
     }
 
     #[test]
@@ -1270,8 +1273,14 @@ mod tests {
             );
         }
         assert_eq!(learner.recent_assessments.len(), 2);
-        assert_eq!(learner.recent_assessments[0].state, EngagementState::Reflecting);
-        assert_eq!(learner.recent_assessments[1].state, EngagementState::FrustratedStuck);
+        assert_eq!(
+            learner.recent_assessments[0].state,
+            EngagementState::Reflecting
+        );
+        assert_eq!(
+            learner.recent_assessments[1].state,
+            EngagementState::FrustratedStuck
+        );
     }
 
     #[test]
@@ -1290,7 +1299,10 @@ mod tests {
             },
             &settings,
         );
-        assert_eq!(learner.current_engagement, EngagementState::FrustratedTrying);
+        assert_eq!(
+            learner.current_engagement,
+            EngagementState::FrustratedTrying
+        );
     }
 
     #[test]
@@ -1330,11 +1342,9 @@ mod tests {
         use primer_core::storage::SessionStore;
         use primer_storage::SqliteSessionStore;
 
-        let storage: Arc<dyn SessionStore> = Arc::new(
-            SqliteSessionStore::open(std::path::Path::new(":memory:")).unwrap(),
-        );
-        let classifier: Arc<dyn EngagementClassifier> =
-            Arc::new(StubEngagementClassifier::new());
+        let storage: Arc<dyn SessionStore> =
+            Arc::new(SqliteSessionStore::open(std::path::Path::new(":memory:")).unwrap());
+        let classifier: Arc<dyn EngagementClassifier> = Arc::new(StubEngagementClassifier::new());
 
         // Pre-seed: save a session with one child turn and one classification.
         let learner = test_learner();
@@ -1375,7 +1385,11 @@ mod tests {
             PedagogyConfig::default(),
         );
 
-        let loaded = storage.load_session(session.id).await.unwrap().expect("must load");
+        let loaded = storage
+            .load_session(session.id)
+            .await
+            .unwrap()
+            .expect("must load");
         dm.resume_session(loaded).await.unwrap();
 
         // Verify rehydration.
@@ -1405,16 +1419,16 @@ mod tests {
 
         // A classifier that always returns FrustratedTrying with high confidence.
         let target_state = EngagementState::FrustratedTrying;
-        let classifier: Arc<dyn EngagementClassifier> =
-            Arc::new(StubEngagementClassifier::with_response(EngagementAssessment {
+        let classifier: Arc<dyn EngagementClassifier> = Arc::new(
+            StubEngagementClassifier::with_response(EngagementAssessment {
                 state: target_state,
                 confidence: 0.95,
                 reasoning: Some("integration test".into()),
-            }));
-
-        let storage: Arc<dyn SessionStore> = Arc::new(
-            SqliteSessionStore::open(std::path::Path::new(":memory:")).unwrap(),
+            }),
         );
+
+        let storage: Arc<dyn SessionStore> =
+            Arc::new(SqliteSessionStore::open(std::path::Path::new(":memory:")).unwrap());
 
         let backend = ScriptedBackend::new(vec![
             Ok(chunk("Great question!", false)),
@@ -1436,7 +1450,10 @@ mod tests {
         dm.open_session().await.unwrap();
 
         // Run one full turn. After this call a classify_task should be live.
-        let response = dm.respond_to_streaming("Why is the sky blue?", |_| {}).await.unwrap();
+        let response = dm
+            .respond_to_streaming("Why is the sky blue?", |_| {})
+            .await
+            .unwrap();
         assert!(!response.is_empty(), "should have a non-empty response");
 
         // The classify_task is now running (or already done). Simulating the
@@ -1453,6 +1470,180 @@ mod tests {
             dm.learner.recent_assessments.len(),
             1,
             "assessment must be pushed into recent_assessments"
+        );
+    }
+
+    /// Backend that serves the same single-chunk response on every
+    /// `generate_stream` call. Used by multi-turn tests where the exact
+    /// content of the Primer response does not matter.
+    struct RepeatingBackend;
+
+    #[async_trait]
+    impl InferenceBackend for RepeatingBackend {
+        fn name(&self) -> &str {
+            "repeating-test"
+        }
+        async fn is_available(&self) -> bool {
+            true
+        }
+        async fn generate_stream(
+            &self,
+            _prompt: &Prompt,
+            _params: &GenerationParams,
+        ) -> Result<TokenStream> {
+            let items: Vec<Result<TokenChunk>> = vec![Ok(chunk("ok.", false)), Ok(chunk("", true))];
+            Ok(Box::pin(stream::iter(items)))
+        }
+        async fn summarize(&self, turns: &[Turn], _target_chars: usize) -> Result<String> {
+            Ok(format!(
+                "[repeating-backend summary covering {} turns]",
+                turns.len()
+            ))
+        }
+    }
+
+    // ─── End-to-end: classifier routing across a multi-turn session ───
+
+    #[tokio::test]
+    async fn end_to_end_classifier_routing_across_multi_turn_session() {
+        use primer_classifier::{EngagementClassifier, StubEngagementClassifier};
+        use primer_core::classifier::EngagementAssessment;
+        use primer_core::conversation::PedagogicalIntent;
+        use primer_core::storage::SessionStore;
+        use primer_storage::SqliteSessionStore;
+        use std::time::Duration;
+
+        // Scripted classifier:
+        //   turn 1 -> Engaged, turn 2 -> FrustratedTrying, turn 3 -> Disengaging
+        // Exhausted script falls back to Engaged for turn 4 — but by then
+        // current_engagement is already Disengaging (applied before turn 4 starts).
+        let classifier: Arc<dyn EngagementClassifier> =
+            Arc::new(StubEngagementClassifier::with_script(vec![
+                EngagementAssessment {
+                    state: EngagementState::Engaged,
+                    confidence: 0.9,
+                    reasoning: None,
+                },
+                EngagementAssessment {
+                    state: EngagementState::FrustratedTrying,
+                    confidence: 0.9,
+                    reasoning: None,
+                },
+                EngagementAssessment {
+                    state: EngagementState::Disengaging,
+                    confidence: 0.9,
+                    reasoning: None,
+                },
+            ]));
+
+        let storage: Arc<dyn SessionStore> =
+            Arc::new(SqliteSessionStore::open(std::path::Path::new(":memory:")).unwrap());
+
+        let backend = RepeatingBackend;
+        let knowledge = EmptyKnowledge;
+
+        // Generous blocking timeout for deterministic test behaviour.
+        let settings = ClassifierSettings {
+            blocking_timeout: Duration::from_secs(5),
+            ..Default::default()
+        };
+
+        let mut learner = test_learner();
+        // 60-second threshold: a backdated session (120 s elapsed) reliably
+        // routes Disengaging → SessionClose.
+        learner.preferences.early_disengagement_threshold = Duration::from_secs(60);
+
+        let mut dm = DialogueManager::new(
+            learner,
+            &backend,
+            &knowledge,
+            Some(Arc::clone(&storage) as Arc<dyn SessionStore>),
+            Arc::clone(&classifier),
+            settings,
+            PedagogyConfig::default(),
+        );
+
+        dm.open_session().await.unwrap();
+
+        // Backdate started_at so elapsed (120 s) exceeds the 60-second threshold.
+        // This makes Disengaging → SessionClose rather than Encouragement.
+        dm.session.started_at = Utc::now() - chrono::Duration::seconds(120);
+
+        let session_id = dm.session.id;
+
+        // ── Turn 1 ──
+        // classify task returns Engaged (first script entry).
+        let _r1 = dm
+            .respond_to_streaming("i'm curious about gravity", |_| {})
+            .await
+            .unwrap();
+        // Drain the spawned task; apply Engaged.
+        dm.await_pending_classification().await;
+        assert_eq!(
+            dm.learner.current_engagement,
+            EngagementState::Engaged,
+            "turn 1: engagement must be Engaged"
+        );
+
+        // ── Turn 2 ──
+        // At the START of respond_to_streaming, await_pending_classification
+        // is called internally — but we already drained it above, so there is
+        // nothing to await.  After this call, a new task carrying FrustratedTrying
+        // is spawned.
+        let _r2 = dm
+            .respond_to_streaming("I think it's hard to explain", |_| {})
+            .await
+            .unwrap();
+        // Drain the spawned task; apply FrustratedTrying.
+        dm.await_pending_classification().await;
+        assert_eq!(
+            dm.learner.current_engagement,
+            EngagementState::FrustratedTrying,
+            "turn 2: engagement must be FrustratedTrying after classifier"
+        );
+
+        // ── Turn 3 ──
+        // Task for this turn returns Disengaging.
+        let _r3 = dm
+            .respond_to_streaming("I'm not sure but maybe...", |_| {})
+            .await
+            .unwrap();
+        // Drain; apply Disengaging.
+        dm.await_pending_classification().await;
+        assert_eq!(
+            dm.learner.current_engagement,
+            EngagementState::Disengaging,
+            "turn 3: engagement must be Disengaging after classifier"
+        );
+
+        // ── Turn 4 ──
+        // At the START of respond_to_streaming, await_pending_classification
+        // is called (nothing to drain — we already did it). Then decide_intent
+        // sees Disengaging + elapsed (120 s) > threshold (60 s) → SessionClose.
+        let _r4 = dm.respond_to_streaming("ok", |_| {}).await.unwrap();
+
+        // last_intent reads the intent stored on the most recent Primer turn.
+        let intent = dm.last_intent().expect("intent must be set after turn 4");
+        assert_eq!(
+            intent,
+            PedagogicalIntent::SessionClose,
+            "turn 4: Disengaging + elapsed > threshold must route to SessionClose"
+        );
+
+        // Drain the task spawned after turn 4 (not needed for intent assertion,
+        // but ensures we don't leave background work running after the test).
+        dm.await_pending_classification().await;
+
+        // All four child-turn classifications must have been persisted.
+        let recent = storage
+            .load_recent_assessments(session_id, "stub", 10)
+            .await
+            .unwrap();
+        assert_eq!(
+            recent.len(),
+            4,
+            "all four turn classifications must be persisted; got {}",
+            recent.len()
         );
     }
 }

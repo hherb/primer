@@ -12,9 +12,9 @@ use primer_core::classifier::{EngagementAssessment, EngagementContext};
 use primer_core::error::Result;
 
 pub mod consts;
+pub mod llm;
 pub mod settings;
 pub mod stub;
-pub mod llm;
 
 pub use llm::LlmEngagementClassifier;
 pub use settings::ClassifierSettings;

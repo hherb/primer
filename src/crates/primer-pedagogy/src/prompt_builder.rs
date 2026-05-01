@@ -265,8 +265,14 @@ pub fn extract_active_concepts(session: &Session, last_n: usize) -> Vec<String> 
 /// the intent-routing logic.
 fn is_factual_question(text: &str) -> bool {
     const FACTUAL_PREFIXES: &[&str] = &[
-        "what is ", "what are ", "what's ", "what does ",
-        "how does ", "how do ",  "how is ",  "how are ",
+        "what is ",
+        "what are ",
+        "what's ",
+        "what does ",
+        "how does ",
+        "how do ",
+        "how is ",
+        "how are ",
     ];
     let lowered = text.trim().to_lowercase();
     FACTUAL_PREFIXES.iter().any(|p| lowered.starts_with(p))
@@ -307,9 +313,8 @@ pub fn decide_intent_at(
                 PedagogicalIntent::SessionClose
             };
         }
-        EngagementState::Engaged
-        | EngagementState::Reflecting
-        | EngagementState::Unknown => { /* fall through to turn analysis */ }
+        EngagementState::Engaged | EngagementState::Reflecting | EngagementState::Unknown => { /* fall through to turn analysis */
+        }
     }
 
     // Look at the last turn — if it was a child's response, decide
@@ -318,7 +323,8 @@ pub fn decide_intent_at(
         if last.speaker == primer_core::conversation::Speaker::Child {
             // Gap 2: factual-question pattern routing
             if is_factual_question(&last.text) {
-                let prior_was_direct_answer = session.turns
+                let prior_was_direct_answer = session
+                    .turns
                     .iter()
                     .rev()
                     .skip(1)
@@ -442,7 +448,10 @@ mod tests {
     fn frustrated_stuck_returns_scaffolding() {
         let learner = learner_with(EngagementState::FrustratedStuck, vec![]);
         let session = empty_session();
-        assert_eq!(decide_intent(&learner, &session), PedagogicalIntent::Scaffolding);
+        assert_eq!(
+            decide_intent(&learner, &session),
+            PedagogicalIntent::Scaffolding
+        );
     }
 
     #[test]
@@ -452,14 +461,20 @@ mod tests {
         let learner = learner_with(EngagementState::FrustratedStuck, vec![]);
         let mut session = empty_session();
         session.add_turn(child_turn("yes", vec![]));
-        assert_eq!(decide_intent(&learner, &session), PedagogicalIntent::Scaffolding);
+        assert_eq!(
+            decide_intent(&learner, &session),
+            PedagogicalIntent::Scaffolding
+        );
     }
 
     #[test]
     fn frustrated_trying_returns_encouragement() {
         let learner = learner_with(EngagementState::FrustratedTrying, vec![]);
         let session = empty_session();
-        assert_eq!(decide_intent(&learner, &session), PedagogicalIntent::Encouragement);
+        assert_eq!(
+            decide_intent(&learner, &session),
+            PedagogicalIntent::Encouragement
+        );
     }
 
     #[test]
@@ -467,7 +482,10 @@ mod tests {
         let learner = learner_with(EngagementState::FrustratedTrying, vec![]);
         let mut session = empty_session();
         session.add_turn(child_turn("yes", vec![]));
-        assert_eq!(decide_intent(&learner, &session), PedagogicalIntent::Encouragement);
+        assert_eq!(
+            decide_intent(&learner, &session),
+            PedagogicalIntent::Encouragement
+        );
     }
 
     #[test]

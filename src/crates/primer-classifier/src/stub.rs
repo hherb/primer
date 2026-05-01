@@ -29,7 +29,10 @@ impl StubEngagementClassifier {
     }
 
     pub fn with_response(response: EngagementAssessment) -> Self {
-        Self { fallback: response, script: Mutex::new(None) }
+        Self {
+            fallback: response,
+            script: Mutex::new(None),
+        }
     }
 
     pub fn with_script(script: Vec<EngagementAssessment>) -> Self {
@@ -45,12 +48,16 @@ impl StubEngagementClassifier {
 }
 
 impl Default for StubEngagementClassifier {
-    fn default() -> Self { Self::new() }
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 #[async_trait]
 impl EngagementClassifier for StubEngagementClassifier {
-    fn identifier(&self) -> &str { "stub" }
+    fn identifier(&self) -> &str {
+        "stub"
+    }
 
     async fn classify(&self, _ctx: EngagementContext<'_>) -> Result<EngagementAssessment> {
         let mut script = self.script.lock().await;
@@ -68,7 +75,10 @@ mod tests {
     use super::*;
 
     fn ctx<'a>() -> EngagementContext<'a> {
-        EngagementContext { recent_child_turns: &[], prior_assessments: &[] }
+        EngagementContext {
+            recent_child_turns: &[],
+            prior_assessments: &[],
+        }
     }
 
     #[tokio::test]
@@ -96,10 +106,14 @@ mod tests {
     async fn with_script_returns_in_order_then_falls_back() {
         let c = StubEngagementClassifier::with_script(vec![
             EngagementAssessment {
-                state: EngagementState::Reflecting, confidence: 0.5, reasoning: None,
+                state: EngagementState::Reflecting,
+                confidence: 0.5,
+                reasoning: None,
             },
             EngagementAssessment {
-                state: EngagementState::FrustratedStuck, confidence: 0.9, reasoning: None,
+                state: EngagementState::FrustratedStuck,
+                confidence: 0.9,
+                reasoning: None,
             },
         ]);
         let a1 = c.classify(ctx()).await.unwrap();

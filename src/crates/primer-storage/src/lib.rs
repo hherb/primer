@@ -475,8 +475,7 @@ impl primer_core::storage::SessionStore for SqliteSessionStore {
                 ))
             })?;
 
-        let classifier_id =
-            catalog::get_or_create_classifier_id(&conn, classifier_identifier)?;
+        let classifier_id = catalog::get_or_create_classifier_id(&conn, classifier_identifier)?;
         let state_id = catalog::engagement_state_id(assessment.state);
 
         conn.execute(
@@ -492,9 +491,7 @@ impl primer_core::storage::SessionStore for SqliteSessionStore {
                 Utc::now().to_rfc3339(),
             ],
         )
-        .map_err(|e| {
-            PrimerError::Storage(format!("save_classification: insert: {e}"))
-        })?;
+        .map_err(|e| PrimerError::Storage(format!("save_classification: insert: {e}")))?;
 
         Ok(())
     }
@@ -516,9 +513,7 @@ impl primer_core::storage::SessionStore for SqliteSessionStore {
             )
             .optional()
             .map_err(|e| {
-                PrimerError::Storage(format!(
-                    "load_recent_assessments: classifier lookup: {e}"
-                ))
+                PrimerError::Storage(format!("load_recent_assessments: classifier lookup: {e}"))
             })?;
 
         let Some(classifier_id) = classifier_id else {
@@ -537,9 +532,7 @@ impl primer_core::storage::SessionStore for SqliteSessionStore {
                  ORDER BY tc.classified_at DESC
                  LIMIT ?3",
             )
-            .map_err(|e| {
-                PrimerError::Storage(format!("load_recent_assessments: prepare: {e}"))
-            })?;
+            .map_err(|e| PrimerError::Storage(format!("load_recent_assessments: prepare: {e}")))?;
 
         let mut rows: Vec<primer_core::classifier::EngagementAssessment> = stmt
             .query_map(
@@ -552,9 +545,7 @@ impl primer_core::storage::SessionStore for SqliteSessionStore {
                     ))
                 },
             )
-            .map_err(|e| {
-                PrimerError::Storage(format!("load_recent_assessments: query: {e}"))
-            })?
+            .map_err(|e| PrimerError::Storage(format!("load_recent_assessments: query: {e}")))?
             .filter_map(|res| {
                 let (state_id, confidence, reasoning) = res.ok()?;
                 let state = catalog::engagement_state_from_id(state_id)?;
@@ -773,10 +764,7 @@ mod tests {
                     |r| r.get(0),
                 )
                 .unwrap_or_else(|_| panic!("no engagement_states row with id={id}"));
-            assert_eq!(
-                actual_name, name,
-                "engagement_states id={id} name mismatch"
-            );
+            assert_eq!(actual_name, name, "engagement_states id={id} name mismatch");
         }
     }
 
