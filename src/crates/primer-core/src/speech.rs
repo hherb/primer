@@ -1,7 +1,12 @@
-//! Speech traits — STT and TTS abstractions.
+//! Speech traits — VAD, STT, and TTS abstractions.
 //!
-//! STT implementations: whisper.cpp (via whisper-rs), platform-native APIs.
-//! TTS implementations: Piper, platform-native APIs.
+//! Concrete implementations live in `primer-speech` behind feature flags:
+//! - VAD: Silero (via `silero-vad-rust`), feature `silero`.
+//! - STT: whisper.cpp (via `whisper-cpp-plus`), feature `whisper`.
+//! - TTS: Piper (planned, via `piper-rs`), feature `piper`.
+//!
+//! All trait method signatures are deliberately backend-agnostic. A new
+//! backend should be a drop-in alternative without touching this file.
 
 use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
@@ -49,20 +54,284 @@ impl Default for VoiceProfile {
     }
 }
 
-/// Speech-to-text backend.
+/// State-transition event emitted by a [`VoiceActivityDetector`] for a chunk.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum VadEvent {
+    /// No transition; the previous speech/silence state continues.
+    None,
+    /// First chunk of a new speech segment (silence → speech).
+    SpeechStart,
+    /// First chunk of silence after a speech segment (speech → silence).
+    SpeechEnd,
+}
+
+/// Per-chunk output from a [`VoiceActivityDetector`].
+#[derive(Debug, Clone, Copy)]
+pub struct VadFrame {
+    /// Speech probability for this chunk (0.0 – 1.0).
+    pub speech_probability: f32,
+    /// State transition (if any) observed at this chunk.
+    pub event: VadEvent,
+}
+
+/// Streaming voice-activity detector.
+///
+/// VAD is inherently stateful: the detector keeps internal history (model
+/// hidden state plus the silence-debounce counter). Each conversation stream
+/// owns its own detector — implementations are `Send` but not `Sync`.
+///
+/// Callers feed exactly [`Self::chunk_samples`] f32 mono samples per call,
+/// at the rate reported by [`Self::sample_rate`]. The detector returns a
+/// per-chunk probability and a state-transition event the caller can use to
+/// trigger STT, end-of-utterance handling, etc.
+pub trait VoiceActivityDetector: Send {
+    /// Backend identifier for logging and diagnostics (e.g. `"silero-vad"`).
+    fn name(&self) -> &str;
+
+    /// Sample rate the detector expects (Hz).
+    fn sample_rate(&self) -> u32;
+
+    /// Number of f32 samples per chunk fed to [`Self::process_chunk`].
+    fn chunk_samples(&self) -> usize;
+
+    /// Process exactly [`Self::chunk_samples`] mono f32 samples.
+    ///
+    /// Implementations must return `Err` if `samples.len()` differs from
+    /// [`Self::chunk_samples`] — callers rely on a deterministic frame
+    /// size for timing arithmetic.
+    fn process_chunk(&mut self, samples: &[f32]) -> Result<VadFrame>;
+
+    /// Reset internal state (between utterances or sessions).
+    fn reset(&mut self);
+}
+
+/// One-shot speech-to-text backend.
+///
+/// Used for offline transcription of complete audio buffers. For live
+/// interactive use prefer [`StreamingSpeechToText`] — it surfaces partial
+/// segments as they arrive instead of blocking until the entire buffer
+/// is processed.
 #[async_trait]
 pub trait SpeechToText: Send + Sync {
+    /// Backend identifier for logging and diagnostics (e.g. `"whisper-cpp"`).
     fn name(&self) -> &str;
 
     /// Transcribe an audio buffer to text.
     async fn transcribe(&self, audio: &AudioBuffer) -> Result<Transcript>;
 }
 
-/// Text-to-speech backend.
+/// One transcribed segment from a streaming session.
+///
+/// Whisper-class models naturally emit text in segment-sized chunks (one
+/// sentence or ~5–10 s of audio); we surface those chunks rather than
+/// pretending to deliver token-by-token output, since underlying ASR rarely
+/// is. Concatenate the `text` of every segment to reconstruct the utterance.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct TranscriptSegment {
+    /// Recognised text for this segment. Concatenate every segment's
+    /// text in order to reconstruct the full utterance.
+    pub text: String,
+    /// Start of this segment relative to session open (ms).
+    pub start_ms: u64,
+    /// End of this segment relative to session open (ms).
+    pub end_ms: u64,
+}
+
+/// A single streaming-transcription session.
+///
+/// Created by [`StreamingSpeechToText::open_session`]. Push f32 mono samples
+/// at the parent backend's [`StreamingSpeechToText::sample_rate`] via
+/// [`Self::push_audio`]; each push may emit zero or more segments as soon
+/// as the underlying model has enough context. Call [`Self::finalize`] once
+/// the utterance is complete (typically on `VadEvent::SpeechEnd`) to drain
+/// the trailing buffer.
+///
+/// Sessions are `Send` but not `Sync`: each utterance owns its own session.
+pub trait TranscriptionSession: Send {
+    /// Push samples; receive any segments that became available as a result.
+    fn push_audio(&mut self, samples: &[f32]) -> Result<Vec<TranscriptSegment>>;
+
+    /// Drain remaining buffered audio and finalize. Consumes the session.
+    fn finalize(self: Box<Self>) -> Result<Vec<TranscriptSegment>>;
+}
+
+/// Streaming speech-to-text backend.
+///
+/// Open one [`TranscriptionSession`] per child utterance. The backend itself
+/// is shareable across sessions (`Send + Sync`); per-session state lives
+/// inside the session handle.
+///
+/// A backend may also implement the one-shot [`SpeechToText`] trait. When
+/// it does, both traits expose a `name()` method — call it through a
+/// trait object (`(&stt as &dyn SpeechToText).name()`) to disambiguate;
+/// direct calls on the concrete type require UFCS.
+pub trait StreamingSpeechToText: Send + Sync {
+    /// Backend identifier for logging and diagnostics (e.g. `"whisper-cpp"`).
+    fn name(&self) -> &str;
+
+    /// Sample rate the backend expects (Hz). Sessions reject mismatched audio.
+    fn sample_rate(&self) -> u32;
+
+    /// Open a fresh transcription session. Each utterance gets its own.
+    fn open_session(&self) -> Result<Box<dyn TranscriptionSession>>;
+}
+
+/// One-shot text-to-speech backend.
+///
+/// Synthesises a complete utterance into a single [`AudioBuffer`]. For
+/// interactive voice loops a streaming variant will be added in the next
+/// step of the speech pipeline (see `docs/primer_TTS_next_step.md`).
 #[async_trait]
 pub trait TextToSpeech: Send + Sync {
+    /// Backend identifier for logging and diagnostics (e.g. `"piper"`).
     fn name(&self) -> &str;
 
     /// Synthesize text to an audio buffer.
     async fn synthesize(&self, text: &str, voice: &VoiceProfile) -> Result<AudioBuffer>;
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Minimal in-memory VAD that replays a canned probability sequence.
+    /// Validates the trait surface compiles and dyn-dispatches without
+    /// pulling in any backend dependency.
+    struct CannedVad {
+        probs: std::vec::IntoIter<f32>,
+        in_speech: bool,
+    }
+
+    impl CannedVad {
+        fn new(probs: Vec<f32>) -> Self {
+            Self {
+                probs: probs.into_iter(),
+                in_speech: false,
+            }
+        }
+    }
+
+    /// Mirrors a Silero-class detector's frame layout (16 kHz / 512-sample
+    /// chunks); production threshold is 0.5.
+    const CANNED_VAD_SAMPLE_RATE: u32 = 16_000;
+    const CANNED_VAD_CHUNK_SAMPLES: usize = 512;
+    const CANNED_VAD_THRESHOLD: f32 = 0.5;
+
+    impl VoiceActivityDetector for CannedVad {
+        fn name(&self) -> &str {
+            "canned"
+        }
+        fn sample_rate(&self) -> u32 {
+            CANNED_VAD_SAMPLE_RATE
+        }
+        fn chunk_samples(&self) -> usize {
+            CANNED_VAD_CHUNK_SAMPLES
+        }
+        fn process_chunk(&mut self, _samples: &[f32]) -> Result<VadFrame> {
+            let p = self.probs.next().unwrap_or(0.0);
+            let is_speech = p >= CANNED_VAD_THRESHOLD;
+            let event = match (self.in_speech, is_speech) {
+                (false, true) => {
+                    self.in_speech = true;
+                    VadEvent::SpeechStart
+                }
+                (true, false) => {
+                    self.in_speech = false;
+                    VadEvent::SpeechEnd
+                }
+                _ => VadEvent::None,
+            };
+            Ok(VadFrame {
+                speech_probability: p,
+                event,
+            })
+        }
+        fn reset(&mut self) {
+            self.in_speech = false;
+        }
+    }
+
+    #[test]
+    fn vad_trait_object_dispatches() {
+        let mut vad: Box<dyn VoiceActivityDetector> = Box::new(CannedVad::new(vec![0.1, 0.9, 0.1]));
+        assert_eq!(vad.sample_rate(), CANNED_VAD_SAMPLE_RATE);
+        assert_eq!(vad.chunk_samples(), CANNED_VAD_CHUNK_SAMPLES);
+        let chunk = vec![0.0_f32; vad.chunk_samples()];
+        let f0 = vad.process_chunk(&chunk).unwrap();
+        let f1 = vad.process_chunk(&chunk).unwrap();
+        let f2 = vad.process_chunk(&chunk).unwrap();
+        assert_eq!(f0.event, VadEvent::None);
+        assert_eq!(f1.event, VadEvent::SpeechStart);
+        assert_eq!(f2.event, VadEvent::SpeechEnd);
+    }
+
+    /// Test sample rate matching the production setting; named so the
+    /// timestamp arithmetic in the streaming-STT test below is obvious.
+    const TEST_SAMPLE_RATE: u32 = 16_000;
+    /// Milliseconds per second — used in the elapsed-ms calculation.
+    const MS_PER_SECOND: u64 = 1_000;
+
+    /// Mock streaming STT that emits one segment per push call from a
+    /// canned script. Each push advances elapsed time by the duration
+    /// of the supplied audio at [`TEST_SAMPLE_RATE`].
+    struct CannedStreamStt;
+
+    struct CannedSession {
+        scripted: std::vec::IntoIter<&'static str>,
+        elapsed_ms: u64,
+    }
+
+    impl TranscriptionSession for CannedSession {
+        fn push_audio(&mut self, samples: &[f32]) -> Result<Vec<TranscriptSegment>> {
+            let chunk_ms = (samples.len() as u64 * MS_PER_SECOND) / TEST_SAMPLE_RATE as u64;
+            let start_ms = self.elapsed_ms;
+            self.elapsed_ms += chunk_ms;
+            match self.scripted.next() {
+                Some(text) => Ok(vec![TranscriptSegment {
+                    text: text.to_string(),
+                    start_ms,
+                    end_ms: self.elapsed_ms,
+                }]),
+                None => Ok(vec![]),
+            }
+        }
+        fn finalize(self: Box<Self>) -> Result<Vec<TranscriptSegment>> {
+            Ok(vec![])
+        }
+    }
+
+    impl StreamingSpeechToText for CannedStreamStt {
+        fn name(&self) -> &str {
+            "canned-stream-stt"
+        }
+        fn sample_rate(&self) -> u32 {
+            TEST_SAMPLE_RATE
+        }
+        fn open_session(&self) -> Result<Box<dyn TranscriptionSession>> {
+            Ok(Box::new(CannedSession {
+                scripted: vec!["hello", " world"].into_iter(),
+                elapsed_ms: 0,
+            }))
+        }
+    }
+
+    #[test]
+    fn streaming_stt_session_yields_segments_and_finalizes() {
+        let stt: Box<dyn StreamingSpeechToText> = Box::new(CannedStreamStt);
+        assert_eq!(stt.sample_rate(), TEST_SAMPLE_RATE);
+        let mut session = stt.open_session().unwrap();
+        // One second of audio per push at the sample rate above.
+        let one_second_chunk = vec![0.0_f32; TEST_SAMPLE_RATE as usize];
+        let s0 = session.push_audio(&one_second_chunk).unwrap();
+        let s1 = session.push_audio(&one_second_chunk).unwrap();
+        let s2 = session.push_audio(&one_second_chunk).unwrap();
+        assert_eq!(s0.len(), 1);
+        assert_eq!(s0[0].text, "hello");
+        assert_eq!(s0[0].start_ms, 0);
+        assert_eq!(s0[0].end_ms, MS_PER_SECOND);
+        assert_eq!(s1[0].text, " world");
+        assert!(s2.is_empty());
+        let trailing = session.finalize().unwrap();
+        assert!(trailing.is_empty());
+    }
 }

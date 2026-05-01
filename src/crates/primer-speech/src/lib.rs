@@ -7,5 +7,19 @@
 //! happens in Phase 1 when hardware audio is connected.
 
 pub mod stub;
+pub mod time_ms;
+pub mod vad_debounce;
 
 pub use stub::{StubStt, StubTts};
+pub use time_ms::clamp_signed_ms_to_u64;
+pub use vad_debounce::{VadDebouncer, ms_to_chunks};
+
+#[cfg(feature = "silero")]
+pub mod silero;
+#[cfg(feature = "silero")]
+pub use silero::{SileroVad, SileroVadParams};
+
+#[cfg(feature = "whisper")]
+pub mod whisper;
+#[cfg(feature = "whisper")]
+pub use whisper::WhisperStt;

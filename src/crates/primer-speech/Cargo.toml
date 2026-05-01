@@ -11,8 +11,23 @@ tokio.workspace = true
 tracing.workspace = true
 thiserror.workspace = true
 
-# Whisper bindings — uncomment when integrating:
-# whisper-rs = "0.12"
+# Silero VAD — bundled ONNX weights, opt-in via the `silero` feature so the
+# ort/ndarray dep tree only compiles for users who want VAD.
+silero-vad-rust = { version = "6.2", default-features = false, optional = true }
+# Pin ort to the rc that silero-vad-rust 6.2 was built against; without
+# this, Cargo picks a newer rc whose bundled ndarray version diverges from
+# silero-vad-rust's direct ndarray dep and the type `Array2<f32>` no
+# longer matches across crates.
+ort = { version = "=2.0.0-rc.10", default-features = false, features = ["ndarray"], optional = true }
+
+# Whisper.cpp — opt-in via the `whisper` feature. Builds bundled C++ source
+# (cmake + a C++ compiler must be present on the build host).
+whisper-cpp-plus = { version = "0.1", default-features = false, optional = true }
 
 # Audio I/O — uncomment when integrating:
 # cpal = "0.15"
+
+[features]
+default = []
+silero = ["dep:silero-vad-rust", "dep:ort"]
+whisper = ["dep:whisper-cpp-plus"]
