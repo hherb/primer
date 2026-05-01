@@ -10,8 +10,13 @@
 //!   primer --name Binti --age 8                         # Set learner profile
 //!   primer --resume <uuid>                              # Resume a past session
 
+use std::io::{self, BufRead, Write};
+use std::path::{Path, PathBuf};
+use std::sync::Arc;
+
 use chrono::Utc;
 use clap::Parser;
+use primer_classifier::{ClassifierSettings, EngagementClassifier, StubEngagementClassifier};
 use primer_core::config::PedagogyConfig;
 use primer_core::knowledge::KnowledgeBase;
 use primer_core::learner::*;
@@ -19,8 +24,6 @@ use primer_core::storage::SessionStore;
 use primer_inference::stub::StubBackend;
 use primer_knowledge::SqliteKnowledgeBase;
 use primer_pedagogy::DialogueManager;
-use std::io::{self, BufRead, Write};
-use std::path::{Path, PathBuf};
 use unicode_normalization::UnicodeNormalization;
 use uuid::Uuid;
 
@@ -322,13 +325,23 @@ async fn main() -> anyhow::Result<()> {
     // Pedagogy config.
     let pedagogy_config = PedagogyConfig::default();
 
+    // Wrap session store in Arc so it can be captured by the classifier task.
+    let session_store: Arc<dyn SessionStore> = Arc::new(session_store);
+
+    // Stub classifier for now — Task 26 replaces this with real construction.
+    let classifier: Arc<dyn EngagementClassifier> =
+        Arc::new(StubEngagementClassifier::new());
+    let classifier_settings = ClassifierSettings::default();
+
     // ─── Dialogue manager ────────────────────────────────────────────
 
     let mut dm = DialogueManager::new(
         learner,
         inference.as_ref(),
         &knowledge as &dyn KnowledgeBase,
-        Some(&session_store as &dyn SessionStore),
+        Some(Arc::clone(&session_store)),
+        classifier,
+        classifier_settings,
         pedagogy_config,
     );
 

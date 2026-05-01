@@ -10,15 +10,30 @@
 //!
 //! It does NOT own the inference backend or knowledge base — those are
 //! injected as trait objects, keeping this module testable with stubs.
+//!
+//! # Ownership model
+//!
+//! `inference` and `knowledge` are borrowed references (`&'a dyn …`):
+//! they are only used synchronously inside method bodies and need no
+//! cross-turn lifetime. By contrast, `storage` and `classifier` are
+//! `Arc<dyn …>` because the post-response classifier task (Task 23)
+//! will capture them inside a `tokio::spawn` future, which requires
+//! `'static` — borrowed references cannot satisfy that bound.
+
+use std::sync::Arc;
 
 use chrono::Utc;
 use futures::StreamExt;
+use primer_classifier::{ClassifierSettings, EngagementClassifier};
+use primer_core::classifier::EngagementAssessment;
 use primer_core::config::PedagogyConfig;
 use primer_core::conversation::{PedagogicalIntent, Session, Speaker, Turn};
 use primer_core::error::{PrimerError, Result};
 use primer_core::inference::{GenerationParams, InferenceBackend};
 use primer_core::knowledge::{KnowledgeBase, RetrievalParams};
 use primer_core::learner::LearnerModel;
+use primer_core::storage::SessionStore;
+use tokio::task::JoinHandle;
 
 use crate::prompt_builder;
 
@@ -27,6 +42,11 @@ use crate::prompt_builder;
 /// Holds references to all the subsystems it needs, plus the mutable
 /// session and learner model state. The CLI (or future GUI) drives
 /// the conversation by calling `respond_to()` in a loop.
+///
+/// `inference` and `knowledge` are borrowed references: they are used
+/// only synchronously inside method bodies. `storage` and `classifier`
+/// are `Arc<dyn …>` so they can be captured by the post-response
+/// classifier task (`tokio::spawn` requires `'static`).
 pub struct DialogueManager<'a> {
     /// The learner model — updated in place as we learn about the child.
     pub learner: LearnerModel,
@@ -38,18 +58,36 @@ pub struct DialogueManager<'a> {
     knowledge: &'a dyn KnowledgeBase,
     /// Optional session persistence. When set, the session is saved after
     /// every `respond_to_streaming` call (success or mid-stream error).
-    storage: Option<&'a dyn primer_core::storage::SessionStore>,
+    /// Arc so the classifier task can capture it across turn boundaries.
+    storage: Option<Arc<dyn SessionStore>>,
+    /// Engagement classifier — called after each Primer response to assess
+    /// the child's engagement state. Arc for the same spawn-capture reason.
+    #[allow(dead_code)]
+    classifier: Arc<dyn EngagementClassifier>,
+    /// Tunable parameters for the classifier (thresholds, timeouts, etc.).
+    #[allow(dead_code)]
+    classifier_settings: ClassifierSettings,
+    /// Handle to the in-flight classifier task spawned after the previous
+    /// turn. `None` when no task is running.
+    #[allow(dead_code)]
+    classify_task: Option<JoinHandle<Option<EngagementAssessment>>>,
     /// Pedagogical configuration.
     config: PedagogyConfig,
 }
 
 impl<'a> DialogueManager<'a> {
     /// Create a new dialogue manager for a session.
+    ///
+    /// `storage` and `classifier` are `Arc<dyn …>` so they can be
+    /// captured inside the post-response classifier task without
+    /// lifetime constraints (`tokio::spawn` requires `'static`).
     pub fn new(
         learner: LearnerModel,
         inference: &'a dyn InferenceBackend,
         knowledge: &'a dyn KnowledgeBase,
-        storage: Option<&'a dyn primer_core::storage::SessionStore>,
+        storage: Option<Arc<dyn SessionStore>>,
+        classifier: Arc<dyn EngagementClassifier>,
+        classifier_settings: ClassifierSettings,
         config: PedagogyConfig,
     ) -> Self {
         let session = Session::new(learner.profile.id);
@@ -59,6 +97,9 @@ impl<'a> DialogueManager<'a> {
             inference,
             knowledge,
             storage,
+            classifier,
+            classifier_settings,
+            classify_task: None,
             config,
         }
     }
@@ -77,7 +118,7 @@ impl<'a> DialogueManager<'a> {
             concepts: vec![],
         });
 
-        if let Some(store) = self.storage {
+        if let Some(ref store) = self.storage {
             if let Err(e) = store.save_session(&self.session).await {
                 tracing::warn!("session save failed: {e}");
             }
@@ -106,7 +147,7 @@ impl<'a> DialogueManager<'a> {
         self.session = loaded;
         self.session.ended_at = None;
         self.refresh_summary_if_stale().await;
-        if let Some(store) = self.storage {
+        if let Some(ref store) = self.storage {
             if let Err(e) = store.save_session(&self.session).await {
                 tracing::warn!("session save failed during resume: {e}");
             }
@@ -217,7 +258,7 @@ impl<'a> DialogueManager<'a> {
 
         // 5. Save the session if a store is configured. Runs on both Ok
         //    and Err paths. Save failures are logged, not propagated.
-        if let Some(store) = self.storage {
+        if let Some(ref store) = self.storage {
             if let Err(e) = store.save_session(&self.session).await {
                 tracing::warn!("session save failed: {e}");
             }
@@ -241,7 +282,7 @@ impl<'a> DialogueManager<'a> {
     /// matching `respond_to_streaming`'s save-failure semantics.
     pub async fn close_session(&mut self) {
         self.session.ended_at = Some(Utc::now());
-        if let Some(store) = self.storage {
+        if let Some(ref store) = self.storage {
             if let Err(e) = store.save_session(&self.session).await {
                 tracing::warn!("session save failed during close: {e}");
             }
@@ -280,7 +321,7 @@ impl<'a> DialogueManager<'a> {
             return (String::new(), vec![]);
         }
         let exclude_at_or_after = total - window;
-        let retrieved = match self.storage {
+        let retrieved = match self.storage.as_deref() {
             None => vec![],
             Some(store) => store
                 .retrieve_session_turns(self.session.id, child_input, 3, exclude_at_or_after)
@@ -381,6 +422,7 @@ mod tests {
     use async_trait::async_trait;
     use chrono::Utc;
     use futures::stream;
+    use primer_classifier::StubEngagementClassifier;
     use primer_core::config::PedagogyConfig;
     use primer_core::inference::{
         GenerationParams, InferenceBackend, Prompt, TokenChunk, TokenStream,
@@ -391,6 +433,10 @@ mod tests {
     };
     use std::sync::Mutex;
     use uuid::Uuid;
+
+    fn stub_classifier() -> Arc<dyn EngagementClassifier> {
+        Arc::new(StubEngagementClassifier::new())
+    }
 
     /// Test inference backend that emits a pre-configured sequence of stream items.
     struct ScriptedBackend {
@@ -552,6 +598,8 @@ mod tests {
             &backend,
             &knowledge,
             None,
+            stub_classifier(),
+            ClassifierSettings::default(),
             PedagogyConfig::default(),
         );
 
@@ -581,6 +629,8 @@ mod tests {
             &backend,
             &knowledge,
             None,
+            stub_classifier(),
+            ClassifierSettings::default(),
             PedagogyConfig::default(),
         );
 
@@ -601,6 +651,8 @@ mod tests {
             &backend,
             &knowledge,
             None,
+            stub_classifier(),
+            ClassifierSettings::default(),
             PedagogyConfig::default(),
         );
 
@@ -622,6 +674,8 @@ mod tests {
             &backend,
             &knowledge,
             None,
+            stub_classifier(),
+            ClassifierSettings::default(),
             PedagogyConfig::default(),
         );
 
@@ -646,6 +700,8 @@ mod tests {
             &backend,
             &knowledge,
             None,
+            stub_classifier(),
+            ClassifierSettings::default(),
             PedagogyConfig::default(),
         );
 
@@ -669,6 +725,8 @@ mod tests {
             &backend,
             &knowledge,
             None,
+            stub_classifier(),
+            ClassifierSettings::default(),
             PedagogyConfig::default(),
         );
 
@@ -678,16 +736,16 @@ mod tests {
 
     #[tokio::test]
     async fn respond_to_streaming_fires_engine_save_on_success() {
-        use primer_core::storage::SessionStore;
-
         let backend = ScriptedBackend::new(vec![Ok(chunk("Hi", false)), Ok(chunk("", true))]);
         let knowledge = EmptyKnowledge;
-        let store = CountingStore::new();
+        let store = Arc::new(CountingStore::new());
         let mut dm = DialogueManager::new(
             test_learner(),
             &backend,
             &knowledge,
-            Some(&store as &dyn SessionStore),
+            Some(Arc::clone(&store) as Arc<dyn SessionStore>),
+            stub_classifier(),
+            ClassifierSettings::default(),
             PedagogyConfig::default(),
         );
 
@@ -701,19 +759,19 @@ mod tests {
 
     #[tokio::test]
     async fn respond_to_streaming_fires_engine_save_on_stream_error() {
-        use primer_core::storage::SessionStore;
-
         let backend = ScriptedBackend::new(vec![
             Ok(chunk("partial", false)),
             Err(PrimerError::Inference("simulated drop".into())),
         ]);
         let knowledge = EmptyKnowledge;
-        let store = CountingStore::new();
+        let store = Arc::new(CountingStore::new());
         let mut dm = DialogueManager::new(
             test_learner(),
             &backend,
             &knowledge,
-            Some(&store as &dyn SessionStore),
+            Some(Arc::clone(&store) as Arc<dyn SessionStore>),
+            stub_classifier(),
+            ClassifierSettings::default(),
             PedagogyConfig::default(),
         );
 
@@ -730,16 +788,16 @@ mod tests {
 
     #[tokio::test]
     async fn close_session_fires_engine_save_with_ended_at() {
-        use primer_core::storage::SessionStore;
-
         let backend = ScriptedBackend::new(vec![Ok(chunk("Hi", false)), Ok(chunk("", true))]);
         let knowledge = EmptyKnowledge;
-        let store = CountingStore::new();
+        let store = Arc::new(CountingStore::new());
         let mut dm = DialogueManager::new(
             test_learner(),
             &backend,
             &knowledge,
-            Some(&store as &dyn SessionStore),
+            Some(Arc::clone(&store) as Arc<dyn SessionStore>),
+            stub_classifier(),
+            ClassifierSettings::default(),
             PedagogyConfig::default(),
         );
 
@@ -756,16 +814,16 @@ mod tests {
 
     #[tokio::test]
     async fn open_session_fires_engine_save() {
-        use primer_core::storage::SessionStore;
-
         let backend = ScriptedBackend::new(vec![Ok(chunk("", true))]);
         let knowledge = EmptyKnowledge;
-        let store = CountingStore::new();
+        let store = Arc::new(CountingStore::new());
         let mut dm = DialogueManager::new(
             test_learner(),
             &backend,
             &knowledge,
-            Some(&store as &dyn SessionStore),
+            Some(Arc::clone(&store) as Arc<dyn SessionStore>),
+            stub_classifier(),
+            ClassifierSettings::default(),
             PedagogyConfig::default(),
         );
 
@@ -809,6 +867,8 @@ mod tests {
             &backend,
             &knowledge,
             None,
+            stub_classifier(),
+            ClassifierSettings::default(),
             PedagogyConfig::default(),
         );
         let learner_id = dm.learner.profile.id;
@@ -823,15 +883,16 @@ mod tests {
 
     #[tokio::test]
     async fn resume_session_clears_ended_at_and_persists() {
-        use primer_core::storage::SessionStore;
         let backend = ScriptedBackend::new(vec![Ok(chunk("", true))]);
         let knowledge = EmptyKnowledge;
-        let store = CountingStore::new();
+        let store = Arc::new(CountingStore::new());
         let mut dm = DialogueManager::new(
             test_learner(),
             &backend,
             &knowledge,
-            Some(&store as &dyn SessionStore),
+            Some(Arc::clone(&store) as Arc<dyn SessionStore>),
+            stub_classifier(),
+            ClassifierSettings::default(),
             PedagogyConfig::default(),
         );
         let mut loaded = make_test_session_with_turns(3, dm.learner.profile.id);
@@ -853,6 +914,8 @@ mod tests {
             &backend,
             &knowledge,
             None,
+            stub_classifier(),
+            ClassifierSettings::default(),
             PedagogyConfig::default(),
         );
         let dm_learner_id = dm.learner.profile.id;
@@ -878,6 +941,8 @@ mod tests {
             &backend,
             &knowledge,
             None,
+            stub_classifier(),
+            ClassifierSettings::default(),
             PedagogyConfig::default(),
         );
         // Window is 20; 25 turns gives 5 pre-window turns.
@@ -909,6 +974,8 @@ mod tests {
             &backend,
             &knowledge,
             None,
+            stub_classifier(),
+            ClassifierSettings::default(),
             PedagogyConfig::default(),
         );
         // Window is 20; 5 turns is well inside.
@@ -931,6 +998,8 @@ mod tests {
             &backend,
             &knowledge,
             None,
+            stub_classifier(),
+            ClassifierSettings::default(),
             PedagogyConfig::default(),
         );
         let mut loaded = make_test_session_with_turns(25, dm.learner.profile.id);
@@ -961,6 +1030,8 @@ mod tests {
             &backend,
             &knowledge,
             None,
+            stub_classifier(),
+            ClassifierSettings::default(),
             PedagogyConfig::default(),
         );
         let mut loaded = make_test_session_with_turns(30, dm.learner.profile.id);
@@ -982,6 +1053,8 @@ mod tests {
             &backend,
             &knowledge,
             None,
+            stub_classifier(),
+            ClassifierSettings::default(),
             PedagogyConfig::default(),
         );
         // Pre-load with 21 turns (1 turn pre-window). Far below the

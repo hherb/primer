@@ -6,6 +6,7 @@ edition.workspace = true
 
 [dependencies]
 primer-core.workspace = true
+primer-classifier.workspace = true
 async-trait.workspace = true
 tokio.workspace = true
 futures.workspace = true
