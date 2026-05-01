@@ -276,14 +276,14 @@ fn is_factual_question(text: &str) -> bool {
 /// Decide the next pedagogical intent based on the learner model
 /// and conversation history.
 pub fn decide_intent(learner: &LearnerModel, session: &Session) -> PedagogicalIntent {
-    // If the child is frustrated and stuck, scaffold.
-    if learner.current_engagement == EngagementState::FrustratedStuck {
-        return PedagogicalIntent::Scaffolding;
-    }
-
-    // If the child is disengaging, consider closing.
-    if learner.current_engagement == EngagementState::Disengaging {
-        return PedagogicalIntent::SessionClose;
+    // Engagement-state overrides fire before turn analysis.
+    match learner.current_engagement {
+        EngagementState::FrustratedStuck => return PedagogicalIntent::Scaffolding,
+        EngagementState::FrustratedTrying => return PedagogicalIntent::Encouragement,
+        EngagementState::Disengaging => return PedagogicalIntent::SessionClose,
+        EngagementState::Engaged
+        | EngagementState::Reflecting
+        | EngagementState::Unknown => { /* fall through to turn analysis */ }
     }
 
     // Look at the last turn — if it was a child's response, decide
@@ -390,26 +390,35 @@ mod tests {
     // ─── Engagement state takes precedence over turn analysis ─────────
 
     #[test]
-    fn frustrated_returns_scaffolding() {
+    fn frustrated_stuck_returns_scaffolding() {
         let learner = learner_with(EngagementState::FrustratedStuck, vec![]);
         let session = empty_session();
-        assert_eq!(
-            decide_intent(&learner, &session),
-            PedagogicalIntent::Scaffolding,
-        );
+        assert_eq!(decide_intent(&learner, &session), PedagogicalIntent::Scaffolding);
     }
 
     #[test]
-    fn frustrated_overrides_short_child_turn_branch() {
+    fn frustrated_stuck_overrides_short_child_turn() {
         // Without frustration, a 1-word child turn would yield ComprehensionCheck.
         // The engagement check fires first.
         let learner = learner_with(EngagementState::FrustratedStuck, vec![]);
         let mut session = empty_session();
         session.add_turn(child_turn("yes", vec![]));
-        assert_eq!(
-            decide_intent(&learner, &session),
-            PedagogicalIntent::Scaffolding,
-        );
+        assert_eq!(decide_intent(&learner, &session), PedagogicalIntent::Scaffolding);
+    }
+
+    #[test]
+    fn frustrated_trying_returns_encouragement() {
+        let learner = learner_with(EngagementState::FrustratedTrying, vec![]);
+        let session = empty_session();
+        assert_eq!(decide_intent(&learner, &session), PedagogicalIntent::Encouragement);
+    }
+
+    #[test]
+    fn frustrated_trying_overrides_short_child_turn() {
+        let learner = learner_with(EngagementState::FrustratedTrying, vec![]);
+        let mut session = empty_session();
+        session.add_turn(child_turn("yes", vec![]));
+        assert_eq!(decide_intent(&learner, &session), PedagogicalIntent::Encouragement);
     }
 
     #[test]
@@ -639,16 +648,6 @@ mod tests {
     // change starts emitting them these guards will fail and prompt a
     // deliberate update — they are NOT a claim that the intents
     // shouldn't ever be returned.
-
-    #[test]
-    fn frustrated_does_not_currently_return_encouragement() {
-        let learner = learner_with(EngagementState::FrustratedStuck, vec![]);
-        let session = empty_session();
-        assert_ne!(
-            decide_intent(&learner, &session),
-            PedagogicalIntent::Encouragement,
-        );
-    }
 
     #[test]
     fn factual_question_pattern_does_not_currently_return_direct_answer() {
