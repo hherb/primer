@@ -7,5 +7,12 @@
 //! happens in Phase 1 when hardware audio is connected.
 
 pub mod stub;
+pub mod vad_debounce;
 
 pub use stub::{StubStt, StubTts};
+pub use vad_debounce::{VadDebouncer, ms_to_chunks};
+
+#[cfg(feature = "silero")]
+pub mod silero;
+#[cfg(feature = "silero")]
+pub use silero::{SileroVad, SileroVadParams};
