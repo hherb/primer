@@ -169,6 +169,25 @@ impl<'a> DialogueManager<'a> {
         self.session = loaded;
         self.session.ended_at = None;
         self.refresh_summary_if_stale().await;
+
+        // Rehydrate recent_assessments + current_engagement from persisted
+        // classifications. Filtered by the current classifier's identifier so
+        // resuming with a different classifier starts a fresh trajectory rather
+        // than mixing outputs from different classifiers.
+        if let Some(store) = self.storage.as_ref() {
+            let recent = store
+                .load_recent_assessments(
+                    self.session.id,
+                    self.classifier.identifier(),
+                    self.classifier_settings.history_depth,
+                )
+                .await?;
+            if let Some(latest) = recent.last() {
+                self.learner.current_engagement = latest.state;
+            }
+            self.learner.recent_assessments = recent;
+        }
+
         if let Some(ref store) = self.storage {
             if let Err(e) = store.save_session(&self.session).await {
                 tracing::warn!("session save failed during resume: {e}");
@@ -1281,6 +1300,79 @@ mod tests {
     }
 
     // ─── Integration: classifier spawned and applied across turns ─────
+
+    #[tokio::test]
+    async fn resume_session_rehydrates_recent_assessments() {
+        use primer_classifier::{EngagementClassifier, StubEngagementClassifier};
+        use primer_core::classifier::EngagementAssessment;
+        use primer_core::storage::SessionStore;
+        use primer_storage::SqliteSessionStore;
+
+        let storage: Arc<dyn SessionStore> = Arc::new(
+            SqliteSessionStore::open(std::path::Path::new(":memory:")).unwrap(),
+        );
+        let classifier: Arc<dyn EngagementClassifier> =
+            Arc::new(StubEngagementClassifier::new());
+
+        // Pre-seed: save a session with one child turn and one classification.
+        let learner = test_learner();
+        let mut session = Session::new(learner.profile.id);
+        session.add_turn(Turn {
+            speaker: Speaker::Child,
+            text: "x".into(),
+            timestamp: Utc::now(),
+            intent: None,
+            concepts: vec![],
+        });
+        storage.save_session(&session).await.unwrap();
+        storage
+            .save_classification(
+                session.id,
+                0,
+                &EngagementAssessment {
+                    state: EngagementState::FrustratedTrying,
+                    confidence: 0.9,
+                    reasoning: Some("test".into()),
+                },
+                "stub",
+            )
+            .await
+            .unwrap();
+
+        // Create a DialogueManager and resume the persisted session.
+        let backend = ScriptedBackend::new(vec![Ok(chunk("", true))]);
+        let knowledge = EmptyKnowledge;
+        let settings = ClassifierSettings::default();
+        let mut dm = DialogueManager::new(
+            learner,
+            &backend,
+            &knowledge,
+            Some(Arc::clone(&storage) as Arc<dyn SessionStore>),
+            Arc::clone(&classifier),
+            settings,
+            PedagogyConfig::default(),
+        );
+
+        let loaded = storage.load_session(session.id).await.unwrap().expect("must load");
+        dm.resume_session(loaded).await.unwrap();
+
+        // Verify rehydration.
+        assert_eq!(
+            dm.learner.recent_assessments.len(),
+            1,
+            "recent_assessments must be populated from the persisted classification"
+        );
+        assert_eq!(
+            dm.learner.recent_assessments[0].state,
+            EngagementState::FrustratedTrying,
+            "rehydrated state must match what was saved"
+        );
+        assert_eq!(
+            dm.learner.current_engagement,
+            EngagementState::FrustratedTrying,
+            "current_engagement must reflect the most recent rehydrated assessment"
+        );
+    }
 
     #[tokio::test]
     async fn respond_to_streaming_spawns_classify_task_and_persists() {
