@@ -13,7 +13,15 @@
 
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
+use std::time::Duration;
 use uuid::Uuid;
+
+use crate::classifier::EngagementAssessment;
+
+/// Default threshold for the session-length-aware Disengaging branch.
+/// Below this, Disengaging routes to Encouragement; at or above, SessionClose.
+/// Per-child tunable via `LearningPreferences::early_disengagement_threshold`.
+pub const DEFAULT_EARLY_DISENGAGEMENT_SECS: u64 = 5 * 60;
 
 /// Unique identifier for a learner (child).
 pub type LearnerId = Uuid;
@@ -87,6 +95,16 @@ pub struct LearningPreferences {
     pub typical_session_minutes: f32,
     /// Topics that sustain attention longest.
     pub high_engagement_topics: Vec<String>,
+    /// Below this duration into the session, Disengaging routes to
+    /// Encouragement; at or above, SessionClose. Per-child tunable.
+    /// Persistence (when learner-model persistence lands) round-trips
+    /// as u64 seconds; not a v3 schema concern.
+    #[serde(with = "duration_secs", default = "default_early_disengagement")]
+    pub early_disengagement_threshold: Duration,
+}
+
+fn default_early_disengagement() -> Duration {
+    Duration::from_secs(DEFAULT_EARLY_DISENGAGEMENT_SECS)
 }
 
 impl Default for LearningPreferences {
@@ -98,7 +116,20 @@ impl Default for LearningPreferences {
             kinesthetic: 0.5,
             typical_session_minutes: 20.0,
             high_engagement_topics: vec![],
+            early_disengagement_threshold: default_early_disengagement(),
         }
+    }
+}
+
+mod duration_secs {
+    use serde::{Deserialize, Deserializer, Serializer};
+    use std::time::Duration;
+
+    pub fn serialize<S: Serializer>(d: &Duration, s: S) -> Result<S::Ok, S::Error> {
+        s.serialize_u64(d.as_secs())
+    }
+    pub fn deserialize<'de, D: Deserializer<'de>>(d: D) -> Result<Duration, D::Error> {
+        u64::deserialize(d).map(Duration::from_secs)
     }
 }
 
@@ -111,12 +142,87 @@ pub enum EngagementState {
     Engaged,
     /// Thinking — longer pauses, but still present.
     Reflecting,
-    /// Showing signs of frustration (short responses, rising tone).
-    Frustrated,
+    /// Frustrated and stuck — no progress, gives up. Routes to Scaffolding.
+    FrustratedStuck,
+    /// Frustrated but still articulating an attempt. Routes to Encouragement.
+    FrustratedTrying,
     /// Losing interest (long pauses, off-topic responses).
     Disengaging,
     /// State cannot be determined.
     Unknown,
+}
+
+impl EngagementState {
+    pub const ALL: &'static [Self] = &[
+        Self::Engaged,
+        Self::Reflecting,
+        Self::FrustratedStuck,
+        Self::FrustratedTrying,
+        Self::Disengaging,
+        Self::Unknown,
+    ];
+
+    /// Canonical machine-readable name. Stable identifier used by the
+    /// engagement-classifier JSON schema and the storage `engagement_states`
+    /// lookup table. Don't rename — `EngagementState` IDs in v3 schema
+    /// are derived from these names and existing DBs validate against them.
+    pub fn name(self) -> &'static str {
+        match self {
+            Self::Engaged => "Engaged",
+            Self::Reflecting => "Reflecting",
+            Self::FrustratedStuck => "FrustratedStuck",
+            Self::FrustratedTrying => "FrustratedTrying",
+            Self::Disengaging => "Disengaging",
+            Self::Unknown => "Unknown",
+        }
+    }
+}
+
+impl std::fmt::Display for EngagementState {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.name())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn engagement_state_all_lists_every_variant() {
+        assert_eq!(EngagementState::ALL.len(), 6);
+        assert!(EngagementState::ALL.contains(&EngagementState::FrustratedStuck));
+        assert!(EngagementState::ALL.contains(&EngagementState::FrustratedTrying));
+    }
+}
+
+#[cfg(test)]
+mod prefs_tests {
+    use super::*;
+
+    #[test]
+    fn default_learning_preferences_includes_early_disengagement_threshold() {
+        let prefs = LearningPreferences::default();
+        assert_eq!(
+            prefs.early_disengagement_threshold,
+            Duration::from_secs(DEFAULT_EARLY_DISENGAGEMENT_SECS),
+        );
+    }
+
+    #[test]
+    fn learning_preferences_round_trips_through_serde_with_seconds() {
+        let prefs = LearningPreferences {
+            early_disengagement_threshold: Duration::from_secs(123),
+            ..Default::default()
+        };
+        let json = serde_json::to_string(&prefs).unwrap();
+        assert!(
+            json.contains("\"early_disengagement_threshold\":123"),
+            "expected seconds-as-u64 serialization, got: {json}"
+        );
+        let back: LearningPreferences = serde_json::from_str(&json).unwrap();
+        assert_eq!(back.early_disengagement_threshold, Duration::from_secs(123));
+    }
 }
 
 /// The complete learner model for one child.
@@ -126,4 +232,10 @@ pub struct LearnerModel {
     pub concepts: Vec<ConceptState>,
     pub preferences: LearningPreferences,
     pub current_engagement: EngagementState,
+    /// Bounded buffer of the most recent classifier outputs for this
+    /// learner. Capacity = `ClassifierSettings::history_depth` (default 3).
+    /// Ephemeral in active use; rehydrated from `turn_classifications`
+    /// on resume.
+    #[serde(default)]
+    pub recent_assessments: Vec<EngagementAssessment>,
 }

@@ -8,6 +8,7 @@ members = [
     "crates/primer-pedagogy",
     "crates/primer-cli",
     "crates/primer-storage",
+    "crates/primer-classifier",
 ]
 
 [workspace.package]
@@ -67,3 +68,4 @@ primer-speech = { path = "crates/primer-speech" }
 primer-knowledge = { path = "crates/primer-knowledge" }
 primer-pedagogy = { path = "crates/primer-pedagogy" }
 primer-storage = { path = "crates/primer-storage" }
+primer-classifier = { path = "crates/primer-classifier" }

@@ -10,15 +10,30 @@
 //!
 //! It does NOT own the inference backend or knowledge base — those are
 //! injected as trait objects, keeping this module testable with stubs.
+//!
+//! # Ownership model
+//!
+//! `inference` and `knowledge` are borrowed references (`&'a dyn …`):
+//! they are only used synchronously inside method bodies and need no
+//! cross-turn lifetime. By contrast, `storage` and `classifier` are
+//! `Arc<dyn …>` because the post-response classifier task (Task 23)
+//! will capture them inside a `tokio::spawn` future, which requires
+//! `'static` — borrowed references cannot satisfy that bound.
+
+use std::sync::Arc;
 
 use chrono::Utc;
 use futures::StreamExt;
+use primer_classifier::{ClassifierSettings, EngagementClassifier};
+use primer_core::classifier::EngagementAssessment;
 use primer_core::config::PedagogyConfig;
 use primer_core::conversation::{PedagogicalIntent, Session, Speaker, Turn};
 use primer_core::error::{PrimerError, Result};
 use primer_core::inference::{GenerationParams, InferenceBackend};
 use primer_core::knowledge::{KnowledgeBase, RetrievalParams};
 use primer_core::learner::LearnerModel;
+use primer_core::storage::SessionStore;
+use tokio::task::JoinHandle;
 
 use crate::prompt_builder;
 
@@ -27,6 +42,11 @@ use crate::prompt_builder;
 /// Holds references to all the subsystems it needs, plus the mutable
 /// session and learner model state. The CLI (or future GUI) drives
 /// the conversation by calling `respond_to()` in a loop.
+///
+/// `inference` and `knowledge` are borrowed references: they are used
+/// only synchronously inside method bodies. `storage` and `classifier`
+/// are `Arc<dyn …>` so they can be captured by the post-response
+/// classifier task (`tokio::spawn` requires `'static`).
 pub struct DialogueManager<'a> {
     /// The learner model — updated in place as we learn about the child.
     pub learner: LearnerModel,
@@ -38,18 +58,58 @@ pub struct DialogueManager<'a> {
     knowledge: &'a dyn KnowledgeBase,
     /// Optional session persistence. When set, the session is saved after
     /// every `respond_to_streaming` call (success or mid-stream error).
-    storage: Option<&'a dyn primer_core::storage::SessionStore>,
+    /// Arc so the classifier task can capture it across turn boundaries.
+    storage: Option<Arc<dyn SessionStore>>,
+    /// Engagement classifier — called after each Primer response to assess
+    /// the child's engagement state. Arc for the same spawn-capture reason.
+    classifier: Arc<dyn EngagementClassifier>,
+    /// Tunable parameters for the classifier (thresholds, timeouts, etc.).
+    classifier_settings: ClassifierSettings,
+    /// Handle to the in-flight classifier task spawned after the previous
+    /// turn. `None` when no task is running.
+    classify_task: Option<JoinHandle<Option<EngagementAssessment>>>,
     /// Pedagogical configuration.
     config: PedagogyConfig,
 }
 
+/// Push an `EngagementAssessment` into the learner's history buffer and,
+/// when confidence is high enough, update `current_engagement`.
+///
+/// History is a FIFO ring of depth `settings.history_depth`. Every
+/// assessment — even low-confidence ones — is recorded so the trajectory
+/// is visible to later logic. Only assessments that meet or exceed
+/// `settings.confidence_threshold` update `current_engagement`; below
+/// that threshold the field is left unchanged so a single noisy read
+/// doesn't yank the intent-selection state.
+pub(crate) fn apply_assessment(
+    learner: &mut primer_core::learner::LearnerModel,
+    a: primer_core::classifier::EngagementAssessment,
+    settings: &primer_classifier::ClassifierSettings,
+) {
+    learner.recent_assessments.push(a.clone());
+    while learner.recent_assessments.len() > settings.history_depth {
+        learner.recent_assessments.remove(0);
+    }
+    if a.confidence >= settings.confidence_threshold {
+        learner.current_engagement = a.state;
+    }
+    // Low-confidence assessments are still recorded in history (signal for
+    // trajectory) but current_engagement stays unchanged.
+}
+
 impl<'a> DialogueManager<'a> {
     /// Create a new dialogue manager for a session.
+    ///
+    /// `storage` and `classifier` are `Arc<dyn …>` so they can be
+    /// captured inside the post-response classifier task without
+    /// lifetime constraints (`tokio::spawn` requires `'static`).
     pub fn new(
         learner: LearnerModel,
         inference: &'a dyn InferenceBackend,
         knowledge: &'a dyn KnowledgeBase,
-        storage: Option<&'a dyn primer_core::storage::SessionStore>,
+        storage: Option<Arc<dyn SessionStore>>,
+        classifier: Arc<dyn EngagementClassifier>,
+        classifier_settings: ClassifierSettings,
         config: PedagogyConfig,
     ) -> Self {
         let session = Session::new(learner.profile.id);
@@ -59,6 +119,9 @@ impl<'a> DialogueManager<'a> {
             inference,
             knowledge,
             storage,
+            classifier,
+            classifier_settings,
+            classify_task: None,
             config,
         }
     }
@@ -77,7 +140,7 @@ impl<'a> DialogueManager<'a> {
             concepts: vec![],
         });
 
-        if let Some(store) = self.storage {
+        if let Some(ref store) = self.storage {
             if let Err(e) = store.save_session(&self.session).await {
                 tracing::warn!("session save failed: {e}");
             }
@@ -106,7 +169,26 @@ impl<'a> DialogueManager<'a> {
         self.session = loaded;
         self.session.ended_at = None;
         self.refresh_summary_if_stale().await;
-        if let Some(store) = self.storage {
+
+        // Rehydrate recent_assessments + current_engagement from persisted
+        // classifications. Filtered by the current classifier's identifier so
+        // resuming with a different classifier starts a fresh trajectory rather
+        // than mixing outputs from different classifiers.
+        if let Some(store) = self.storage.as_ref() {
+            let recent = store
+                .load_recent_assessments(
+                    self.session.id,
+                    self.classifier.identifier(),
+                    self.classifier_settings.history_depth,
+                )
+                .await?;
+            if let Some(latest) = recent.last() {
+                self.learner.current_engagement = latest.state;
+            }
+            self.learner.recent_assessments = recent;
+        }
+
+        if let Some(ref store) = self.storage {
             if let Err(e) = store.save_session(&self.session).await {
                 tracing::warn!("session save failed during resume: {e}");
             }
@@ -140,6 +222,11 @@ impl<'a> DialogueManager<'a> {
     where
         F: FnMut(&str),
     {
+        // 0. Wait for the previous turn's classification (if any) to complete
+        //    with a bounded timeout, then apply it so decide_intent sees the
+        //    updated engagement state.
+        self.await_pending_classification().await;
+
         // 1. Record the child's turn.
         let child_turn = Turn {
             speaker: Speaker::Child,
@@ -217,13 +304,102 @@ impl<'a> DialogueManager<'a> {
 
         // 5. Save the session if a store is configured. Runs on both Ok
         //    and Err paths. Save failures are logged, not propagated.
-        if let Some(store) = self.storage {
+        if let Some(ref store) = self.storage {
             if let Err(e) = store.save_session(&self.session).await {
                 tracing::warn!("session save failed: {e}");
             }
         }
 
+        // 6. Spawn a classification task for the child turn that just completed.
+        //    Skipped on error paths — without a completed Primer response there
+        //    is no exchange to assess, and the partial Primer turn was dropped.
+        if result.is_ok() {
+            let child_turn_index = self
+                .session
+                .turns
+                .iter()
+                .enumerate()
+                .rev()
+                .find(|(_, t)| t.speaker == Speaker::Child)
+                .map(|(i, _)| i);
+
+            if let Some(child_idx) = child_turn_index {
+                let store = self.storage.clone();
+                let classifier = Arc::clone(&self.classifier);
+                let session_id = self.session.id;
+
+                // Build owned copies of the context inputs — the spawned task
+                // needs 'static, so we cannot pass slices that borrow self.
+                let recent_child_turns: Vec<Turn> = self
+                    .session
+                    .turns
+                    .iter()
+                    .filter(|t| t.speaker == Speaker::Child)
+                    .rev()
+                    .take(self.classifier_settings.recent_child_turns)
+                    .cloned()
+                    .collect::<Vec<_>>()
+                    .into_iter()
+                    .rev()
+                    .collect();
+                let prior_assessments: Vec<EngagementAssessment> =
+                    self.learner.recent_assessments.clone();
+
+                let task = tokio::spawn(async move {
+                    let ctx = primer_core::classifier::EngagementContext {
+                        recent_child_turns: &recent_child_turns,
+                        prior_assessments: &prior_assessments,
+                    };
+                    match classifier.classify(ctx).await {
+                        Ok(a) => {
+                            if let Some(store) = store {
+                                if let Err(e) = store
+                                    .save_classification(
+                                        session_id,
+                                        child_idx,
+                                        &a,
+                                        classifier.identifier(),
+                                    )
+                                    .await
+                                {
+                                    tracing::warn!(error = ?e, "save_classification failed");
+                                }
+                            }
+                            Some(a)
+                        }
+                        Err(e) => {
+                            tracing::warn!(error = ?e, "classifier returned error");
+                            None
+                        }
+                    }
+                });
+                self.classify_task = Some(task);
+            }
+        }
+
         result
+    }
+
+    /// Last `PedagogicalIntent` selected by `decide_intent` (used by `--verbose`).
+    /// Returns `None` until at least one turn has been processed.
+    pub fn last_intent(&self) -> Option<PedagogicalIntent> {
+        self.session
+            .turns
+            .iter()
+            .rev()
+            .find(|t| t.speaker == Speaker::Primer)
+            .and_then(|t| t.intent)
+    }
+
+    /// Most recent classifier output applied to the learner (used by `--verbose`).
+    /// Returns `None` until at least one classification has completed.
+    pub fn last_assessment(&self) -> Option<&primer_core::classifier::EngagementAssessment> {
+        self.learner.recent_assessments.last()
+    }
+
+    /// Stable identifier of the active engagement classifier (used by `--verbose`).
+    pub fn classifier_identifier(&self) -> &str {
+        self.classifier.identifier()
     }
 
     /// Check whether the session has run long enough that the Primer
@@ -235,15 +411,53 @@ impl<'a> DialogueManager<'a> {
         elapsed >= self.config.max_session_minutes as i64
     }
 
-    /// End the session gracefully. Records `ended_at` and, if storage is
-    /// configured, fires a final save so the timestamp lands on disk. Save
-    /// failures are logged via `tracing::warn!` rather than propagated —
-    /// matching `respond_to_streaming`'s save-failure semantics.
+    /// End the session gracefully. Drains any in-flight classifier task so
+    /// the final turn's assessment lands on disk, records `ended_at`, and
+    /// (if storage is configured) fires a final save so the timestamp
+    /// lands on disk. Save failures are logged via `tracing::warn!` rather
+    /// than propagated — matching `respond_to_streaming`'s save-failure
+    /// semantics.
     pub async fn close_session(&mut self) {
+        // Drain the post-response classifier task spawned after the most
+        // recent turn. Without this, a quick exit ("respond_to_streaming"
+        // immediately followed by close_session) races the runtime shutdown
+        // and the last turn_classifications row may never be persisted.
+        self.await_pending_classification().await;
+
         self.session.ended_at = Some(Utc::now());
-        if let Some(store) = self.storage {
+        if let Some(ref store) = self.storage {
             if let Err(e) = store.save_session(&self.session).await {
                 tracing::warn!("session save failed during close: {e}");
+            }
+        }
+    }
+
+    // ─── Classifier helpers ───────────────────────────────────────────
+
+    /// Wait (up to `blocking_timeout`) for the classifier task spawned after
+    /// the previous turn, then apply its result to `self.learner`.
+    ///
+    /// Called at the start of each new turn so the prior turn's assessment
+    /// is consumed before intent is decided. On timeout the task is aborted
+    /// and we proceed with the existing (stale) engagement state — better
+    /// than blocking the conversation indefinitely.
+    async fn await_pending_classification(&mut self) {
+        let Some(task) = self.classify_task.take() else {
+            return;
+        };
+        let abort = task.abort_handle();
+        let timeout = self.classifier_settings.blocking_timeout;
+        match tokio::time::timeout(timeout, task).await {
+            Ok(Ok(Some(assessment))) => {
+                apply_assessment(&mut self.learner, assessment, &self.classifier_settings)
+            }
+            Ok(Ok(None)) => { /* soft failure; nothing to apply */ }
+            Ok(Err(e)) => tracing::warn!(error = ?e, "classifier task panicked"),
+            Err(_) => {
+                abort.abort();
+                tracing::debug!(
+                    "classifier exceeded blocking timeout — proceeding with stale engagement state"
+                );
             }
         }
     }
@@ -280,7 +494,7 @@ impl<'a> DialogueManager<'a> {
             return (String::new(), vec![]);
         }
         let exclude_at_or_after = total - window;
-        let retrieved = match self.storage {
+        let retrieved = match self.storage.as_deref() {
             None => vec![],
             Some(store) => store
                 .retrieve_session_turns(self.session.id, child_input, 3, exclude_at_or_after)
@@ -381,6 +595,7 @@ mod tests {
     use async_trait::async_trait;
     use chrono::Utc;
     use futures::stream;
+    use primer_classifier::StubEngagementClassifier;
     use primer_core::config::PedagogyConfig;
     use primer_core::inference::{
         GenerationParams, InferenceBackend, Prompt, TokenChunk, TokenStream,
@@ -391,6 +606,10 @@ mod tests {
     };
     use std::sync::Mutex;
     use uuid::Uuid;
+
+    fn stub_classifier() -> Arc<dyn EngagementClassifier> {
+        Arc::new(StubEngagementClassifier::new())
+    }
 
     /// Test inference backend that emits a pre-configured sequence of stream items.
     struct ScriptedBackend {
@@ -493,6 +712,25 @@ mod tests {
         ) -> Result<Vec<Turn>> {
             Ok(vec![])
         }
+
+        async fn save_classification(
+            &self,
+            _session_id: primer_core::conversation::SessionId,
+            _turn_index: usize,
+            _assessment: &primer_core::classifier::EngagementAssessment,
+            _classifier_identifier: &str,
+        ) -> Result<()> {
+            Ok(())
+        }
+
+        async fn load_recent_assessments(
+            &self,
+            _session_id: primer_core::conversation::SessionId,
+            _classifier_identifier: &str,
+            _k: usize,
+        ) -> Result<Vec<primer_core::classifier::EngagementAssessment>> {
+            Ok(vec![])
+        }
     }
 
     fn test_learner() -> LearnerModel {
@@ -508,6 +746,7 @@ mod tests {
             concepts: vec![],
             preferences: LearningPreferences::default(),
             current_engagement: EngagementState::Engaged,
+            recent_assessments: vec![],
         }
     }
 
@@ -532,6 +771,8 @@ mod tests {
             &backend,
             &knowledge,
             None,
+            stub_classifier(),
+            ClassifierSettings::default(),
             PedagogyConfig::default(),
         );
 
@@ -561,6 +802,8 @@ mod tests {
             &backend,
             &knowledge,
             None,
+            stub_classifier(),
+            ClassifierSettings::default(),
             PedagogyConfig::default(),
         );
 
@@ -581,6 +824,8 @@ mod tests {
             &backend,
             &knowledge,
             None,
+            stub_classifier(),
+            ClassifierSettings::default(),
             PedagogyConfig::default(),
         );
 
@@ -602,6 +847,8 @@ mod tests {
             &backend,
             &knowledge,
             None,
+            stub_classifier(),
+            ClassifierSettings::default(),
             PedagogyConfig::default(),
         );
 
@@ -626,6 +873,8 @@ mod tests {
             &backend,
             &knowledge,
             None,
+            stub_classifier(),
+            ClassifierSettings::default(),
             PedagogyConfig::default(),
         );
 
@@ -649,6 +898,8 @@ mod tests {
             &backend,
             &knowledge,
             None,
+            stub_classifier(),
+            ClassifierSettings::default(),
             PedagogyConfig::default(),
         );
 
@@ -658,16 +909,16 @@ mod tests {
 
     #[tokio::test]
     async fn respond_to_streaming_fires_engine_save_on_success() {
-        use primer_core::storage::SessionStore;
-
         let backend = ScriptedBackend::new(vec![Ok(chunk("Hi", false)), Ok(chunk("", true))]);
         let knowledge = EmptyKnowledge;
-        let store = CountingStore::new();
+        let store = Arc::new(CountingStore::new());
         let mut dm = DialogueManager::new(
             test_learner(),
             &backend,
             &knowledge,
-            Some(&store as &dyn SessionStore),
+            Some(Arc::clone(&store) as Arc<dyn SessionStore>),
+            stub_classifier(),
+            ClassifierSettings::default(),
             PedagogyConfig::default(),
         );
 
@@ -681,19 +932,19 @@ mod tests {
 
     #[tokio::test]
     async fn respond_to_streaming_fires_engine_save_on_stream_error() {
-        use primer_core::storage::SessionStore;
-
         let backend = ScriptedBackend::new(vec![
             Ok(chunk("partial", false)),
             Err(PrimerError::Inference("simulated drop".into())),
         ]);
         let knowledge = EmptyKnowledge;
-        let store = CountingStore::new();
+        let store = Arc::new(CountingStore::new());
         let mut dm = DialogueManager::new(
             test_learner(),
             &backend,
             &knowledge,
-            Some(&store as &dyn SessionStore),
+            Some(Arc::clone(&store) as Arc<dyn SessionStore>),
+            stub_classifier(),
+            ClassifierSettings::default(),
             PedagogyConfig::default(),
         );
 
@@ -710,16 +961,16 @@ mod tests {
 
     #[tokio::test]
     async fn close_session_fires_engine_save_with_ended_at() {
-        use primer_core::storage::SessionStore;
-
         let backend = ScriptedBackend::new(vec![Ok(chunk("Hi", false)), Ok(chunk("", true))]);
         let knowledge = EmptyKnowledge;
-        let store = CountingStore::new();
+        let store = Arc::new(CountingStore::new());
         let mut dm = DialogueManager::new(
             test_learner(),
             &backend,
             &knowledge,
-            Some(&store as &dyn SessionStore),
+            Some(Arc::clone(&store) as Arc<dyn SessionStore>),
+            stub_classifier(),
+            ClassifierSettings::default(),
             PedagogyConfig::default(),
         );
 
@@ -736,16 +987,16 @@ mod tests {
 
     #[tokio::test]
     async fn open_session_fires_engine_save() {
-        use primer_core::storage::SessionStore;
-
         let backend = ScriptedBackend::new(vec![Ok(chunk("", true))]);
         let knowledge = EmptyKnowledge;
-        let store = CountingStore::new();
+        let store = Arc::new(CountingStore::new());
         let mut dm = DialogueManager::new(
             test_learner(),
             &backend,
             &knowledge,
-            Some(&store as &dyn SessionStore),
+            Some(Arc::clone(&store) as Arc<dyn SessionStore>),
+            stub_classifier(),
+            ClassifierSettings::default(),
             PedagogyConfig::default(),
         );
 
@@ -789,6 +1040,8 @@ mod tests {
             &backend,
             &knowledge,
             None,
+            stub_classifier(),
+            ClassifierSettings::default(),
             PedagogyConfig::default(),
         );
         let learner_id = dm.learner.profile.id;
@@ -803,15 +1056,16 @@ mod tests {
 
     #[tokio::test]
     async fn resume_session_clears_ended_at_and_persists() {
-        use primer_core::storage::SessionStore;
         let backend = ScriptedBackend::new(vec![Ok(chunk("", true))]);
         let knowledge = EmptyKnowledge;
-        let store = CountingStore::new();
+        let store = Arc::new(CountingStore::new());
         let mut dm = DialogueManager::new(
             test_learner(),
             &backend,
             &knowledge,
-            Some(&store as &dyn SessionStore),
+            Some(Arc::clone(&store) as Arc<dyn SessionStore>),
+            stub_classifier(),
+            ClassifierSettings::default(),
             PedagogyConfig::default(),
         );
         let mut loaded = make_test_session_with_turns(3, dm.learner.profile.id);
@@ -833,6 +1087,8 @@ mod tests {
             &backend,
             &knowledge,
             None,
+            stub_classifier(),
+            ClassifierSettings::default(),
             PedagogyConfig::default(),
         );
         let dm_learner_id = dm.learner.profile.id;
@@ -858,6 +1114,8 @@ mod tests {
             &backend,
             &knowledge,
             None,
+            stub_classifier(),
+            ClassifierSettings::default(),
             PedagogyConfig::default(),
         );
         // Window is 20; 25 turns gives 5 pre-window turns.
@@ -889,6 +1147,8 @@ mod tests {
             &backend,
             &knowledge,
             None,
+            stub_classifier(),
+            ClassifierSettings::default(),
             PedagogyConfig::default(),
         );
         // Window is 20; 5 turns is well inside.
@@ -911,6 +1171,8 @@ mod tests {
             &backend,
             &knowledge,
             None,
+            stub_classifier(),
+            ClassifierSettings::default(),
             PedagogyConfig::default(),
         );
         let mut loaded = make_test_session_with_turns(25, dm.learner.profile.id);
@@ -941,6 +1203,8 @@ mod tests {
             &backend,
             &knowledge,
             None,
+            stub_classifier(),
+            ClassifierSettings::default(),
             PedagogyConfig::default(),
         );
         let mut loaded = make_test_session_with_turns(30, dm.learner.profile.id);
@@ -962,6 +1226,8 @@ mod tests {
             &backend,
             &knowledge,
             None,
+            stub_classifier(),
+            ClassifierSettings::default(),
             PedagogyConfig::default(),
         );
         // Pre-load with 21 turns (1 turn pre-window). Far below the
@@ -969,5 +1235,505 @@ mod tests {
         dm.session.turns = make_test_session_with_turns(21, dm.learner.profile.id).turns;
         let _ = dm.respond_to_streaming("hi", |_| {}).await.unwrap();
         assert_eq!(backend.summary_call_count(), 0);
+    }
+
+    // ─── apply_assessment ─────────────────────────────────────────────
+
+    #[test]
+    fn apply_assessment_pushes_to_recent_assessments() {
+        let mut learner = test_learner();
+        let settings = ClassifierSettings::default();
+        let a = primer_core::classifier::EngagementAssessment {
+            state: EngagementState::Reflecting,
+            confidence: 0.9,
+            reasoning: None,
+        };
+        apply_assessment(&mut learner, a.clone(), &settings);
+        assert_eq!(learner.recent_assessments.len(), 1);
+        assert_eq!(
+            learner.recent_assessments[0].state,
+            EngagementState::Reflecting
+        );
+    }
+
+    #[test]
+    fn apply_assessment_evicts_oldest_when_buffer_full() {
+        let mut learner = test_learner();
+        let settings = ClassifierSettings {
+            history_depth: 2,
+            ..Default::default()
+        };
+        for state in [
+            EngagementState::Engaged,
+            EngagementState::Reflecting,
+            EngagementState::FrustratedStuck,
+        ] {
+            apply_assessment(
+                &mut learner,
+                primer_core::classifier::EngagementAssessment {
+                    state,
+                    confidence: 0.9,
+                    reasoning: None,
+                },
+                &settings,
+            );
+        }
+        assert_eq!(learner.recent_assessments.len(), 2);
+        assert_eq!(
+            learner.recent_assessments[0].state,
+            EngagementState::Reflecting
+        );
+        assert_eq!(
+            learner.recent_assessments[1].state,
+            EngagementState::FrustratedStuck
+        );
+    }
+
+    #[test]
+    fn apply_assessment_updates_current_engagement_when_confident() {
+        let mut learner = test_learner();
+        let settings = ClassifierSettings {
+            confidence_threshold: 0.6,
+            ..Default::default()
+        };
+        apply_assessment(
+            &mut learner,
+            primer_core::classifier::EngagementAssessment {
+                state: EngagementState::FrustratedTrying,
+                confidence: 0.8,
+                reasoning: None,
+            },
+            &settings,
+        );
+        assert_eq!(
+            learner.current_engagement,
+            EngagementState::FrustratedTrying
+        );
+    }
+
+    #[test]
+    fn apply_assessment_keeps_current_engagement_when_low_confidence() {
+        let mut learner = test_learner();
+        let initial = learner.current_engagement;
+        let settings = ClassifierSettings {
+            confidence_threshold: 0.6,
+            ..Default::default()
+        };
+        apply_assessment(
+            &mut learner,
+            primer_core::classifier::EngagementAssessment {
+                state: EngagementState::FrustratedTrying,
+                confidence: 0.3,
+                reasoning: None,
+            },
+            &settings,
+        );
+        assert_eq!(
+            learner.current_engagement, initial,
+            "low-confidence assessment must NOT change current_engagement"
+        );
+        assert_eq!(
+            learner.recent_assessments.len(),
+            1,
+            "low-confidence assessment IS still recorded in history"
+        );
+    }
+
+    // ─── Integration: classifier spawned and applied across turns ─────
+
+    #[tokio::test]
+    async fn resume_session_rehydrates_recent_assessments() {
+        use primer_classifier::{EngagementClassifier, StubEngagementClassifier};
+        use primer_core::classifier::EngagementAssessment;
+        use primer_core::storage::SessionStore;
+        use primer_storage::SqliteSessionStore;
+
+        let storage: Arc<dyn SessionStore> =
+            Arc::new(SqliteSessionStore::open(std::path::Path::new(":memory:")).unwrap());
+        let classifier: Arc<dyn EngagementClassifier> = Arc::new(StubEngagementClassifier::new());
+
+        // Pre-seed: save a session with one child turn and one classification.
+        let learner = test_learner();
+        let mut session = Session::new(learner.profile.id);
+        session.add_turn(Turn {
+            speaker: Speaker::Child,
+            text: "x".into(),
+            timestamp: Utc::now(),
+            intent: None,
+            concepts: vec![],
+        });
+        storage.save_session(&session).await.unwrap();
+        storage
+            .save_classification(
+                session.id,
+                0,
+                &EngagementAssessment {
+                    state: EngagementState::FrustratedTrying,
+                    confidence: 0.9,
+                    reasoning: Some("test".into()),
+                },
+                "stub",
+            )
+            .await
+            .unwrap();
+
+        // Create a DialogueManager and resume the persisted session.
+        let backend = ScriptedBackend::new(vec![Ok(chunk("", true))]);
+        let knowledge = EmptyKnowledge;
+        let settings = ClassifierSettings::default();
+        let mut dm = DialogueManager::new(
+            learner,
+            &backend,
+            &knowledge,
+            Some(Arc::clone(&storage) as Arc<dyn SessionStore>),
+            Arc::clone(&classifier),
+            settings,
+            PedagogyConfig::default(),
+        );
+
+        let loaded = storage
+            .load_session(session.id)
+            .await
+            .unwrap()
+            .expect("must load");
+        dm.resume_session(loaded).await.unwrap();
+
+        // Verify rehydration.
+        assert_eq!(
+            dm.learner.recent_assessments.len(),
+            1,
+            "recent_assessments must be populated from the persisted classification"
+        );
+        assert_eq!(
+            dm.learner.recent_assessments[0].state,
+            EngagementState::FrustratedTrying,
+            "rehydrated state must match what was saved"
+        );
+        assert_eq!(
+            dm.learner.current_engagement,
+            EngagementState::FrustratedTrying,
+            "current_engagement must reflect the most recent rehydrated assessment"
+        );
+    }
+
+    #[tokio::test]
+    async fn respond_to_streaming_spawns_classify_task_and_persists() {
+        use primer_classifier::{EngagementClassifier, StubEngagementClassifier};
+        use primer_core::classifier::EngagementAssessment;
+        use primer_core::storage::SessionStore;
+        use primer_storage::SqliteSessionStore;
+
+        // A classifier that always returns FrustratedTrying with high confidence.
+        let target_state = EngagementState::FrustratedTrying;
+        let classifier: Arc<dyn EngagementClassifier> = Arc::new(
+            StubEngagementClassifier::with_response(EngagementAssessment {
+                state: target_state,
+                confidence: 0.95,
+                reasoning: Some("integration test".into()),
+            }),
+        );
+
+        let storage: Arc<dyn SessionStore> =
+            Arc::new(SqliteSessionStore::open(std::path::Path::new(":memory:")).unwrap());
+
+        let backend = ScriptedBackend::new(vec![
+            Ok(chunk("Great question!", false)),
+            Ok(chunk("", true)),
+        ]);
+        let knowledge = EmptyKnowledge;
+        let settings = ClassifierSettings::default();
+
+        let mut dm = DialogueManager::new(
+            test_learner(),
+            &backend,
+            &knowledge,
+            Some(Arc::clone(&storage) as Arc<dyn SessionStore>),
+            Arc::clone(&classifier),
+            settings,
+            PedagogyConfig::default(),
+        );
+
+        dm.open_session().await.unwrap();
+
+        // Run one full turn. After this call a classify_task should be live.
+        let response = dm
+            .respond_to_streaming("Why is the sky blue?", |_| {})
+            .await
+            .unwrap();
+        assert!(!response.is_empty(), "should have a non-empty response");
+
+        // The classify_task is now running (or already done). Simulating the
+        // start of the next turn by calling await_pending_classification
+        // should apply the FrustratedTrying assessment.
+        dm.await_pending_classification().await;
+
+        // Assessment applied: current_engagement updated by the stub.
+        assert_eq!(
+            dm.learner.current_engagement, target_state,
+            "await_pending_classification must apply the spawned assessment"
+        );
+        assert_eq!(
+            dm.learner.recent_assessments.len(),
+            1,
+            "assessment must be pushed into recent_assessments"
+        );
+    }
+
+    #[tokio::test]
+    async fn await_pending_classification_aborts_and_preserves_state_on_timeout() {
+        use primer_classifier::EngagementClassifier;
+        use primer_core::classifier::{EngagementAssessment, EngagementContext};
+        use std::time::Duration;
+
+        // Classifier that sleeps long enough to reliably exceed the test's
+        // blocking_timeout. If the timeout path works, the sleep never
+        // completes (task gets aborted) and current_engagement stays untouched.
+        struct SlowClassifier;
+
+        #[async_trait]
+        impl EngagementClassifier for SlowClassifier {
+            fn identifier(&self) -> &str {
+                "slow"
+            }
+            async fn classify(&self, _ctx: EngagementContext<'_>) -> Result<EngagementAssessment> {
+                tokio::time::sleep(Duration::from_secs(5)).await;
+                Ok(EngagementAssessment {
+                    state: EngagementState::FrustratedTrying,
+                    confidence: 0.99,
+                    reasoning: None,
+                })
+            }
+        }
+
+        let backend = ScriptedBackend::new(vec![Ok(chunk("hi", false)), Ok(chunk("", true))]);
+        let knowledge = EmptyKnowledge;
+        // Tight timeout so the await reliably trips it before the 5s sleep.
+        let settings = ClassifierSettings {
+            blocking_timeout: Duration::from_millis(50),
+            ..ClassifierSettings::default()
+        };
+
+        let mut dm = DialogueManager::new(
+            test_learner(),
+            &backend,
+            &knowledge,
+            None,
+            Arc::new(SlowClassifier),
+            settings,
+            PedagogyConfig::default(),
+        );
+
+        // Run a turn so a classify_task is spawned. The task is still
+        // sleeping when respond_to_streaming returns.
+        let _ = dm.respond_to_streaming("hi", |_| {}).await.unwrap();
+        assert!(
+            dm.classify_task.is_some(),
+            "a classify_task must be spawned after a successful turn"
+        );
+        // Capture the engagement state AFTER respond_to_streaming so the
+        // placeholder word-count heuristic in `update_learner_model` (which
+        // mutates `current_engagement` independently of the classifier) does
+        // not contaminate this test. We're checking that the timeout path
+        // does not apply the slow classifier's pending result, not that the
+        // pre-existing heuristic is bypassed.
+        let initial = dm.learner.current_engagement;
+
+        // This call should hit the timeout path: abort the task, log
+        // tracing::debug!, and return without applying any assessment.
+        let started = std::time::Instant::now();
+        dm.await_pending_classification().await;
+        let elapsed = started.elapsed();
+
+        assert!(
+            elapsed < Duration::from_secs(2),
+            "await_pending_classification must give up within ~blocking_timeout, \
+             not wait for the slow classifier; elapsed={elapsed:?}"
+        );
+        assert_eq!(
+            dm.learner.current_engagement, initial,
+            "timeout path must NOT update current_engagement"
+        );
+        assert!(
+            dm.learner.recent_assessments.is_empty(),
+            "timeout path must NOT push into recent_assessments"
+        );
+        assert!(
+            dm.classify_task.is_none(),
+            "the task handle must be consumed even on timeout"
+        );
+    }
+
+    /// Backend that serves the same single-chunk response on every
+    /// `generate_stream` call. Used by multi-turn tests where the exact
+    /// content of the Primer response does not matter.
+    struct RepeatingBackend;
+
+    #[async_trait]
+    impl InferenceBackend for RepeatingBackend {
+        fn name(&self) -> &str {
+            "repeating-test"
+        }
+        async fn is_available(&self) -> bool {
+            true
+        }
+        async fn generate_stream(
+            &self,
+            _prompt: &Prompt,
+            _params: &GenerationParams,
+        ) -> Result<TokenStream> {
+            let items: Vec<Result<TokenChunk>> = vec![Ok(chunk("ok.", false)), Ok(chunk("", true))];
+            Ok(Box::pin(stream::iter(items)))
+        }
+        async fn summarize(&self, turns: &[Turn], _target_chars: usize) -> Result<String> {
+            Ok(format!(
+                "[repeating-backend summary covering {} turns]",
+                turns.len()
+            ))
+        }
+    }
+
+    // ─── End-to-end: classifier routing across a multi-turn session ───
+
+    #[tokio::test]
+    async fn end_to_end_classifier_routing_across_multi_turn_session() {
+        use primer_classifier::{EngagementClassifier, StubEngagementClassifier};
+        use primer_core::classifier::EngagementAssessment;
+        use primer_core::conversation::PedagogicalIntent;
+        use primer_core::storage::SessionStore;
+        use primer_storage::SqliteSessionStore;
+        use std::time::Duration;
+
+        // Scripted classifier:
+        //   turn 1 -> Engaged, turn 2 -> FrustratedTrying, turn 3 -> Disengaging
+        // Exhausted script falls back to Engaged for turn 4 — but by then
+        // current_engagement is already Disengaging (applied before turn 4 starts).
+        let classifier: Arc<dyn EngagementClassifier> =
+            Arc::new(StubEngagementClassifier::with_script(vec![
+                EngagementAssessment {
+                    state: EngagementState::Engaged,
+                    confidence: 0.9,
+                    reasoning: None,
+                },
+                EngagementAssessment {
+                    state: EngagementState::FrustratedTrying,
+                    confidence: 0.9,
+                    reasoning: None,
+                },
+                EngagementAssessment {
+                    state: EngagementState::Disengaging,
+                    confidence: 0.9,
+                    reasoning: None,
+                },
+            ]));
+
+        let storage: Arc<dyn SessionStore> =
+            Arc::new(SqliteSessionStore::open(std::path::Path::new(":memory:")).unwrap());
+
+        let backend = RepeatingBackend;
+        let knowledge = EmptyKnowledge;
+
+        // Generous blocking timeout for deterministic test behaviour.
+        let settings = ClassifierSettings {
+            blocking_timeout: Duration::from_secs(5),
+            ..Default::default()
+        };
+
+        let mut learner = test_learner();
+        // 60-second threshold: a backdated session (120 s elapsed) reliably
+        // routes Disengaging → SessionClose.
+        learner.preferences.early_disengagement_threshold = Duration::from_secs(60);
+
+        let mut dm = DialogueManager::new(
+            learner,
+            &backend,
+            &knowledge,
+            Some(Arc::clone(&storage) as Arc<dyn SessionStore>),
+            Arc::clone(&classifier),
+            settings,
+            PedagogyConfig::default(),
+        );
+
+        dm.open_session().await.unwrap();
+
+        // Backdate started_at so elapsed (120 s) exceeds the 60-second threshold.
+        // This makes Disengaging → SessionClose rather than Encouragement.
+        dm.session.started_at = Utc::now() - chrono::Duration::seconds(120);
+
+        let session_id = dm.session.id;
+
+        // ── Turn 1 ──
+        // classify task returns Engaged (first script entry).
+        let _r1 = dm
+            .respond_to_streaming("i'm curious about gravity", |_| {})
+            .await
+            .unwrap();
+        // Drain the spawned task; apply Engaged.
+        dm.await_pending_classification().await;
+        assert_eq!(
+            dm.learner.current_engagement,
+            EngagementState::Engaged,
+            "turn 1: engagement must be Engaged"
+        );
+
+        // ── Turn 2 ──
+        // At the START of respond_to_streaming, await_pending_classification
+        // is called internally — but we already drained it above, so there is
+        // nothing to await.  After this call, a new task carrying FrustratedTrying
+        // is spawned.
+        let _r2 = dm
+            .respond_to_streaming("I think it's hard to explain", |_| {})
+            .await
+            .unwrap();
+        // Drain the spawned task; apply FrustratedTrying.
+        dm.await_pending_classification().await;
+        assert_eq!(
+            dm.learner.current_engagement,
+            EngagementState::FrustratedTrying,
+            "turn 2: engagement must be FrustratedTrying after classifier"
+        );
+
+        // ── Turn 3 ──
+        // Task for this turn returns Disengaging.
+        let _r3 = dm
+            .respond_to_streaming("I'm not sure but maybe...", |_| {})
+            .await
+            .unwrap();
+        // Drain; apply Disengaging.
+        dm.await_pending_classification().await;
+        assert_eq!(
+            dm.learner.current_engagement,
+            EngagementState::Disengaging,
+            "turn 3: engagement must be Disengaging after classifier"
+        );
+
+        // ── Turn 4 ──
+        // At the START of respond_to_streaming, await_pending_classification
+        // is called (nothing to drain — we already did it). Then decide_intent
+        // sees Disengaging + elapsed (120 s) > threshold (60 s) → SessionClose.
+        let _r4 = dm.respond_to_streaming("ok", |_| {}).await.unwrap();
+
+        // last_intent reads the intent stored on the most recent Primer turn.
+        let intent = dm.last_intent().expect("intent must be set after turn 4");
+        assert_eq!(
+            intent,
+            PedagogicalIntent::SessionClose,
+            "turn 4: Disengaging + elapsed > threshold must route to SessionClose"
+        );
+
+        // Drain the task spawned after turn 4 (not needed for intent assertion,
+        // but ensures we don't leave background work running after the test).
+        dm.await_pending_classification().await;
+
+        // All four child-turn classifications must have been persisted.
+        let recent = storage
+            .load_recent_assessments(session_id, "stub", 10)
+            .await
+            .unwrap();
+        assert_eq!(
+            recent.len(),
+            4,
+            "all four turn classifications must be persisted; got {}",
+            recent.len()
+        );
     }
 }

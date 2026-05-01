@@ -102,7 +102,7 @@ Vocabulary discipline (applies at every age):
     };
 
     let engagement_note = match learner.current_engagement {
-        EngagementState::Frustrated => {
+        EngagementState::FrustratedStuck | EngagementState::FrustratedTrying => {
             "\n\nIMPORTANT: The child appears frustrated. Be especially gentle. \
              Offer to approach the topic differently or switch topics entirely."
         }
@@ -253,32 +253,101 @@ pub fn extract_active_concepts(session: &Session, last_n: usize) -> Vec<String> 
         .collect()
 }
 
+/// Return `true` if `text` looks like a direct factual lookup.
+///
+/// Only a small set of opening phrases qualify: "what is/are/does", "what's",
+/// and "how does/do/is/are". The trailing space in each prefix prevents
+/// partial-word matches ("whatever", "howdy"). Exploratory forms ("what if",
+/// "what about") and "why" questions are intentionally excluded — those
+/// are Socratic-richer and should not be short-circuited with a direct answer.
+///
+/// This is a private helper for `decide_intent`; Task 19 wires it into
+/// the intent-routing logic.
+fn is_factual_question(text: &str) -> bool {
+    const FACTUAL_PREFIXES: &[&str] = &[
+        "what is ",
+        "what are ",
+        "what's ",
+        "what does ",
+        "how does ",
+        "how do ",
+        "how is ",
+        "how are ",
+    ];
+    let lowered = text.trim().to_lowercase();
+    FACTUAL_PREFIXES.iter().any(|p| lowered.starts_with(p))
+}
+
 /// Decide the next pedagogical intent based on the learner model
 /// and conversation history.
+///
+/// This is a thin wrapper around [`decide_intent_at`] that injects
+/// `chrono::Utc::now()` as the reference time. Production code calls this;
+/// tests call `decide_intent_at` directly with a controlled timestamp.
 pub fn decide_intent(learner: &LearnerModel, session: &Session) -> PedagogicalIntent {
-    // If the child is frustrated, scaffold.
-    if learner.current_engagement == EngagementState::Frustrated {
-        return PedagogicalIntent::Scaffolding;
-    }
+    decide_intent_at(learner, session, chrono::Utc::now())
+}
 
-    // If the child is disengaging, consider closing.
-    if learner.current_engagement == EngagementState::Disengaging {
-        return PedagogicalIntent::SessionClose;
+/// Time-aware core of [`decide_intent`].
+///
+/// Accepts an explicit `now` so tests can backdate sessions deterministically
+/// without real-clock races. The `Disengaging` branch uses `now` together with
+/// `session.started_at` to distinguish an early disengagement (encourage rather
+/// than close) from a sustained one (suggest session close).
+pub fn decide_intent_at(
+    learner: &LearnerModel,
+    session: &Session,
+    now: chrono::DateTime<chrono::Utc>,
+) -> PedagogicalIntent {
+    // Engagement-state overrides fire before turn analysis.
+    match learner.current_engagement {
+        EngagementState::FrustratedStuck => return PedagogicalIntent::Scaffolding,
+        EngagementState::FrustratedTrying => return PedagogicalIntent::Encouragement,
+        EngagementState::Disengaging => {
+            let elapsed = now.signed_duration_since(session.started_at);
+            let elapsed_secs = elapsed.num_seconds().max(0) as u64;
+            let threshold = learner.preferences.early_disengagement_threshold;
+            return if std::time::Duration::from_secs(elapsed_secs) < threshold {
+                PedagogicalIntent::Encouragement
+            } else {
+                PedagogicalIntent::SessionClose
+            };
+        }
+        EngagementState::Engaged | EngagementState::Reflecting | EngagementState::Unknown => { /* fall through to turn analysis */
+        }
     }
 
     // Look at the last turn — if it was a child's response, decide
     // whether to probe comprehension or extend.
     if let Some(last) = session.turns.last() {
         if last.speaker == primer_core::conversation::Speaker::Child {
+            // Gap 2: factual-question pattern routing
+            if is_factual_question(&last.text) {
+                let prior_was_direct_answer = session
+                    .turns
+                    .iter()
+                    .rev()
+                    .skip(1)
+                    .find(|t| t.speaker == primer_core::conversation::Speaker::Primer)
+                    .and_then(|t| t.intent)
+                    .map(|i| i == PedagogicalIntent::DirectAnswer)
+                    .unwrap_or(false);
+                return if prior_was_direct_answer {
+                    PedagogicalIntent::AnswerThenPivot
+                } else {
+                    PedagogicalIntent::DirectAnswer
+                };
+            }
+
             // Simple heuristic: short responses likely need probing,
             // longer responses might demonstrate understanding.
-            if last.text.split_whitespace().count() < 10 {
+            if last.text.split_whitespace().count() < crate::consts::SHORT_TURN_WORD_BOUNDARY {
                 return PedagogicalIntent::ComprehensionCheck;
             }
 
             // Check if any active concepts are at Comprehension level
             // or above — if so, extend.
-            let active = extract_active_concepts(session, 4);
+            let active = extract_active_concepts(session, crate::consts::ACTIVE_CONCEPT_LOOKBACK);
             let has_understood = active.iter().any(|c| {
                 learner
                     .concepts
@@ -328,11 +397,18 @@ mod tests {
             concepts,
             preferences: LearningPreferences::default(),
             current_engagement: engagement,
+            recent_assessments: vec![],
         }
     }
 
     fn empty_session() -> Session {
         Session::new(Uuid::new_v4())
+    }
+
+    fn make_session_started_seconds_ago(seconds_ago: i64) -> Session {
+        let mut s = Session::new(Uuid::new_v4());
+        s.started_at = Utc::now() - chrono::Duration::seconds(seconds_ago);
+        s
     }
 
     fn child_turn(text: &str, concepts: Vec<String>) -> Turn {
@@ -369,45 +445,103 @@ mod tests {
     // ─── Engagement state takes precedence over turn analysis ─────────
 
     #[test]
-    fn frustrated_returns_scaffolding() {
-        let learner = learner_with(EngagementState::Frustrated, vec![]);
+    fn frustrated_stuck_returns_scaffolding() {
+        let learner = learner_with(EngagementState::FrustratedStuck, vec![]);
         let session = empty_session();
         assert_eq!(
             decide_intent(&learner, &session),
-            PedagogicalIntent::Scaffolding,
+            PedagogicalIntent::Scaffolding
         );
     }
 
     #[test]
-    fn frustrated_overrides_short_child_turn_branch() {
+    fn frustrated_stuck_overrides_short_child_turn() {
         // Without frustration, a 1-word child turn would yield ComprehensionCheck.
         // The engagement check fires first.
-        let learner = learner_with(EngagementState::Frustrated, vec![]);
+        let learner = learner_with(EngagementState::FrustratedStuck, vec![]);
         let mut session = empty_session();
         session.add_turn(child_turn("yes", vec![]));
         assert_eq!(
             decide_intent(&learner, &session),
-            PedagogicalIntent::Scaffolding,
+            PedagogicalIntent::Scaffolding
         );
     }
 
     #[test]
-    fn disengaging_returns_session_close() {
-        let learner = learner_with(EngagementState::Disengaging, vec![]);
+    fn frustrated_trying_returns_encouragement() {
+        let learner = learner_with(EngagementState::FrustratedTrying, vec![]);
         let session = empty_session();
         assert_eq!(
             decide_intent(&learner, &session),
+            PedagogicalIntent::Encouragement
+        );
+    }
+
+    #[test]
+    fn frustrated_trying_overrides_short_child_turn() {
+        let learner = learner_with(EngagementState::FrustratedTrying, vec![]);
+        let mut session = empty_session();
+        session.add_turn(child_turn("yes", vec![]));
+        assert_eq!(
+            decide_intent(&learner, &session),
+            PedagogicalIntent::Encouragement
+        );
+    }
+
+    #[test]
+    fn disengaging_late_returns_session_close() {
+        let learner = learner_with(EngagementState::Disengaging, vec![]);
+        let session = make_session_started_seconds_ago(60 * 60); // 1 hour ago
+        let now = Utc::now();
+        assert_eq!(
+            decide_intent_at(&learner, &session, now),
             PedagogicalIntent::SessionClose,
         );
     }
 
     #[test]
-    fn disengaging_overrides_short_child_turn_branch() {
+    fn disengaging_early_returns_encouragement() {
         let learner = learner_with(EngagementState::Disengaging, vec![]);
-        let mut session = empty_session();
+        let session = make_session_started_seconds_ago(60); // 1 minute ago
+        let now = Utc::now();
+        assert_eq!(
+            decide_intent_at(&learner, &session, now),
+            PedagogicalIntent::Encouragement,
+        );
+    }
+
+    #[test]
+    fn disengaging_at_threshold_returns_session_close() {
+        use primer_core::learner::DEFAULT_EARLY_DISENGAGEMENT_SECS;
+        let learner = learner_with(EngagementState::Disengaging, vec![]);
+        let session = make_session_started_seconds_ago(DEFAULT_EARLY_DISENGAGEMENT_SECS as i64);
+        let now = Utc::now();
+        assert_eq!(
+            decide_intent_at(&learner, &session, now),
+            PedagogicalIntent::SessionClose,
+        );
+    }
+
+    #[test]
+    fn disengaging_just_after_threshold_returns_session_close() {
+        use primer_core::learner::DEFAULT_EARLY_DISENGAGEMENT_SECS;
+        let learner = learner_with(EngagementState::Disengaging, vec![]);
+        let session =
+            make_session_started_seconds_ago(DEFAULT_EARLY_DISENGAGEMENT_SECS as i64 + 60);
+        let now = Utc::now();
+        assert_eq!(
+            decide_intent_at(&learner, &session, now),
+            PedagogicalIntent::SessionClose,
+        );
+    }
+
+    #[test]
+    fn disengaging_late_overrides_short_child_turn_branch() {
+        let learner = learner_with(EngagementState::Disengaging, vec![]);
+        let mut session = make_session_started_seconds_ago(60 * 60); // 1 hour ago
         session.add_turn(child_turn("ok", vec![]));
         assert_eq!(
-            decide_intent(&learner, &session),
+            decide_intent_at(&learner, &session, Utc::now()),
             PedagogicalIntent::SessionClose,
         );
     }
@@ -612,33 +746,67 @@ mod tests {
         );
     }
 
-    // ─── Currently-unreachable intents (regression guards) ───────────
-    //
-    // The current heuristic never returns these intents. If a future
-    // change starts emitting them these guards will fail and prompt a
-    // deliberate update — they are NOT a claim that the intents
-    // shouldn't ever be returned.
+    // ─── Factual-question routing (Gap 2) ────────────────────────────
 
     #[test]
-    fn frustrated_does_not_currently_return_encouragement() {
-        let learner = learner_with(EngagementState::Frustrated, vec![]);
-        let session = empty_session();
-        assert_ne!(
+    fn factual_question_what_is_returns_direct_answer() {
+        let learner = learner_with(EngagementState::Engaged, vec![]);
+        let mut session = empty_session();
+        session.add_turn(child_turn("What is gravity?", vec![]));
+        assert_eq!(
             decide_intent(&learner, &session),
-            PedagogicalIntent::Encouragement,
+            PedagogicalIntent::DirectAnswer,
         );
     }
 
     #[test]
-    fn factual_question_pattern_does_not_currently_return_direct_answer() {
-        // "what is X?" is not detected as a factual query; the heuristic
-        // routes purely on engagement state and turn length.
+    fn factual_question_how_does_returns_direct_answer() {
         let learner = learner_with(EngagementState::Engaged, vec![]);
         let mut session = empty_session();
+        session.add_turn(child_turn("How does it work?", vec![]));
+        assert_eq!(
+            decide_intent(&learner, &session),
+            PedagogicalIntent::DirectAnswer,
+        );
+    }
+
+    #[test]
+    fn factual_question_after_direct_answer_returns_answer_then_pivot() {
+        let learner = learner_with(EngagementState::Engaged, vec![]);
+        let mut session = empty_session();
+        session.add_turn(child_turn("What is gravity?", vec![]));
+        let mut primer_t = primer_turn("Gravity is...", vec![]);
+        primer_t.intent = Some(PedagogicalIntent::DirectAnswer);
+        session.add_turn(primer_t);
+        session.add_turn(child_turn("What is mass?", vec![]));
+        assert_eq!(
+            decide_intent(&learner, &session),
+            PedagogicalIntent::AnswerThenPivot,
+        );
+    }
+
+    #[test]
+    fn factual_question_with_frustrated_state_still_routes_via_engagement() {
+        // Engagement-state precedence preserved: frustrated kid asking
+        // "what is X?" still gets the engagement branch (Scaffolding).
+        let learner = learner_with(EngagementState::FrustratedStuck, vec![]);
+        let mut session = empty_session();
         session.add_turn(child_turn("what is gravity?", vec![]));
-        let intent = decide_intent(&learner, &session);
-        assert_ne!(intent, PedagogicalIntent::DirectAnswer);
-        assert_ne!(intent, PedagogicalIntent::AnswerThenPivot);
+        assert_eq!(
+            decide_intent(&learner, &session),
+            PedagogicalIntent::Scaffolding,
+        );
+    }
+
+    #[test]
+    fn non_factual_short_turn_still_returns_comprehension_check() {
+        let learner = learner_with(EngagementState::Engaged, vec![]);
+        let mut session = empty_session();
+        session.add_turn(child_turn("yes", vec![]));
+        assert_eq!(
+            decide_intent(&learner, &session),
+            PedagogicalIntent::ComprehensionCheck,
+        );
     }
 
     // ─── Long-term memory injection (summary + retrieved older) ──────
@@ -717,6 +885,42 @@ mod tests {
         assert!(!prompt.system.contains("Relevant prior moments"));
     }
 
+    // ─── is_factual_question ─────────────────────────────────────────────
+
+    #[test]
+    fn is_factual_question_matches_what_is() {
+        assert!(is_factual_question("What is gravity?"));
+        assert!(is_factual_question("what is gravity?"));
+        assert!(is_factual_question("  WHAT IS gravity?  "));
+    }
+
+    #[test]
+    fn is_factual_question_matches_how_does() {
+        assert!(is_factual_question("how does it work"));
+        assert!(is_factual_question("How do plants eat?"));
+    }
+
+    #[test]
+    fn is_factual_question_does_not_match_partial_words() {
+        // "whatever" must NOT trigger "what" — the prefix list uses trailing space.
+        assert!(!is_factual_question("whatever"));
+        assert!(!is_factual_question("howdy"));
+    }
+
+    #[test]
+    fn is_factual_question_does_not_match_open_ended_what() {
+        // "What if" / "What about" are exploratory, not factual lookups.
+        assert!(!is_factual_question("what if we tried"));
+        assert!(!is_factual_question("what about us"));
+    }
+
+    #[test]
+    fn is_factual_question_drops_why_questions() {
+        // "why" forms are deliberately left out — Socratic-richer.
+        assert!(!is_factual_question("why is the sky blue"));
+        assert!(!is_factual_question("why does it rain"));
+    }
+
     #[test]
     fn build_prompt_chat_messages_remain_recent_window_only() {
         // Long-term memory (summary + retrieved older) lives in the
@@ -744,5 +948,45 @@ mod tests {
         // Summary and retrieved appeared in system prompt — not as messages.
         assert!(prompt.system.contains("summary text"));
         assert!(prompt.system.contains("retrieved"));
+    }
+
+    // ─── engagement_note coverage for new EngagementState variants ───
+
+    #[test]
+    fn build_prompt_includes_engagement_note_for_frustrated_stuck() {
+        let learner = learner_with(EngagementState::FrustratedStuck, vec![]);
+        let session = empty_session();
+        let prompt = build_prompt(
+            &learner,
+            &session,
+            PedagogicalIntent::Scaffolding,
+            &[],
+            "",
+            &[],
+            20,
+        );
+        assert!(
+            prompt.system.contains("appears frustrated"),
+            "engagement note should appear for FrustratedStuck"
+        );
+    }
+
+    #[test]
+    fn build_prompt_includes_engagement_note_for_frustrated_trying() {
+        let learner = learner_with(EngagementState::FrustratedTrying, vec![]);
+        let session = empty_session();
+        let prompt = build_prompt(
+            &learner,
+            &session,
+            PedagogicalIntent::Encouragement,
+            &[],
+            "",
+            &[],
+            20,
+        );
+        assert!(
+            prompt.system.contains("appears frustrated"),
+            "engagement note should appear for FrustratedTrying"
+        );
     }
 }

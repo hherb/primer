@@ -40,11 +40,11 @@ impl SqliteSessionStore {
     /// an in-memory database.
     ///
     /// Creates the schema if missing, sets `PRAGMA foreign_keys = ON`,
-    /// asserts/sets `PRAGMA user_version`, and applies v2 migrations
-    /// (summary fields + FTS index) to bring older DBs up to date. The
-    /// migrations are idempotent — safe to run on fresh, v1, or v2 DBs.
-    /// A version newer than this build understands is a hard error
-    /// rather than a silent downgrade.
+    /// asserts/sets `PRAGMA user_version`, and applies v2 and v3
+    /// migrations to bring older DBs up to date. The migrations are
+    /// idempotent — safe to run on fresh, v1, v2, or v3 DBs. A version
+    /// newer than this build understands is a hard error rather than a
+    /// silent downgrade.
     pub fn open(path: &Path) -> Result<Self> {
         let conn = Connection::open(path)
             .map_err(|e| PrimerError::Storage(format!("open failed: {e}")))?;
@@ -72,6 +72,10 @@ impl SqliteSessionStore {
         // and the FTS5 turn-text index if not already present.
         schema::apply_v2_migrations(&conn)?;
 
+        // v3 migrations: idempotent on every open. Adds engagement_states,
+        // classifiers, and turn_classifications tables.
+        schema::apply_v3_migrations(&conn)?;
+
         if existing_version != schema::USER_VERSION {
             conn.execute_batch(&format!("PRAGMA user_version = {};", schema::USER_VERSION))
                 .map_err(|e| PrimerError::Storage(format!("set user_version failed: {e}")))?;
@@ -82,8 +86,10 @@ impl SqliteSessionStore {
         // idempotent INSERTs.
         let speakers = catalog::expected_speakers();
         let intents = catalog::expected_intents();
+        let engagement_states = catalog::expected_engagement_states();
         schema::validate_and_seed_lookup(&conn, "speakers", &speakers)?;
         schema::validate_and_seed_lookup(&conn, "pedagogical_intents", &intents)?;
+        schema::validate_and_seed_lookup(&conn, "engagement_states", &engagement_states)?;
 
         Ok(Self {
             conn: Mutex::new(conn),
@@ -446,6 +452,126 @@ impl primer_core::storage::SessionStore for SqliteSessionStore {
         }
         Ok(out)
     }
+
+    async fn save_classification(
+        &self,
+        session_id: primer_core::conversation::SessionId,
+        turn_index: usize,
+        assessment: &primer_core::classifier::EngagementAssessment,
+        classifier_identifier: &str,
+    ) -> Result<()> {
+        let conn = self.conn.lock().unwrap();
+
+        // Resolve (session_id, turn_index) → turn.id
+        let turn_id: i64 = conn
+            .query_row(
+                "SELECT id FROM turns WHERE session_id = ?1 AND turn_index = ?2",
+                rusqlite::params![session_id.to_string(), turn_index as i64],
+                |r| r.get(0),
+            )
+            .map_err(|e| {
+                PrimerError::Storage(format!(
+                    "save_classification: turn_id lookup ({session_id}, {turn_index}): {e}"
+                ))
+            })?;
+
+        let classifier_id = catalog::get_or_create_classifier_id(&conn, classifier_identifier)?;
+        let state_id = catalog::engagement_state_id(assessment.state);
+
+        conn.execute(
+            "INSERT INTO turn_classifications
+                 (turn_id, engagement_state_id, classifier_id, confidence, reasoning, classified_at)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+            rusqlite::params![
+                turn_id,
+                state_id,
+                classifier_id,
+                assessment.confidence,
+                assessment.reasoning.as_deref(),
+                Utc::now().to_rfc3339(),
+            ],
+        )
+        .map_err(|e| PrimerError::Storage(format!("save_classification: insert: {e}")))?;
+
+        Ok(())
+    }
+
+    async fn load_recent_assessments(
+        &self,
+        session_id: primer_core::conversation::SessionId,
+        classifier_identifier: &str,
+        k: usize,
+    ) -> Result<Vec<primer_core::classifier::EngagementAssessment>> {
+        let conn = self.conn.lock().unwrap();
+
+        // If the classifier has never been created, there are no rows.
+        let classifier_id: Option<i64> = conn
+            .query_row(
+                "SELECT id FROM classifiers WHERE identifier = ?1",
+                rusqlite::params![classifier_identifier],
+                |r| r.get(0),
+            )
+            .optional()
+            .map_err(|e| {
+                PrimerError::Storage(format!("load_recent_assessments: classifier lookup: {e}"))
+            })?;
+
+        let Some(classifier_id) = classifier_id else {
+            return Ok(vec![]);
+        };
+
+        // Fetch the k most-recent rows (DESC by classified_at), then
+        // reverse so the caller gets oldest-first within the window.
+        let mut stmt = conn
+            .prepare(
+                "SELECT tc.engagement_state_id, tc.confidence, tc.reasoning
+                 FROM turn_classifications tc
+                 JOIN turns t ON t.id = tc.turn_id
+                 WHERE t.session_id = ?1
+                   AND tc.classifier_id = ?2
+                 ORDER BY tc.classified_at DESC
+                 LIMIT ?3",
+            )
+            .map_err(|e| PrimerError::Storage(format!("load_recent_assessments: prepare: {e}")))?;
+
+        let mut rows: Vec<primer_core::classifier::EngagementAssessment> = stmt
+            .query_map(
+                rusqlite::params![session_id.to_string(), classifier_id, k as i64],
+                |r| {
+                    Ok((
+                        r.get::<_, i64>(0)?,
+                        r.get::<_, f32>(1)?,
+                        r.get::<_, Option<String>>(2)?,
+                    ))
+                },
+            )
+            .map_err(|e| PrimerError::Storage(format!("load_recent_assessments: query: {e}")))?
+            .filter_map(|res| {
+                let (state_id, confidence, reasoning) = res.ok()?;
+                let Some(state) = catalog::engagement_state_from_id(state_id) else {
+                    // Row written by a newer build that knows an EngagementState
+                    // variant this build does not. Drop the row but make the
+                    // skew visible so the operator can spot version-rollback
+                    // issues; otherwise rehydrated history would silently shrink.
+                    tracing::warn!(
+                        engagement_state_id = state_id,
+                        classifier = classifier_identifier,
+                        "load_recent_assessments: dropping row with unknown engagement_state_id (DB written by newer build?)"
+                    );
+                    return None;
+                };
+                Some(primer_core::classifier::EngagementAssessment {
+                    state,
+                    confidence,
+                    reasoning,
+                })
+            })
+            .collect();
+
+        // Reverse DESC → oldest-first for the caller's trajectory buffer.
+        rows.reverse();
+        Ok(rows)
+    }
 }
 
 fn parse_rfc3339(s: &str, field: &str) -> Result<DateTime<Utc>> {
@@ -536,7 +662,7 @@ mod tests {
             .unwrap();
         assert_eq!(fk, 1);
 
-        // All six base tables exist, plus the v2 FTS index.
+        // All base tables exist, plus the v2 FTS index and the v3 tables.
         for table in &[
             "speakers",
             "pedagogical_intents",
@@ -545,6 +671,9 @@ mod tests {
             "turns",
             "turn_concepts",
             "turn_text_fts",
+            "engagement_states",
+            "classifiers",
+            "turn_classifications",
         ] {
             let count: i64 = conn
                 .query_row(
@@ -621,6 +750,61 @@ mod tests {
             )
             .unwrap();
         assert_eq!(name, "SocraticQuestion");
+    }
+
+    #[test]
+    fn open_seeds_engagement_states_on_fresh_db() {
+        let store = open_memory();
+        let conn = store.conn.lock().unwrap();
+
+        let count: i64 = conn
+            .query_row("SELECT COUNT(*) FROM engagement_states", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(
+            count,
+            primer_core::learner::EngagementState::ALL.len() as i64,
+            "engagement_states row count must equal EngagementState::ALL.len()"
+        );
+
+        // Verify every expected (id, name) pair is present.
+        for (id, name) in catalog::expected_engagement_states() {
+            let actual_name: String = conn
+                .query_row(
+                    "SELECT name FROM engagement_states WHERE id = ?1",
+                    rusqlite::params![id],
+                    |r| r.get(0),
+                )
+                .unwrap_or_else(|_| panic!("no engagement_states row with id={id}"));
+            assert_eq!(actual_name, name, "engagement_states id={id} name mismatch");
+        }
+    }
+
+    #[test]
+    fn open_validates_engagement_states_rejects_name_mismatch() {
+        // Hand-roll a DB with a corrupted engagement_states row, then open
+        // it via SqliteSessionStore::open — it must return an error.
+        let tmp = tempfile_path();
+        {
+            let conn = Connection::open(&tmp).unwrap();
+            // Create the table manually with one wrong name so the validator
+            // fires before any migration seeds the correct data.
+            conn.execute_batch(
+                "
+                PRAGMA foreign_keys = ON;
+                CREATE TABLE engagement_states (id INTEGER PRIMARY KEY, name TEXT NOT NULL UNIQUE);
+                INSERT INTO engagement_states (id, name) VALUES (1, 'WRONG_NAME');
+                PRAGMA user_version = 1;
+                ",
+            )
+            .unwrap();
+        }
+        let err = SqliteSessionStore::open(&tmp).unwrap_err();
+        let msg = format!("{err}");
+        assert!(
+            msg.contains("WRONG_NAME") || msg.contains("Engaged"),
+            "error should mention the conflict: {msg}"
+        );
+        let _ = std::fs::remove_file(&tmp);
     }
 
     #[test]
@@ -1564,5 +1748,279 @@ mod tests {
             .await
             .unwrap();
         assert!(hits.is_empty());
+    }
+
+    // ─── v3 migration ────────────────────────────────────────────────
+
+    #[test]
+    fn apply_v3_migrations_creates_all_three_tables() {
+        let conn = rusqlite::Connection::open_in_memory().unwrap();
+        // Set up v2 baseline: existing schema must be valid before v3 runs.
+        conn.execute_batch(schema::SCHEMA_SQL).unwrap();
+        schema::apply_v2_migrations(&conn).unwrap();
+
+        schema::apply_v3_migrations(&conn).unwrap();
+
+        for table in ["engagement_states", "classifiers", "turn_classifications"] {
+            let count: i64 = conn
+                .query_row(
+                    "SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name=?1",
+                    [table],
+                    |r| r.get(0),
+                )
+                .unwrap();
+            assert_eq!(count, 1, "{table} not created by v3 migration");
+        }
+    }
+
+    #[test]
+    fn apply_v3_migrations_is_idempotent() {
+        let conn = rusqlite::Connection::open_in_memory().unwrap();
+        conn.execute_batch(schema::SCHEMA_SQL).unwrap();
+        schema::apply_v2_migrations(&conn).unwrap();
+        schema::apply_v3_migrations(&conn).unwrap();
+        schema::apply_v3_migrations(&conn).unwrap(); // second call must succeed
+    }
+
+    #[test]
+    fn apply_v3_migrations_creates_index_on_turn_classifications() {
+        let conn = rusqlite::Connection::open_in_memory().unwrap();
+        conn.execute_batch(schema::SCHEMA_SQL).unwrap();
+        schema::apply_v2_migrations(&conn).unwrap();
+        schema::apply_v3_migrations(&conn).unwrap();
+
+        let count: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM sqlite_master WHERE type='index' AND name='idx_turn_classifications_turn_id'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(count, 1);
+    }
+
+    #[test]
+    fn user_version_is_three() {
+        assert_eq!(schema::USER_VERSION, 3);
+    }
+
+    // ─── save_classification / load_recent_assessments ───────────────
+
+    #[tokio::test]
+    async fn save_classification_persists_to_table() {
+        use primer_core::classifier::EngagementAssessment;
+        use primer_core::conversation::Speaker;
+        use primer_core::learner::EngagementState;
+        use primer_core::storage::SessionStore;
+
+        let store = open_memory();
+        let mut session = Session::new(Uuid::new_v4());
+        session.add_turn(Turn {
+            speaker: Speaker::Child,
+            text: "what is gravity?".into(),
+            timestamp: Utc::now(),
+            intent: None,
+            concepts: vec![],
+        });
+        store.save_session(&session).await.unwrap();
+
+        let assessment = EngagementAssessment {
+            state: EngagementState::Engaged,
+            confidence: 0.92,
+            reasoning: Some("child curious".into()),
+        };
+        store
+            .save_classification(session.id, 0, &assessment, "stub")
+            .await
+            .unwrap();
+
+        let loaded = store
+            .load_recent_assessments(session.id, "stub", 10)
+            .await
+            .unwrap();
+        assert_eq!(loaded.len(), 1);
+        assert_eq!(loaded[0].state, EngagementState::Engaged);
+        assert!((loaded[0].confidence - 0.92).abs() < 1e-6);
+        assert_eq!(loaded[0].reasoning.as_deref(), Some("child curious"));
+    }
+
+    #[tokio::test]
+    async fn save_classification_handles_null_reasoning() {
+        use primer_core::classifier::EngagementAssessment;
+        use primer_core::conversation::Speaker;
+        use primer_core::learner::EngagementState;
+        use primer_core::storage::SessionStore;
+
+        let store = open_memory();
+        let mut session = Session::new(Uuid::new_v4());
+        session.add_turn(Turn {
+            speaker: Speaker::Child,
+            text: "ok".into(),
+            timestamp: Utc::now(),
+            intent: None,
+            concepts: vec![],
+        });
+        store.save_session(&session).await.unwrap();
+
+        let assessment = EngagementAssessment {
+            state: EngagementState::Reflecting,
+            confidence: 0.5,
+            reasoning: None,
+        };
+        store
+            .save_classification(session.id, 0, &assessment, "stub")
+            .await
+            .unwrap();
+
+        let loaded = store
+            .load_recent_assessments(session.id, "stub", 10)
+            .await
+            .unwrap();
+        assert_eq!(loaded.len(), 1);
+        assert_eq!(loaded[0].reasoning, None);
+    }
+
+    #[tokio::test]
+    async fn save_classification_unique_constraint_fires_on_duplicate() {
+        use primer_core::classifier::EngagementAssessment;
+        use primer_core::conversation::Speaker;
+        use primer_core::learner::EngagementState;
+        use primer_core::storage::SessionStore;
+
+        let store = open_memory();
+        let mut session = Session::new(Uuid::new_v4());
+        session.add_turn(Turn {
+            speaker: Speaker::Child,
+            text: "x".into(),
+            timestamp: Utc::now(),
+            intent: None,
+            concepts: vec![],
+        });
+        store.save_session(&session).await.unwrap();
+
+        let a = EngagementAssessment {
+            state: EngagementState::Engaged,
+            confidence: 0.5,
+            reasoning: None,
+        };
+        store
+            .save_classification(session.id, 0, &a, "stub")
+            .await
+            .unwrap();
+        // Same classifier on same turn — must error (logic bug to surface).
+        let err = store.save_classification(session.id, 0, &a, "stub").await;
+        assert!(err.is_err());
+    }
+
+    #[tokio::test]
+    async fn load_recent_assessments_filters_by_classifier_identifier() {
+        use primer_core::classifier::EngagementAssessment;
+        use primer_core::conversation::Speaker;
+        use primer_core::learner::EngagementState;
+        use primer_core::storage::SessionStore;
+
+        let store = open_memory();
+        let mut session = Session::new(Uuid::new_v4());
+        session.add_turn(Turn {
+            speaker: Speaker::Child,
+            text: "x".into(),
+            timestamp: Utc::now(),
+            intent: None,
+            concepts: vec![],
+        });
+        store.save_session(&session).await.unwrap();
+
+        let a = EngagementAssessment {
+            state: EngagementState::Engaged,
+            confidence: 0.5,
+            reasoning: None,
+        };
+        store
+            .save_classification(session.id, 0, &a, "stub")
+            .await
+            .unwrap();
+        store
+            .save_classification(session.id, 0, &a, "llm:haiku")
+            .await
+            .unwrap();
+
+        let stub_only = store
+            .load_recent_assessments(session.id, "stub", 10)
+            .await
+            .unwrap();
+        assert_eq!(stub_only.len(), 1);
+
+        let llm_only = store
+            .load_recent_assessments(session.id, "llm:haiku", 10)
+            .await
+            .unwrap();
+        assert_eq!(llm_only.len(), 1);
+    }
+
+    #[tokio::test]
+    async fn load_recent_assessments_respects_k_limit() {
+        use primer_core::classifier::EngagementAssessment;
+        use primer_core::conversation::Speaker;
+        use primer_core::learner::EngagementState;
+        use primer_core::storage::SessionStore;
+
+        let store = open_memory();
+        let mut session = Session::new(Uuid::new_v4());
+        for i in 0..5 {
+            session.add_turn(Turn {
+                speaker: Speaker::Child,
+                text: format!("t{i}"),
+                timestamp: Utc::now(),
+                intent: None,
+                concepts: vec![],
+            });
+        }
+        store.save_session(&session).await.unwrap();
+
+        for i in 0..5usize {
+            let confidence = 0.1 + (i as f32) * 0.1;
+            let a = EngagementAssessment {
+                state: EngagementState::Engaged,
+                confidence,
+                reasoning: None,
+            };
+            store
+                .save_classification(session.id, i, &a, "stub")
+                .await
+                .unwrap();
+            // Tiny sleep so classified_at is monotonic.
+            tokio::time::sleep(std::time::Duration::from_millis(2)).await;
+        }
+
+        let loaded = store
+            .load_recent_assessments(session.id, "stub", 2)
+            .await
+            .unwrap();
+        assert_eq!(loaded.len(), 2);
+        // Must be the most-recent two, ordered oldest-first within the result.
+        assert!(
+            (loaded[0].confidence - 0.4).abs() < 1e-6,
+            "expected 0.4, got {}",
+            loaded[0].confidence
+        );
+        assert!(
+            (loaded[1].confidence - 0.5).abs() < 1e-6,
+            "expected 0.5, got {}",
+            loaded[1].confidence
+        );
+    }
+
+    #[tokio::test]
+    async fn load_recent_assessments_returns_empty_when_no_classifications() {
+        use primer_core::storage::SessionStore;
+
+        let store = open_memory();
+        let session = Session::new(Uuid::new_v4());
+        store.save_session(&session).await.unwrap();
+        let loaded = store
+            .load_recent_assessments(session.id, "stub", 10)
+            .await
+            .unwrap();
+        assert!(loaded.is_empty());
     }
 }

@@ -1,8 +1,12 @@
 //! Canonical mappings between Rust enum variants and their on-disk
 //! integer IDs. This module is the single source of truth for the
-//! contents of the `speakers` and `pedagogical_intents` lookup tables.
+//! contents of the `speakers`, `pedagogical_intents`, and
+//! `engagement_states` lookup tables.
 
 use primer_core::conversation::{PedagogicalIntent, Speaker};
+use primer_core::error::{PrimerError, Result};
+use primer_core::learner::EngagementState;
+use rusqlite::{Connection, OptionalExtension, params};
 
 /// Stable on-disk integer ID for every `Speaker` variant.
 ///
@@ -81,6 +85,146 @@ pub fn expected_intents() -> Vec<(i64, &'static str)> {
         .iter()
         .map(|i| (intent_id(*i), intent_name(*i)))
         .collect()
+}
+
+/// Stable on-disk integer ID for every `EngagementState` variant.
+///
+/// Explicit match arms so reordering variants in `primer-core`
+/// cannot silently shift IDs already on disk.
+pub fn engagement_state_id(state: EngagementState) -> i64 {
+    match state {
+        EngagementState::Engaged => 1,
+        EngagementState::Reflecting => 2,
+        EngagementState::FrustratedStuck => 3,
+        EngagementState::FrustratedTrying => 4,
+        EngagementState::Disengaging => 5,
+        EngagementState::Unknown => 6,
+    }
+}
+
+/// Human-readable name stored alongside the ID in the `engagement_states`
+/// lookup table.
+pub fn engagement_state_name(state: EngagementState) -> &'static str {
+    match state {
+        EngagementState::Engaged => "Engaged",
+        EngagementState::Reflecting => "Reflecting",
+        EngagementState::FrustratedStuck => "FrustratedStuck",
+        EngagementState::FrustratedTrying => "FrustratedTrying",
+        EngagementState::Disengaging => "Disengaging",
+        EngagementState::Unknown => "Unknown",
+    }
+}
+
+/// Reverse lookup: integer ID → `EngagementState`. Returns `None` for
+/// IDs the current build doesn't know about.
+pub fn engagement_state_from_id(id: i64) -> Option<EngagementState> {
+    EngagementState::ALL
+        .iter()
+        .copied()
+        .find(|v| engagement_state_id(*v) == id)
+}
+
+/// All `(id, name)` pairs the storage layer expects to see in the
+/// `engagement_states` lookup table. Used by the validate-and-seed pass.
+pub fn expected_engagement_states() -> Vec<(i64, &'static str)> {
+    EngagementState::ALL
+        .iter()
+        .map(|s| (engagement_state_id(*s), engagement_state_name(*s)))
+        .collect()
+}
+
+/// Look up an existing `classifiers` row by `identifier`, or insert one
+/// and return the freshly-assigned `AUTOINCREMENT` id.
+///
+/// This is the single choke-point for mapping a classifier identifier
+/// string (e.g. `"stub"` or `"llm:claude-haiku-4-5"`) to its integer FK
+/// used in `turn_classifications`. Callers never need to know whether the
+/// row was created now or already existed.
+pub(crate) fn get_or_create_classifier_id(conn: &Connection, identifier: &str) -> Result<i64> {
+    if let Some(id) = conn
+        .query_row(
+            "SELECT id FROM classifiers WHERE identifier = ?1",
+            params![identifier],
+            |r| r.get::<_, i64>(0),
+        )
+        .optional()
+        .map_err(|e| PrimerError::Storage(format!("classifier lookup: {e}")))?
+    {
+        return Ok(id);
+    }
+    conn.execute(
+        "INSERT INTO classifiers (identifier) VALUES (?1)",
+        params![identifier],
+    )
+    .map_err(|e| PrimerError::Storage(format!("classifier insert: {e}")))?;
+    Ok(conn.last_insert_rowid())
+}
+
+#[cfg(test)]
+mod classifier_row_tests {
+    use super::*;
+    use rusqlite::Connection;
+
+    fn v3_conn() -> Connection {
+        let conn = Connection::open_in_memory().unwrap();
+        conn.execute_batch(crate::schema::SCHEMA_SQL).unwrap();
+        crate::schema::apply_v2_migrations(&conn).unwrap();
+        crate::schema::apply_v3_migrations(&conn).unwrap();
+        conn
+    }
+
+    #[test]
+    fn get_or_create_classifier_id_creates_on_first_call() {
+        let conn = v3_conn();
+        let id1 = get_or_create_classifier_id(&conn, "stub").unwrap();
+        let id2 = get_or_create_classifier_id(&conn, "stub").unwrap();
+        assert_eq!(id1, id2, "second call must return the same id");
+    }
+
+    #[test]
+    fn get_or_create_classifier_id_handles_distinct_identifiers() {
+        let conn = v3_conn();
+        let stub = get_or_create_classifier_id(&conn, "stub").unwrap();
+        let llm = get_or_create_classifier_id(&conn, "llm:claude-haiku-4-5").unwrap();
+        assert_ne!(stub, llm);
+    }
+}
+
+#[cfg(test)]
+mod engagement_state_tests {
+    use super::*;
+    use primer_core::learner::EngagementState;
+
+    #[test]
+    fn engagement_state_id_is_stable_for_every_variant() {
+        // Document the canonical id->variant mapping. If you ever
+        // need to change these ids, retired ones must NEVER be reused.
+        assert_eq!(engagement_state_id(EngagementState::Engaged), 1);
+        assert_eq!(engagement_state_id(EngagementState::Reflecting), 2);
+        assert_eq!(engagement_state_id(EngagementState::FrustratedStuck), 3);
+        assert_eq!(engagement_state_id(EngagementState::FrustratedTrying), 4);
+        assert_eq!(engagement_state_id(EngagementState::Disengaging), 5);
+        assert_eq!(engagement_state_id(EngagementState::Unknown), 6);
+    }
+
+    #[test]
+    fn engagement_state_from_id_is_inverse_of_id() {
+        for state in EngagementState::ALL {
+            let id = engagement_state_id(*state);
+            assert_eq!(engagement_state_from_id(id), Some(*state));
+        }
+    }
+
+    #[test]
+    fn engagement_state_from_id_returns_none_on_unknown_id() {
+        assert!(engagement_state_from_id(999).is_none());
+    }
+
+    #[test]
+    fn expected_engagement_states_covers_all_variants() {
+        let pairs = expected_engagement_states();
+        assert_eq!(pairs.len(), EngagementState::ALL.len());
+    }
 }
 
 #[cfg(test)]

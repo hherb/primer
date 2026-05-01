@@ -1376,6 +1376,20 @@ dependencies = [
 ]
 
 [[package]]
+name = "primer-classifier"
+version = "0.1.0"
+dependencies = [
+ "async-trait",
+ "chrono",
+ "futures",
+ "primer-core",
+ "serde",
+ "serde_json",
+ "tokio",
+ "tracing",
+]
+
+[[package]]
 name = "primer-cli"
 version = "0.1.0"
 dependencies = [
@@ -1383,6 +1397,7 @@ dependencies = [
  "chrono",
  "clap",
  "dotenvy",
+ "primer-classifier",
  "primer-core",
  "primer-inference",
  "primer-knowledge",
@@ -1450,7 +1465,9 @@ dependencies = [
  "async-trait",
  "chrono",
  "futures",
+ "primer-classifier",
  "primer-core",
+ "primer-storage",
  "serde",
  "serde_json",
  "thiserror 2.0.18",
