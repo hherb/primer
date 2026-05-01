@@ -721,6 +721,48 @@ mod classifier_construction_tests {
         // Main is stub → classifier defaults to stub regardless of model override.
         assert_eq!(c.identifier(), "stub");
     }
+
+    /// `--classifier-model` override on a NON-stub main constructs a fresh
+    /// backend of the same type with the override model (case 5 in the dispatch
+    /// matrix, lines 284-292 in build_classifier).
+    ///
+    /// The `main_backend` Arc is a stub (we cannot unit-test real cloud/ollama
+    /// without live infrastructure), but `main_backend_name` is "ollama" so the
+    /// dispatch falls through to the model-override branch and calls
+    /// `build_backend("ollama", "override-model", params)`.  `OllamaBackend::new`
+    /// is purely constructive (no I/O), so this succeeds in unit tests.
+    #[tokio::test]
+    async fn classifier_model_override_on_non_stub_main_constructs_fresh_backend() {
+        let params = params_with(None, Some("override-model"));
+        // The Arc itself is a stub, but the *name* string "ollama" drives dispatch.
+        let main = build_backend("stub", "main".into(), &params).await.unwrap();
+        let c = build_classifier(
+            main,
+            "ollama", // non-stub name → falls through to model-override arm
+            "main-model",
+            &params,
+            ClassifierSettings::default(),
+        )
+        .await
+        .unwrap();
+        // A fresh OllamaBackend is constructed with "override-model"; the
+        // classifier identifier must reflect the override, not the main model.
+        assert_eq!(c.identifier(), "llm:override-model");
+    }
+
+    /// An unknown `--classifier-backend` value must return an error (the
+    /// explicit-backend arm calls `build_backend`, which errors on unknown names).
+    #[tokio::test]
+    async fn unknown_classifier_backend_returns_error() {
+        let params = params_with(Some("nonexistent"), Some("any-model"));
+        let main = build_backend("stub", "main".into(), &params).await.unwrap();
+        let result =
+            build_classifier(main, "stub", "main", &params, ClassifierSettings::default()).await;
+        assert!(
+            result.is_err(),
+            "should error when --classifier-backend names an unknown backend"
+        );
+    }
 }
 
 #[cfg(test)]
