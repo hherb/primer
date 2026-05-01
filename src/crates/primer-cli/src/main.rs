@@ -21,6 +21,7 @@ use primer_knowledge::SqliteKnowledgeBase;
 use primer_pedagogy::DialogueManager;
 use std::io::{self, BufRead, Write};
 use std::path::{Path, PathBuf};
+use unicode_normalization::UnicodeNormalization;
 use uuid::Uuid;
 
 /// SQLite path token for an in-memory database — used as the default
@@ -72,25 +73,39 @@ struct Cli {
     /// exist or no session with that id is stored. Works with any
     /// backend including stub: historical turns provide context, new
     /// turns get backend-appropriate responses.
-    #[arg(long, value_name = "UUID")]
+    #[arg(long, value_name = "UUID", conflicts_with = "no_persist")]
     resume: Option<Uuid>,
+
+    /// Run the session in-memory only — nothing is written to disk
+    /// and the conversation evaporates on exit. Useful for quick
+    /// experiments and tests; the per-learner default-path persistence
+    /// stays out of the way. Mutually exclusive with `--resume` and
+    /// `--session-db`.
+    #[arg(long, conflicts_with_all = ["session_db", "resume"])]
+    no_persist: bool,
 
     /// Anthropic API key (for cloud backend).
     #[arg(long, env = "ANTHROPIC_API_KEY")]
     api_key: Option<String>,
 }
 
-/// Slugify a learner name into a filesystem-safe filename stem. ASCII
-/// alphanumerics are kept (lowercased); every other character becomes
-/// `-`; runs of `-` collapse; leading/trailing `-` are stripped. An
-/// empty result falls back to `default` so we always produce a valid
-/// filename.
+/// Slugify a learner name into a filesystem-safe filename stem.
+///
+/// The input is first NFC-normalized so two visually identical names
+/// (e.g. precomposed `é` vs decomposed `e` + combining acute) map to
+/// the same slug. Characters that Unicode classifies as alphanumeric
+/// — Latin, Cyrillic, CJK, etc. — are kept (Latin is lowercased; CJK
+/// has no case so it round-trips). Every other character becomes `-`;
+/// runs of `-` collapse; leading/trailing `-` are stripped. An empty
+/// result falls back to `default` so we always produce a valid filename.
 fn slug(name: &str) -> String {
-    let mut out = String::with_capacity(name.len());
+    let normalized: String = name.nfc().collect();
+    let lowered = normalized.to_lowercase();
+    let mut out = String::with_capacity(lowered.len());
     let mut last_was_sep = true; // suppress leading sep
-    for c in name.chars() {
-        if c.is_ascii_alphanumeric() {
-            out.push(c.to_ascii_lowercase());
+    for c in lowered.chars() {
+        if c.is_alphanumeric() {
+            out.push(c);
             last_was_sep = false;
         } else if !last_was_sep {
             out.push('-');
@@ -108,21 +123,38 @@ fn slug(name: &str) -> String {
 }
 
 /// Resolve the path to use for the session database.
-/// `~/.primer/<slug(name)>.db` when no explicit path is given, or the
-/// explicit path verbatim when one is. Returns the resolved path along
-/// with a flag indicating whether it lives under the default home.
+/// `:memory:` when `no_persist` is set; otherwise the explicit path if
+/// given, falling back to `<home>/.primer/<slug(name)>.db`. The home
+/// directory is taken as a parameter so callers can supply it from any
+/// source (env var in production, synthetic value in tests) without
+/// this function touching the process environment.
 fn resolve_session_db_path(
     explicit: Option<PathBuf>,
+    home: &Path,
     learner_name: &str,
-) -> Result<PathBuf, String> {
-    if let Some(path) = explicit {
-        return Ok(path);
+    no_persist: bool,
+) -> PathBuf {
+    if no_persist {
+        return PathBuf::from(IN_MEMORY);
     }
-    let home = std::env::var("HOME").map_err(|_| {
-        "Cannot find HOME env var to default --session-db; pass it explicitly".to_string()
-    })?;
-    let dir = PathBuf::from(home).join(PRIMER_HOME_DIR);
-    Ok(dir.join(format!("{}.db", slug(learner_name))))
+    explicit.unwrap_or_else(|| {
+        home.join(PRIMER_HOME_DIR)
+            .join(format!("{}.db", slug(learner_name)))
+    })
+}
+
+/// Should we print the "we just started persisting your sessions"
+/// banner? True only when the session DB is at the default path AND
+/// the file did not exist before this run AND the user did not opt
+/// out via `--no-persist`. The banner answers the legitimate "where
+/// did my conversation go?" question that the silent default-path
+/// change would otherwise raise.
+fn should_show_first_run_banner(
+    explicit_session_db: bool,
+    no_persist: bool,
+    file_existed_before: bool,
+) -> bool {
+    !explicit_session_db && !no_persist && !file_existed_before
 }
 
 fn create_learner(name: &str, age: u8) -> LearnerModel {
@@ -208,16 +240,28 @@ async fn main() -> anyhow::Result<()> {
     let knowledge = SqliteKnowledgeBase::open(&knowledge_path)?;
 
     // Session store — defaults to a per-learner file under `~/.primer/`.
-    let session_path = match resolve_session_db_path(cli.session_db, &cli.name) {
-        Ok(p) => p,
-        Err(msg) => {
-            eprintln!("Error: {msg}");
-            std::process::exit(1);
+    // We look up HOME here (rather than inside `resolve_session_db_path`)
+    // so the function stays a pure path computation that's trivial to test.
+    let explicit_session_db = cli.session_db.is_some();
+    let home = match std::env::var("HOME") {
+        Ok(h) => PathBuf::from(h),
+        Err(_) => {
+            if cli.session_db.is_none() && !cli.no_persist {
+                eprintln!(
+                    "Error: cannot find HOME env var to default --session-db; pass it explicitly"
+                );
+                std::process::exit(1);
+            }
+            // HOME is unused when an explicit path is given or --no-persist is set.
+            PathBuf::new()
         }
     };
+    let session_path = resolve_session_db_path(cli.session_db, &home, &cli.name, cli.no_persist);
 
     // Resume requires the file to already exist; do not auto-create on
     // a typo'd path. Catch this BEFORE we open (which would create it).
+    // (--resume is mutually exclusive with --no-persist via clap, so the
+    // path here is always a real on-disk path.)
     if cli.resume.is_some() && !Path::new(&session_path).exists() {
         eprintln!(
             "Error: --resume requires an existing --session-db; {} does not exist.",
@@ -226,15 +270,23 @@ async fn main() -> anyhow::Result<()> {
         std::process::exit(1);
     }
 
-    // Ensure parent directory exists before opening.
-    if let Some(parent) = session_path.parent() {
-        if !parent.as_os_str().is_empty() {
-            if let Err(e) = std::fs::create_dir_all(parent) {
-                eprintln!(
-                    "Error: cannot create session-db directory {}: {e}",
-                    parent.display()
-                );
-                std::process::exit(1);
+    // Capture file-existed state BEFORE we open (open creates it). Used
+    // for the first-run banner. The :memory: token is never a real path,
+    // so its existence check is naturally false — that's fine: the banner
+    // is also gated on !no_persist below.
+    let file_existed_before = !cli.no_persist && Path::new(&session_path).exists();
+
+    // Ensure parent directory exists before opening. Not needed for :memory:.
+    if !cli.no_persist {
+        if let Some(parent) = session_path.parent() {
+            if !parent.as_os_str().is_empty() {
+                if let Err(e) = std::fs::create_dir_all(parent) {
+                    eprintln!(
+                        "Error: cannot create session-db directory {}: {e}",
+                        parent.display()
+                    );
+                    std::process::exit(1);
+                }
             }
         }
     }
@@ -249,7 +301,19 @@ async fn main() -> anyhow::Result<()> {
             std::process::exit(1);
         }
     };
-    eprintln!("Session DB: {}", session_path.display());
+    if cli.no_persist {
+        eprintln!("Session DB: in-memory (no persistence; session ends when you exit).");
+    } else {
+        eprintln!("Session DB: {}", session_path.display());
+        if should_show_first_run_banner(explicit_session_db, cli.no_persist, file_existed_before) {
+            eprintln!(
+                "Note: this is your first session for {name}. Conversations are now persisted\n      \
+                 locally to {path}. Use `--no-persist` to opt out, or `--session-db` to relocate.",
+                name = cli.name,
+                path = session_path.display(),
+            );
+        }
+    }
 
     // Learner model.
     let learner = create_learner(&cli.name, cli.age);
@@ -366,8 +430,31 @@ mod tests {
     #[test]
     fn slug_replaces_special_chars_with_dash() {
         assert_eq!(slug("Anna Maria"), "anna-maria");
-        assert_eq!(slug("José"), "jos");
         assert_eq!(slug("Lee/Davis"), "lee-davis");
+    }
+
+    #[test]
+    fn slug_keeps_unicode_letters_lowercased() {
+        // The previous ASCII-only rule collapsed `José`, `Łukasz`, `Соня`
+        // and `美咲` into ambiguous or empty stems. Children's names are
+        // a load-bearing input here — accept anything Unicode considers
+        // alphanumeric, lowercased where that exists.
+        assert_eq!(slug("José"), "josé");
+        assert_eq!(slug("Łukasz"), "łukasz");
+        assert_eq!(slug("Соня"), "соня");
+        // No case-folding for CJK; the chars round-trip as-is.
+        assert_eq!(slug("美咲"), "美咲");
+    }
+
+    #[test]
+    fn slug_normalizes_nfc_so_decomposed_equals_precomposed() {
+        // Same visible name, two Unicode encodings: precomposed `é`
+        // (U+00E9) vs decomposed `e` + combining acute (U+0301). Without
+        // NFC normalization these slug to different filenames, so two
+        // copies of the same child get two session DBs.
+        let nfc = "Jos\u{00E9}"; // José (NFC)
+        let nfd = "Jose\u{0301}"; // José (NFD)
+        assert_eq!(slug(nfc), slug(nfd));
     }
 
     #[test]
@@ -390,32 +477,84 @@ mod tests {
 
     #[test]
     fn resolve_session_db_path_passes_explicit_through() {
-        let p = resolve_session_db_path(Some(PathBuf::from("/tmp/explicit.db")), "Anyone").unwrap();
+        // The home arg is unused when an explicit path is given.
+        let home = Path::new("/this/should/be/ignored");
+        let p = resolve_session_db_path(
+            Some(PathBuf::from("/tmp/explicit.db")),
+            home,
+            "Anyone",
+            false,
+        );
         assert_eq!(p, PathBuf::from("/tmp/explicit.db"));
     }
 
     #[test]
     fn resolve_session_db_path_default_uses_home_and_slug() {
-        // Use a synthetic HOME so the test doesn't depend on the dev's
-        // real home directory. Cleanup is done via setting HOME back —
-        // but env vars are process-global and tests run in parallel, so
-        // we restore on drop.
-        struct HomeGuard {
-            original: Option<String>,
-        }
-        impl Drop for HomeGuard {
-            fn drop(&mut self) {
-                match &self.original {
-                    Some(v) => unsafe { std::env::set_var("HOME", v) },
-                    None => unsafe { std::env::remove_var("HOME") },
-                }
-            }
-        }
-        let _guard = HomeGuard {
-            original: std::env::var("HOME").ok(),
-        };
-        unsafe { std::env::set_var("HOME", "/synthetic/home") };
-        let p = resolve_session_db_path(None, "Binti").unwrap();
+        let home = Path::new("/synthetic/home");
+        let p = resolve_session_db_path(None, home, "Binti", false);
         assert_eq!(p, PathBuf::from("/synthetic/home/.primer/binti.db"));
+    }
+
+    #[test]
+    fn resolve_session_db_path_no_persist_returns_in_memory() {
+        // `--no-persist` short-circuits everything: no slug, no home
+        // join, no explicit path. The session is throwaway.
+        let home = Path::new("/some/home");
+        assert_eq!(
+            resolve_session_db_path(None, home, "Anyone", true),
+            PathBuf::from(IN_MEMORY)
+        );
+    }
+
+    #[test]
+    fn no_persist_conflicts_with_resume_at_parse_time() {
+        // clap should reject a `--no-persist --resume <uuid>` invocation
+        // before we ever try to open anything. In-memory + resume is
+        // a contradiction (nothing to resume from).
+        let result = Cli::try_parse_from([
+            "primer",
+            "--no-persist",
+            "--resume",
+            "00000000-0000-0000-0000-000000000000",
+        ]);
+        assert!(result.is_err(), "expected clap to reject the combination");
+    }
+
+    #[test]
+    fn no_persist_conflicts_with_session_db_at_parse_time() {
+        // Naming a session DB while asking for in-memory is also a
+        // contradiction; clap should reject it up front.
+        let result = Cli::try_parse_from(["primer", "--no-persist", "--session-db", "/tmp/x.db"]);
+        assert!(result.is_err(), "expected clap to reject the combination");
+    }
+
+    #[test]
+    fn first_run_banner_shows_only_for_default_path_first_run() {
+        // Default path + brand-new file → show banner (the user just
+        // started persisting without explicitly opting in).
+        assert!(should_show_first_run_banner(false, false, false));
+        // Default path but file already existed → silent (not first run).
+        assert!(!should_show_first_run_banner(false, false, true));
+        // Explicit path → silent (the user knows where their data is).
+        assert!(!should_show_first_run_banner(true, false, false));
+        // No-persist → silent (no file is being created at all).
+        assert!(!should_show_first_run_banner(false, true, false));
+    }
+
+    #[test]
+    fn resolve_session_db_path_default_handles_unicode_name() {
+        // Confirms the slug + path composition round-trip a non-ASCII
+        // name without env mutation. The same name in NFC vs NFD must
+        // produce the same path so we don't end up with two DB files.
+        let home = Path::new("/h");
+        assert_eq!(
+            resolve_session_db_path(None, home, "José", false),
+            PathBuf::from("/h/.primer/josé.db")
+        );
+        let nfd = "Jose\u{0301}";
+        assert_eq!(
+            resolve_session_db_path(None, home, nfd, false),
+            PathBuf::from("/h/.primer/josé.db")
+        );
     }
 }

@@ -68,18 +68,27 @@ CREATE INDEX IF NOT EXISTS idx_turn_concepts_concept
 /// `SCHEMA_SQL` has created the v1 tables), on a v1 DB being upgraded,
 /// and on a v2 DB being re-opened.
 ///
+/// All steps run inside a single transaction so a partial failure (e.g.
+/// disk full between the FTS create and a trigger create) rolls back to
+/// the pre-migration state instead of leaving an inconsistent half-v2
+/// database that subsequent saves would silently miswrite to.
+///
 /// v2 adds:
 /// - `sessions.summary` and `sessions.summary_through_turn_index` —
 ///   rolling LLM-generated summary of pre-window turns.
 /// - `turn_text_fts` virtual table for FTS5 retrieval over `turns.text`.
 /// - Triggers to keep `turn_text_fts` in sync with `turns`.
 pub fn apply_v2_migrations(conn: &Connection) -> Result<()> {
-    if !column_exists(conn, "sessions", "summary")? {
-        conn.execute_batch("ALTER TABLE sessions ADD COLUMN summary TEXT NOT NULL DEFAULT '';")
+    let tx = conn
+        .unchecked_transaction()
+        .map_err(|e| PrimerError::Storage(format!("begin v2 migration tx: {e}")))?;
+
+    if !column_exists(&tx, "sessions", "summary")? {
+        tx.execute_batch("ALTER TABLE sessions ADD COLUMN summary TEXT NOT NULL DEFAULT '';")
             .map_err(|e| PrimerError::Storage(format!("ALTER sessions ADD summary: {e}")))?;
     }
-    if !column_exists(conn, "sessions", "summary_through_turn_index")? {
-        conn.execute_batch(
+    if !column_exists(&tx, "sessions", "summary_through_turn_index")? {
+        tx.execute_batch(
             "ALTER TABLE sessions ADD COLUMN summary_through_turn_index INTEGER NOT NULL DEFAULT 0;",
         )
         .map_err(|e| {
@@ -93,22 +102,22 @@ pub fn apply_v2_migrations(conn: &Connection) -> Result<()> {
     // If we are creating it for the first time, backfill from `turns`;
     // otherwise the existing index is already kept in sync by the
     // triggers and a backfill would just duplicate rows.
-    let fts_existed = table_exists(conn, "turn_text_fts")?;
+    let fts_existed = table_exists(&tx, "turn_text_fts")?;
 
-    conn.execute_batch(
+    tx.execute_batch(
         "CREATE VIRTUAL TABLE IF NOT EXISTS turn_text_fts USING fts5(\
             text, content='turns', content_rowid='id', tokenize='porter unicode61');",
     )
     .map_err(|e| PrimerError::Storage(format!("create turn_text_fts: {e}")))?;
 
     if !fts_existed {
-        conn.execute_batch("INSERT INTO turn_text_fts(rowid, text) SELECT id, text FROM turns;")
+        tx.execute_batch("INSERT INTO turn_text_fts(rowid, text) SELECT id, text FROM turns;")
             .map_err(|e| PrimerError::Storage(format!("backfill turn_text_fts: {e}")))?;
     }
 
     // Triggers keep the FTS index in sync as turns are inserted, deleted,
     // or updated. `IF NOT EXISTS` makes them idempotent across re-opens.
-    conn.execute_batch(
+    tx.execute_batch(
         "CREATE TRIGGER IF NOT EXISTS turns_ai AFTER INSERT ON turns BEGIN
              INSERT INTO turn_text_fts(rowid, text) VALUES (new.id, new.text);
          END;
@@ -124,6 +133,8 @@ pub fn apply_v2_migrations(conn: &Connection) -> Result<()> {
     )
     .map_err(|e| PrimerError::Storage(format!("create FTS triggers: {e}")))?;
 
+    tx.commit()
+        .map_err(|e| PrimerError::Storage(format!("commit v2 migration: {e}")))?;
     Ok(())
 }
 

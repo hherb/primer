@@ -1105,6 +1105,55 @@ mod tests {
     // ─── v2 migration ────────────────────────────────────────────────
 
     #[test]
+    fn apply_v2_migrations_rolls_back_on_failure() {
+        // Inject a known failure mode: invoke the migration on a connection
+        // where `sessions` exists (so the ALTERs succeed) but `turns` does
+        // NOT exist (so the FTS backfill INSERT fails). With the migration
+        // wrapped in a transaction, the column adds and the FTS table
+        // creation must roll back, leaving the DB exactly as we found it.
+        let conn = Connection::open_in_memory().unwrap();
+        conn.execute_batch(
+            "CREATE TABLE sessions (
+                 id TEXT PRIMARY KEY,
+                 learner_id TEXT NOT NULL,
+                 started_at TEXT NOT NULL,
+                 ended_at TEXT
+             );",
+        )
+        .unwrap();
+        // No `turns` table — backfill will fail.
+
+        let result = schema::apply_v2_migrations(&conn);
+        assert!(result.is_err(), "expected backfill to fail without turns");
+
+        // Pre-fix behaviour: each statement auto-commits, so `sessions.summary`
+        // would already exist on disk despite the backfill failure. Post-fix:
+        // the transaction rolls back, leaving sessions in its original shape.
+        let summary_col_count: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM pragma_table_info('sessions') WHERE name = 'summary'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(
+            summary_col_count, 0,
+            "sessions.summary should have rolled back when backfill failed"
+        );
+        let fts_count: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name='turn_text_fts'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(
+            fts_count, 0,
+            "turn_text_fts should have rolled back when backfill failed"
+        );
+    }
+
+    #[test]
     fn fresh_db_at_v2_has_summary_columns_and_fts_table() {
         let store = open_memory();
         let conn = store.conn.lock().unwrap();

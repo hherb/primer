@@ -91,9 +91,13 @@ impl<'a> DialogueManager<'a> {
     /// loaded turns are kept in place, and `ended_at` is cleared so
     /// the session is "active again".
     ///
-    /// If the loaded session has more turns than the active context
-    /// window, this method also triggers a summary refresh so the
-    /// model has long-term memory of the conversation from turn one.
+    /// If the loaded session has pre-window content the existing
+    /// summary doesn't yet cover, this method refreshes the summary so
+    /// the model has long-term memory of the conversation from turn
+    /// one. A summary that already covers the current pre-window range
+    /// is preserved verbatim — no point burning an LLM call to
+    /// regenerate identical work.
+    ///
     /// Note: the in-memory `LearnerModel` (built from CLI flags) is
     /// not reconciled with `loaded.learner_id`; they may diverge until
     /// a learner persistence layer lands. The session's `learner_id`
@@ -101,7 +105,7 @@ impl<'a> DialogueManager<'a> {
     pub async fn resume_session(&mut self, loaded: Session) -> Result<()> {
         self.session = loaded;
         self.session.ended_at = None;
-        self.refresh_summary_if_due(true).await;
+        self.refresh_summary_if_stale().await;
         if let Some(store) = self.storage {
             if let Err(e) = store.save_session(&self.session).await {
                 tracing::warn!("session save failed during resume: {e}");
@@ -208,7 +212,7 @@ impl<'a> DialogueManager<'a> {
             // Refresh the rolling summary if enough turns have fallen
             // out of the window since we last summarized. Best-effort:
             // a summary failure is logged, not propagated.
-            self.refresh_summary_if_due(false).await;
+            self.refresh_summary_if_due().await;
         }
 
         // 5. Save the session if a store is configured. Runs on both Ok
@@ -289,21 +293,13 @@ impl<'a> DialogueManager<'a> {
         (self.session.summary.clone(), retrieved)
     }
 
-    /// Regenerate the rolling summary if the active window has shifted
-    /// enough since the last summarization, or unconditionally if `force`
-    /// is set (used on resume so a freshly-loaded session immediately has
-    /// a summary covering its pre-window history).
-    ///
-    /// Threshold: re-summarize when at least `context_window_turns`
-    /// turns have fallen out of the window since `summary_through_turn_index`
-    /// was last set. So at the default K=20, a summary is built when 20
+    /// Active-conversation cadence. Refresh the rolling summary when at
+    /// least `context_window_turns` turns have fallen out of the window
+    /// since `summary_through_turn_index` was last set, so per-turn
+    /// dialogue doesn't trigger an LLM call every time the boundary
+    /// advances. At the default K=20, a summary is built each time 20
     /// new turns have rolled past the boundary.
-    ///
-    /// The summary always covers `turns[..total - window]` from scratch
-    /// (replacing the previous summary). This is more expensive than an
-    /// incremental approach but keeps the logic simple and the summary
-    /// coherent. Phase-0 cost is acceptable; revisit under profiling.
-    async fn refresh_summary_if_due(&mut self, force: bool) {
+    async fn refresh_summary_if_due(&mut self) {
         let window = self.config.context_window_turns;
         let total = self.session.turns.len();
         if total <= window {
@@ -311,9 +307,35 @@ impl<'a> DialogueManager<'a> {
         }
         let pre_window_end = total - window;
         let already_covered = self.session.summary_through_turn_index;
-        if !force && pre_window_end < already_covered.saturating_add(window) {
+        if pre_window_end < already_covered.saturating_add(window) {
             return;
         }
+        self.regenerate_summary_through(pre_window_end).await;
+    }
+
+    /// Resume cadence. Refresh the rolling summary when the loaded
+    /// session has pre-window content the existing summary doesn't
+    /// yet cover. A summary that's already current is preserved
+    /// verbatim — there is no value in regenerating identical work.
+    async fn refresh_summary_if_stale(&mut self) {
+        let window = self.config.context_window_turns;
+        let total = self.session.turns.len();
+        if total <= window {
+            return;
+        }
+        let pre_window_end = total - window;
+        if self.session.summary_through_turn_index >= pre_window_end {
+            return;
+        }
+        self.regenerate_summary_through(pre_window_end).await;
+    }
+
+    /// Common body: re-summarize `turns[..pre_window_end]` from scratch
+    /// and stamp the new boundary. Replacing rather than incrementally
+    /// extending keeps the summary coherent; the simplicity is fine at
+    /// Phase-0 cost. Best-effort: a summary failure is logged and the
+    /// previous state stays in place.
+    async fn regenerate_summary_through(&mut self, pre_window_end: usize) {
         let to_summarize = &self.session.turns[..pre_window_end];
         match self.inference.summarize(to_summarize, 1500).await {
             Ok(summary) => {
@@ -874,6 +896,59 @@ mod tests {
         dm.resume_session(loaded).await.unwrap();
         assert_eq!(backend.summary_call_count(), 0);
         assert_eq!(dm.session.summary, "");
+    }
+
+    #[tokio::test]
+    async fn resume_session_skips_refresh_when_summary_already_current() {
+        // Loaded session has 25 turns and a summary that already covers
+        // turns[..5] — exactly the pre-window range. There is no new
+        // pre-window content for the summary to absorb, so resume must
+        // not burn an LLM call regenerating identical work.
+        let backend = ScriptedBackend::new(vec![Ok(chunk("", true))]);
+        let knowledge = EmptyKnowledge;
+        let mut dm = DialogueManager::new(
+            test_learner(),
+            &backend,
+            &knowledge,
+            None,
+            PedagogyConfig::default(),
+        );
+        let mut loaded = make_test_session_with_turns(25, dm.learner.profile.id);
+        loaded.summary = "Pre-existing summary covering turns 0..5.".to_string();
+        loaded.summary_through_turn_index = 5;
+        dm.resume_session(loaded).await.unwrap();
+        assert_eq!(
+            backend.summary_call_count(),
+            0,
+            "summary already covers the pre-window range; resume must not regenerate"
+        );
+        assert_eq!(
+            dm.session.summary, "Pre-existing summary covering turns 0..5.",
+            "existing summary must be preserved verbatim"
+        );
+    }
+
+    #[tokio::test]
+    async fn resume_session_refreshes_when_existing_summary_is_stale() {
+        // Loaded session has 30 turns and a summary that only covers
+        // turns[..3]. The current pre-window range is turns[..10], so
+        // there are 7 pre-window turns the summary doesn't yet know
+        // about. Resume must refresh.
+        let backend = ScriptedBackend::new(vec![Ok(chunk("", true))]);
+        let knowledge = EmptyKnowledge;
+        let mut dm = DialogueManager::new(
+            test_learner(),
+            &backend,
+            &knowledge,
+            None,
+            PedagogyConfig::default(),
+        );
+        let mut loaded = make_test_session_with_turns(30, dm.learner.profile.id);
+        loaded.summary = "Stale summary covering only turns 0..3.".to_string();
+        loaded.summary_through_turn_index = 3;
+        dm.resume_session(loaded).await.unwrap();
+        assert_eq!(backend.summary_call_count(), 1);
+        assert_eq!(dm.session.summary_through_turn_index, 10);
     }
 
     #[tokio::test]

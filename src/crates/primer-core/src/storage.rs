@@ -44,6 +44,16 @@ pub trait SessionStore: Send + Sync {
     /// retrieval is read-only and concept tags are not needed by the
     /// caller. Returns an empty Vec on no matches; reserves `Err` for
     /// genuine I/O failures.
+    ///
+    /// **Index-lag invariant.** The dialogue manager calls this *after*
+    /// appending the current child turn to its in-memory `Session` but
+    /// *before* the next `save_session` flushes that turn to disk, so
+    /// the search index may be one save behind the in-memory session.
+    /// Callers MUST set `exclude_indices_at_or_after = total - window`
+    /// so the still-unsaved tail of the conversation is excluded by
+    /// index regardless of whether it has reached the index yet. Lower
+    /// bounds (e.g. `total - window - 1`) would silently return stale
+    /// — or duplicate — results.
     async fn retrieve_session_turns(
         &self,
         session_id: Uuid,

@@ -62,7 +62,7 @@ SQLite FTS5-backed knowledge base. Stores passages from Wikipedia, curated encyc
 
 ### primer-storage
 
-SQLite-backed conversation persistence. Every child turn, every Primer turn, and every `close_session` writes through to disk in an append-only schema (turn rowids stay stable across saves). Categorical text columns (`speaker`, `pedagogical_intent`, `concept`) are normalised into integer-keyed lookup tables; the `Speaker` and `PedagogicalIntent` Rust enums are the canonical source of truth and the storage layer validates the on-disk lookup tables against them on every `open()` — drift is a hard error. Schema version 2 adds two long-term-memory primitives: a `summary` field on `sessions` (rolling LLM-generated condensation of pre-window turns, refreshed on resume and every `context_window_turns` further turns) and a `turn_text_fts` FTS5 virtual table for searchable retrieval of older turns. The session DB is intentionally separate from the RAG corpus on privacy grounds (different file, different lifecycle); existing v1 databases are migrated in place on first open.
+SQLite-backed conversation persistence. Every child turn, every Primer turn, and every `close_session` writes through to disk in an append-only schema (turn rowids stay stable across saves). Categorical text columns (`speaker`, `pedagogical_intent`, `concept`) are normalised into integer-keyed lookup tables; the `Speaker` and `PedagogicalIntent` Rust enums are the canonical source of truth and the storage layer validates the on-disk lookup tables against them on every `open()` — drift is a hard error. Schema version 2 adds two long-term-memory primitives: a `summary` field on `sessions` (rolling LLM-generated condensation of pre-window turns, refreshed on resume when stale and every `context_window_turns` further turns during active conversation) and a `turn_text_fts` FTS5 virtual table for searchable retrieval of older turns. The v2 migration runs inside a single transaction so a partial failure rolls back to the pre-migration state instead of leaving a half-v2 DB. The session DB is intentionally separate from the RAG corpus on privacy grounds (different file, different lifecycle); existing v1 databases are migrated in place on first open.
 
 ### primer-cli
 
@@ -132,6 +132,8 @@ Project-local `.env` wins over the home file. Both are gitignored. See `.env.exa
                                 (default: ~/.primer/<slugified-name>.db, created if missing)
 --resume <uuid>                 Resume a past session by UUID. Reads from --session-db; errors if
                                 the file or the id is missing. No greeting is emitted on resume.
+--no-persist                    Run in-memory only — nothing is written to disk and the conversation
+                                evaporates on exit. Mutually exclusive with --resume and --session-db.
 --api-key <key>                 Anthropic API key (or set ANTHROPIC_API_KEY)
 ```
 
@@ -144,7 +146,7 @@ sqlite3 ~/.primer/explorer.db 'SELECT id FROM sessions ORDER BY started_at DESC 
 cargo run --bin primer -- --resume <uuid>
 ```
 
-When the resumed session has more than `context_window_turns` (default 20) turns, the Primer maintains long-term memory in two complementary ways: a rolling LLM-generated summary (regenerated on resume and every 20 further turns), and FTS5-based retrieval of relevant older turns based on the current child input. Both are injected into the system prompt — the chat-message timeline the model sees stays equal to the last 20 turns, so context budget is bounded even across hours of conversation.
+When the resumed session has more than `context_window_turns` (default 20) turns, the Primer maintains long-term memory in two complementary ways: a rolling LLM-generated summary (refreshed on resume only when the loaded one is stale, then every 20 further pre-window turns during active conversation) and FTS5-based retrieval of relevant older turns based on the current child input. Both are injected into the system prompt — the chat-message timeline the model sees stays equal to the last 20 turns, so context budget is bounded even across hours of conversation.
 
 ## Design Principles
 
