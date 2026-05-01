@@ -253,6 +253,26 @@ pub fn extract_active_concepts(session: &Session, last_n: usize) -> Vec<String> 
         .collect()
 }
 
+/// Return `true` if `text` looks like a direct factual lookup.
+///
+/// Only a small set of opening phrases qualify: "what is/are/does", "what's",
+/// and "how does/do/is/are". The trailing space in each prefix prevents
+/// partial-word matches ("whatever", "howdy"). Exploratory forms ("what if",
+/// "what about") and "why" questions are intentionally excluded — those
+/// are Socratic-richer and should not be short-circuited with a direct answer.
+///
+/// This is a private helper for `decide_intent`; Task 19 wires it into
+/// the intent-routing logic.
+#[allow(dead_code)]
+fn is_factual_question(text: &str) -> bool {
+    const FACTUAL_PREFIXES: &[&str] = &[
+        "what is ", "what are ", "what's ", "what does ",
+        "how does ", "how do ",  "how is ",  "how are ",
+    ];
+    let lowered = text.trim().to_lowercase();
+    FACTUAL_PREFIXES.iter().any(|p| lowered.starts_with(p))
+}
+
 /// Decide the next pedagogical intent based on the learner model
 /// and conversation history.
 pub fn decide_intent(learner: &LearnerModel, session: &Session) -> PedagogicalIntent {
@@ -716,6 +736,42 @@ mod tests {
     fn build_prompt_omits_retrieved_section_when_empty() {
         let prompt = build_default_prompt("", &[]);
         assert!(!prompt.system.contains("Relevant prior moments"));
+    }
+
+    // ─── is_factual_question ─────────────────────────────────────────────
+
+    #[test]
+    fn is_factual_question_matches_what_is() {
+        assert!(is_factual_question("What is gravity?"));
+        assert!(is_factual_question("what is gravity?"));
+        assert!(is_factual_question("  WHAT IS gravity?  "));
+    }
+
+    #[test]
+    fn is_factual_question_matches_how_does() {
+        assert!(is_factual_question("how does it work"));
+        assert!(is_factual_question("How do plants eat?"));
+    }
+
+    #[test]
+    fn is_factual_question_does_not_match_partial_words() {
+        // "whatever" must NOT trigger "what" — the prefix list uses trailing space.
+        assert!(!is_factual_question("whatever"));
+        assert!(!is_factual_question("howdy"));
+    }
+
+    #[test]
+    fn is_factual_question_does_not_match_open_ended_what() {
+        // "What if" / "What about" are exploratory, not factual lookups.
+        assert!(!is_factual_question("what if we tried"));
+        assert!(!is_factual_question("what about us"));
+    }
+
+    #[test]
+    fn is_factual_question_drops_why_questions() {
+        // "why" forms are deliberately left out — Socratic-richer.
+        assert!(!is_factual_question("why is the sky blue"));
+        assert!(!is_factual_question("why does it rain"));
     }
 
     #[test]
