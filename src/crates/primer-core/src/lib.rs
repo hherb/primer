@@ -12,6 +12,7 @@
 //! allowing backends to be swapped by configuration without touching
 //! the pedagogical engine.
 
+pub mod classifier;
 pub mod config;
 pub mod conversation;
 pub mod error;
