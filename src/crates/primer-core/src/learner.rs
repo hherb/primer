@@ -161,6 +161,27 @@ impl EngagementState {
         Self::Disengaging,
         Self::Unknown,
     ];
+
+    /// Canonical machine-readable name. Stable identifier used by the
+    /// engagement-classifier JSON schema and the storage `engagement_states`
+    /// lookup table. Don't rename — `EngagementState` IDs in v3 schema
+    /// are derived from these names and existing DBs validate against them.
+    pub fn name(self) -> &'static str {
+        match self {
+            Self::Engaged => "Engaged",
+            Self::Reflecting => "Reflecting",
+            Self::FrustratedStuck => "FrustratedStuck",
+            Self::FrustratedTrying => "FrustratedTrying",
+            Self::Disengaging => "Disengaging",
+            Self::Unknown => "Unknown",
+        }
+    }
+}
+
+impl std::fmt::Display for EngagementState {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.name())
+    }
 }
 
 #[cfg(test)]

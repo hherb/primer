@@ -548,7 +548,18 @@ impl primer_core::storage::SessionStore for SqliteSessionStore {
             .map_err(|e| PrimerError::Storage(format!("load_recent_assessments: query: {e}")))?
             .filter_map(|res| {
                 let (state_id, confidence, reasoning) = res.ok()?;
-                let state = catalog::engagement_state_from_id(state_id)?;
+                let Some(state) = catalog::engagement_state_from_id(state_id) else {
+                    // Row written by a newer build that knows an EngagementState
+                    // variant this build does not. Drop the row but make the
+                    // skew visible so the operator can spot version-rollback
+                    // issues; otherwise rehydrated history would silently shrink.
+                    tracing::warn!(
+                        engagement_state_id = state_id,
+                        classifier = classifier_identifier,
+                        "load_recent_assessments: dropping row with unknown engagement_state_id (DB written by newer build?)"
+                    );
+                    return None;
+                };
                 Some(primer_core::classifier::EngagementAssessment {
                     state,
                     confidence,

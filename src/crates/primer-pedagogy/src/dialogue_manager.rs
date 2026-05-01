@@ -323,7 +323,7 @@ impl<'a> DialogueManager<'a> {
                 .find(|(_, t)| t.speaker == Speaker::Child)
                 .map(|(i, _)| i);
 
-            if let Some(_child_idx) = child_turn_index {
+            if let Some(child_idx) = child_turn_index {
                 let store = self.storage.clone();
                 let classifier = Arc::clone(&self.classifier);
                 let session_id = self.session.id;
@@ -344,7 +344,6 @@ impl<'a> DialogueManager<'a> {
                     .collect();
                 let prior_assessments: Vec<EngagementAssessment> =
                     self.learner.recent_assessments.clone();
-                let child_idx = _child_idx;
 
                 let task = tokio::spawn(async move {
                     let ctx = primer_core::classifier::EngagementContext {
@@ -412,11 +411,19 @@ impl<'a> DialogueManager<'a> {
         elapsed >= self.config.max_session_minutes as i64
     }
 
-    /// End the session gracefully. Records `ended_at` and, if storage is
-    /// configured, fires a final save so the timestamp lands on disk. Save
-    /// failures are logged via `tracing::warn!` rather than propagated —
-    /// matching `respond_to_streaming`'s save-failure semantics.
+    /// End the session gracefully. Drains any in-flight classifier task so
+    /// the final turn's assessment lands on disk, records `ended_at`, and
+    /// (if storage is configured) fires a final save so the timestamp
+    /// lands on disk. Save failures are logged via `tracing::warn!` rather
+    /// than propagated — matching `respond_to_streaming`'s save-failure
+    /// semantics.
     pub async fn close_session(&mut self) {
+        // Drain the post-response classifier task spawned after the most
+        // recent turn. Without this, a quick exit ("respond_to_streaming"
+        // immediately followed by close_session) races the runtime shutdown
+        // and the last turn_classifications row may never be persisted.
+        self.await_pending_classification().await;
+
         self.session.ended_at = Some(Utc::now());
         if let Some(ref store) = self.storage {
             if let Err(e) = store.save_session(&self.session).await {
@@ -1469,6 +1476,90 @@ mod tests {
             dm.learner.recent_assessments.len(),
             1,
             "assessment must be pushed into recent_assessments"
+        );
+    }
+
+    #[tokio::test]
+    async fn await_pending_classification_aborts_and_preserves_state_on_timeout() {
+        use primer_classifier::EngagementClassifier;
+        use primer_core::classifier::{EngagementAssessment, EngagementContext};
+        use std::time::Duration;
+
+        // Classifier that sleeps long enough to reliably exceed the test's
+        // blocking_timeout. If the timeout path works, the sleep never
+        // completes (task gets aborted) and current_engagement stays untouched.
+        struct SlowClassifier;
+
+        #[async_trait]
+        impl EngagementClassifier for SlowClassifier {
+            fn identifier(&self) -> &str {
+                "slow"
+            }
+            async fn classify(&self, _ctx: EngagementContext<'_>) -> Result<EngagementAssessment> {
+                tokio::time::sleep(Duration::from_secs(5)).await;
+                Ok(EngagementAssessment {
+                    state: EngagementState::FrustratedTrying,
+                    confidence: 0.99,
+                    reasoning: None,
+                })
+            }
+        }
+
+        let backend = ScriptedBackend::new(vec![Ok(chunk("hi", false)), Ok(chunk("", true))]);
+        let knowledge = EmptyKnowledge;
+        // Tight timeout so the await reliably trips it before the 5s sleep.
+        let settings = ClassifierSettings {
+            blocking_timeout: Duration::from_millis(50),
+            ..ClassifierSettings::default()
+        };
+
+        let mut dm = DialogueManager::new(
+            test_learner(),
+            &backend,
+            &knowledge,
+            None,
+            Arc::new(SlowClassifier),
+            settings,
+            PedagogyConfig::default(),
+        );
+
+        // Run a turn so a classify_task is spawned. The task is still
+        // sleeping when respond_to_streaming returns.
+        let _ = dm.respond_to_streaming("hi", |_| {}).await.unwrap();
+        assert!(
+            dm.classify_task.is_some(),
+            "a classify_task must be spawned after a successful turn"
+        );
+        // Capture the engagement state AFTER respond_to_streaming so the
+        // placeholder word-count heuristic in `update_learner_model` (which
+        // mutates `current_engagement` independently of the classifier) does
+        // not contaminate this test. We're checking that the timeout path
+        // does not apply the slow classifier's pending result, not that the
+        // pre-existing heuristic is bypassed.
+        let initial = dm.learner.current_engagement;
+
+        // This call should hit the timeout path: abort the task, log
+        // tracing::debug!, and return without applying any assessment.
+        let started = std::time::Instant::now();
+        dm.await_pending_classification().await;
+        let elapsed = started.elapsed();
+
+        assert!(
+            elapsed < Duration::from_secs(2),
+            "await_pending_classification must give up within ~blocking_timeout, \
+             not wait for the slow classifier; elapsed={elapsed:?}"
+        );
+        assert_eq!(
+            dm.learner.current_engagement, initial,
+            "timeout path must NOT update current_engagement"
+        );
+        assert!(
+            dm.learner.recent_assessments.is_empty(),
+            "timeout path must NOT push into recent_assessments"
+        );
+        assert!(
+            dm.classify_task.is_none(),
+            "the task handle must be consumed even on timeout"
         );
     }
 

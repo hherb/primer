@@ -39,6 +39,10 @@ impl EngagementAssessment {
 /// Input to the classifier. Newtype'd so future fields can be added
 /// without breaking the trait signature.
 pub struct EngagementContext<'a> {
+    /// Recent child turns, oldest-first within the window. Callers MUST
+    /// pre-filter to `Speaker::Child` only — Primer turns leaking into
+    /// this slice will appear in the classifier prompt as if the child
+    /// said them. The dialogue manager enforces this at the spawn site.
     pub recent_child_turns: &'a [Turn],
     pub prior_assessments: &'a [EngagementAssessment],
     // Reserved for extension. Adding fields here is non-breaking

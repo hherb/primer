@@ -107,7 +107,7 @@ fn build_classification_prompt(ctx: &EngagementContext) -> Prompt {
                 let turns_ago = ctx.prior_assessments.len() - i;
                 let r = a.reasoning.as_deref().unwrap_or("");
                 format!(
-                    "{turns_ago} turn(s) ago: {:?} ({:.2}) — {r}",
+                    "{turns_ago} turn(s) ago: {} ({:.2}) — {r}",
                     a.state, a.confidence
                 )
             })
