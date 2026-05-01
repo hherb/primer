@@ -16,8 +16,10 @@ use std::sync::Arc;
 
 use chrono::Utc;
 use clap::Parser;
-use primer_classifier::{EngagementClassifier, StubEngagementClassifier};
+use primer_classifier::{ClassifierSettings, EngagementClassifier, LlmEngagementClassifier, StubEngagementClassifier};
 use primer_core::config::PedagogyConfig;
+use primer_core::error::{PrimerError, Result};
+use primer_core::inference::InferenceBackend;
 use primer_core::knowledge::KnowledgeBase;
 use primer_core::learner::*;
 use primer_core::storage::SessionStore;
@@ -182,6 +184,111 @@ fn should_show_first_run_banner(
     !explicit_session_db && !no_persist && !file_existed_before
 }
 
+/// Parameters needed by `build_backend` and `build_classifier` that would
+/// otherwise require borrowing from `Cli`. Extracted early (before any partial
+/// moves of `Cli` fields) so the helpers can be called after those moves.
+struct BackendParams {
+    api_key: Option<String>,
+    ollama_url: String,
+    classifier_backend: Option<String>,
+    classifier_model: Option<String>,
+}
+
+/// Construct an `InferenceBackend` of the named type with the given model.
+///
+/// All three backend variants are synchronous at construction time; the
+/// function signature is `async` only for uniformity with `build_classifier`.
+async fn build_backend(
+    backend_name: &str,
+    model: String,
+    params: &BackendParams,
+) -> Result<Arc<dyn InferenceBackend>> {
+    match backend_name {
+        "stub" => Ok(Arc::new(StubBackend)),
+        "cloud" => {
+            let api_key = params.api_key.clone().ok_or_else(|| {
+                PrimerError::Inference(
+                    "--api-key or ANTHROPIC_API_KEY required for cloud backend".into(),
+                )
+            })?;
+            Ok(Arc::new(primer_inference::cloud::CloudBackend::new(
+                "https://api.anthropic.com".to_string(),
+                api_key,
+                model,
+            )))
+        }
+        "ollama" => Ok(Arc::new(primer_inference::ollama::OllamaBackend::new(
+            params.ollama_url.clone(),
+            model,
+        ))),
+        other => Err(PrimerError::Inference(format!("unknown backend: {other}"))),
+    }
+}
+
+/// Construct the engagement classifier according to the dispatch matrix:
+///
+/// | main backend | --classifier-backend | --classifier-model | outcome                               |
+/// |--------------|----------------------|--------------------|---------------------------------------|
+/// | stub         | (unset)              | (any)              | StubEngagementClassifier              |
+/// | *            | "stub"               | (any)              | StubEngagementClassifier              |
+/// | *            | some(X)              | None               | error (model required for non-stub)   |
+/// | *            | some(X)              | some(M)            | LlmEngagementClassifier(new backend X, model M) |
+/// | non-stub     | (unset)              | None               | LlmEngagementClassifier(Arc::clone main) |
+/// | non-stub     | (unset)              | some(M)            | LlmEngagementClassifier(new backend same type, model M) |
+async fn build_classifier(
+    main_backend: Arc<dyn InferenceBackend>,
+    main_backend_name: &str,
+    main_model: &str,
+    params: &BackendParams,
+    settings: ClassifierSettings,
+) -> Result<Arc<dyn EngagementClassifier>> {
+    match (main_backend_name, params.classifier_backend.as_deref()) {
+        // Explicit stub override always wins regardless of main backend.
+        (_, Some("stub")) => Ok(Arc::new(StubEngagementClassifier::new())),
+
+        // Main backend is stub and no classifier backend specified → default to stub.
+        // (LlmEngagementClassifier wrapping a stub backend would silently return
+        // Unknown on every classify call — that's worse than a deterministic stub.)
+        ("stub", None) => Ok(Arc::new(StubEngagementClassifier::new())),
+
+        // Explicit non-stub classifier backend → need a model too.
+        (_, Some(cls_backend_name)) => {
+            let model = params.classifier_model.clone().ok_or_else(|| {
+                PrimerError::Inference(
+                    "--classifier-model is required when --classifier-backend is set to a non-stub backend".into(),
+                )
+            })?;
+            let cls_backend = build_backend(cls_backend_name, model.clone(), params).await?;
+            Ok(Arc::new(LlmEngagementClassifier::new(cls_backend, model, settings)))
+        }
+
+        // No --classifier-backend specified, main is not stub.
+        (_, None) => {
+            match params.classifier_model.as_deref() {
+                // No model override → reuse the main backend via Arc::clone.
+                // The classifier identifier becomes "llm:<main-model>".
+                None => Ok(Arc::new(LlmEngagementClassifier::new(
+                    Arc::clone(&main_backend),
+                    main_model.to_string(),
+                    settings,
+                ))),
+                // Model override only → construct a fresh backend of the same TYPE
+                // with the override model, because InferenceBackend::generate() does
+                // not accept a model argument — model is baked in at construction.
+                Some(override_model) => {
+                    let cls_backend =
+                        build_backend(main_backend_name, override_model.to_string(), params).await?;
+                    Ok(Arc::new(LlmEngagementClassifier::new(
+                        cls_backend,
+                        override_model.to_string(),
+                        settings,
+                    )))
+                }
+            }
+        }
+    }
+}
+
 fn create_learner(name: &str, age: u8) -> LearnerModel {
     LearnerModel {
         profile: LearnerProfile {
@@ -223,43 +330,48 @@ async fn main() -> anyhow::Result<()> {
 
     // ─── Create backends ─────────────────────────────────────────────
 
-    let inference: Box<dyn primer_core::inference::InferenceBackend> = match cli.backend.as_str() {
-        "stub" => {
-            eprintln!("Using stub inference backend (canned Socratic responses).");
-            Box::new(StubBackend)
-        }
-        "cloud" => {
-            let api_key = cli.api_key.unwrap_or_else(|| {
-                eprintln!("Error: --api-key or ANTHROPIC_API_KEY required for cloud backend.");
+    // Resolve the model for the main backend early so we can report it
+    // in the banner AND pass the resolved value to build_classifier later.
+    let main_model: String = match cli.backend.as_str() {
+        "cloud" => cli.model.clone().unwrap_or_else(|| "claude-sonnet-4-6".to_string()),
+        "ollama" => cli.model.clone().unwrap_or_else(|| {
+            eprintln!("Error: --model required for ollama backend (e.g., --model llama3.2).");
+            std::process::exit(1);
+        }),
+        // stub (and anything else — will error in build_backend below)
+        _ => cli.model.clone().unwrap_or_else(|| "stub".to_string()),
+    };
+
+    // Extract the fields that build_backend / build_classifier need BEFORE
+    // any partial moves of other Cli fields (knowledge_db, session_db etc.).
+    let backend_params = BackendParams {
+        api_key: cli.api_key.clone(),
+        ollama_url: cli.ollama_url.clone(),
+        classifier_backend: cli.classifier_backend.clone(),
+        classifier_model: cli.classifier_model.clone(),
+    };
+
+    let backend: Arc<dyn InferenceBackend> =
+        match build_backend(&cli.backend, main_model.clone(), &backend_params).await {
+            Ok(b) => b,
+            Err(e) => {
+                eprintln!("Error constructing backend: {e}");
                 std::process::exit(1);
-            });
-            let model = cli.model.unwrap_or_else(|| "claude-sonnet-4-6".to_string());
-            eprintln!("Using cloud inference backend (Anthropic {model}).");
-            Box::new(primer_inference::cloud::CloudBackend::new(
-                "https://api.anthropic.com".to_string(),
-                api_key,
-                model,
-            ))
-        }
-        "ollama" => {
-            let model = cli.model.unwrap_or_else(|| {
-                eprintln!("Error: --model required for ollama backend (e.g., --model llama3.2).");
-                std::process::exit(1);
-            });
-            eprintln!(
-                "Using ollama backend at {} with model {model}.",
-                cli.ollama_url
-            );
-            Box::new(primer_inference::ollama::OllamaBackend::new(
-                cli.ollama_url,
-                model,
-            ))
-        }
+            }
+        };
+
+    match cli.backend.as_str() {
+        "stub" => eprintln!("Using stub inference backend (canned Socratic responses)."),
+        "cloud" => eprintln!("Using cloud inference backend (Anthropic {main_model})."),
+        "ollama" => eprintln!(
+            "Using ollama backend at {} with model {main_model}.",
+            cli.ollama_url
+        ),
         other => {
             eprintln!("Unknown backend: {other}. Use 'stub', 'cloud', or 'ollama'.");
             std::process::exit(1);
         }
-    };
+    }
 
     // Knowledge base — in-memory by default (empty, but functional).
     let knowledge_path = cli.knowledge_db.unwrap_or_else(|| PathBuf::from(IN_MEMORY));
@@ -350,19 +462,36 @@ async fn main() -> anyhow::Result<()> {
     // Wrap session store in Arc so it can be captured by the classifier task.
     let session_store: Arc<dyn SessionStore> = Arc::new(session_store);
 
-    // Stub classifier for now — Task 26 replaces this with real construction.
-    let classifier: Arc<dyn EngagementClassifier> =
-        Arc::new(StubEngagementClassifier::new());
-    let classifier_settings = primer_classifier::ClassifierSettings {
+    let classifier_settings = ClassifierSettings {
         blocking_timeout: std::time::Duration::from_millis(cli.classifier_timeout_ms),
-        ..primer_classifier::ClassifierSettings::default()
+        ..ClassifierSettings::default()
     };
+
+    let classifier: Arc<dyn EngagementClassifier> =
+        match build_classifier(
+            Arc::clone(&backend),
+            &cli.backend,
+            &main_model,
+            &backend_params,
+            classifier_settings.clone(),
+        )
+        .await
+        {
+            Ok(c) => {
+                eprintln!("Engagement classifier: {}", c.identifier());
+                c
+            }
+            Err(e) => {
+                eprintln!("Error constructing engagement classifier: {e}");
+                std::process::exit(1);
+            }
+        };
 
     // ─── Dialogue manager ────────────────────────────────────────────
 
     let mut dm = DialogueManager::new(
         learner,
-        inference.as_ref(),
+        backend.as_ref(),
         &knowledge as &dyn KnowledgeBase,
         Some(Arc::clone(&session_store)),
         classifier,
@@ -454,6 +583,117 @@ async fn main() -> anyhow::Result<()> {
     }
 
     Ok(())
+}
+
+#[cfg(test)]
+mod classifier_construction_tests {
+    use super::*;
+
+    /// Build a minimal `BackendParams` for testing.
+    fn params_with(
+        classifier_backend: Option<&str>,
+        classifier_model: Option<&str>,
+    ) -> BackendParams {
+        BackendParams {
+            api_key: None,
+            ollama_url: "http://localhost:11434".into(),
+            classifier_backend: classifier_backend.map(String::from),
+            classifier_model: classifier_model.map(String::from),
+        }
+    }
+
+    /// With main=stub and no classifier flags, we get a stub classifier.
+    #[tokio::test]
+    async fn stub_main_no_flags_gives_stub_classifier() {
+        let params = params_with(None, None);
+        let main = build_backend("stub", "main".into(), &params).await.unwrap();
+        let c = build_classifier(main, "stub", "main", &params, ClassifierSettings::default())
+            .await
+            .unwrap();
+        assert_eq!(c.identifier(), "stub");
+    }
+
+    /// `--classifier-backend stub` wins regardless of the main backend.
+    #[tokio::test]
+    async fn explicit_stub_override_wins_over_any_main() {
+        // Main is stub (would default to stub anyway), but the explicit flag
+        // should also work when the main is declared as a different type.
+        // We use stub here to avoid needing a real cloud backend in tests.
+        let params_main = params_with(None, None);
+        let main = build_backend("stub", "main-model".into(), &params_main)
+            .await
+            .unwrap();
+        let params = params_with(Some("stub"), None);
+        let c = build_classifier(
+            main,
+            "cloud",
+            "main-model",
+            &params,
+            ClassifierSettings::default(),
+        )
+        .await
+        .unwrap();
+        assert_eq!(c.identifier(), "stub");
+    }
+
+    /// No classifier flags on a non-stub main → LlmEngagementClassifier wrapping
+    /// Arc::clone of main (identifier is "llm:<main-model>").
+    #[tokio::test]
+    async fn non_stub_main_no_flags_gives_llm_with_main_model() {
+        // We simulate a non-stub main by using "stub" type but treating it as
+        // cloud in the dispatch (the type doesn't matter for the Arc::clone path;
+        // what matters is that main_backend_name is NOT "stub").
+        // Since we can't construct a real cloud backend without an API key,
+        // we build a stub backend but pass "cloud" as the name to exercise
+        // the dispatch arm that reuses main via Arc::clone.
+        let params = params_with(None, None);
+        let main = build_backend("stub", "claude-sonnet-4-6".into(), &params)
+            .await
+            .unwrap();
+        let c = build_classifier(
+            main,
+            "cloud", // use "cloud" as name to exercise the non-stub arm
+            "claude-sonnet-4-6",
+            &params,
+            ClassifierSettings::default(),
+        )
+        .await
+        .unwrap();
+        assert_eq!(c.identifier(), "llm:claude-sonnet-4-6");
+    }
+
+    /// `--classifier-backend ollama` without `--classifier-model` is an error.
+    #[tokio::test]
+    async fn classifier_backend_without_model_is_error() {
+        let params_main = params_with(None, None);
+        let main = build_backend("stub", "main".into(), &params_main).await.unwrap();
+        let params = params_with(Some("ollama"), None /* no model */);
+        let result =
+            build_classifier(main, "stub", "main", &params, ClassifierSettings::default()).await;
+        assert!(
+            result.is_err(),
+            "should error when --classifier-backend is non-stub and --classifier-model is missing"
+        );
+    }
+
+    /// `--classifier-model` override on a stub main still yields stub classifier
+    /// (the stub arm fires before we reach the model-override arm).
+    #[tokio::test]
+    async fn classifier_model_override_on_stub_main_still_yields_stub() {
+        let params = params_with(None, Some("override-model"));
+        let main = build_backend("stub", "main".into(), &params).await.unwrap();
+        let c = build_classifier(
+            main,
+            "stub",
+            "main",
+            &params,
+            ClassifierSettings::default(),
+        )
+        .await
+        .unwrap();
+        // Main is stub → classifier defaults to stub regardless of model override.
+        assert_eq!(c.identifier(), "stub");
+    }
 }
 
 #[cfg(test)]
