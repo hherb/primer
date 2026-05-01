@@ -311,9 +311,8 @@ impl<'a> DialogueManager<'a> {
         }
 
         // 6. Spawn a classification task for the child turn that just completed.
-        //    The child turn is the last Child-speaker turn in session.turns.
-        //    We search from the end so it works even on error paths (where the
-        //    Primer turn was not appended).
+        //    Skipped on error paths — without a completed Primer response there
+        //    is no exchange to assess, and the partial Primer turn was dropped.
         if result.is_ok() {
             let child_turn_index = self
                 .session
