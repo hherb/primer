@@ -275,12 +275,39 @@ fn is_factual_question(text: &str) -> bool {
 
 /// Decide the next pedagogical intent based on the learner model
 /// and conversation history.
+///
+/// This is a thin wrapper around [`decide_intent_at`] that injects
+/// `chrono::Utc::now()` as the reference time. Production code calls this;
+/// tests call `decide_intent_at` directly with a controlled timestamp.
 pub fn decide_intent(learner: &LearnerModel, session: &Session) -> PedagogicalIntent {
+    decide_intent_at(learner, session, chrono::Utc::now())
+}
+
+/// Time-aware core of [`decide_intent`].
+///
+/// Accepts an explicit `now` so tests can backdate sessions deterministically
+/// without real-clock races. The `Disengaging` branch uses `now` together with
+/// `session.started_at` to distinguish an early disengagement (encourage rather
+/// than close) from a sustained one (suggest session close).
+pub fn decide_intent_at(
+    learner: &LearnerModel,
+    session: &Session,
+    now: chrono::DateTime<chrono::Utc>,
+) -> PedagogicalIntent {
     // Engagement-state overrides fire before turn analysis.
     match learner.current_engagement {
         EngagementState::FrustratedStuck => return PedagogicalIntent::Scaffolding,
         EngagementState::FrustratedTrying => return PedagogicalIntent::Encouragement,
-        EngagementState::Disengaging => return PedagogicalIntent::SessionClose,
+        EngagementState::Disengaging => {
+            let elapsed = now.signed_duration_since(session.started_at);
+            let elapsed_secs = elapsed.num_seconds().max(0) as u64;
+            let threshold = learner.preferences.early_disengagement_threshold;
+            return if std::time::Duration::from_secs(elapsed_secs) < threshold {
+                PedagogicalIntent::Encouragement
+            } else {
+                PedagogicalIntent::SessionClose
+            };
+        }
         EngagementState::Engaged
         | EngagementState::Reflecting
         | EngagementState::Unknown => { /* fall through to turn analysis */ }
@@ -356,6 +383,12 @@ mod tests {
         Session::new(Uuid::new_v4())
     }
 
+    fn make_session_started_seconds_ago(seconds_ago: i64) -> Session {
+        let mut s = Session::new(Uuid::new_v4());
+        s.started_at = Utc::now() - chrono::Duration::seconds(seconds_ago);
+        s
+    }
+
     fn child_turn(text: &str, concepts: Vec<String>) -> Turn {
         Turn {
             speaker: Speaker::Child,
@@ -422,22 +455,59 @@ mod tests {
     }
 
     #[test]
-    fn disengaging_returns_session_close() {
+    fn disengaging_late_returns_session_close() {
         let learner = learner_with(EngagementState::Disengaging, vec![]);
-        let session = empty_session();
+        let session = make_session_started_seconds_ago(60 * 60); // 1 hour ago
+        let now = Utc::now();
         assert_eq!(
-            decide_intent(&learner, &session),
+            decide_intent_at(&learner, &session, now),
             PedagogicalIntent::SessionClose,
         );
     }
 
     #[test]
-    fn disengaging_overrides_short_child_turn_branch() {
+    fn disengaging_early_returns_encouragement() {
         let learner = learner_with(EngagementState::Disengaging, vec![]);
-        let mut session = empty_session();
+        let session = make_session_started_seconds_ago(60); // 1 minute ago
+        let now = Utc::now();
+        assert_eq!(
+            decide_intent_at(&learner, &session, now),
+            PedagogicalIntent::Encouragement,
+        );
+    }
+
+    #[test]
+    fn disengaging_at_threshold_returns_session_close() {
+        use primer_core::learner::DEFAULT_EARLY_DISENGAGEMENT_SECS;
+        let learner = learner_with(EngagementState::Disengaging, vec![]);
+        let session = make_session_started_seconds_ago(DEFAULT_EARLY_DISENGAGEMENT_SECS as i64);
+        let now = Utc::now();
+        assert_eq!(
+            decide_intent_at(&learner, &session, now),
+            PedagogicalIntent::SessionClose,
+        );
+    }
+
+    #[test]
+    fn disengaging_just_after_threshold_returns_session_close() {
+        use primer_core::learner::DEFAULT_EARLY_DISENGAGEMENT_SECS;
+        let learner = learner_with(EngagementState::Disengaging, vec![]);
+        let session =
+            make_session_started_seconds_ago(DEFAULT_EARLY_DISENGAGEMENT_SECS as i64 + 60);
+        let now = Utc::now();
+        assert_eq!(
+            decide_intent_at(&learner, &session, now),
+            PedagogicalIntent::SessionClose,
+        );
+    }
+
+    #[test]
+    fn disengaging_late_overrides_short_child_turn_branch() {
+        let learner = learner_with(EngagementState::Disengaging, vec![]);
+        let mut session = make_session_started_seconds_ago(60 * 60); // 1 hour ago
         session.add_turn(child_turn("ok", vec![]));
         assert_eq!(
-            decide_intent(&learner, &session),
+            decide_intent_at(&learner, &session, Utc::now()),
             PedagogicalIntent::SessionClose,
         );
     }
