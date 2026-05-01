@@ -86,6 +86,30 @@ impl<'a> DialogueManager<'a> {
         Ok(greeting)
     }
 
+    /// Pick up an existing session loaded from storage. Replaces
+    /// `open_session()` for resumed flows: no greeting is emitted, the
+    /// loaded turns are kept in place, and `ended_at` is cleared so
+    /// the session is "active again".
+    ///
+    /// If the loaded session has more turns than the active context
+    /// window, this method also triggers a summary refresh so the
+    /// model has long-term memory of the conversation from turn one.
+    /// Note: the in-memory `LearnerModel` (built from CLI flags) is
+    /// not reconciled with `loaded.learner_id`; they may diverge until
+    /// a learner persistence layer lands. The session's `learner_id`
+    /// is preserved as loaded.
+    pub async fn resume_session(&mut self, loaded: Session) -> Result<()> {
+        self.session = loaded;
+        self.session.ended_at = None;
+        self.refresh_summary_if_due(true).await;
+        if let Some(store) = self.storage {
+            if let Err(e) = store.save_session(&self.session).await {
+                tracing::warn!("session save failed during resume: {e}");
+            }
+        }
+        Ok(())
+    }
+
     /// Process the child's input and generate the Primer's response.
     /// Convenience wrapper around `respond_to_streaming` that discards
     /// per-chunk callbacks. See that method for the full contract.
@@ -122,14 +146,19 @@ impl<'a> DialogueManager<'a> {
         };
         self.session.add_turn(child_turn);
 
-        // 2. Decide intent + retrieve knowledge + build prompt.
+        // 2. Decide intent, retrieve knowledge, retrieve relevant older
+        //    turns from the FTS index (when there are turns outside the
+        //    active window), build prompt.
         let intent = prompt_builder::decide_intent(&self.learner, &self.session);
         let knowledge_context = self.retrieve_knowledge(child_input).await;
+        let (summary, retrieved_older) = self.retrieve_long_term_memory(child_input).await;
         let prompt = prompt_builder::build_prompt(
             &self.learner,
             &self.session,
             intent,
             &knowledge_context,
+            &summary,
+            &retrieved_older,
             self.config.context_window_turns,
         );
 
@@ -176,6 +205,10 @@ impl<'a> DialogueManager<'a> {
             };
             self.session.add_turn(primer_turn);
             self.update_learner_model(child_input, &intent);
+            // Refresh the rolling summary if enough turns have fallen
+            // out of the window since we last summarized. Best-effort:
+            // a summary failure is logged, not propagated.
+            self.refresh_summary_if_due(false).await;
         }
 
         // 5. Save the session if a store is configured. Runs on both Ok
@@ -226,6 +259,69 @@ impl<'a> DialogueManager<'a> {
             .retrieve(query, &params)
             .await
             .unwrap_or_default()
+    }
+
+    /// Pull long-term memory for the current turn: the rolling summary
+    /// of pre-window turns plus the top-K older turns that the FTS index
+    /// considers relevant to `child_input`.
+    ///
+    /// Both pieces are empty when the session is still inside its first
+    /// context window, when no store is configured, or when the FTS
+    /// index returns no matches. Errors from the store are logged and
+    /// treated as "no retrieved turns" — long-term memory is best-effort.
+    async fn retrieve_long_term_memory(&self, child_input: &str) -> (String, Vec<Turn>) {
+        let total = self.session.turns.len();
+        let window = self.config.context_window_turns;
+        if total <= window {
+            return (String::new(), vec![]);
+        }
+        let exclude_at_or_after = total - window;
+        let retrieved = match self.storage {
+            None => vec![],
+            Some(store) => store
+                .retrieve_session_turns(self.session.id, child_input, 3, exclude_at_or_after)
+                .await
+                .unwrap_or_else(|e| {
+                    tracing::warn!("session-turn retrieval failed: {e}");
+                    vec![]
+                }),
+        };
+        (self.session.summary.clone(), retrieved)
+    }
+
+    /// Regenerate the rolling summary if the active window has shifted
+    /// enough since the last summarization, or unconditionally if `force`
+    /// is set (used on resume so a freshly-loaded session immediately has
+    /// a summary covering its pre-window history).
+    ///
+    /// Threshold: re-summarize when at least `context_window_turns`
+    /// turns have fallen out of the window since `summary_through_turn_index`
+    /// was last set. So at the default K=20, a summary is built when 20
+    /// new turns have rolled past the boundary.
+    ///
+    /// The summary always covers `turns[..total - window]` from scratch
+    /// (replacing the previous summary). This is more expensive than an
+    /// incremental approach but keeps the logic simple and the summary
+    /// coherent. Phase-0 cost is acceptable; revisit under profiling.
+    async fn refresh_summary_if_due(&mut self, force: bool) {
+        let window = self.config.context_window_turns;
+        let total = self.session.turns.len();
+        if total <= window {
+            return;
+        }
+        let pre_window_end = total - window;
+        let already_covered = self.session.summary_through_turn_index;
+        if !force && pre_window_end < already_covered.saturating_add(window) {
+            return;
+        }
+        let to_summarize = &self.session.turns[..pre_window_end];
+        match self.inference.summarize(to_summarize, 1500).await {
+            Ok(summary) => {
+                self.session.summary = summary;
+                self.session.summary_through_turn_index = pre_window_end;
+            }
+            Err(e) => tracing::warn!("summary refresh failed: {e}"),
+        }
     }
 
     /// Update the learner model based on the conversation evidence.
@@ -279,13 +375,19 @@ mod tests {
         // Wrap in Mutex<Option> so we can take ownership in `generate_stream`
         // even though the trait method takes `&self`.
         script: Mutex<Option<Vec<Result<TokenChunk>>>>,
+        // Counts calls to `summarize` for tests that assert on cadence.
+        summarize_calls: Mutex<u32>,
     }
 
     impl ScriptedBackend {
         fn new(items: Vec<Result<TokenChunk>>) -> Self {
             Self {
                 script: Mutex::new(Some(items)),
+                summarize_calls: Mutex::new(0),
             }
+        }
+        fn summary_call_count(&self) -> u32 {
+            *self.summarize_calls.lock().unwrap()
         }
     }
 
@@ -309,6 +411,10 @@ mod tests {
                 .take()
                 .expect("ScriptedBackend script already consumed");
             Ok(Box::pin(stream::iter(items)))
+        }
+        async fn summarize(&self, turns: &[Turn], _target_chars: usize) -> Result<String> {
+            *self.summarize_calls.lock().unwrap() += 1;
+            Ok(format!("[test summary covering {} turns]", turns.len()))
         }
     }
 
@@ -351,6 +457,19 @@ mod tests {
             *self.saves.lock().unwrap() += 1;
             *self.last_turn_count.lock().unwrap() = session.turns.len();
             Ok(())
+        }
+        async fn load_session(&self, _id: uuid::Uuid) -> Result<Option<Session>> {
+            // Stub: tests that need real load behaviour use a different store.
+            Ok(None)
+        }
+        async fn retrieve_session_turns(
+            &self,
+            _session_id: uuid::Uuid,
+            _query: &str,
+            _k: usize,
+            _exclude_indices_at_or_after: usize,
+        ) -> Result<Vec<Turn>> {
+            Ok(vec![])
         }
     }
 
@@ -613,5 +732,167 @@ mod tests {
         // The greeting turn was recorded and persisted.
         assert_eq!(store.save_count(), 1);
         assert_eq!(store.last_turn_count(), 1);
+    }
+
+    // ─── resume_session and summary refresh ──────────────────────────
+
+    fn make_test_session_with_turns(n: usize, learner_id: Uuid) -> Session {
+        use primer_core::conversation::Speaker;
+        let mut session = Session::new(learner_id);
+        for i in 0..n {
+            session.add_turn(Turn {
+                speaker: if i % 2 == 0 {
+                    Speaker::Child
+                } else {
+                    Speaker::Primer
+                },
+                text: format!("turn {i}"),
+                timestamp: Utc::now(),
+                intent: None,
+                concepts: vec![],
+            });
+        }
+        session
+    }
+
+    #[tokio::test]
+    async fn resume_session_loads_turns_without_greeting() {
+        // Resume picks up the loaded turns verbatim. No greeting is
+        // prepended; the turn count after resume_session matches the
+        // loaded session exactly.
+        let backend = ScriptedBackend::new(vec![Ok(chunk("", true))]);
+        let knowledge = EmptyKnowledge;
+        let mut dm = DialogueManager::new(
+            test_learner(),
+            &backend,
+            &knowledge,
+            None,
+            PedagogyConfig::default(),
+        );
+        let learner_id = dm.learner.profile.id;
+        let loaded = make_test_session_with_turns(5, learner_id);
+        let loaded_id = loaded.id;
+        dm.resume_session(loaded).await.unwrap();
+        assert_eq!(dm.session.turns.len(), 5);
+        assert_eq!(dm.session.id, loaded_id);
+        // The Primer never said "Hello, ..." — turn 0 is from our test fixture.
+        assert_eq!(dm.session.turns[0].text, "turn 0");
+    }
+
+    #[tokio::test]
+    async fn resume_session_clears_ended_at_and_persists() {
+        use primer_core::storage::SessionStore;
+        let backend = ScriptedBackend::new(vec![Ok(chunk("", true))]);
+        let knowledge = EmptyKnowledge;
+        let store = CountingStore::new();
+        let mut dm = DialogueManager::new(
+            test_learner(),
+            &backend,
+            &knowledge,
+            Some(&store as &dyn SessionStore),
+            PedagogyConfig::default(),
+        );
+        let mut loaded = make_test_session_with_turns(3, dm.learner.profile.id);
+        loaded.ended_at = Some(Utc::now());
+        dm.resume_session(loaded).await.unwrap();
+        assert!(dm.session.ended_at.is_none(), "ended_at should be cleared");
+        assert_eq!(store.save_count(), 1, "resume should fire one save");
+    }
+
+    #[tokio::test]
+    async fn resume_session_preserves_loaded_learner_id() {
+        // The in-memory LearnerModel comes from CLI flags; the loaded
+        // Session might belong to a different learner_id. Resume must
+        // keep the loaded learner_id (no silent override).
+        let backend = ScriptedBackend::new(vec![Ok(chunk("", true))]);
+        let knowledge = EmptyKnowledge;
+        let mut dm = DialogueManager::new(
+            test_learner(),
+            &backend,
+            &knowledge,
+            None,
+            PedagogyConfig::default(),
+        );
+        let dm_learner_id = dm.learner.profile.id;
+        let other_learner = Uuid::new_v4();
+        assert_ne!(dm_learner_id, other_learner);
+        let loaded = make_test_session_with_turns(2, other_learner);
+        dm.resume_session(loaded).await.unwrap();
+        assert_eq!(
+            dm.session.learner_id, other_learner,
+            "session learner_id should not be overwritten by the manager's learner"
+        );
+    }
+
+    #[tokio::test]
+    async fn resume_session_triggers_summary_refresh_when_above_window() {
+        // A loaded session with > context_window_turns should get its
+        // summary refreshed unconditionally on resume so the Primer has
+        // long-term memory of pre-window turns from turn one.
+        let backend = ScriptedBackend::new(vec![Ok(chunk("", true))]);
+        let knowledge = EmptyKnowledge;
+        let mut dm = DialogueManager::new(
+            test_learner(),
+            &backend,
+            &knowledge,
+            None,
+            PedagogyConfig::default(),
+        );
+        // Window is 20; 25 turns gives 5 pre-window turns.
+        let loaded = make_test_session_with_turns(25, dm.learner.profile.id);
+        dm.resume_session(loaded).await.unwrap();
+        assert_eq!(
+            backend.summary_call_count(),
+            1,
+            "summary should refresh on resume"
+        );
+        assert!(
+            !dm.session.summary.is_empty(),
+            "summary should be populated after refresh"
+        );
+        assert_eq!(
+            dm.session.summary_through_turn_index, 5,
+            "summary boundary should land at total - window"
+        );
+    }
+
+    #[tokio::test]
+    async fn resume_session_skips_summary_when_inside_first_window() {
+        // Sessions that fit inside the active window have nothing to
+        // summarize; resume must not waste an inference call.
+        let backend = ScriptedBackend::new(vec![Ok(chunk("", true))]);
+        let knowledge = EmptyKnowledge;
+        let mut dm = DialogueManager::new(
+            test_learner(),
+            &backend,
+            &knowledge,
+            None,
+            PedagogyConfig::default(),
+        );
+        // Window is 20; 5 turns is well inside.
+        let loaded = make_test_session_with_turns(5, dm.learner.profile.id);
+        dm.resume_session(loaded).await.unwrap();
+        assert_eq!(backend.summary_call_count(), 0);
+        assert_eq!(dm.session.summary, "");
+    }
+
+    #[tokio::test]
+    async fn summary_does_not_refresh_when_below_threshold_during_active_session() {
+        // First respond_to_streaming fires only when there are turns to
+        // process. With turn count below window+window, no refresh.
+        let backend = ScriptedBackend::new(vec![Ok(chunk("ok", false)), Ok(chunk("", true))]);
+        let knowledge = EmptyKnowledge;
+        let mut dm = DialogueManager::new(
+            test_learner(),
+            &backend,
+            &knowledge,
+            None,
+            PedagogyConfig::default(),
+        );
+        // Pre-load with 21 turns (1 turn pre-window). Far below the
+        // 2*window threshold.
+        dm.session.turns = make_test_session_with_turns(21, dm.learner.profile.id).turns;
+        let _ = dm.respond_to_streaming("hi", |_| {}).await.unwrap();
+        assert_eq!(backend.summary_call_count(), 0);
     }
 }

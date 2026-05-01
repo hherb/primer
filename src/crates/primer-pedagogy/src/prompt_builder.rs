@@ -7,7 +7,7 @@
 //! This is where the Socratic method is encoded — not in the model's weights,
 //! but in the instructions we give it.
 
-use primer_core::conversation::{PedagogicalIntent, Session};
+use primer_core::conversation::{PedagogicalIntent, Session, Speaker, Turn};
 use primer_core::inference::{Message, Prompt, Role};
 use primer_core::knowledge::Passage;
 use primer_core::learner::{EngagementState, LearnerModel, UnderstandingDepth};
@@ -19,10 +19,19 @@ use primer_core::learner::{EngagementState, LearnerModel, UnderstandingDepth};
 /// - Their current engagement state
 /// - What concepts are active in the conversation
 /// - What the dialogue manager wants to accomplish next
+/// - Long-term memory: a rolling summary of pre-window turns plus
+///   FTS5-retrieved older turns relevant to the current input
+///
+/// `summary` and `retrieved_older` may be empty: short sessions stay
+/// inside the active window so neither is needed. When non-empty they
+/// live as system-prompt sections so the chat-message timeline (the
+/// last N turns) stays linear and coherent.
 pub fn build_system_prompt(
     learner: &LearnerModel,
     intent: PedagogicalIntent,
     knowledge_context: &[Passage],
+    summary: &str,
+    retrieved_older: &[Turn],
 ) -> String {
     let age = learner.profile.age;
     let name = &learner.profile.name;
@@ -118,7 +127,37 @@ Vocabulary discipline (applies at every age):
         )
     };
 
-    format!("{base}\n\n{intent_instruction}{engagement_note}{knowledge_section}")
+    let summary_section = if summary.trim().is_empty() {
+        String::new()
+    } else {
+        format!(
+            "\n\nEarlier in this conversation (long-term memory across many turns):\n\n{summary}"
+        )
+    };
+
+    let retrieved_section = if retrieved_older.is_empty() {
+        String::new()
+    } else {
+        let lines: String = retrieved_older
+            .iter()
+            .map(|t| {
+                let who = match t.speaker {
+                    Speaker::Child => "Child",
+                    Speaker::Primer => "Primer",
+                };
+                format!("- [{who}] {}", t.text)
+            })
+            .collect::<Vec<_>>()
+            .join("\n");
+        format!(
+            "\n\nRelevant prior moments from this same session (retrieved by topic, \
+             not in time order; use as background, not as the active conversation):\n\n{lines}"
+        )
+    };
+
+    format!(
+        "{base}\n\n{intent_instruction}{engagement_note}{summary_section}{retrieved_section}{knowledge_section}"
+    )
 }
 
 /// Convert a conversation session into the messages array for the LLM prompt.
@@ -137,15 +176,25 @@ pub fn build_messages(session: &Session, context_turns: usize) -> Vec<Message> {
 }
 
 /// Assemble the complete prompt from components.
+///
+/// `summary` and `retrieved_older` carry long-term memory: the rolling
+/// LLM-generated condensation of pre-window turns and the FTS5-retrieved
+/// older turns relevant to the latest child input. Both are injected
+/// into the system prompt; the chat `messages` list stays exactly equal
+/// to `session.recent_turns(context_turns)` so the timeline the model
+/// sees as "the conversation" is linear.
+#[allow(clippy::too_many_arguments)]
 pub fn build_prompt(
     learner: &LearnerModel,
     session: &Session,
     intent: PedagogicalIntent,
     knowledge_context: &[Passage],
+    summary: &str,
+    retrieved_older: &[Turn],
     context_turns: usize,
 ) -> Prompt {
     Prompt {
-        system: build_system_prompt(learner, intent, knowledge_context),
+        system: build_system_prompt(learner, intent, knowledge_context, summary, retrieved_older),
         messages: build_messages(session, context_turns),
     }
 }
@@ -206,10 +255,7 @@ pub fn extract_active_concepts(session: &Session, last_n: usize) -> Vec<String> 
 
 /// Decide the next pedagogical intent based on the learner model
 /// and conversation history.
-pub fn decide_intent(
-    learner: &LearnerModel,
-    session: &Session,
-) -> PedagogicalIntent {
+pub fn decide_intent(learner: &LearnerModel, session: &Session) -> PedagogicalIntent {
     // If the child is frustrated, scaffold.
     if learner.current_engagement == EngagementState::Frustrated {
         return PedagogicalIntent::Scaffolding;
@@ -593,5 +639,110 @@ mod tests {
         let intent = decide_intent(&learner, &session);
         assert_ne!(intent, PedagogicalIntent::DirectAnswer);
         assert_ne!(intent, PedagogicalIntent::AnswerThenPivot);
+    }
+
+    // ─── Long-term memory injection (summary + retrieved older) ──────
+
+    fn build_default_prompt(
+        summary: &str,
+        retrieved_older: &[Turn],
+    ) -> primer_core::inference::Prompt {
+        let learner = learner_with(EngagementState::Engaged, vec![]);
+        let session = empty_session();
+        build_prompt(
+            &learner,
+            &session,
+            PedagogicalIntent::SocraticQuestion,
+            &[],
+            summary,
+            retrieved_older,
+            20,
+        )
+    }
+
+    #[test]
+    fn build_prompt_includes_summary_section_when_non_empty() {
+        let prompt = build_default_prompt(
+            "Earlier we explored why the sky is blue and what gravity feels like.",
+            &[],
+        );
+        assert!(
+            prompt.system.contains("Earlier in this conversation"),
+            "summary section header should appear in system prompt"
+        );
+        assert!(
+            prompt.system.contains("why the sky is blue"),
+            "summary content should be in system prompt: {}",
+            prompt.system
+        );
+    }
+
+    #[test]
+    fn build_prompt_omits_summary_section_when_empty() {
+        let prompt = build_default_prompt("", &[]);
+        assert!(
+            !prompt.system.contains("Earlier in this conversation"),
+            "no summary section when summary is empty"
+        );
+    }
+
+    #[test]
+    fn build_prompt_omits_summary_section_when_whitespace_only() {
+        let prompt = build_default_prompt("   \n\t  ", &[]);
+        assert!(
+            !prompt.system.contains("Earlier in this conversation"),
+            "whitespace-only summary should be treated as empty"
+        );
+    }
+
+    #[test]
+    fn build_prompt_includes_retrieved_prior_moments() {
+        let retrieved = vec![
+            child_turn("we talked about lightning last week", vec![]),
+            primer_turn("yes, you wondered why thunder follows", vec![]),
+        ];
+        let prompt = build_default_prompt("", &retrieved);
+        assert!(
+            prompt.system.contains("Relevant prior moments"),
+            "retrieved-moments section header should appear"
+        );
+        assert!(prompt.system.contains("lightning last week"));
+        assert!(prompt.system.contains("[Child]"));
+        assert!(prompt.system.contains("[Primer]"));
+    }
+
+    #[test]
+    fn build_prompt_omits_retrieved_section_when_empty() {
+        let prompt = build_default_prompt("", &[]);
+        assert!(!prompt.system.contains("Relevant prior moments"));
+    }
+
+    #[test]
+    fn build_prompt_chat_messages_remain_recent_window_only() {
+        // Long-term memory (summary + retrieved older) lives in the
+        // system prompt, NOT in the messages list. The messages stay
+        // exactly equal to session.recent_turns(window).
+        let learner = learner_with(EngagementState::Engaged, vec![]);
+        let mut session = empty_session();
+        for i in 0..30 {
+            session.add_turn(child_turn(&format!("turn {i}"), vec![]));
+        }
+        let retrieved = vec![child_turn("retrieved", vec![])];
+        let prompt = build_prompt(
+            &learner,
+            &session,
+            PedagogicalIntent::SocraticQuestion,
+            &[],
+            "summary text",
+            &retrieved,
+            20, // window
+        );
+        // 30 turns total, window 20 → messages are turns 10..30.
+        assert_eq!(prompt.messages.len(), 20);
+        assert_eq!(prompt.messages[0].content, "turn 10");
+        assert_eq!(prompt.messages[19].content, "turn 29");
+        // Summary and retrieved appeared in system prompt — not as messages.
+        assert!(prompt.system.contains("summary text"));
+        assert!(prompt.system.contains("retrieved"));
     }
 }

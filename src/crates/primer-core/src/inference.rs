@@ -15,6 +15,7 @@ use futures::Stream;
 use serde::{Deserialize, Serialize};
 use std::pin::Pin;
 
+use crate::conversation::{Speaker, Turn};
 use crate::error::Result;
 
 /// Parameters controlling text generation.
@@ -111,4 +112,60 @@ pub trait InferenceBackend: Send + Sync {
         prompt: &Prompt,
         params: &GenerationParams,
     ) -> Result<TokenStream>;
+
+    /// Condense a sequence of conversation turns into a short prose
+    /// summary suitable for inclusion in a future system prompt.
+    ///
+    /// Used by `DialogueManager` to maintain long-term memory across
+    /// hours of conversation: turns that fall out of the active context
+    /// window are summarized and the summary is persisted on the
+    /// `Session`. The default implementation builds a one-shot prompt
+    /// and dispatches to `generate`. Stub backends override this to
+    /// return a canned string so tests don't need a real model.
+    ///
+    /// `target_chars` is a soft target for the output length, not a
+    /// hard cap. Implementations should pass it through to the model
+    /// as guidance.
+    async fn summarize(&self, turns: &[Turn], target_chars: usize) -> Result<String> {
+        let prompt = build_summarize_prompt(turns, target_chars);
+        let params = GenerationParams {
+            // Heuristic: ~3 chars per token, plus headroom.
+            max_tokens: ((target_chars / 3) as u32).max(256),
+            temperature: 0.3,
+            top_p: 0.9,
+            stop_sequences: vec![],
+        };
+        self.generate(&prompt, &params).await
+    }
+}
+
+/// Construct a summarization prompt from a slice of turns. The system
+/// instruction frames the task; the conversation itself is laid out as
+/// alternating user/assistant messages so the model "sees" the original
+/// dialogue rather than a flattened transcript.
+pub fn build_summarize_prompt(turns: &[Turn], target_chars: usize) -> Prompt {
+    let system = format!(
+        "You are summarizing a conversation between the Primer (a Socratic AI learning \
+         companion) and a child. The summary will be re-shown to a future Primer turn \
+         as long-term memory.\n\n\
+         Capture, in plain prose:\n\
+         - The topics that were explored.\n\
+         - Concepts the child clearly grasped, and how they expressed that understanding.\n\
+         - Concepts the child struggled with or had misconceptions about.\n\
+         - The emotional arc (curious, frustrated, distracted, energised).\n\n\
+         Write a single paragraph of about {target_chars} characters. No bullet lists, \
+         no headings, no quotation marks. Refer to the child as \"the child\" — the \
+         summary will be read by the Primer in a future session.",
+    );
+    let messages = turns
+        .iter()
+        .map(|t| Message {
+            role: match t.speaker {
+                Speaker::Child => Role::User,
+                Speaker::Primer => Role::Assistant,
+            },
+            content: t.text.clone(),
+        })
+        .collect();
+    Prompt { system, messages }
 }

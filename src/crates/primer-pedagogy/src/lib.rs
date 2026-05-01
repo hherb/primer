@@ -14,7 +14,7 @@
 //! is active. This separation means the pedagogy can be tested with the
 //! stub backend, without any model loaded.
 
-pub mod prompt_builder;
 pub mod dialogue_manager;
+pub mod prompt_builder;
 
 pub use dialogue_manager::DialogueManager;

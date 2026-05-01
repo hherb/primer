@@ -7,6 +7,7 @@
 
 use async_trait::async_trait;
 use futures::stream;
+use primer_core::conversation::Turn;
 use primer_core::error::Result;
 use primer_core::inference::*;
 
@@ -48,5 +49,50 @@ impl InferenceBackend for StubBackend {
         };
 
         Ok(Box::pin(stream::once(async { Ok(chunk) })))
+    }
+
+    /// Stub override: returns a canned string mentioning the turn count.
+    /// Lets `DialogueManager`'s summary path be exercised in tests
+    /// without a real model. The format is stable so tests can assert
+    /// on substring presence.
+    async fn summarize(&self, turns: &[Turn], _target_chars: usize) -> Result<String> {
+        Ok(format!(
+            "[stub summary covering {} earlier turns]",
+            turns.len()
+        ))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use chrono::Utc;
+    use primer_core::conversation::Speaker;
+
+    #[tokio::test]
+    async fn stub_summarize_returns_canned_string_with_turn_count() {
+        let backend = StubBackend;
+        let turns = vec![
+            Turn {
+                speaker: Speaker::Child,
+                text: "first".to_string(),
+                timestamp: Utc::now(),
+                intent: None,
+                concepts: vec![],
+            },
+            Turn {
+                speaker: Speaker::Primer,
+                text: "second".to_string(),
+                timestamp: Utc::now(),
+                intent: None,
+                concepts: vec![],
+            },
+        ];
+        let result = backend.summarize(&turns, 1500).await.unwrap();
+        assert!(
+            result.contains("2"),
+            "summary should mention turn count: {result}"
+        );
+        assert!(result.starts_with("[stub summary"));
     }
 }

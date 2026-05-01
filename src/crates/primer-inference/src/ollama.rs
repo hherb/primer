@@ -94,8 +94,9 @@ impl NdjsonBuffer {
 }
 
 fn parse_ollama_line(line: &str) -> Result<TokenChunk> {
-    let chunk: ChatChunk = serde_json::from_str(line)
-        .map_err(|e| PrimerError::Inference(format!("Ollama NDJSON parse error: {e}; line: {line}")))?;
+    let chunk: ChatChunk = serde_json::from_str(line).map_err(|e| {
+        PrimerError::Inference(format!("Ollama NDJSON parse error: {e}; line: {line}"))
+    })?;
     Ok(TokenChunk {
         text: chunk.message.content,
         done: chunk.done,
@@ -290,7 +291,9 @@ mod tests {
         // and skip it via the normal parse-error path.
         let mut buf = NdjsonBuffer::new();
         buf.extend(&[b'a', 0xff, b'b', b'\n']);
-        let line = buf.pop_line().expect("invalid UTF-8 line should still be surfaced");
+        let line = buf
+            .pop_line()
+            .expect("invalid UTF-8 line should still be surfaced");
         assert!(line.contains('a'));
         assert!(line.contains('b'));
         assert!(line.contains('\u{FFFD}'));

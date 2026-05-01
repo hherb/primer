@@ -8,22 +8,28 @@
 //!   primer --backend cloud --model claude-opus-4-7      # Override the cloud model
 //!   primer --backend ollama --model llama3.2            # Local Ollama server
 //!   primer --name Binti --age 8                         # Set learner profile
+//!   primer --resume <uuid>                              # Resume a past session
 
 use chrono::Utc;
 use clap::Parser;
 use primer_core::config::PedagogyConfig;
 use primer_core::knowledge::KnowledgeBase;
 use primer_core::learner::*;
+use primer_core::storage::SessionStore;
 use primer_inference::stub::StubBackend;
 use primer_knowledge::SqliteKnowledgeBase;
 use primer_pedagogy::DialogueManager;
 use std::io::{self, BufRead, Write};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use uuid::Uuid;
 
 /// SQLite path token for an in-memory database — used as the default
-/// for both `--knowledge-db` and `--session-db` when no path is given.
+/// for `--knowledge-db` when no path is given. Sessions persist to a
+/// per-learner file under `~/.primer/` instead.
 const IN_MEMORY: &str = ":memory:";
+
+/// Subdirectory under `$HOME` for per-learner session databases.
+const PRIMER_HOME_DIR: &str = ".primer";
 
 #[derive(Parser, Debug)]
 #[command(name = "primer", about = "The Primer — a Socratic learning companion")]
@@ -55,13 +61,68 @@ struct Cli {
     knowledge_db: Option<PathBuf>,
 
     /// Path to session database SQLite file.
-    /// If omitted, uses an in-memory database (sessions are not persisted).
+    /// If omitted, defaults to `~/.primer/<slug-of-name>.db` (per-learner
+    /// file, created if missing). Pass an explicit path only when you
+    /// want a non-default location.
     #[arg(long)]
     session_db: Option<PathBuf>,
+
+    /// Resume an existing session by UUID. Read from `--session-db`
+    /// (default `~/.primer/<name>.db`). Errors if the file doesn't
+    /// exist or no session with that id is stored. Works with any
+    /// backend including stub: historical turns provide context, new
+    /// turns get backend-appropriate responses.
+    #[arg(long, value_name = "UUID")]
+    resume: Option<Uuid>,
 
     /// Anthropic API key (for cloud backend).
     #[arg(long, env = "ANTHROPIC_API_KEY")]
     api_key: Option<String>,
+}
+
+/// Slugify a learner name into a filesystem-safe filename stem. ASCII
+/// alphanumerics are kept (lowercased); every other character becomes
+/// `-`; runs of `-` collapse; leading/trailing `-` are stripped. An
+/// empty result falls back to `default` so we always produce a valid
+/// filename.
+fn slug(name: &str) -> String {
+    let mut out = String::with_capacity(name.len());
+    let mut last_was_sep = true; // suppress leading sep
+    for c in name.chars() {
+        if c.is_ascii_alphanumeric() {
+            out.push(c.to_ascii_lowercase());
+            last_was_sep = false;
+        } else if !last_was_sep {
+            out.push('-');
+            last_was_sep = true;
+        }
+    }
+    while out.ends_with('-') {
+        out.pop();
+    }
+    if out.is_empty() {
+        "default".to_string()
+    } else {
+        out
+    }
+}
+
+/// Resolve the path to use for the session database.
+/// `~/.primer/<slug(name)>.db` when no explicit path is given, or the
+/// explicit path verbatim when one is. Returns the resolved path along
+/// with a flag indicating whether it lives under the default home.
+fn resolve_session_db_path(
+    explicit: Option<PathBuf>,
+    learner_name: &str,
+) -> Result<PathBuf, String> {
+    if let Some(path) = explicit {
+        return Ok(path);
+    }
+    let home = std::env::var("HOME").map_err(|_| {
+        "Cannot find HOME env var to default --session-db; pass it explicitly".to_string()
+    })?;
+    let dir = PathBuf::from(home).join(PRIMER_HOME_DIR);
+    Ok(dir.join(format!("{}.db", slug(learner_name))))
 }
 
 fn create_learner(name: &str, age: u8) -> LearnerModel {
@@ -146,9 +207,49 @@ async fn main() -> anyhow::Result<()> {
     let knowledge_path = cli.knowledge_db.unwrap_or_else(|| PathBuf::from(IN_MEMORY));
     let knowledge = SqliteKnowledgeBase::open(&knowledge_path)?;
 
-    // Session store — in-memory by default (sessions are not persisted).
-    let session_path = cli.session_db.unwrap_or_else(|| PathBuf::from(IN_MEMORY));
-    let session_store = primer_storage::SqliteSessionStore::open(&session_path)?;
+    // Session store — defaults to a per-learner file under `~/.primer/`.
+    let session_path = match resolve_session_db_path(cli.session_db, &cli.name) {
+        Ok(p) => p,
+        Err(msg) => {
+            eprintln!("Error: {msg}");
+            std::process::exit(1);
+        }
+    };
+
+    // Resume requires the file to already exist; do not auto-create on
+    // a typo'd path. Catch this BEFORE we open (which would create it).
+    if cli.resume.is_some() && !Path::new(&session_path).exists() {
+        eprintln!(
+            "Error: --resume requires an existing --session-db; {} does not exist.",
+            session_path.display()
+        );
+        std::process::exit(1);
+    }
+
+    // Ensure parent directory exists before opening.
+    if let Some(parent) = session_path.parent() {
+        if !parent.as_os_str().is_empty() {
+            if let Err(e) = std::fs::create_dir_all(parent) {
+                eprintln!(
+                    "Error: cannot create session-db directory {}: {e}",
+                    parent.display()
+                );
+                std::process::exit(1);
+            }
+        }
+    }
+
+    let session_store = match primer_storage::SqliteSessionStore::open(&session_path) {
+        Ok(s) => s,
+        Err(e) => {
+            eprintln!(
+                "Error: cannot open session-db {}: {e}",
+                session_path.display()
+            );
+            std::process::exit(1);
+        }
+    };
+    eprintln!("Session DB: {}", session_path.display());
 
     // Learner model.
     let learner = create_learner(&cli.name, cli.age);
@@ -162,14 +263,31 @@ async fn main() -> anyhow::Result<()> {
         learner,
         inference.as_ref(),
         &knowledge as &dyn KnowledgeBase,
-        Some(&session_store as &dyn primer_core::storage::SessionStore),
+        Some(&session_store as &dyn SessionStore),
         pedagogy_config,
     );
 
     // ─── REPL ────────────────────────────────────────────────────────
 
-    let greeting = dm.open_session().await?;
-    println!("\nPrimer: {greeting}\n");
+    if let Some(resume_id) = cli.resume {
+        match session_store.load_session(resume_id).await? {
+            None => {
+                eprintln!(
+                    "Error: no session with id {resume_id} found in {}",
+                    session_path.display()
+                );
+                std::process::exit(1);
+            }
+            Some(loaded) => {
+                let n_turns = loaded.turns.len();
+                dm.resume_session(loaded).await?;
+                eprintln!("\nResumed session {resume_id} with {n_turns} prior turn(s).\n");
+            }
+        }
+    } else {
+        let greeting = dm.open_session().await?;
+        println!("\nPrimer: {greeting}\n");
+    }
 
     let stdin = io::stdin();
     let mut stdout = io::stdout();
@@ -233,4 +351,71 @@ async fn main() -> anyhow::Result<()> {
     }
 
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn slug_lowercases_and_keeps_alphanumerics() {
+        assert_eq!(slug("Explorer"), "explorer");
+        assert_eq!(slug("Binti7"), "binti7");
+    }
+
+    #[test]
+    fn slug_replaces_special_chars_with_dash() {
+        assert_eq!(slug("Anna Maria"), "anna-maria");
+        assert_eq!(slug("José"), "jos");
+        assert_eq!(slug("Lee/Davis"), "lee-davis");
+    }
+
+    #[test]
+    fn slug_collapses_runs_of_separators() {
+        assert_eq!(slug("a   b"), "a-b");
+        assert_eq!(slug("a---b"), "a-b");
+    }
+
+    #[test]
+    fn slug_strips_leading_and_trailing_separators() {
+        assert_eq!(slug("  hello  "), "hello");
+        assert_eq!(slug("___world___"), "world");
+    }
+
+    #[test]
+    fn slug_empty_input_falls_back_to_default() {
+        assert_eq!(slug(""), "default");
+        assert_eq!(slug("!!!"), "default");
+    }
+
+    #[test]
+    fn resolve_session_db_path_passes_explicit_through() {
+        let p = resolve_session_db_path(Some(PathBuf::from("/tmp/explicit.db")), "Anyone").unwrap();
+        assert_eq!(p, PathBuf::from("/tmp/explicit.db"));
+    }
+
+    #[test]
+    fn resolve_session_db_path_default_uses_home_and_slug() {
+        // Use a synthetic HOME so the test doesn't depend on the dev's
+        // real home directory. Cleanup is done via setting HOME back —
+        // but env vars are process-global and tests run in parallel, so
+        // we restore on drop.
+        struct HomeGuard {
+            original: Option<String>,
+        }
+        impl Drop for HomeGuard {
+            fn drop(&mut self) {
+                match &self.original {
+                    Some(v) => unsafe { std::env::set_var("HOME", v) },
+                    None => unsafe { std::env::remove_var("HOME") },
+                }
+            }
+        }
+        let _guard = HomeGuard {
+            original: std::env::var("HOME").ok(),
+        };
+        unsafe { std::env::set_var("HOME", "/synthetic/home") };
+        let p = resolve_session_db_path(None, "Binti").unwrap();
+        assert_eq!(p, PathBuf::from("/synthetic/home/.primer/binti.db"));
+    }
 }

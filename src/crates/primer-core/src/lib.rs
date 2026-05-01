@@ -12,11 +12,11 @@
 //! allowing backends to be swapped by configuration without touching
 //! the pedagogical engine.
 
+pub mod config;
+pub mod conversation;
 pub mod error;
 pub mod inference;
-pub mod speech;
 pub mod knowledge;
 pub mod learner;
-pub mod conversation;
+pub mod speech;
 pub mod storage;
-pub mod config;

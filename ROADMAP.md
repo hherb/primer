@@ -17,7 +17,9 @@ This roadmap is organised around one principle: **get a working conversation loo
 - ✅ Wire up SSE streaming in `CloudBackend` — done. NDJSON streaming for `OllamaBackend` landed in the same pass. Tokens drip through to the terminal as they arrive.
 - ✅ Add a `--model` CLI flag to select between Claude models (sonnet for speed, opus for depth) — done. Defaults to `claude-sonnet-4-6`; required for ollama.
 - [ ] Handle API errors gracefully (rate limits, network drops, invalid key) with clear user-facing messages — partial. Mid-stream errors propagate cleanly and the partial Primer turn is dropped. Full retry/backoff on rate limits is still TODO.
-- ✅ Add conversation persistence — sessions persist to SQLite via `primer-storage` (per-turn save). Load/resume CLI surface deferred — see [docs/superpowers/specs/2026-04-30-session-persistence-sqlite-design.md](docs/superpowers/specs/2026-04-30-session-persistence-sqlite-design.md)
+- ✅ Add conversation persistence — sessions persist to SQLite via `primer-storage` (per-turn save). Default location is `~/.primer/<slug-of-name>.db`; explicit path via `--session-db <path>`. See [docs/superpowers/specs/2026-04-30-session-persistence-sqlite-design.md](docs/superpowers/specs/2026-04-30-session-persistence-sqlite-design.md)
+- ✅ Resume past session — `--resume <uuid>` CLI flag loads a stored `Session` and picks up without a greeting. Errors clearly when the file or id is missing.
+- ✅ Long-term memory across the context window — schema v2 added a rolling LLM-generated `Session.summary` (refreshed on resume + every 20 turns) plus FTS5 retrieval (`turn_text_fts`) of relevant older turns; both inject into the system prompt while the chat-message timeline stays = `recent_turns(window)`. Context budget is bounded across hours of conversation.
 
 ### 0.2 — Knowledge base bootstrapping
 
@@ -40,7 +42,7 @@ This roadmap is organised around one principle: **get a working conversation loo
 
 ### 0.4 — Developer experience
 
-- [ ] Add `cargo test` coverage for all crates (core trait contracts, prompt builder output, dialogue manager state transitions, knowledge base retrieval) — partial. 71 tests across the workspace: streaming parsers (18 in `primer-inference`), `decide_intent` and prompt builder (18 characterization tests in `primer-pedagogy::prompt_builder`), `dialogue_manager` including the engine-save spy (10 in `primer-pedagogy::dialogue_manager`), session persistence (23 in `primer-storage`), and the enum-variant arrays (2 in `primer-core`). `primer-knowledge` retrieval is the only crate still without coverage.
+- [ ] Add `cargo test` coverage for all crates (core trait contracts, prompt builder output, dialogue manager state transitions, knowledge base retrieval) — partial. 109 tests across the workspace: streaming parsers + stub-summarize (19 in `primer-inference`), `decide_intent`/prompt builder including long-term-memory injection (24 in `primer-pedagogy::prompt_builder`), `dialogue_manager` including resume + summary refresh (16 in `primer-pedagogy::dialogue_manager`), session persistence + v2 migration + load + FTS retrieval (41 in `primer-storage`), CLI slug + path resolution (7 in `primer-cli`), and the enum-variant arrays (2 in `primer-core`). `primer-knowledge` retrieval is the only crate still without coverage.
 - [ ] Set up CI (GitHub Actions) — build + test on Linux and macOS
 - ✅ Add a `CLAUDE.md` to the repo with codebase conventions — done.
 - [ ] Add `--verbose` flag that prints pedagogical decisions (intent chosen, knowledge passages retrieved, engagement state) alongside the conversation — invaluable for debugging the Socratic behaviour
