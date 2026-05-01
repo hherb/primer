@@ -931,4 +931,44 @@ mod tests {
         assert!(prompt.system.contains("summary text"));
         assert!(prompt.system.contains("retrieved"));
     }
+
+    // ─── engagement_note coverage for new EngagementState variants ───
+
+    #[test]
+    fn build_prompt_includes_engagement_note_for_frustrated_stuck() {
+        let learner = learner_with(EngagementState::FrustratedStuck, vec![]);
+        let session = empty_session();
+        let prompt = build_prompt(
+            &learner,
+            &session,
+            PedagogicalIntent::Scaffolding,
+            &[],
+            "",
+            &[],
+            20,
+        );
+        assert!(
+            prompt.system.contains("appears frustrated"),
+            "engagement note should appear for FrustratedStuck"
+        );
+    }
+
+    #[test]
+    fn build_prompt_includes_engagement_note_for_frustrated_trying() {
+        let learner = learner_with(EngagementState::FrustratedTrying, vec![]);
+        let session = empty_session();
+        let prompt = build_prompt(
+            &learner,
+            &session,
+            PedagogicalIntent::Encouragement,
+            &[],
+            "",
+            &[],
+            20,
+        );
+        assert!(
+            prompt.system.contains("appears frustrated"),
+            "engagement note should appear for FrustratedTrying"
+        );
+    }
 }
