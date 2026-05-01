@@ -573,6 +573,26 @@ async fn main() -> anyhow::Result<()> {
             }
         }
 
+        // Print pedagogical debug info when --verbose is set.
+        if cli.verbose {
+            if let Some(intent) = dm.last_intent() {
+                eprintln!(
+                    "[intent] {:?} -> {:?}",
+                    dm.learner.current_engagement, intent
+                );
+            }
+            if let Some(a) = dm.last_assessment() {
+                let r = a.reasoning.as_deref().unwrap_or("");
+                eprintln!(
+                    "[classifier] {:?} conf={:.2} ({})",
+                    a.state, a.confidence, dm.classifier_identifier()
+                );
+                if !r.is_empty() {
+                    eprintln!("             — {r}");
+                }
+            }
+        }
+
         // Check if the session has run long.
         if dm.should_suggest_break() {
             println!("Primer: We've been talking for a while. Want to take a break?\n");

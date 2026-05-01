@@ -382,6 +382,28 @@ impl<'a> DialogueManager<'a> {
         result
     }
 
+    /// Last `PedagogicalIntent` selected by `decide_intent` (used by `--verbose`).
+    /// Returns `None` until at least one turn has been processed.
+    pub fn last_intent(&self) -> Option<PedagogicalIntent> {
+        self.session
+            .turns
+            .iter()
+            .rev()
+            .find(|t| t.speaker == Speaker::Primer)
+            .and_then(|t| t.intent)
+    }
+
+    /// Most recent classifier output applied to the learner (used by `--verbose`).
+    /// Returns `None` until at least one classification has completed.
+    pub fn last_assessment(&self) -> Option<&primer_core::classifier::EngagementAssessment> {
+        self.learner.recent_assessments.last()
+    }
+
+    /// Stable identifier of the active engagement classifier (used by `--verbose`).
+    pub fn classifier_identifier(&self) -> &str {
+        self.classifier.identifier()
+    }
+
     /// Check whether the session has run long enough that the Primer
     /// should suggest a break.
     pub fn should_suggest_break(&self) -> bool {
