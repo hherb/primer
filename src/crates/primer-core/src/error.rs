@@ -19,6 +19,9 @@ pub enum PrimerError {
     #[error("Storage error: {0}")]
     Storage(String),
 
+    #[error("Classification error: {0}")]
+    Classification(String),
+
     #[error("Configuration error: {0}")]
     Config(String),
 
