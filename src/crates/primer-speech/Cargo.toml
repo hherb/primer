@@ -20,8 +20,9 @@ silero-vad-rust = { version = "6.2", default-features = false, optional = true }
 # longer matches across crates.
 ort = { version = "=2.0.0-rc.10", default-features = false, features = ["ndarray"], optional = true }
 
-# Whisper bindings — uncomment when integrating:
-# whisper-rs = "0.12"
+# Whisper.cpp — opt-in via the `whisper` feature. Builds bundled C++ source
+# (cmake + a C++ compiler must be present on the build host).
+whisper-cpp-plus = { version = "0.1", default-features = false, optional = true }
 
 # Audio I/O — uncomment when integrating:
 # cpal = "0.15"
@@ -29,3 +30,4 @@ ort = { version = "=2.0.0-rc.10", default-features = false, features = ["ndarray
 [features]
 default = []
 silero = ["dep:silero-vad-rust", "dep:ort"]
+whisper = ["dep:whisper-cpp-plus"]

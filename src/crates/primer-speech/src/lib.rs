@@ -16,3 +16,8 @@ pub use vad_debounce::{VadDebouncer, ms_to_chunks};
 pub mod silero;
 #[cfg(feature = "silero")]
 pub use silero::{SileroVad, SileroVadParams};
+
+#[cfg(feature = "whisper")]
+pub mod whisper;
+#[cfg(feature = "whisper")]
+pub use whisper::WhisperStt;

@@ -105,6 +105,53 @@ pub trait SpeechToText: Send + Sync {
     async fn transcribe(&self, audio: &AudioBuffer) -> Result<Transcript>;
 }
 
+/// One transcribed segment from a streaming session.
+///
+/// Whisper-class models naturally emit text in segment-sized chunks (one
+/// sentence or ~5–10 s of audio); we surface those chunks rather than
+/// pretending to deliver token-by-token output, since underlying ASR rarely
+/// is. Concatenate the `text` of every segment to reconstruct the utterance.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct TranscriptSegment {
+    pub text: String,
+    /// Start of this segment relative to session open (ms).
+    pub start_ms: u64,
+    /// End of this segment relative to session open (ms).
+    pub end_ms: u64,
+}
+
+/// A single streaming-transcription session.
+///
+/// Created by [`StreamingSpeechToText::open_session`]. Push f32 mono samples
+/// at the parent backend's [`StreamingSpeechToText::sample_rate`] via
+/// [`Self::push_audio`]; each push may emit zero or more segments as soon
+/// as the underlying model has enough context. Call [`Self::finalize`] once
+/// the utterance is complete (typically on `VadEvent::SpeechEnd`) to drain
+/// the trailing buffer.
+///
+/// Sessions are `Send` but not `Sync`: each utterance owns its own session.
+pub trait TranscriptionSession: Send {
+    /// Push samples; receive any segments that became available as a result.
+    fn push_audio(&mut self, samples: &[f32]) -> Result<Vec<TranscriptSegment>>;
+
+    /// Drain remaining buffered audio and finalize. Consumes the session.
+    fn finalize(self: Box<Self>) -> Result<Vec<TranscriptSegment>>;
+}
+
+/// Streaming speech-to-text backend.
+///
+/// Open one [`TranscriptionSession`] per child utterance. The backend itself
+/// is shareable across sessions (`Send + Sync`); per-session state lives
+/// inside the session handle.
+pub trait StreamingSpeechToText: Send + Sync {
+    fn name(&self) -> &str;
+
+    /// Sample rate the backend expects (Hz). Sessions reject mismatched audio.
+    fn sample_rate(&self) -> u32;
+
+    fn open_session(&self) -> Result<Box<dyn TranscriptionSession>>;
+}
+
 /// Text-to-speech backend.
 #[async_trait]
 pub trait TextToSpeech: Send + Sync {
@@ -181,5 +228,71 @@ mod tests {
         assert_eq!(f0.event, VadEvent::None);
         assert_eq!(f1.event, VadEvent::SpeechStart);
         assert_eq!(f2.event, VadEvent::SpeechEnd);
+    }
+
+    /// Mock streaming STT that emits one segment per push call from a
+    /// canned script and concatenates them on finalize.
+    struct CannedStreamStt {
+        sample_rate: u32,
+    }
+
+    struct CannedSession {
+        scripted: std::vec::IntoIter<&'static str>,
+        elapsed_ms: u64,
+    }
+
+    impl TranscriptionSession for CannedSession {
+        fn push_audio(&mut self, samples: &[f32]) -> Result<Vec<TranscriptSegment>> {
+            let chunk_ms = (samples.len() as u64 * 1000) / 16_000;
+            let start_ms = self.elapsed_ms;
+            self.elapsed_ms += chunk_ms;
+            match self.scripted.next() {
+                Some(text) => Ok(vec![TranscriptSegment {
+                    text: text.to_string(),
+                    start_ms,
+                    end_ms: self.elapsed_ms,
+                }]),
+                None => Ok(vec![]),
+            }
+        }
+        fn finalize(self: Box<Self>) -> Result<Vec<TranscriptSegment>> {
+            Ok(vec![])
+        }
+    }
+
+    impl StreamingSpeechToText for CannedStreamStt {
+        fn name(&self) -> &str {
+            "canned-stream-stt"
+        }
+        fn sample_rate(&self) -> u32 {
+            self.sample_rate
+        }
+        fn open_session(&self) -> Result<Box<dyn TranscriptionSession>> {
+            Ok(Box::new(CannedSession {
+                scripted: vec!["hello", " world"].into_iter(),
+                elapsed_ms: 0,
+            }))
+        }
+    }
+
+    #[test]
+    fn streaming_stt_session_yields_segments_and_finalizes() {
+        let stt: Box<dyn StreamingSpeechToText> = Box::new(CannedStreamStt {
+            sample_rate: 16_000,
+        });
+        assert_eq!(stt.sample_rate(), 16_000);
+        let mut session = stt.open_session().unwrap();
+        let chunk = vec![0.0_f32; 16_000]; // 1 s of audio per push
+        let s0 = session.push_audio(&chunk).unwrap();
+        let s1 = session.push_audio(&chunk).unwrap();
+        let s2 = session.push_audio(&chunk).unwrap();
+        assert_eq!(s0.len(), 1);
+        assert_eq!(s0[0].text, "hello");
+        assert_eq!(s0[0].start_ms, 0);
+        assert_eq!(s0[0].end_ms, 1000);
+        assert_eq!(s1[0].text, " world");
+        assert!(s2.is_empty());
+        let trailing = session.finalize().unwrap();
+        assert!(trailing.is_empty());
     }
 }
