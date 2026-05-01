@@ -56,6 +56,10 @@ clap = { version = "4", features = ["derive", "env"] }
 # .env file loading (so ANTHROPIC_API_KEY can live in a gitignored .env)
 dotenvy = "0.15"
 
+# Unicode normalization (used by primer-cli to slug learner names into
+# stable filenames regardless of NFC/NFD encoding).
+unicode-normalization = "0.1"
+
 # Workspace crates
 primer-core = { path = "crates/primer-core" }
 primer-inference = { path = "crates/primer-inference" }

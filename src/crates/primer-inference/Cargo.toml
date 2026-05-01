@@ -15,5 +15,8 @@ futures.workspace = true
 tracing.workspace = true
 thiserror.workspace = true
 
+[dev-dependencies]
+chrono.workspace = true
+
 # llama.cpp bindings — uncomment when integrating:
 # llama-cpp-2 = "0.1"

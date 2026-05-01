@@ -11,10 +11,10 @@
 //! - `QnnBackend`: (TODO) Qualcomm QNN SDK for Snapdragon NPU.
 //! - `RknnBackend`: (TODO) Rockchip RKNN-LLM for RK1828 NPU.
 
-pub mod stub;
 pub mod cloud;
 pub mod ollama;
+pub mod stub;
 
-pub use stub::StubBackend;
 pub use cloud::CloudBackend;
 pub use ollama::OllamaBackend;
+pub use stub::StubBackend;

@@ -10,7 +10,7 @@ The Primer doesn't teach by telling. It teaches by asking. When a child says "Wh
 
 ## Status
 
-**Phase 0.1 — cloud-backed proof of concept, mostly working.** The trait architecture and module boundaries are in place, you can hold a real Socratic conversation against either the Anthropic Claude API or a local Ollama model with **tokens streaming progressively** into the terminal, and conversations now **persist to a normalised SQLite store** on every turn (one DB per child, kept separate from the RAG corpus on privacy grounds). Phase 0.2/0.3 work (knowledge-base bootstrapping, comprehension assessment, learner-model persistence, resume-a-past-session UX) is still ahead. There is no local llama.cpp inference, no speech pipeline, and no hardware integration yet. See [ROADMAP.md](ROADMAP.md) for what comes next.
+**Phase 0.1 — cloud-backed proof of concept, mostly working.** The trait architecture and module boundaries are in place, you can hold a real Socratic conversation against either the Anthropic Claude API or a local Ollama model with **tokens streaming progressively** into the terminal, and conversations **persist to a normalised SQLite store** on every turn (one DB per child under `~/.primer/`, kept separate from the RAG corpus on privacy grounds). Sessions can be **resumed by UUID** (`--resume <uuid>`), and once a conversation grows past the active context window the Primer keeps long-term memory via a **rolling LLM-generated summary** plus **FTS5 retrieval** over older turns. Phase 0.2/0.3 work (knowledge-base bootstrapping, comprehension assessment, learner-model persistence) is still ahead. There is no local llama.cpp inference, no speech pipeline, and no hardware integration yet. See [ROADMAP.md](ROADMAP.md) for what comes next.
 
 ## Architecture
 
@@ -62,7 +62,7 @@ SQLite FTS5-backed knowledge base. Stores passages from Wikipedia, curated encyc
 
 ### primer-storage
 
-SQLite-backed conversation persistence. Every child turn, every Primer turn, and every `close_session` writes through to disk in an append-only schema (turn rowids stay stable across saves). Categorical text columns (`speaker`, `pedagogical_intent`, `concept`) are normalised into integer-keyed lookup tables; the `Speaker` and `PedagogicalIntent` Rust enums are the canonical source of truth and the storage layer validates the on-disk lookup tables against them on every `open()` — drift is a hard error. The session DB is intentionally separate from the RAG corpus on privacy grounds (different file, different lifecycle).
+SQLite-backed conversation persistence. Every child turn, every Primer turn, and every `close_session` writes through to disk in an append-only schema (turn rowids stay stable across saves). Categorical text columns (`speaker`, `pedagogical_intent`, `concept`) are normalised into integer-keyed lookup tables; the `Speaker` and `PedagogicalIntent` Rust enums are the canonical source of truth and the storage layer validates the on-disk lookup tables against them on every `open()` — drift is a hard error. Schema version 2 adds two long-term-memory primitives: a `summary` field on `sessions` (rolling LLM-generated condensation of pre-window turns, refreshed on resume when stale and every `context_window_turns` further turns during active conversation) and a `turn_text_fts` FTS5 virtual table for searchable retrieval of older turns. The v2 migration runs inside a single transaction so a partial failure rolls back to the pre-migration state instead of leaving a half-v2 DB. The session DB is intentionally separate from the RAG corpus on privacy grounds (different file, different lifecycle); existing v1 databases are migrated in place on first open.
 
 ### primer-cli
 
@@ -128,9 +128,25 @@ Project-local `.env` wins over the home file. Both are gitignored. See `.env.exa
 --name <name>                   Child's name for the learner profile (default: Explorer)
 --age <age>                     Child's age in years (default: 8)
 --knowledge-db <path>           Path to SQLite knowledge base (default: in-memory)
---session-db <path>             Path to SQLite session store (default: in-memory; sessions are not persisted)
+--session-db <path>             Path to SQLite session store
+                                (default: ~/.primer/<slugified-name>.db, created if missing)
+--resume <uuid>                 Resume a past session by UUID. Reads from --session-db; errors if
+                                the file or the id is missing. No greeting is emitted on resume.
+--no-persist                    Run in-memory only — nothing is written to disk and the conversation
+                                evaporates on exit. Mutually exclusive with --resume and --session-db.
 --api-key <key>                 Anthropic API key (or set ANTHROPIC_API_KEY)
 ```
+
+### Resuming a past session
+
+Sessions are persisted automatically. To pick one up later, copy its UUID out of the session DB and pass it via `--resume`:
+
+```bash
+sqlite3 ~/.primer/explorer.db 'SELECT id FROM sessions ORDER BY started_at DESC LIMIT 1;'
+cargo run --bin primer -- --resume <uuid>
+```
+
+When the resumed session has more than `context_window_turns` (default 20) turns, the Primer maintains long-term memory in two complementary ways: a rolling LLM-generated summary (refreshed on resume only when the loaded one is stale, then every 20 further pre-window turns during active conversation) and FTS5-based retrieval of relevant older turns based on the current child input. Both are injected into the system prompt — the chat-message timeline the model sees stays equal to the last 20 turns, so context budget is bounded even across hours of conversation.
 
 ## Design Principles
 

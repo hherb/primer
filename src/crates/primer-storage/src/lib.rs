@@ -24,8 +24,10 @@ use std::path::Path;
 use std::sync::Mutex;
 
 use async_trait::async_trait;
+use chrono::{DateTime, Utc};
 use primer_core::error::{PrimerError, Result};
-use rusqlite::Connection;
+use rusqlite::{Connection, OptionalExtension};
+use uuid::Uuid;
 
 /// SQLite-backed session store.
 #[derive(Debug)]
@@ -38,7 +40,11 @@ impl SqliteSessionStore {
     /// an in-memory database.
     ///
     /// Creates the schema if missing, sets `PRAGMA foreign_keys = ON`,
-    /// and asserts/sets `PRAGMA user_version`.
+    /// asserts/sets `PRAGMA user_version`, and applies v2 migrations
+    /// (summary fields + FTS index) to bring older DBs up to date. The
+    /// migrations are idempotent — safe to run on fresh, v1, or v2 DBs.
+    /// A version newer than this build understands is a hard error
+    /// rather than a silent downgrade.
     pub fn open(path: &Path) -> Result<Self> {
         let conn = Connection::open(path)
             .map_err(|e| PrimerError::Storage(format!("open failed: {e}")))?;
@@ -46,12 +52,13 @@ impl SqliteSessionStore {
         conn.execute_batch("PRAGMA foreign_keys = ON;")
             .map_err(|e| PrimerError::Storage(format!("PRAGMA foreign_keys failed: {e}")))?;
 
-        // Read existing user_version. A fresh DB returns 0.
+        // Read existing user_version. A fresh DB returns 0; v1 DBs from
+        // before the rolling-summary work return 1; current builds stamp 2.
         let existing_version: i64 = conn
             .query_row("PRAGMA user_version", [], |row| row.get(0))
             .map_err(|e| PrimerError::Storage(format!("read user_version failed: {e}")))?;
 
-        if existing_version != 0 && existing_version != schema::USER_VERSION {
+        if existing_version > schema::USER_VERSION {
             return Err(PrimerError::Storage(format!(
                 "incompatible schema version: file is at user_version={existing_version}, this build expects {}",
                 schema::USER_VERSION
@@ -61,7 +68,11 @@ impl SqliteSessionStore {
         conn.execute_batch(schema::SCHEMA_SQL)
             .map_err(|e| PrimerError::Storage(format!("schema creation failed: {e}")))?;
 
-        if existing_version == 0 {
+        // v2 migrations: idempotent on every open. Adds summary columns
+        // and the FTS5 turn-text index if not already present.
+        schema::apply_v2_migrations(&conn)?;
+
+        if existing_version != schema::USER_VERSION {
             conn.execute_batch(&format!("PRAGMA user_version = {};", schema::USER_VERSION))
                 .map_err(|e| PrimerError::Storage(format!("set user_version failed: {e}")))?;
         }
@@ -102,18 +113,26 @@ impl primer_core::storage::SessionStore for SqliteSessionStore {
         // Upsert session metadata. Plain `INSERT OR REPLACE` would do a
         // DELETE-then-INSERT, which cascades through the FK and wipes
         // every turn we've already persisted. The proper SQLite UPSERT
-        // (ON CONFLICT … DO UPDATE) updates in place. Only `ended_at`
-        // is allowed to change after creation; `learner_id` and
-        // `started_at` are pinned at session start.
+        // (ON CONFLICT … DO UPDATE) updates in place. `learner_id` and
+        // `started_at` are pinned at session start; `ended_at`,
+        // `summary`, and `summary_through_turn_index` may change as the
+        // conversation evolves.
         tx.execute(
-            "INSERT INTO sessions (id, learner_id, started_at, ended_at)
-             VALUES (?1, ?2, ?3, ?4)
-             ON CONFLICT(id) DO UPDATE SET ended_at = excluded.ended_at",
+            "INSERT INTO sessions
+                 (id, learner_id, started_at, ended_at,
+                  summary, summary_through_turn_index)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6)
+             ON CONFLICT(id) DO UPDATE SET
+                 ended_at = excluded.ended_at,
+                 summary = excluded.summary,
+                 summary_through_turn_index = excluded.summary_through_turn_index",
             rusqlite::params![
                 session.id.to_string(),
                 session.learner_id.to_string(),
                 session.started_at.to_rfc3339(),
                 session.ended_at.map(|t| t.to_rfc3339()),
+                session.summary,
+                session.summary_through_turn_index as i64,
             ],
         )
         .map_err(|e| PrimerError::Storage(format!("upsert session: {e}")))?;
@@ -204,6 +223,271 @@ impl primer_core::storage::SessionStore for SqliteSessionStore {
             .map_err(|e| PrimerError::Storage(format!("commit: {e}")))?;
         Ok(())
     }
+
+    /// Load a session by id. Returns `Ok(None)` when no session with
+    /// that id exists. Three SELECTs: session metadata, turns ordered
+    /// by `turn_index`, and a single concept join keyed by turn rowid.
+    ///
+    /// The shape mirrors `save_session`'s three discrete prepared
+    /// statements rather than collapsing into one `LEFT JOIN` + group —
+    /// at conversation row counts the perf delta is nil and the explicit
+    /// concept-grouping loop is more readable.
+    async fn load_session(&self, id: Uuid) -> Result<Option<primer_core::conversation::Session>> {
+        use primer_core::conversation::{Session, Turn};
+
+        let conn = self.conn.lock().unwrap();
+
+        // Step 1: session row.
+        let row: Option<(String, String, String, Option<String>, String, i64)> = conn
+            .query_row(
+                "SELECT id, learner_id, started_at, ended_at,
+                        summary, summary_through_turn_index
+                 FROM sessions WHERE id = ?1",
+                rusqlite::params![id.to_string()],
+                |r| {
+                    Ok((
+                        r.get(0)?,
+                        r.get(1)?,
+                        r.get(2)?,
+                        r.get(3)?,
+                        r.get(4)?,
+                        r.get(5)?,
+                    ))
+                },
+            )
+            .optional()
+            .map_err(|e| PrimerError::Storage(format!("select session: {e}")))?;
+
+        let Some((id_str, learner_str, started_str, ended_opt, summary, summary_through)) = row
+        else {
+            return Ok(None);
+        };
+
+        let session_uuid = Uuid::parse_str(&id_str)
+            .map_err(|e| PrimerError::Storage(format!("parse session id {id_str}: {e}")))?;
+        let learner_uuid = Uuid::parse_str(&learner_str)
+            .map_err(|e| PrimerError::Storage(format!("parse learner id {learner_str}: {e}")))?;
+        let started_at = parse_rfc3339(&started_str, "started_at")?;
+        let ended_at = ended_opt
+            .as_deref()
+            .map(|s| parse_rfc3339(s, "ended_at"))
+            .transpose()?;
+
+        // Step 2: turns ordered by turn_index. Capture each turn's rowid
+        // so we can attach concepts in step 3.
+        let mut turns_with_id: Vec<(i64, Turn)> = {
+            let mut stmt = conn
+                .prepare(
+                    "SELECT id, speaker_id, text, timestamp, intent_id
+                     FROM turns WHERE session_id = ?1 ORDER BY turn_index",
+                )
+                .map_err(|e| PrimerError::Storage(format!("prepare select turns: {e}")))?;
+            let rows = stmt
+                .query_map(rusqlite::params![id.to_string()], |r| {
+                    Ok((
+                        r.get::<_, i64>(0)?,
+                        r.get::<_, i64>(1)?,
+                        r.get::<_, String>(2)?,
+                        r.get::<_, String>(3)?,
+                        r.get::<_, Option<i64>>(4)?,
+                    ))
+                })
+                .map_err(|e| PrimerError::Storage(format!("query turns: {e}")))?;
+
+            let mut out = Vec::new();
+            for row in rows {
+                let (turn_id, speaker_id, text, ts_str, intent_id) =
+                    row.map_err(|e| PrimerError::Storage(format!("read turn row: {e}")))?;
+                let speaker = catalog::speaker_from_id(speaker_id).ok_or_else(|| {
+                    PrimerError::Storage(format!("unknown speaker_id {speaker_id}"))
+                })?;
+                let intent =
+                    match intent_id {
+                        None => None,
+                        Some(id) => Some(catalog::intent_from_id(id).ok_or_else(|| {
+                            PrimerError::Storage(format!("unknown intent_id {id}"))
+                        })?),
+                    };
+                let timestamp = parse_rfc3339(&ts_str, "turn timestamp")?;
+                out.push((
+                    turn_id,
+                    Turn {
+                        speaker,
+                        text,
+                        timestamp,
+                        intent,
+                        concepts: vec![],
+                    },
+                ));
+            }
+            out
+        };
+
+        // Step 3: concepts per turn, grouped by turn_id.
+        if !turns_with_id.is_empty() {
+            let mut stmt = conn
+                .prepare(
+                    "SELECT tc.turn_id, c.name
+                     FROM turn_concepts tc
+                     JOIN concepts c ON c.id = tc.concept_id
+                     WHERE tc.turn_id IN (
+                         SELECT id FROM turns WHERE session_id = ?1
+                     )
+                     ORDER BY c.name",
+                )
+                .map_err(|e| PrimerError::Storage(format!("prepare concepts: {e}")))?;
+            let rows = stmt
+                .query_map(rusqlite::params![id.to_string()], |r| {
+                    Ok((r.get::<_, i64>(0)?, r.get::<_, String>(1)?))
+                })
+                .map_err(|e| PrimerError::Storage(format!("query concepts: {e}")))?;
+            let mut grouped: std::collections::HashMap<i64, Vec<String>> =
+                std::collections::HashMap::new();
+            for row in rows {
+                let (turn_id, name) =
+                    row.map_err(|e| PrimerError::Storage(format!("read concept row: {e}")))?;
+                grouped.entry(turn_id).or_default().push(name);
+            }
+            for (turn_id, turn) in turns_with_id.iter_mut() {
+                if let Some(concepts) = grouped.remove(turn_id) {
+                    turn.concepts = concepts;
+                }
+            }
+        }
+
+        let turns: Vec<Turn> = turns_with_id.into_iter().map(|(_, t)| t).collect();
+
+        Ok(Some(Session {
+            id: session_uuid,
+            learner_id: learner_uuid,
+            started_at,
+            ended_at,
+            turns,
+            summary,
+            summary_through_turn_index: summary_through.max(0) as usize,
+        }))
+    }
+
+    /// FTS5 retrieval over a single session's turns. Treats `query` as a
+    /// literal phrase: any quote characters in the input are stripped and
+    /// the whole string is wrapped in `"..."` so FTS5 operators like `OR`,
+    /// `NEAR`, `*`, `^` and column qualifiers cannot be smuggled in by a
+    /// child's input.
+    async fn retrieve_session_turns(
+        &self,
+        session_id: Uuid,
+        query: &str,
+        k: usize,
+        exclude_indices_at_or_after: usize,
+    ) -> Result<Vec<primer_core::conversation::Turn>> {
+        use primer_core::conversation::Turn;
+
+        let phrase = sanitize_fts_phrase(query);
+        // Empty input → nothing to match. Avoids issuing a `MATCH '""'`
+        // which FTS5 rejects as a syntax error.
+        if phrase.is_empty() {
+            return Ok(vec![]);
+        }
+
+        let conn = self.conn.lock().unwrap();
+        let mut stmt = conn
+            .prepare(
+                "SELECT t.speaker_id, t.text, t.timestamp, t.intent_id
+                 FROM turn_text_fts f
+                 JOIN turns t ON t.id = f.rowid
+                 WHERE f.text MATCH ?1
+                   AND t.session_id = ?2
+                   AND t.turn_index < ?3
+                 ORDER BY bm25(turn_text_fts)
+                 LIMIT ?4",
+            )
+            .map_err(|e| PrimerError::Storage(format!("prepare retrieve: {e}")))?;
+
+        let rows = stmt
+            .query_map(
+                rusqlite::params![
+                    phrase,
+                    session_id.to_string(),
+                    exclude_indices_at_or_after as i64,
+                    k as i64,
+                ],
+                |r| {
+                    Ok((
+                        r.get::<_, i64>(0)?,
+                        r.get::<_, String>(1)?,
+                        r.get::<_, String>(2)?,
+                        r.get::<_, Option<i64>>(3)?,
+                    ))
+                },
+            )
+            .map_err(|e| PrimerError::Storage(format!("query retrieve: {e}")))?;
+
+        let mut out = Vec::with_capacity(k);
+        for row in rows {
+            let (speaker_id, text, ts_str, intent_id) =
+                row.map_err(|e| PrimerError::Storage(format!("read retrieve row: {e}")))?;
+            let speaker = catalog::speaker_from_id(speaker_id)
+                .ok_or_else(|| PrimerError::Storage(format!("unknown speaker_id {speaker_id}")))?;
+            let intent = match intent_id {
+                None => None,
+                Some(id) => Some(
+                    catalog::intent_from_id(id)
+                        .ok_or_else(|| PrimerError::Storage(format!("unknown intent_id {id}")))?,
+                ),
+            };
+            let timestamp = parse_rfc3339(&ts_str, "turn timestamp")?;
+            out.push(Turn {
+                speaker,
+                text,
+                timestamp,
+                intent,
+                concepts: vec![],
+            });
+        }
+        Ok(out)
+    }
+}
+
+fn parse_rfc3339(s: &str, field: &str) -> Result<DateTime<Utc>> {
+    DateTime::parse_from_rfc3339(s)
+        .map(|dt| dt.with_timezone(&Utc))
+        .map_err(|e| PrimerError::Storage(format!("parse {field} {s:?}: {e}")))
+}
+
+/// Sanitize an arbitrary user query into an FTS5 expression that is
+/// safe to pass to `MATCH`. Tokenizes on whitespace, strips every
+/// non-alphanumeric character per token (kills `*`, `^`, `:`, `"`, `(`,
+/// `)`, slashes, etc.), drops the FTS5 reserved keywords (`AND`, `OR`,
+/// `NOT`, `NEAR`), wraps each surviving token in double quotes (so any
+/// special character the tokenizer would otherwise see is inert), and
+/// joins the tokens with explicit `OR`. An empty result means "no
+/// useful tokens"; the caller should skip the query rather than issue
+/// `MATCH ''` which FTS5 rejects.
+///
+/// `OR` is chosen over implicit-AND so that "noise" tokens introduced
+/// by sanitization (e.g. fragments from stripped punctuation) do not
+/// torpedo the entire query. BM25 ranking + the caller's `LIMIT k` keep
+/// the result list focused on the most relevant matches.
+fn sanitize_fts_phrase(query: &str) -> String {
+    const RESERVED: &[&str] = &["AND", "OR", "NOT", "NEAR"];
+    let tokens: Vec<String> = query
+        .split_whitespace()
+        .map(|tok| {
+            tok.chars()
+                .filter(|c| c.is_alphanumeric())
+                .collect::<String>()
+        })
+        .filter(|tok| !tok.is_empty())
+        .filter(|tok| !RESERVED.iter().any(|r| r.eq_ignore_ascii_case(tok)))
+        .collect();
+    if tokens.is_empty() {
+        return String::new();
+    }
+    tokens
+        .iter()
+        .map(|t| format!("\"{t}\""))
+        .collect::<Vec<_>>()
+        .join(" OR ")
 }
 
 #[cfg(test)]
@@ -240,11 +524,11 @@ mod tests {
         let store = open_memory();
         let conn = store.conn.lock().unwrap();
 
-        // user_version was set.
+        // user_version is the current schema version.
         let v: i64 = conn
             .query_row("PRAGMA user_version", [], |r| r.get(0))
             .unwrap();
-        assert_eq!(v, 1);
+        assert_eq!(v, schema::USER_VERSION);
 
         // foreign_keys is on.
         let fk: i64 = conn
@@ -252,7 +536,7 @@ mod tests {
             .unwrap();
         assert_eq!(fk, 1);
 
-        // All six tables exist.
+        // All six base tables exist, plus the v2 FTS index.
         for table in &[
             "speakers",
             "pedagogical_intents",
@@ -260,6 +544,7 @@ mod tests {
             "sessions",
             "turns",
             "turn_concepts",
+            "turn_text_fts",
         ] {
             let count: i64 = conn
                 .query_row(
@@ -295,18 +580,18 @@ mod tests {
 
     #[test]
     fn open_existing_valid_db_is_a_no_op() {
-        // First open creates the schema and stamps user_version=1.
+        // First open creates the schema and stamps the current user_version.
         let tmp = tempfile_path();
         {
             let _store = SqliteSessionStore::open(&tmp).unwrap();
         }
-        // Second open should succeed cleanly. user_version stays at 1.
+        // Second open should succeed cleanly. user_version stays put.
         let store = SqliteSessionStore::open(&tmp).unwrap();
         let conn = store.conn.lock().unwrap();
         let v: i64 = conn
             .query_row("PRAGMA user_version", [], |r| r.get(0))
             .unwrap();
-        assert_eq!(v, 1);
+        assert_eq!(v, schema::USER_VERSION);
         drop(conn);
         drop(store);
         let _ = std::fs::remove_file(&tmp);
@@ -815,5 +1100,469 @@ mod tests {
     /// between parallel test threads.
     fn tempfile_path() -> PathBuf {
         std::env::temp_dir().join(format!("primer-storage-test-{}.db", uuid::Uuid::new_v4()))
+    }
+
+    // ─── v2 migration ────────────────────────────────────────────────
+
+    #[test]
+    fn apply_v2_migrations_rolls_back_on_failure() {
+        // Inject a known failure mode: invoke the migration on a connection
+        // where `sessions` exists (so the ALTERs succeed) but `turns` does
+        // NOT exist (so the FTS backfill INSERT fails). With the migration
+        // wrapped in a transaction, the column adds and the FTS table
+        // creation must roll back, leaving the DB exactly as we found it.
+        let conn = Connection::open_in_memory().unwrap();
+        conn.execute_batch(
+            "CREATE TABLE sessions (
+                 id TEXT PRIMARY KEY,
+                 learner_id TEXT NOT NULL,
+                 started_at TEXT NOT NULL,
+                 ended_at TEXT
+             );",
+        )
+        .unwrap();
+        // No `turns` table — backfill will fail.
+
+        let result = schema::apply_v2_migrations(&conn);
+        assert!(result.is_err(), "expected backfill to fail without turns");
+
+        // Pre-fix behaviour: each statement auto-commits, so `sessions.summary`
+        // would already exist on disk despite the backfill failure. Post-fix:
+        // the transaction rolls back, leaving sessions in its original shape.
+        let summary_col_count: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM pragma_table_info('sessions') WHERE name = 'summary'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(
+            summary_col_count, 0,
+            "sessions.summary should have rolled back when backfill failed"
+        );
+        let fts_count: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name='turn_text_fts'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(
+            fts_count, 0,
+            "turn_text_fts should have rolled back when backfill failed"
+        );
+    }
+
+    #[test]
+    fn fresh_db_at_v2_has_summary_columns_and_fts_table() {
+        let store = open_memory();
+        let conn = store.conn.lock().unwrap();
+        assert_eq!(
+            conn.query_row::<i64, _, _>("PRAGMA user_version", [], |r| r.get(0))
+                .unwrap(),
+            schema::USER_VERSION
+        );
+        // Summary columns are present.
+        for col in &["summary", "summary_through_turn_index"] {
+            let count: i64 = conn
+                .query_row(
+                    "SELECT COUNT(*) FROM pragma_table_info('sessions') WHERE name = ?1",
+                    [col],
+                    |r| r.get(0),
+                )
+                .unwrap();
+            assert_eq!(count, 1, "sessions.{col} should exist");
+        }
+        // FTS virtual table is present.
+        let fts: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name='turn_text_fts'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(fts, 1);
+    }
+
+    #[test]
+    fn migrate_v1_db_with_turns_adds_columns_and_backfills_fts() {
+        // Hand-roll a v1 DB on disk with a session and two turns. Then
+        // open it via the store (which runs the v2 migration in place)
+        // and verify the new columns exist with default values, the FTS
+        // table is populated, and the original turn rows are intact.
+        let tmp = tempfile_path();
+        let session_id = Uuid::new_v4().to_string();
+        let learner_id = Uuid::new_v4().to_string();
+        {
+            let conn = Connection::open(&tmp).unwrap();
+            conn.execute_batch(
+                "PRAGMA foreign_keys = ON;
+                 CREATE TABLE speakers (id INTEGER PRIMARY KEY, name TEXT NOT NULL UNIQUE);
+                 CREATE TABLE pedagogical_intents (id INTEGER PRIMARY KEY, name TEXT NOT NULL UNIQUE);
+                 CREATE TABLE concepts (id INTEGER PRIMARY KEY AUTOINCREMENT, name TEXT NOT NULL UNIQUE);
+                 CREATE TABLE sessions (id TEXT PRIMARY KEY, learner_id TEXT NOT NULL,
+                     started_at TEXT NOT NULL, ended_at TEXT);
+                 CREATE TABLE turns (id INTEGER PRIMARY KEY AUTOINCREMENT,
+                     session_id TEXT NOT NULL REFERENCES sessions(id) ON DELETE CASCADE,
+                     turn_index INTEGER NOT NULL, speaker_id INTEGER NOT NULL REFERENCES speakers(id),
+                     text TEXT NOT NULL, timestamp TEXT NOT NULL,
+                     intent_id INTEGER REFERENCES pedagogical_intents(id),
+                     UNIQUE(session_id, turn_index));
+                 CREATE TABLE turn_concepts (turn_id INTEGER NOT NULL REFERENCES turns(id) ON DELETE CASCADE,
+                     concept_id INTEGER NOT NULL REFERENCES concepts(id),
+                     PRIMARY KEY(turn_id, concept_id));
+                 INSERT INTO speakers (id, name) VALUES (1, 'Child'), (2, 'Primer');
+                 INSERT INTO pedagogical_intents (id, name) VALUES
+                     (1,'SocraticQuestion'),(2,'ComprehensionCheck'),(3,'Scaffolding'),
+                     (4,'Encouragement'),(5,'Extension'),(6,'DirectAnswer'),
+                     (7,'AnswerThenPivot'),(8,'SessionClose');
+                 PRAGMA user_version = 1;",
+            )
+            .unwrap();
+            conn.execute(
+                "INSERT INTO sessions (id, learner_id, started_at) VALUES (?1, ?2, ?3)",
+                rusqlite::params![&session_id, &learner_id, "2026-04-30T00:00:00+00:00"],
+            )
+            .unwrap();
+            conn.execute(
+                "INSERT INTO turns (session_id, turn_index, speaker_id, text, timestamp)
+                 VALUES (?1, 0, 1, 'why is the sky blue', '2026-04-30T00:00:00+00:00'),
+                        (?1, 1, 2, 'what colour is the sky?', '2026-04-30T00:00:01+00:00')",
+                rusqlite::params![&session_id],
+            )
+            .unwrap();
+        }
+
+        // Now open via the store. v2 migration runs in place.
+        let store = SqliteSessionStore::open(&tmp).unwrap();
+        let conn = store.conn.lock().unwrap();
+
+        let v: i64 = conn
+            .query_row("PRAGMA user_version", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(v, schema::USER_VERSION);
+
+        // Summary columns exist with default values.
+        let (summary, through): (String, i64) = conn
+            .query_row(
+                "SELECT summary, summary_through_turn_index FROM sessions WHERE id = ?1",
+                rusqlite::params![&session_id],
+                |r| Ok((r.get(0)?, r.get(1)?)),
+            )
+            .unwrap();
+        assert_eq!(summary, "");
+        assert_eq!(through, 0);
+
+        // FTS table is populated from existing turns.
+        let fts_count: i64 = conn
+            .query_row("SELECT COUNT(*) FROM turn_text_fts", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(fts_count, 2, "FTS index should be backfilled from turns");
+
+        // Original turn rows are untouched.
+        let turn_count: i64 = conn
+            .query_row("SELECT COUNT(*) FROM turns", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(turn_count, 2);
+
+        drop(conn);
+        drop(store);
+        let _ = std::fs::remove_file(&tmp);
+    }
+
+    #[tokio::test]
+    async fn inserting_a_turn_updates_fts_index() {
+        use primer_core::conversation::Speaker;
+        let store = open_memory();
+        let mut session = Session::new(Uuid::new_v4());
+        session.add_turn(make_turn(
+            Speaker::Child,
+            "supercalifragilistic",
+            None,
+            vec![],
+        ));
+        store.save_session(&session).await.unwrap();
+        let conn = store.conn.lock().unwrap();
+        let count: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM turn_text_fts WHERE text MATCH ?1",
+                ["\"supercalifragilistic\""],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(count, 1, "trigger should have inserted into FTS");
+    }
+
+    #[tokio::test]
+    async fn deleting_a_turn_removes_it_from_fts() {
+        use primer_core::conversation::Speaker;
+        let store = open_memory();
+        let mut session = Session::new(Uuid::new_v4());
+        session.add_turn(make_turn(Speaker::Child, "uniqueterm", None, vec![]));
+        store.save_session(&session).await.unwrap();
+        let conn = store.conn.lock().unwrap();
+        // Cascade-delete via the session row (mimics what an admin would do).
+        conn.execute(
+            "DELETE FROM sessions WHERE id = ?1",
+            rusqlite::params![session.id.to_string()],
+        )
+        .unwrap();
+        let count: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM turn_text_fts WHERE text MATCH ?1",
+                ["\"uniqueterm\""],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(count, 0, "trigger should have removed the row from FTS");
+    }
+
+    // ─── load_session ────────────────────────────────────────────────
+
+    #[tokio::test]
+    async fn load_unknown_id_returns_none() {
+        let store = open_memory();
+        let result = store.load_session(Uuid::new_v4()).await.unwrap();
+        assert!(result.is_none());
+    }
+
+    #[tokio::test]
+    async fn save_then_load_round_trips_empty_session_with_default_summary() {
+        let store = open_memory();
+        let session = Session::new(Uuid::new_v4());
+        store.save_session(&session).await.unwrap();
+        let loaded = store.load_session(session.id).await.unwrap().unwrap();
+        assert_eq!(loaded.id, session.id);
+        assert_eq!(loaded.learner_id, session.learner_id);
+        assert!(loaded.ended_at.is_none());
+        assert_eq!(loaded.turns.len(), 0);
+        assert_eq!(loaded.summary, "");
+        assert_eq!(loaded.summary_through_turn_index, 0);
+    }
+
+    #[tokio::test]
+    async fn save_then_load_round_trips_with_turns() {
+        use primer_core::conversation::{PedagogicalIntent, Speaker};
+        let store = open_memory();
+        let mut session = Session::new(Uuid::new_v4());
+        session.add_turn(make_turn(
+            Speaker::Child,
+            "why is the sky blue",
+            None,
+            vec![],
+        ));
+        session.add_turn(make_turn(
+            Speaker::Primer,
+            "What do you notice about the sky during the day?",
+            Some(PedagogicalIntent::SocraticQuestion),
+            vec![],
+        ));
+        store.save_session(&session).await.unwrap();
+        let loaded = store.load_session(session.id).await.unwrap().unwrap();
+        assert_eq!(loaded.turns.len(), 2);
+        assert_eq!(loaded.turns[0].speaker, Speaker::Child);
+        assert_eq!(loaded.turns[0].text, "why is the sky blue");
+        assert!(loaded.turns[0].intent.is_none());
+        assert_eq!(loaded.turns[1].speaker, Speaker::Primer);
+        assert_eq!(
+            loaded.turns[1].intent,
+            Some(PedagogicalIntent::SocraticQuestion)
+        );
+    }
+
+    #[tokio::test]
+    async fn load_preserves_turn_order_under_appending_saves() {
+        use primer_core::conversation::Speaker;
+        let store = open_memory();
+        let mut session = Session::new(Uuid::new_v4());
+        session.add_turn(make_turn(Speaker::Child, "first", None, vec![]));
+        store.save_session(&session).await.unwrap();
+        session.add_turn(make_turn(Speaker::Primer, "second", None, vec![]));
+        store.save_session(&session).await.unwrap();
+        session.add_turn(make_turn(Speaker::Child, "third", None, vec![]));
+        store.save_session(&session).await.unwrap();
+        let loaded = store.load_session(session.id).await.unwrap().unwrap();
+        let texts: Vec<&str> = loaded.turns.iter().map(|t| t.text.as_str()).collect();
+        assert_eq!(texts, vec!["first", "second", "third"]);
+    }
+
+    #[tokio::test]
+    async fn load_preserves_concepts_per_turn() {
+        use primer_core::conversation::Speaker;
+        let store = open_memory();
+        let mut session = Session::new(Uuid::new_v4());
+        session.add_turn(make_turn(
+            Speaker::Child,
+            "tell me about gravity and mass",
+            None,
+            vec!["gravity".to_string(), "mass".to_string()],
+        ));
+        store.save_session(&session).await.unwrap();
+        let loaded = store.load_session(session.id).await.unwrap().unwrap();
+        let mut concepts = loaded.turns[0].concepts.clone();
+        concepts.sort();
+        assert_eq!(concepts, vec!["gravity".to_string(), "mass".to_string()]);
+    }
+
+    #[tokio::test]
+    async fn load_with_concept_shared_across_turns() {
+        use primer_core::conversation::Speaker;
+        let store = open_memory();
+        let mut session = Session::new(Uuid::new_v4());
+        session.add_turn(make_turn(
+            Speaker::Child,
+            "what is gravity",
+            None,
+            vec!["gravity".to_string()],
+        ));
+        session.add_turn(make_turn(
+            Speaker::Primer,
+            "What does gravity do?",
+            None,
+            vec!["gravity".to_string()],
+        ));
+        store.save_session(&session).await.unwrap();
+        let loaded = store.load_session(session.id).await.unwrap().unwrap();
+        assert_eq!(loaded.turns[0].concepts, vec!["gravity".to_string()]);
+        assert_eq!(loaded.turns[1].concepts, vec!["gravity".to_string()]);
+    }
+
+    #[tokio::test]
+    async fn load_session_with_ended_at_round_trips() {
+        let store = open_memory();
+        let mut session = Session::new(Uuid::new_v4());
+        session.ended_at = Some(Utc::now());
+        store.save_session(&session).await.unwrap();
+        let loaded = store.load_session(session.id).await.unwrap().unwrap();
+        assert!(loaded.ended_at.is_some());
+    }
+
+    #[tokio::test]
+    async fn load_session_round_trips_summary_and_through_turn_index() {
+        let store = open_memory();
+        let mut session = Session::new(Uuid::new_v4());
+        session.summary = "We have been talking about why the sky is blue.".to_string();
+        session.summary_through_turn_index = 42;
+        store.save_session(&session).await.unwrap();
+        let loaded = store.load_session(session.id).await.unwrap().unwrap();
+        assert_eq!(
+            loaded.summary,
+            "We have been talking about why the sky is blue."
+        );
+        assert_eq!(loaded.summary_through_turn_index, 42);
+    }
+
+    // ─── retrieve_session_turns ──────────────────────────────────────
+
+    #[tokio::test]
+    async fn retrieve_session_turns_returns_matching_turns() {
+        use primer_core::conversation::Speaker;
+        let store = open_memory();
+        let mut session = Session::new(Uuid::new_v4());
+        session.add_turn(make_turn(Speaker::Child, "I love kittens", None, vec![]));
+        session.add_turn(make_turn(
+            Speaker::Primer,
+            "Tell me about gravity",
+            None,
+            vec![],
+        ));
+        session.add_turn(make_turn(
+            Speaker::Child,
+            "what causes lightning",
+            None,
+            vec![],
+        ));
+        store.save_session(&session).await.unwrap();
+        let hits = store
+            .retrieve_session_turns(session.id, "gravity", 10, 1000)
+            .await
+            .unwrap();
+        assert_eq!(hits.len(), 1);
+        assert!(hits[0].text.contains("gravity"));
+    }
+
+    #[tokio::test]
+    async fn retrieve_session_turns_excludes_recent_window() {
+        // The dialogue manager passes `exclude_indices_at_or_after` to
+        // skip turns the model already sees in the active window.
+        use primer_core::conversation::Speaker;
+        let store = open_memory();
+        let mut session = Session::new(Uuid::new_v4());
+        // Three turns, all mention "lightning".
+        session.add_turn(make_turn(Speaker::Child, "lightning early", None, vec![]));
+        session.add_turn(make_turn(Speaker::Primer, "lightning middle", None, vec![]));
+        session.add_turn(make_turn(Speaker::Child, "lightning late", None, vec![]));
+        store.save_session(&session).await.unwrap();
+        // Exclude index >= 1: only the first turn ("early") qualifies.
+        let hits = store
+            .retrieve_session_turns(session.id, "lightning", 10, 1)
+            .await
+            .unwrap();
+        assert_eq!(hits.len(), 1);
+        assert_eq!(hits[0].text, "lightning early");
+    }
+
+    #[tokio::test]
+    async fn retrieve_session_turns_returns_empty_when_no_match() {
+        use primer_core::conversation::Speaker;
+        let store = open_memory();
+        let mut session = Session::new(Uuid::new_v4());
+        session.add_turn(make_turn(Speaker::Child, "kittens are nice", None, vec![]));
+        store.save_session(&session).await.unwrap();
+        let hits = store
+            .retrieve_session_turns(session.id, "supernova", 10, 1000)
+            .await
+            .unwrap();
+        assert!(hits.is_empty());
+    }
+
+    #[tokio::test]
+    async fn retrieve_session_turns_handles_quotes_and_special_chars() {
+        // FTS5-special characters and reserved keywords in the input
+        // must not be interpreted as operators. Hostile chars get
+        // stripped, reserved tokens (`OR`, `NEAR`, ...) are dropped,
+        // surviving content tokens are quoted and ANDed — meaningful
+        // words still match the indexed turn.
+        use primer_core::conversation::Speaker;
+        let store = open_memory();
+        let mut session = Session::new(Uuid::new_v4());
+        session.add_turn(make_turn(Speaker::Child, "what is plasma", None, vec![]));
+        store.save_session(&session).await.unwrap();
+        let hostile = "plasma what \" * OR ^col: NEAR/2";
+        let hits = store
+            .retrieve_session_turns(session.id, hostile, 10, 1000)
+            .await
+            .unwrap();
+        assert!(
+            !hits.is_empty(),
+            "tokens 'plasma' and 'what' survive sanitization and should match"
+        );
+    }
+
+    #[tokio::test]
+    async fn retrieve_session_turns_drops_only_reserved_tokens() {
+        // A query that is *nothing but* FTS5 keywords + special chars
+        // must not produce a query that matches everything; it must
+        // produce an empty result via the empty-phrase short-circuit.
+        let store = open_memory();
+        let session = Session::new(Uuid::new_v4());
+        store.save_session(&session).await.unwrap();
+        let hits = store
+            .retrieve_session_turns(session.id, "AND OR NOT NEAR \" * ^", 10, 1000)
+            .await
+            .unwrap();
+        assert!(hits.is_empty());
+    }
+
+    #[tokio::test]
+    async fn retrieve_session_turns_empty_query_returns_empty() {
+        let store = open_memory();
+        let session = Session::new(Uuid::new_v4());
+        store.save_session(&session).await.unwrap();
+        let hits = store
+            .retrieve_session_turns(session.id, "   ", 10, 1000)
+            .await
+            .unwrap();
+        assert!(hits.is_empty());
     }
 }

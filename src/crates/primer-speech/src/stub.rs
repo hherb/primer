@@ -16,7 +16,11 @@ impl SpeechToText for StubStt {
 
     async fn transcribe(&self, audio: &AudioBuffer) -> Result<Transcript> {
         Ok(Transcript {
-            text: format!("[audio: {} samples at {}Hz]", audio.samples.len(), audio.sample_rate),
+            text: format!(
+                "[audio: {} samples at {}Hz]",
+                audio.samples.len(),
+                audio.sample_rate
+            ),
             language: Some("en".to_string()),
             confidence: Some(1.0),
         })

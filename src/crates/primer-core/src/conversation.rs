@@ -79,6 +79,16 @@ impl PedagogicalIntent {
 }
 
 /// A complete conversation session.
+///
+/// `summary` is a rolling LLM-generated condensation of the turns that
+/// have fallen out of the active context window. It exists so the model
+/// retains long-range memory across hours of conversation without
+/// blowing the context budget. Empty until enough turns have accumulated
+/// for the dialogue manager to trigger a summarization pass.
+///
+/// `summary_through_turn_index` records the *exclusive* upper bound of
+/// turns covered by `summary`: turns at indices `0..summary_through_turn_index`
+/// have been summarized. Defaults to 0 (nothing covered yet).
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Session {
     pub id: SessionId,
@@ -86,6 +96,10 @@ pub struct Session {
     pub started_at: DateTime<Utc>,
     pub ended_at: Option<DateTime<Utc>>,
     pub turns: Vec<Turn>,
+    #[serde(default)]
+    pub summary: String,
+    #[serde(default)]
+    pub summary_through_turn_index: usize,
 }
 
 impl Session {
@@ -96,6 +110,8 @@ impl Session {
             started_at: Utc::now(),
             ended_at: None,
             turns: vec![],
+            summary: String::new(),
+            summary_through_turn_index: 0,
         }
     }
 

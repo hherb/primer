@@ -202,11 +202,7 @@ impl InferenceBackend for CloudBackend {
 
     async fn is_available(&self) -> bool {
         // Simple connectivity check — try to reach the API endpoint.
-        self.client
-            .head(&self.api_endpoint)
-            .send()
-            .await
-            .is_ok()
+        self.client.head(&self.api_endpoint).send().await.is_ok()
     }
 
     async fn generate_stream(
@@ -380,7 +376,13 @@ mod tests {
 
     #[test]
     fn parse_anthropic_event_skips_ignorable_events() {
-        for name in ["ping", "message_start", "content_block_start", "content_block_stop", "message_delta"] {
+        for name in [
+            "ping",
+            "message_start",
+            "content_block_start",
+            "content_block_stop",
+            "message_delta",
+        ] {
             let ev = SseEvent {
                 event: name.to_string(),
                 data: "{}".to_string(),
@@ -407,8 +409,14 @@ mod tests {
             stream: true,
         };
         let json = serde_json::to_string(&req).unwrap();
-        assert!(!json.contains("top_p"), "top_p must not be in the request body, got: {json}");
-        assert!(json.contains("\"temperature\":0.7"), "temperature should still be sent");
+        assert!(
+            !json.contains("top_p"),
+            "top_p must not be in the request body, got: {json}"
+        );
+        assert!(
+            json.contains("\"temperature\":0.7"),
+            "temperature should still be sent"
+        );
     }
 
     #[test]
@@ -432,6 +440,9 @@ mod tests {
         };
         let err = parse_anthropic_event(&ev).unwrap_err();
         let msg = format!("{err}");
-        assert!(msg.contains("slow down"), "expected error message to mention 'slow down', got: {msg}");
+        assert!(
+            msg.contains("slow down"),
+            "expected error message to mention 'slow down', got: {msg}"
+        );
     }
 }

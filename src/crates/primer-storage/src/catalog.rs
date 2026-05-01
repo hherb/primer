@@ -51,13 +51,9 @@ pub fn intent_name(intent: PedagogicalIntent) -> &'static str {
     }
 }
 
-/// Reverse lookup: integer ID → `PedagogicalIntent`.
-/// Returns `None` for IDs the current build doesn't know about.
-///
-/// Currently exercised only by tests; will become load-bearing when
-/// `load_session` lands. Allowed-dead per-function so unrelated dead
-/// code in this module still warns.
-#[allow(dead_code)]
+/// Reverse lookup: integer ID → `PedagogicalIntent`. Returns `None` for
+/// IDs the current build doesn't know about — used by `load_session` and
+/// `retrieve_session_turns` to decode persisted turns.
 pub fn intent_from_id(id: i64) -> Option<PedagogicalIntent> {
     PedagogicalIntent::ALL
         .iter()
@@ -65,7 +61,6 @@ pub fn intent_from_id(id: i64) -> Option<PedagogicalIntent> {
         .find(|v| intent_id(*v) == id)
 }
 
-#[allow(dead_code)]
 pub fn speaker_from_id(id: i64) -> Option<Speaker> {
     Speaker::ALL.iter().copied().find(|v| speaker_id(*v) == id)
 }
