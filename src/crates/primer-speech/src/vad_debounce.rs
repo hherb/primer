@@ -64,10 +64,12 @@ impl VadDebouncer {
 
 /// Convert a desired silence duration in ms to a number of chunks at a given
 /// sample rate and chunk size. Rounds up so the user's stated minimum is
-/// always honoured.
+/// always honoured. Uses integer arithmetic to avoid f32 precision loss at
+/// high sample rates or large silence values.
 pub fn ms_to_chunks(min_silence_ms: u32, sample_rate: u32, chunk_samples: u32) -> u32 {
-    let chunk_ms = (chunk_samples as f32 / sample_rate as f32) * 1000.0;
-    ((min_silence_ms as f32) / chunk_ms).ceil() as u32
+    let samples_needed = (min_silence_ms as u64) * (sample_rate as u64);
+    let divisor = (chunk_samples as u64) * 1000;
+    samples_needed.div_ceil(divisor) as u32
 }
 
 #[cfg(test)]

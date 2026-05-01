@@ -95,6 +95,10 @@ pub trait VoiceActivityDetector: Send {
     fn chunk_samples(&self) -> usize;
 
     /// Process exactly [`Self::chunk_samples`] mono f32 samples.
+    ///
+    /// Implementations must return `Err` if `samples.len()` differs from
+    /// [`Self::chunk_samples`] — callers rely on a deterministic frame
+    /// size for timing arithmetic.
     fn process_chunk(&mut self, samples: &[f32]) -> Result<VadFrame>;
 
     /// Reset internal state (between utterances or sessions).

@@ -25,7 +25,7 @@ This document scopes the **third slice** of the Phase 2 speech pipeline: a TTS t
 
 ## Goal of this slice
 
-Add a streaming-TTS trait + Piper implementation so the Primer can begin emitting audio before the LLM has finished generating a response. End-to-end target: <150 ms from first LLM token to first PCM sample on a Pi-class device (per the latency budget in the research write-up on commit `b1c0d6...` — see PR #3 description). Children's-voice quality and selection is in scope for the implementation but voice training is **not**.
+Add a streaming-TTS trait + Piper implementation so the Primer can begin emitting audio before the LLM has finished generating a response. End-to-end target: <150 ms from first LLM token to first PCM sample on a Pi-class device (per the latency budget in the PR #3 description). Children's-voice quality and selection is in scope for the implementation but voice training is **not**.
 
 ## Suggested trait shape
 
