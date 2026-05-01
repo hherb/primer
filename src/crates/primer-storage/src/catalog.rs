@@ -4,7 +4,9 @@
 //! `engagement_states` lookup tables.
 
 use primer_core::conversation::{PedagogicalIntent, Speaker};
+use primer_core::error::{PrimerError, Result};
 use primer_core::learner::EngagementState;
+use rusqlite::{params, Connection, OptionalExtension};
 
 /// Stable on-disk integer ID for every `Speaker` variant.
 ///
@@ -129,6 +131,63 @@ pub fn expected_engagement_states() -> Vec<(i64, &'static str)> {
         .iter()
         .map(|s| (engagement_state_id(*s), engagement_state_name(*s)))
         .collect()
+}
+
+/// Look up an existing `classifiers` row by `identifier`, or insert one
+/// and return the freshly-assigned `AUTOINCREMENT` id.
+///
+/// This is the single choke-point for mapping a classifier identifier
+/// string (e.g. `"stub"` or `"llm:claude-haiku-4-5"`) to its integer FK
+/// used in `turn_classifications`. Callers never need to know whether the
+/// row was created now or already existed.
+pub(crate) fn get_or_create_classifier_id(conn: &Connection, identifier: &str) -> Result<i64> {
+    if let Some(id) = conn
+        .query_row(
+            "SELECT id FROM classifiers WHERE identifier = ?1",
+            params![identifier],
+            |r| r.get::<_, i64>(0),
+        )
+        .optional()
+        .map_err(|e| PrimerError::Storage(format!("classifier lookup: {e}")))?
+    {
+        return Ok(id);
+    }
+    conn.execute(
+        "INSERT INTO classifiers (identifier) VALUES (?1)",
+        params![identifier],
+    )
+    .map_err(|e| PrimerError::Storage(format!("classifier insert: {e}")))?;
+    Ok(conn.last_insert_rowid())
+}
+
+#[cfg(test)]
+mod classifier_row_tests {
+    use super::*;
+    use rusqlite::Connection;
+
+    fn v3_conn() -> Connection {
+        let conn = Connection::open_in_memory().unwrap();
+        conn.execute_batch(crate::schema::SCHEMA_SQL).unwrap();
+        crate::schema::apply_v2_migrations(&conn).unwrap();
+        crate::schema::apply_v3_migrations(&conn).unwrap();
+        conn
+    }
+
+    #[test]
+    fn get_or_create_classifier_id_creates_on_first_call() {
+        let conn = v3_conn();
+        let id1 = get_or_create_classifier_id(&conn, "stub").unwrap();
+        let id2 = get_or_create_classifier_id(&conn, "stub").unwrap();
+        assert_eq!(id1, id2, "second call must return the same id");
+    }
+
+    #[test]
+    fn get_or_create_classifier_id_handles_distinct_identifiers() {
+        let conn = v3_conn();
+        let stub = get_or_create_classifier_id(&conn, "stub").unwrap();
+        let llm = get_or_create_classifier_id(&conn, "llm:claude-haiku-4-5").unwrap();
+        assert_ne!(stub, llm);
+    }
 }
 
 #[cfg(test)]
