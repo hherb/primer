@@ -102,7 +102,7 @@ Vocabulary discipline (applies at every age):
     };
 
     let engagement_note = match learner.current_engagement {
-        EngagementState::Frustrated => {
+        EngagementState::FrustratedStuck | EngagementState::FrustratedTrying => {
             "\n\nIMPORTANT: The child appears frustrated. Be especially gentle. \
              Offer to approach the topic differently or switch topics entirely."
         }
@@ -256,8 +256,8 @@ pub fn extract_active_concepts(session: &Session, last_n: usize) -> Vec<String> 
 /// Decide the next pedagogical intent based on the learner model
 /// and conversation history.
 pub fn decide_intent(learner: &LearnerModel, session: &Session) -> PedagogicalIntent {
-    // If the child is frustrated, scaffold.
-    if learner.current_engagement == EngagementState::Frustrated {
+    // If the child is frustrated and stuck, scaffold.
+    if learner.current_engagement == EngagementState::FrustratedStuck {
         return PedagogicalIntent::Scaffolding;
     }
 
@@ -370,7 +370,7 @@ mod tests {
 
     #[test]
     fn frustrated_returns_scaffolding() {
-        let learner = learner_with(EngagementState::Frustrated, vec![]);
+        let learner = learner_with(EngagementState::FrustratedStuck, vec![]);
         let session = empty_session();
         assert_eq!(
             decide_intent(&learner, &session),
@@ -382,7 +382,7 @@ mod tests {
     fn frustrated_overrides_short_child_turn_branch() {
         // Without frustration, a 1-word child turn would yield ComprehensionCheck.
         // The engagement check fires first.
-        let learner = learner_with(EngagementState::Frustrated, vec![]);
+        let learner = learner_with(EngagementState::FrustratedStuck, vec![]);
         let mut session = empty_session();
         session.add_turn(child_turn("yes", vec![]));
         assert_eq!(
@@ -621,7 +621,7 @@ mod tests {
 
     #[test]
     fn frustrated_does_not_currently_return_encouragement() {
-        let learner = learner_with(EngagementState::Frustrated, vec![]);
+        let learner = learner_with(EngagementState::FrustratedStuck, vec![]);
         let session = empty_session();
         assert_ne!(
             decide_intent(&learner, &session),

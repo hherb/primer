@@ -111,12 +111,37 @@ pub enum EngagementState {
     Engaged,
     /// Thinking — longer pauses, but still present.
     Reflecting,
-    /// Showing signs of frustration (short responses, rising tone).
-    Frustrated,
+    /// Frustrated and stuck — no progress, gives up. Routes to Scaffolding.
+    FrustratedStuck,
+    /// Frustrated but still articulating an attempt. Routes to Encouragement.
+    FrustratedTrying,
     /// Losing interest (long pauses, off-topic responses).
     Disengaging,
     /// State cannot be determined.
     Unknown,
+}
+
+impl EngagementState {
+    pub const ALL: &'static [Self] = &[
+        Self::Engaged,
+        Self::Reflecting,
+        Self::FrustratedStuck,
+        Self::FrustratedTrying,
+        Self::Disengaging,
+        Self::Unknown,
+    ];
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn engagement_state_all_lists_every_variant() {
+        assert_eq!(EngagementState::ALL.len(), 6);
+        assert!(EngagementState::ALL.contains(&EngagementState::FrustratedStuck));
+        assert!(EngagementState::ALL.contains(&EngagementState::FrustratedTrying));
+    }
 }
 
 /// The complete learner model for one child.
