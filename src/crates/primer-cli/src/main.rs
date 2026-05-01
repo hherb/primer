@@ -16,7 +16,9 @@ use std::sync::Arc;
 
 use chrono::Utc;
 use clap::Parser;
-use primer_classifier::{ClassifierSettings, EngagementClassifier, LlmEngagementClassifier, StubEngagementClassifier};
+use primer_classifier::{
+    ClassifierSettings, EngagementClassifier, LlmEngagementClassifier, StubEngagementClassifier,
+};
 use primer_core::config::PedagogyConfig;
 use primer_core::error::{PrimerError, Result};
 use primer_core::inference::InferenceBackend;
@@ -259,7 +261,11 @@ async fn build_classifier(
                 )
             })?;
             let cls_backend = build_backend(cls_backend_name, model.clone(), params).await?;
-            Ok(Arc::new(LlmEngagementClassifier::new(cls_backend, model, settings)))
+            Ok(Arc::new(LlmEngagementClassifier::new(
+                cls_backend,
+                model,
+                settings,
+            )))
         }
 
         // No --classifier-backend specified, main is not stub.
@@ -277,7 +283,8 @@ async fn build_classifier(
                 // not accept a model argument — model is baked in at construction.
                 Some(override_model) => {
                     let cls_backend =
-                        build_backend(main_backend_name, override_model.to_string(), params).await?;
+                        build_backend(main_backend_name, override_model.to_string(), params)
+                            .await?;
                     Ok(Arc::new(LlmEngagementClassifier::new(
                         cls_backend,
                         override_model.to_string(),
@@ -333,7 +340,10 @@ async fn main() -> anyhow::Result<()> {
     // Resolve the model for the main backend early so we can report it
     // in the banner AND pass the resolved value to build_classifier later.
     let main_model: String = match cli.backend.as_str() {
-        "cloud" => cli.model.clone().unwrap_or_else(|| "claude-sonnet-4-6".to_string()),
+        "cloud" => cli
+            .model
+            .clone()
+            .unwrap_or_else(|| "claude-sonnet-4-6".to_string()),
         "ollama" => cli.model.clone().unwrap_or_else(|| {
             eprintln!("Error: --model required for ollama backend (e.g., --model llama3.2).");
             std::process::exit(1);
@@ -467,25 +477,24 @@ async fn main() -> anyhow::Result<()> {
         ..ClassifierSettings::default()
     };
 
-    let classifier: Arc<dyn EngagementClassifier> =
-        match build_classifier(
-            Arc::clone(&backend),
-            &cli.backend,
-            &main_model,
-            &backend_params,
-            classifier_settings.clone(),
-        )
-        .await
-        {
-            Ok(c) => {
-                eprintln!("Engagement classifier: {}", c.identifier());
-                c
-            }
-            Err(e) => {
-                eprintln!("Error constructing engagement classifier: {e}");
-                std::process::exit(1);
-            }
-        };
+    let classifier: Arc<dyn EngagementClassifier> = match build_classifier(
+        Arc::clone(&backend),
+        &cli.backend,
+        &main_model,
+        &backend_params,
+        classifier_settings.clone(),
+    )
+    .await
+    {
+        Ok(c) => {
+            eprintln!("Engagement classifier: {}", c.identifier());
+            c
+        }
+        Err(e) => {
+            eprintln!("Error constructing engagement classifier: {e}");
+            std::process::exit(1);
+        }
+    };
 
     // ─── Dialogue manager ────────────────────────────────────────────
 
@@ -585,7 +594,9 @@ async fn main() -> anyhow::Result<()> {
                 let r = a.reasoning.as_deref().unwrap_or("");
                 eprintln!(
                     "[classifier] {:?} conf={:.2} ({})",
-                    a.state, a.confidence, dm.classifier_identifier()
+                    a.state,
+                    a.confidence,
+                    dm.classifier_identifier()
                 );
                 if !r.is_empty() {
                     eprintln!("             — {r}");
@@ -686,7 +697,9 @@ mod classifier_construction_tests {
     #[tokio::test]
     async fn classifier_backend_without_model_is_error() {
         let params_main = params_with(None, None);
-        let main = build_backend("stub", "main".into(), &params_main).await.unwrap();
+        let main = build_backend("stub", "main".into(), &params_main)
+            .await
+            .unwrap();
         let params = params_with(Some("ollama"), None /* no model */);
         let result =
             build_classifier(main, "stub", "main", &params, ClassifierSettings::default()).await;
@@ -702,15 +715,9 @@ mod classifier_construction_tests {
     async fn classifier_model_override_on_stub_main_still_yields_stub() {
         let params = params_with(None, Some("override-model"));
         let main = build_backend("stub", "main".into(), &params).await.unwrap();
-        let c = build_classifier(
-            main,
-            "stub",
-            "main",
-            &params,
-            ClassifierSettings::default(),
-        )
-        .await
-        .unwrap();
+        let c = build_classifier(main, "stub", "main", &params, ClassifierSettings::default())
+            .await
+            .unwrap();
         // Main is stub → classifier defaults to stub regardless of model override.
         assert_eq!(c.identifier(), "stub");
     }

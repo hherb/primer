@@ -48,8 +48,14 @@ mod tests {
             s.recent_child_turns,
             consts::DEFAULT_RECENT_CHILD_TURNS_FOR_CLASSIFICATION
         );
-        assert_eq!(s.max_output_chars, consts::DEFAULT_MAX_CLASSIFIER_OUTPUT_CHARS);
-        assert_eq!(s.generation_max_tokens, consts::DEFAULT_CLASSIFIER_MAX_TOKENS);
+        assert_eq!(
+            s.max_output_chars,
+            consts::DEFAULT_MAX_CLASSIFIER_OUTPUT_CHARS
+        );
+        assert_eq!(
+            s.generation_max_tokens,
+            consts::DEFAULT_CLASSIFIER_MAX_TOKENS
+        );
         assert!((s.generation_temperature - consts::DEFAULT_CLASSIFIER_TEMPERATURE).abs() < 1e-6);
         assert!((s.generation_top_p - consts::DEFAULT_CLASSIFIER_TOP_P).abs() < 1e-6);
     }

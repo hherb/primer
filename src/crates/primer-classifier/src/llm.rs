@@ -11,8 +11,8 @@ use primer_core::classifier::{EngagementAssessment, EngagementContext};
 use primer_core::error::Result;
 use primer_core::inference::InferenceBackend;
 
-use crate::settings::ClassifierSettings;
 use crate::EngagementClassifier;
+use crate::settings::ClassifierSettings;
 
 pub struct LlmEngagementClassifier {
     backend: Arc<dyn InferenceBackend>,
@@ -27,13 +27,19 @@ impl LlmEngagementClassifier {
         settings: ClassifierSettings,
     ) -> Self {
         let identifier = format!("llm:{model}");
-        Self { backend, settings, identifier }
+        Self {
+            backend,
+            settings,
+            identifier,
+        }
     }
 }
 
 #[async_trait]
 impl EngagementClassifier for LlmEngagementClassifier {
-    fn identifier(&self) -> &str { &self.identifier }
+    fn identifier(&self) -> &str {
+        &self.identifier
+    }
 
     async fn classify(&self, ctx: EngagementContext<'_>) -> Result<EngagementAssessment> {
         let prompt = build_classification_prompt(&ctx);
@@ -47,9 +53,9 @@ impl EngagementClassifier for LlmEngagementClassifier {
             Ok(r) => r,
             Err(e) => {
                 warn!(classifier = %self.identifier, error = ?e, "classifier backend call failed");
-                return Ok(EngagementAssessment::unknown_low_confidence(
-                    format!("backend error: {e}")
-                ));
+                return Ok(EngagementAssessment::unknown_low_confidence(format!(
+                    "backend error: {e}"
+                )));
             }
         };
 
@@ -76,7 +82,11 @@ fn truncate_to_chars(s: &str, max_chars: usize) -> &str {
     if s.chars().count() <= max_chars {
         return s;
     }
-    let end = s.char_indices().nth(max_chars).map(|(i, _)| i).unwrap_or(s.len());
+    let end = s
+        .char_indices()
+        .nth(max_chars)
+        .map(|(i, _)| i)
+        .unwrap_or(s.len());
     &s[..end]
 }
 
@@ -96,13 +106,17 @@ fn build_classification_prompt(ctx: &EngagementContext) -> Prompt {
             .map(|(i, a)| {
                 let turns_ago = ctx.prior_assessments.len() - i;
                 let r = a.reasoning.as_deref().unwrap_or("");
-                format!("{turns_ago} turn(s) ago: {:?} ({:.2}) — {r}", a.state, a.confidence)
+                format!(
+                    "{turns_ago} turn(s) ago: {:?} ({:.2}) — {r}",
+                    a.state, a.confidence
+                )
             })
             .collect::<Vec<_>>()
             .join("\n")
     };
 
-    let recent = ctx.recent_child_turns
+    let recent = ctx
+        .recent_child_turns
         .iter()
         .filter(|t| t.speaker == Speaker::Child)
         .map(|t| t.text.as_str())
@@ -113,7 +127,8 @@ fn build_classification_prompt(ctx: &EngagementContext) -> Prompt {
         conversation. Output ONLY valid JSON of the form: \
         {\"state\": \"<one of: Engaged, Reflecting, FrustratedStuck, FrustratedTrying, \
         Disengaging, Unknown>\", \"confidence\": 0.0-1.0, \"reasoning\": \
-        \"<one short sentence>\"} — no other text.".to_string();
+        \"<one short sentence>\"} — no other text."
+        .to_string();
 
     let user = format!(
         "Recent trajectory (oldest first):\n{trajectory}\n\nMost recent child responses:\n{recent}\n\nClassify the CURRENT engagement state."
@@ -121,7 +136,10 @@ fn build_classification_prompt(ctx: &EngagementContext) -> Prompt {
 
     Prompt {
         system,
-        messages: vec![Message { role: Role::User, content: user }],
+        messages: vec![Message {
+            role: Role::User,
+            content: user,
+        }],
     }
 }
 
@@ -138,11 +156,14 @@ struct ClassifierOutput {
 fn parse_classification_output(raw: &str) -> std::result::Result<EngagementAssessment, String> {
     let json_str = extract_first_json_object(raw)
         .ok_or_else(|| "no JSON object found in output".to_string())?;
-    let parsed: ClassifierOutput = serde_json::from_str(json_str)
-        .map_err(|e| format!("JSON parse error: {e}"))?;
+    let parsed: ClassifierOutput =
+        serde_json::from_str(json_str).map_err(|e| format!("JSON parse error: {e}"))?;
 
     if !(0.0..=1.0).contains(&parsed.confidence) {
-        return Err(format!("confidence {} out of range [0.0, 1.0]", parsed.confidence));
+        return Err(format!(
+            "confidence {} out of range [0.0, 1.0]",
+            parsed.confidence
+        ));
     }
 
     let state = match parsed.state.as_str() {
@@ -172,7 +193,10 @@ fn extract_first_json_object(raw: &str) -> Option<&str> {
     let mut in_string = false;
     let mut escape = false;
     for (i, &b) in bytes.iter().enumerate().skip(start) {
-        if escape { escape = false; continue; }
+        if escape {
+            escape = false;
+            continue;
+        }
         if in_string {
             match b {
                 b'\\' => escape = true,
@@ -211,9 +235,13 @@ mod tests {
 
     #[async_trait]
     impl InferenceBackend for CannedBackend {
-        fn name(&self) -> &str { "canned" }
+        fn name(&self) -> &str {
+            "canned"
+        }
 
-        async fn is_available(&self) -> bool { true }
+        async fn is_available(&self) -> bool {
+            true
+        }
 
         async fn generate_stream(
             &self,
@@ -243,9 +271,14 @@ mod tests {
             r#"{"state": "FrustratedStuck", "confidence": 0.85, "reasoning": "child says i don't know"}"#.into()
         )) as Arc<dyn InferenceBackend>;
         let c = LlmEngagementClassifier::new(
-            backend, "test-model".into(), ClassifierSettings::default()
+            backend,
+            "test-model".into(),
+            ClassifierSettings::default(),
         );
-        let ctx = EngagementContext { recent_child_turns: &[], prior_assessments: &[] };
+        let ctx = EngagementContext {
+            recent_child_turns: &[],
+            prior_assessments: &[],
+        };
         let a = c.classify(ctx).await.unwrap();
         assert_eq!(a.state, EngagementState::FrustratedStuck);
         assert!((a.confidence - 0.85).abs() < 1e-6);
@@ -258,21 +291,31 @@ mod tests {
             r#"Here is my analysis: {"state": "Engaged", "confidence": 0.9, "reasoning": "good"} — hope this helps!"#.into()
         )) as Arc<dyn InferenceBackend>;
         let c = LlmEngagementClassifier::new(
-            backend, "test-model".into(), ClassifierSettings::default()
+            backend,
+            "test-model".into(),
+            ClassifierSettings::default(),
         );
-        let ctx = EngagementContext { recent_child_turns: &[], prior_assessments: &[] };
+        let ctx = EngagementContext {
+            recent_child_turns: &[],
+            prior_assessments: &[],
+        };
         let a = c.classify(ctx).await.unwrap();
         assert_eq!(a.state, EngagementState::Engaged);
     }
 
     #[tokio::test]
     async fn classify_returns_unknown_on_unparseable_output() {
-        let backend = Arc::new(CannedBackend("not json at all".into()))
-            as Arc<dyn InferenceBackend>;
+        let backend =
+            Arc::new(CannedBackend("not json at all".into())) as Arc<dyn InferenceBackend>;
         let c = LlmEngagementClassifier::new(
-            backend, "test-model".into(), ClassifierSettings::default()
+            backend,
+            "test-model".into(),
+            ClassifierSettings::default(),
         );
-        let ctx = EngagementContext { recent_child_turns: &[], prior_assessments: &[] };
+        let ctx = EngagementContext {
+            recent_child_turns: &[],
+            prior_assessments: &[],
+        };
         let a = c.classify(ctx).await.unwrap();
         assert_eq!(a.state, EngagementState::Unknown);
         assert_eq!(a.confidence, 0.0);
@@ -282,12 +325,17 @@ mod tests {
     #[tokio::test]
     async fn classify_returns_unknown_on_invalid_state_name() {
         let backend = Arc::new(CannedBackend(
-            r#"{"state": "EnthusiastiCallyEngaged", "confidence": 1.0, "reasoning": ""}"#.into()
+            r#"{"state": "EnthusiastiCallyEngaged", "confidence": 1.0, "reasoning": ""}"#.into(),
         )) as Arc<dyn InferenceBackend>;
         let c = LlmEngagementClassifier::new(
-            backend, "test-model".into(), ClassifierSettings::default()
+            backend,
+            "test-model".into(),
+            ClassifierSettings::default(),
         );
-        let ctx = EngagementContext { recent_child_turns: &[], prior_assessments: &[] };
+        let ctx = EngagementContext {
+            recent_child_turns: &[],
+            prior_assessments: &[],
+        };
         let a = c.classify(ctx).await.unwrap();
         assert_eq!(a.state, EngagementState::Unknown);
     }
@@ -295,12 +343,17 @@ mod tests {
     #[tokio::test]
     async fn classify_returns_unknown_on_out_of_range_confidence() {
         let backend = Arc::new(CannedBackend(
-            r#"{"state": "Engaged", "confidence": 2.5, "reasoning": ""}"#.into()
+            r#"{"state": "Engaged", "confidence": 2.5, "reasoning": ""}"#.into(),
         )) as Arc<dyn InferenceBackend>;
         let c = LlmEngagementClassifier::new(
-            backend, "test-model".into(), ClassifierSettings::default()
+            backend,
+            "test-model".into(),
+            ClassifierSettings::default(),
         );
-        let ctx = EngagementContext { recent_child_turns: &[], prior_assessments: &[] };
+        let ctx = EngagementContext {
+            recent_child_turns: &[],
+            prior_assessments: &[],
+        };
         let a = c.classify(ctx).await.unwrap();
         assert_eq!(a.state, EngagementState::Unknown);
     }
@@ -311,9 +364,13 @@ mod tests {
 
         #[async_trait]
         impl InferenceBackend for ErrorBackend {
-            fn name(&self) -> &str { "error-test" }
+            fn name(&self) -> &str {
+                "error-test"
+            }
 
-            async fn is_available(&self) -> bool { true }
+            async fn is_available(&self) -> bool {
+                true
+            }
 
             async fn generate_stream(
                 &self,
@@ -332,7 +389,10 @@ mod tests {
             "test-model".into(),
             ClassifierSettings::default(),
         );
-        let ctx = EngagementContext { recent_child_turns: &[], prior_assessments: &[] };
+        let ctx = EngagementContext {
+            recent_child_turns: &[],
+            prior_assessments: &[],
+        };
         let a = c.classify(ctx).await.unwrap();
         assert_eq!(a.state, EngagementState::Unknown);
         assert_eq!(a.confidence, 0.0);

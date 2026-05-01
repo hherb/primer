@@ -6,7 +6,7 @@
 use primer_core::conversation::{PedagogicalIntent, Speaker};
 use primer_core::error::{PrimerError, Result};
 use primer_core::learner::EngagementState;
-use rusqlite::{params, Connection, OptionalExtension};
+use rusqlite::{Connection, OptionalExtension, params};
 
 /// Stable on-disk integer ID for every `Speaker` variant.
 ///
