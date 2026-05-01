@@ -1,8 +1,10 @@
 //! Canonical mappings between Rust enum variants and their on-disk
 //! integer IDs. This module is the single source of truth for the
-//! contents of the `speakers` and `pedagogical_intents` lookup tables.
+//! contents of the `speakers`, `pedagogical_intents`, and
+//! `engagement_states` lookup tables.
 
 use primer_core::conversation::{PedagogicalIntent, Speaker};
+use primer_core::learner::EngagementState;
 
 /// Stable on-disk integer ID for every `Speaker` variant.
 ///
@@ -81,6 +83,89 @@ pub fn expected_intents() -> Vec<(i64, &'static str)> {
         .iter()
         .map(|i| (intent_id(*i), intent_name(*i)))
         .collect()
+}
+
+/// Stable on-disk integer ID for every `EngagementState` variant.
+///
+/// Explicit match arms so reordering variants in `primer-core`
+/// cannot silently shift IDs already on disk.
+pub fn engagement_state_id(state: EngagementState) -> i64 {
+    match state {
+        EngagementState::Engaged => 1,
+        EngagementState::Reflecting => 2,
+        EngagementState::FrustratedStuck => 3,
+        EngagementState::FrustratedTrying => 4,
+        EngagementState::Disengaging => 5,
+        EngagementState::Unknown => 6,
+    }
+}
+
+/// Human-readable name stored alongside the ID in the `engagement_states`
+/// lookup table.
+pub fn engagement_state_name(state: EngagementState) -> &'static str {
+    match state {
+        EngagementState::Engaged => "Engaged",
+        EngagementState::Reflecting => "Reflecting",
+        EngagementState::FrustratedStuck => "FrustratedStuck",
+        EngagementState::FrustratedTrying => "FrustratedTrying",
+        EngagementState::Disengaging => "Disengaging",
+        EngagementState::Unknown => "Unknown",
+    }
+}
+
+/// Reverse lookup: integer ID → `EngagementState`. Returns `None` for
+/// IDs the current build doesn't know about.
+pub fn engagement_state_from_id(id: i64) -> Option<EngagementState> {
+    EngagementState::ALL
+        .iter()
+        .copied()
+        .find(|v| engagement_state_id(*v) == id)
+}
+
+/// All `(id, name)` pairs the storage layer expects to see in the
+/// `engagement_states` lookup table. Used by the validate-and-seed pass.
+pub fn expected_engagement_states() -> Vec<(i64, &'static str)> {
+    EngagementState::ALL
+        .iter()
+        .map(|s| (engagement_state_id(*s), engagement_state_name(*s)))
+        .collect()
+}
+
+#[cfg(test)]
+mod engagement_state_tests {
+    use super::*;
+    use primer_core::learner::EngagementState;
+
+    #[test]
+    fn engagement_state_id_is_stable_for_every_variant() {
+        // Document the canonical id->variant mapping. If you ever
+        // need to change these ids, retired ones must NEVER be reused.
+        assert_eq!(engagement_state_id(EngagementState::Engaged), 1);
+        assert_eq!(engagement_state_id(EngagementState::Reflecting), 2);
+        assert_eq!(engagement_state_id(EngagementState::FrustratedStuck), 3);
+        assert_eq!(engagement_state_id(EngagementState::FrustratedTrying), 4);
+        assert_eq!(engagement_state_id(EngagementState::Disengaging), 5);
+        assert_eq!(engagement_state_id(EngagementState::Unknown), 6);
+    }
+
+    #[test]
+    fn engagement_state_from_id_is_inverse_of_id() {
+        for state in EngagementState::ALL {
+            let id = engagement_state_id(*state);
+            assert_eq!(engagement_state_from_id(id), Some(*state));
+        }
+    }
+
+    #[test]
+    fn engagement_state_from_id_returns_none_on_unknown_id() {
+        assert!(engagement_state_from_id(999).is_none());
+    }
+
+    #[test]
+    fn expected_engagement_states_covers_all_variants() {
+        let pairs = expected_engagement_states();
+        assert_eq!(pairs.len(), EngagementState::ALL.len());
+    }
 }
 
 #[cfg(test)]
