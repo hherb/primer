@@ -17,6 +17,7 @@ pub mod stub;
 pub mod llm;
 
 pub use settings::ClassifierSettings;
+pub use stub::StubEngagementClassifier;
 
 /// Classifier of the child's engagement state.
 ///
