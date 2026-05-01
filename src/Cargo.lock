@@ -1006,6 +1006,7 @@ dependencies = [
  "futures",
  "primer-classifier",
  "primer-core",
+ "primer-storage",
  "serde",
  "serde_json",
  "thiserror",

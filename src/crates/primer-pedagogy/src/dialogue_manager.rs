@@ -62,13 +62,11 @@ pub struct DialogueManager<'a> {
     storage: Option<Arc<dyn SessionStore>>,
     /// Engagement classifier — called after each Primer response to assess
     /// the child's engagement state. Arc for the same spawn-capture reason.
-    #[allow(dead_code)]
     classifier: Arc<dyn EngagementClassifier>,
     /// Tunable parameters for the classifier (thresholds, timeouts, etc.).
     classifier_settings: ClassifierSettings,
     /// Handle to the in-flight classifier task spawned after the previous
     /// turn. `None` when no task is running.
-    #[allow(dead_code)]
     classify_task: Option<JoinHandle<Option<EngagementAssessment>>>,
     /// Pedagogical configuration.
     config: PedagogyConfig,
@@ -205,6 +203,11 @@ impl<'a> DialogueManager<'a> {
     where
         F: FnMut(&str),
     {
+        // 0. Wait for the previous turn's classification (if any) to complete
+        //    with a bounded timeout, then apply it so decide_intent sees the
+        //    updated engagement state.
+        self.await_pending_classification().await;
+
         // 1. Record the child's turn.
         let child_turn = Turn {
             speaker: Speaker::Child,
@@ -288,6 +291,75 @@ impl<'a> DialogueManager<'a> {
             }
         }
 
+        // 6. Spawn a classification task for the child turn that just completed.
+        //    The child turn is the last Child-speaker turn in session.turns.
+        //    We search from the end so it works even on error paths (where the
+        //    Primer turn was not appended).
+        if result.is_ok() {
+            let child_turn_index = self
+                .session
+                .turns
+                .iter()
+                .enumerate()
+                .rev()
+                .find(|(_, t)| t.speaker == Speaker::Child)
+                .map(|(i, _)| i);
+
+            if let Some(_child_idx) = child_turn_index {
+                let store = self.storage.clone();
+                let classifier = Arc::clone(&self.classifier);
+                let session_id = self.session.id;
+
+                // Build owned copies of the context inputs — the spawned task
+                // needs 'static, so we cannot pass slices that borrow self.
+                let recent_child_turns: Vec<Turn> = self
+                    .session
+                    .turns
+                    .iter()
+                    .filter(|t| t.speaker == Speaker::Child)
+                    .rev()
+                    .take(self.classifier_settings.recent_child_turns)
+                    .cloned()
+                    .collect::<Vec<_>>()
+                    .into_iter()
+                    .rev()
+                    .collect();
+                let prior_assessments: Vec<EngagementAssessment> =
+                    self.learner.recent_assessments.clone();
+                let child_idx = _child_idx;
+
+                let task = tokio::spawn(async move {
+                    let ctx = primer_core::classifier::EngagementContext {
+                        recent_child_turns: &recent_child_turns,
+                        prior_assessments: &prior_assessments,
+                    };
+                    match classifier.classify(ctx).await {
+                        Ok(a) => {
+                            if let Some(store) = store {
+                                if let Err(e) = store
+                                    .save_classification(
+                                        session_id,
+                                        child_idx,
+                                        &a,
+                                        classifier.identifier(),
+                                    )
+                                    .await
+                                {
+                                    tracing::warn!(error = ?e, "save_classification failed");
+                                }
+                            }
+                            Some(a)
+                        }
+                        Err(e) => {
+                            tracing::warn!(error = ?e, "classifier returned error");
+                            None
+                        }
+                    }
+                });
+                self.classify_task = Some(task);
+            }
+        }
+
         result
     }
 
@@ -316,16 +388,13 @@ impl<'a> DialogueManager<'a> {
     // ─── Classifier helpers ───────────────────────────────────────────
 
     /// Wait (up to `blocking_timeout`) for the classifier task spawned after
-    /// the previous turn, then apply its result to `learner`.
+    /// the previous turn, then apply its result to `self.learner`.
     ///
     /// Called at the start of each new turn so the prior turn's assessment
     /// is consumed before intent is decided. On timeout the task is aborted
     /// and we proceed with the existing (stale) engagement state — better
     /// than blocking the conversation indefinitely.
-    async fn await_pending_classification(
-        &mut self,
-        learner: &mut primer_core::learner::LearnerModel,
-    ) {
+    async fn await_pending_classification(&mut self) {
         let Some(task) = self.classify_task.take() else {
             return;
         };
@@ -333,7 +402,7 @@ impl<'a> DialogueManager<'a> {
         let timeout = self.classifier_settings.blocking_timeout;
         match tokio::time::timeout(timeout, task).await {
             Ok(Ok(Some(assessment))) => {
-                apply_assessment(learner, assessment, &self.classifier_settings)
+                apply_assessment(&mut self.learner, assessment, &self.classifier_settings)
             }
             Ok(Ok(None)) => { /* soft failure; nothing to apply */ }
             Ok(Err(e)) => tracing::warn!(error = ?e, "classifier task panicked"),
@@ -1208,6 +1277,68 @@ mod tests {
             learner.recent_assessments.len(),
             1,
             "low-confidence assessment IS still recorded in history"
+        );
+    }
+
+    // ─── Integration: classifier spawned and applied across turns ─────
+
+    #[tokio::test]
+    async fn respond_to_streaming_spawns_classify_task_and_persists() {
+        use primer_classifier::{EngagementClassifier, StubEngagementClassifier};
+        use primer_core::classifier::EngagementAssessment;
+        use primer_core::storage::SessionStore;
+        use primer_storage::SqliteSessionStore;
+
+        // A classifier that always returns FrustratedTrying with high confidence.
+        let target_state = EngagementState::FrustratedTrying;
+        let classifier: Arc<dyn EngagementClassifier> =
+            Arc::new(StubEngagementClassifier::with_response(EngagementAssessment {
+                state: target_state,
+                confidence: 0.95,
+                reasoning: Some("integration test".into()),
+            }));
+
+        let storage: Arc<dyn SessionStore> = Arc::new(
+            SqliteSessionStore::open(std::path::Path::new(":memory:")).unwrap(),
+        );
+
+        let backend = ScriptedBackend::new(vec![
+            Ok(chunk("Great question!", false)),
+            Ok(chunk("", true)),
+        ]);
+        let knowledge = EmptyKnowledge;
+        let settings = ClassifierSettings::default();
+
+        let mut dm = DialogueManager::new(
+            test_learner(),
+            &backend,
+            &knowledge,
+            Some(Arc::clone(&storage) as Arc<dyn SessionStore>),
+            Arc::clone(&classifier),
+            settings,
+            PedagogyConfig::default(),
+        );
+
+        dm.open_session().await.unwrap();
+
+        // Run one full turn. After this call a classify_task should be live.
+        let response = dm.respond_to_streaming("Why is the sky blue?", |_| {}).await.unwrap();
+        assert!(!response.is_empty(), "should have a non-empty response");
+
+        // The classify_task is now running (or already done). Simulating the
+        // start of the next turn by calling await_pending_classification
+        // should apply the FrustratedTrying assessment.
+        dm.await_pending_classification().await;
+
+        // Assessment applied: current_engagement updated by the stub.
+        assert_eq!(
+            dm.learner.current_engagement, target_state,
+            "await_pending_classification must apply the spawned assessment"
+        );
+        assert_eq!(
+            dm.learner.recent_assessments.len(),
+            1,
+            "assessment must be pushed into recent_assessments"
         );
     }
 }
