@@ -26,8 +26,34 @@ use whisper_cpp_plus::{
     FullParams, SamplingStrategy, Segment, TranscriptionParams, WhisperContext, WhisperStream,
 };
 
+use crate::time_ms::clamp_signed_ms_to_u64;
+
+/// Sample rate Whisper requires (16 kHz mono f32).
 const SAMPLE_RATE: u32 = 16_000;
 
+/// Default transcription language (ISO 639-1). English is the only
+/// language Whisper's `.en` distillates support; multilingual models
+/// auto-detect when given a non-`en` value but using "en" by default
+/// keeps things deterministic for the Primer's English-first audience.
+const DEFAULT_LANGUAGE: &str = "en";
+
+/// `best_of` for the streaming sampler. 1 = greedy decoding (fastest,
+/// lowest quality drop in our latency-dominated streaming path). Beam
+/// search would lift WER on noisy/child audio but at multiplicative
+/// cost; revisit only after profiling shows headroom.
+const STREAMING_BEST_OF: i32 = 1;
+
+/// Backend identifier returned by [`WhisperStt::name`].
+const BACKEND_NAME: &str = "whisper-cpp";
+
+/// Whisper.cpp speech-to-text backend.
+///
+/// Loads a GGML/GGUF model from disk on construction; the same loaded
+/// context is shared across all sessions via `Arc`, which makes one
+/// `WhisperStt` cheap to clone and safe to call from many tasks. Both
+/// the one-shot [`SpeechToText`] and the streaming
+/// [`StreamingSpeechToText`] traits are implemented; pick whichever
+/// matches the call site.
 pub struct WhisperStt {
     ctx: Arc<WhisperContext>,
     language: String,
@@ -41,7 +67,7 @@ impl WhisperStt {
             .map_err(|e| PrimerError::Speech(format!("load whisper model: {e}")))?;
         Ok(Self {
             ctx: Arc::new(ctx),
-            language: "en".to_string(),
+            language: DEFAULT_LANGUAGE.to_string(),
         })
     }
 
@@ -55,7 +81,7 @@ impl WhisperStt {
 #[async_trait]
 impl SpeechToText for WhisperStt {
     fn name(&self) -> &str {
-        "whisper-cpp"
+        BACKEND_NAME
     }
 
     async fn transcribe(&self, audio: &AudioBuffer) -> Result<Transcript> {
@@ -88,7 +114,7 @@ impl SpeechToText for WhisperStt {
 
 impl StreamingSpeechToText for WhisperStt {
     fn name(&self) -> &str {
-        "whisper-cpp"
+        BACKEND_NAME
     }
 
     fn sample_rate(&self) -> u32 {
@@ -96,8 +122,10 @@ impl StreamingSpeechToText for WhisperStt {
     }
 
     fn open_session(&self) -> Result<Box<dyn TranscriptionSession>> {
-        let params =
-            FullParams::new(SamplingStrategy::Greedy { best_of: 1 }).language(&self.language);
+        let params = FullParams::new(SamplingStrategy::Greedy {
+            best_of: STREAMING_BEST_OF,
+        })
+        .language(&self.language);
         let stream = WhisperStream::new(&self.ctx, params)
             .map_err(|e| PrimerError::Speech(format!("open whisper stream: {e}")))?;
         Ok(Box::new(WhisperSession { stream }))
@@ -130,10 +158,15 @@ impl TranscriptionSession for WhisperSession {
     }
 }
 
+/// Map a whisper.cpp segment to our [`TranscriptSegment`].
+///
+/// Whisper's timestamps are signed; in practice they're non-negative,
+/// but the type allows it so we clamp through [`clamp_signed_ms_to_u64`]
+/// rather than reinterpret-casting.
 fn to_transcript_segment(seg: Segment) -> TranscriptSegment {
     TranscriptSegment {
         text: seg.text,
-        start_ms: seg.start_ms.max(0) as u64,
-        end_ms: seg.end_ms.max(0) as u64,
+        start_ms: clamp_signed_ms_to_u64(seg.start_ms),
+        end_ms: clamp_signed_ms_to_u64(seg.end_ms),
     }
 }

@@ -23,6 +23,16 @@ use crate::vad_debounce::{VadDebouncer, ms_to_chunks};
 const SAMPLE_RATE: u32 = 16_000;
 const CHUNK_SAMPLES: usize = 512;
 
+/// Default speech-probability threshold. Matches the Silero upstream
+/// `VadIterator` default and the value the model was tuned to. Lower
+/// thresholds catch quiet child speech but admit more breath/noise.
+const DEFAULT_THRESHOLD: f32 = 0.5;
+
+/// Default trailing-silence required before emitting `SpeechEnd` (ms).
+/// 300 ms is short enough that the Primer responds promptly after a
+/// child stops speaking, but long enough to bridge inter-word pauses.
+const DEFAULT_MIN_SILENCE_MS: u32 = 300;
+
 /// Runtime-tunable parameters for the Silero VAD wrapper.
 #[derive(Debug, Clone)]
 pub struct SileroVadParams {
@@ -35,18 +45,27 @@ pub struct SileroVadParams {
 impl Default for SileroVadParams {
     fn default() -> Self {
         Self {
-            threshold: 0.5,
-            min_silence_ms: 300,
+            threshold: DEFAULT_THRESHOLD,
+            min_silence_ms: DEFAULT_MIN_SILENCE_MS,
         }
     }
 }
 
+/// Streaming VAD backed by the Silero ONNX model.
+///
+/// One detector per audio stream. Internally holds the model's hidden
+/// state plus a [`VadDebouncer`] for the threshold + min-silence state
+/// machine. Default-constructed params match the Silero upstream
+/// defaults; tune via [`SileroVadParams`] if a deployment needs different
+/// sensitivity.
 pub struct SileroVad {
     model: OnnxModel,
     debouncer: VadDebouncer,
 }
 
 impl SileroVad {
+    /// Load the bundled Silero ONNX model and wrap it with the supplied
+    /// debounce parameters. Fails if ONNX Runtime cannot initialise.
     pub fn new(params: SileroVadParams) -> Result<Self> {
         let model =
             load_silero_vad().map_err(|e| PrimerError::Speech(format!("load Silero VAD: {e}")))?;
@@ -57,6 +76,7 @@ impl SileroVad {
         })
     }
 
+    /// Convenience: load the detector with [`SileroVadParams::default`].
     pub fn with_defaults() -> Result<Self> {
         Self::new(SileroVadParams::default())
     }
