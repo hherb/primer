@@ -272,13 +272,13 @@ pub fn decide_intent(learner: &LearnerModel, session: &Session) -> PedagogicalIn
         if last.speaker == primer_core::conversation::Speaker::Child {
             // Simple heuristic: short responses likely need probing,
             // longer responses might demonstrate understanding.
-            if last.text.split_whitespace().count() < 10 {
+            if last.text.split_whitespace().count() < crate::consts::SHORT_TURN_WORD_BOUNDARY {
                 return PedagogicalIntent::ComprehensionCheck;
             }
 
             // Check if any active concepts are at Comprehension level
             // or above — if so, extend.
-            let active = extract_active_concepts(session, 4);
+            let active = extract_active_concepts(session, crate::consts::ACTIVE_CONCEPT_LOOKBACK);
             let has_understood = active.iter().any(|c| {
                 learner
                     .concepts
