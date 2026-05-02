@@ -835,14 +835,26 @@ impl primer_core::storage::LearnerStore for SqliteSessionStore {
                 ))
             })?;
 
+        // Defensive integer narrowing: a corrupt or hostile DB row must
+        // produce a clear `Storage` error rather than silently truncate.
+        // Sources of badness include: a future schema migration that
+        // widens an int column without updating the loader, manual
+        // sqlite3 edits, a third-party tool writing the file, or a
+        // hardware-level bit flip. The `as` cast on i64 → u8/u32 wraps
+        // mod 2^N — that's the wrong failure mode here.
         let profile = LearnerProfile {
             id,
             name,
-            age: age as u8,
+            age: i64_to_u8(age, "learners.age")?,
             languages,
             created_at,
             last_active,
         };
+        // Float narrowing (f64 → f32) is left as `as`. Rust's `as`
+        // semantics saturate to ±infinity on overflow, which is loud
+        // (NaN/inf will surface in any downstream comparison) and the
+        // values we store are bounded f32-range by construction.
+        let early_disengagement_secs = i64_to_u64(early_secs, "learners.early_disengagement_secs")?;
         let preferences = LearningPreferences {
             narrative: pref_narrative as f32,
             socratic: pref_socratic as f32,
@@ -850,7 +862,7 @@ impl primer_core::storage::LearnerStore for SqliteSessionStore {
             kinesthetic: pref_kinesthetic as f32,
             typical_session_minutes: typical_session_minutes as f32,
             high_engagement_topics,
-            early_disengagement_threshold: Duration::from_secs(early_secs.max(0) as u64),
+            early_disengagement_threshold: Duration::from_secs(early_disengagement_secs),
         };
 
         // Step 2: every learner_concepts row, joined to concepts for the
@@ -899,7 +911,7 @@ impl primer_core::storage::LearnerStore for SqliteSessionStore {
                 concept_id: concept_name,
                 depth,
                 confidence: confidence as f32,
-                encounter_count: encounter_count as u32,
+                encounter_count: i64_to_u32(encounter_count, "learner_concepts.encounter_count")?,
                 last_encountered,
                 notes,
             });
@@ -919,6 +931,36 @@ fn parse_rfc3339(s: &str, field: &str) -> Result<DateTime<Utc>> {
     DateTime::parse_from_rfc3339(s)
         .map(|dt| dt.with_timezone(&Utc))
         .map_err(|e| PrimerError::Storage(format!("parse {field} {s:?}: {e}")))
+}
+
+/// Narrow a SQLite-stored `i64` to `u8`. SQLite's INTEGER column type
+/// is 64-bit signed, but the in-memory model uses `u8` for `age`. A
+/// silent `as` cast wraps mod 256 (so 300 → 44, -1 → 255), which is
+/// exactly the wrong failure mode for a corrupt-DB read path.
+fn i64_to_u8(value: i64, field: &str) -> Result<u8> {
+    u8::try_from(value).map_err(|_| {
+        PrimerError::Storage(format!(
+            "{field} value {value} is outside the valid u8 range 0..=255"
+        ))
+    })
+}
+
+/// Narrow a SQLite-stored `i64` to `u32`. Same rationale as
+/// `i64_to_u8`.
+fn i64_to_u32(value: i64, field: &str) -> Result<u32> {
+    u32::try_from(value).map_err(|_| {
+        PrimerError::Storage(format!(
+            "{field} value {value} is outside the valid u32 range 0..=4294967295"
+        ))
+    })
+}
+
+/// Narrow a SQLite-stored `i64` to `u64`. Negatives are rejected
+/// rather than clamped — a stored negative seconds value indicates
+/// corruption, not "interpret as zero".
+fn i64_to_u64(value: i64, field: &str) -> Result<u64> {
+    u64::try_from(value)
+        .map_err(|_| PrimerError::Storage(format!("{field} value {value} must be non-negative")))
 }
 
 /// Sanitize an arbitrary user query into an FTS5 expression that is
@@ -2723,5 +2765,168 @@ mod learner_store_tests {
         // recent_assessments is rehydrated separately from
         // turn_classifications and is not part of the round-trip.
         assert!(loaded.recent_assessments.is_empty());
+    }
+
+    /// Inject a row with an out-of-range `age` to prove that
+    /// `load_learner` does not silently truncate `i64 → u8`. A corrupt
+    /// or hostile DB with `age = 300` must error rather than return a
+    /// learner with `age = 44` (300 mod 256).
+    #[tokio::test]
+    async fn load_learner_rejects_age_outside_u8_range() {
+        let store = open_in_mem();
+        {
+            let conn = store.conn.lock().unwrap();
+            conn.execute(
+                "INSERT INTO learners (
+                     id, name, age, languages, created_at, last_active,
+                     pref_narrative, pref_socratic, pref_visual, pref_kinesthetic,
+                     typical_session_minutes, high_engagement_topics,
+                     early_disengagement_secs, current_engagement_state_id
+                 ) VALUES (?1, 'Test', 300, '[]', '2026-01-01T00:00:00Z', '2026-01-01T00:00:00Z',
+                           0.5, 0.5, 0.5, 0.5, 20.0, '[]', 300, 1)",
+                rusqlite::params!["00000000-0000-0000-0000-000000000001"],
+            )
+            .unwrap();
+        }
+        let err = store
+            .load_learner()
+            .await
+            .expect_err("expected out-of-range error, not silent truncation");
+        let msg = format!("{err}");
+        assert!(
+            msg.contains("age"),
+            "error must name the failing field: got {msg:?}"
+        );
+        assert!(
+            msg.contains("300"),
+            "error must include the offending value: got {msg:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn load_learner_rejects_negative_age() {
+        let store = open_in_mem();
+        {
+            let conn = store.conn.lock().unwrap();
+            conn.execute(
+                "INSERT INTO learners (
+                     id, name, age, languages, created_at, last_active,
+                     pref_narrative, pref_socratic, pref_visual, pref_kinesthetic,
+                     typical_session_minutes, high_engagement_topics,
+                     early_disengagement_secs, current_engagement_state_id
+                 ) VALUES (?1, 'Test', -1, '[]', '2026-01-01T00:00:00Z', '2026-01-01T00:00:00Z',
+                           0.5, 0.5, 0.5, 0.5, 20.0, '[]', 300, 1)",
+                rusqlite::params!["00000000-0000-0000-0000-000000000002"],
+            )
+            .unwrap();
+        }
+        let err = store
+            .load_learner()
+            .await
+            .expect_err("expected negative-age error");
+        assert!(format!("{err}").contains("age"));
+    }
+
+    #[tokio::test]
+    async fn load_learner_rejects_negative_encounter_count() {
+        let store = open_in_mem();
+        // Pre-seed a learners row + a concepts row, then inject a bad
+        // learner_concepts row with encounter_count = -1.
+        let learner_id = "00000000-0000-0000-0000-000000000003";
+        {
+            let conn = store.conn.lock().unwrap();
+            conn.execute(
+                "INSERT INTO learners (
+                     id, name, age, languages, created_at, last_active,
+                     pref_narrative, pref_socratic, pref_visual, pref_kinesthetic,
+                     typical_session_minutes, high_engagement_topics,
+                     early_disengagement_secs, current_engagement_state_id
+                 ) VALUES (?1, 'Test', 8, '[]', '2026-01-01T00:00:00Z', '2026-01-01T00:00:00Z',
+                           0.5, 0.5, 0.5, 0.5, 20.0, '[]', 300, 1)",
+                rusqlite::params![learner_id],
+            )
+            .unwrap();
+            conn.execute("INSERT INTO concepts (name) VALUES ('test:bad')", [])
+                .unwrap();
+            conn.execute(
+                "INSERT INTO learner_concepts (
+                     learner_id, concept_id, depth_id, confidence,
+                     encounter_count, last_encountered, notes
+                 ) VALUES (?1, (SELECT id FROM concepts WHERE name = 'test:bad'),
+                           1, 0.5, -1, NULL, '[]')",
+                rusqlite::params![learner_id],
+            )
+            .unwrap();
+        }
+        let err = store
+            .load_learner()
+            .await
+            .expect_err("expected negative encounter_count to error");
+        let msg = format!("{err}");
+        assert!(
+            msg.contains("encounter_count"),
+            "error must name the failing field: got {msg:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn load_learner_rejects_encounter_count_above_u32_max() {
+        let store = open_in_mem();
+        let learner_id = "00000000-0000-0000-0000-000000000004";
+        let too_big: i64 = (u32::MAX as i64) + 1;
+        {
+            let conn = store.conn.lock().unwrap();
+            conn.execute(
+                "INSERT INTO learners (
+                     id, name, age, languages, created_at, last_active,
+                     pref_narrative, pref_socratic, pref_visual, pref_kinesthetic,
+                     typical_session_minutes, high_engagement_topics,
+                     early_disengagement_secs, current_engagement_state_id
+                 ) VALUES (?1, 'Test', 8, '[]', '2026-01-01T00:00:00Z', '2026-01-01T00:00:00Z',
+                           0.5, 0.5, 0.5, 0.5, 20.0, '[]', 300, 1)",
+                rusqlite::params![learner_id],
+            )
+            .unwrap();
+            conn.execute("INSERT INTO concepts (name) VALUES ('test:huge')", [])
+                .unwrap();
+            conn.execute(
+                "INSERT INTO learner_concepts (
+                     learner_id, concept_id, depth_id, confidence,
+                     encounter_count, last_encountered, notes
+                 ) VALUES (?1, (SELECT id FROM concepts WHERE name = 'test:huge'),
+                           1, 0.5, ?2, NULL, '[]')",
+                rusqlite::params![learner_id, too_big],
+            )
+            .unwrap();
+        }
+        let err = store
+            .load_learner()
+            .await
+            .expect_err("expected encounter_count > u32::MAX to error");
+        assert!(format!("{err}").contains("encounter_count"));
+    }
+
+    #[tokio::test]
+    async fn load_learner_rejects_negative_early_disengagement_secs() {
+        let store = open_in_mem();
+        {
+            let conn = store.conn.lock().unwrap();
+            conn.execute(
+                "INSERT INTO learners (
+                     id, name, age, languages, created_at, last_active,
+                     pref_narrative, pref_socratic, pref_visual, pref_kinesthetic,
+                     typical_session_minutes, high_engagement_topics,
+                     early_disengagement_secs, current_engagement_state_id
+                 ) VALUES (?1, 'Test', 8, '[]', '2026-01-01T00:00:00Z', '2026-01-01T00:00:00Z',
+                           0.5, 0.5, 0.5, 0.5, 20.0, '[]', -5, 1)",
+                rusqlite::params!["00000000-0000-0000-0000-000000000005"],
+            )
+            .unwrap();
+        }
+        let err = store
+            .load_learner()
+            .await
+            .expect_err("expected negative early_disengagement_secs to error");
+        assert!(format!("{err}").contains("early_disengagement_secs"));
     }
 }
