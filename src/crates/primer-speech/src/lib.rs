@@ -32,3 +32,6 @@ pub mod piper;
 pub mod piper_config;
 #[cfg(feature = "piper")]
 pub use piper::PiperTts;
+
+#[cfg(feature = "cpal")]
+pub mod cpal_io;
