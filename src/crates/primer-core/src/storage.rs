@@ -117,6 +117,17 @@ pub trait SessionStore: Send + Sync {
 pub trait LearnerStore: Send + Sync {
     /// Look up the (single) learner row in this DB. Returns Ok(None) if
     /// the file has never had a learner row created.
+    ///
+    /// **Returned `recent_assessments` is always empty.** That field is
+    /// the per-session classifier trajectory buffer; it lives in
+    /// `turn_classifications`, not in the `learners` table. Callers that
+    /// need it populated MUST follow this call with
+    /// `SessionStore::load_recent_assessments(session_id, classifier, k)`
+    /// — typically as part of resuming a session via
+    /// `DialogueManager::resume_session`. Code paths that load a learner
+    /// without resuming a session will see an empty buffer; if that
+    /// matters to them, they need to call `load_recent_assessments`
+    /// themselves.
     async fn load_learner(&self) -> Result<Option<LearnerModel>>;
 
     /// Persist the full current state of `learner`. Idempotent at the
