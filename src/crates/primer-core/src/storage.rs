@@ -9,6 +9,7 @@ use uuid::Uuid;
 use crate::classifier::EngagementAssessment;
 use crate::conversation::{Session, SessionId, Turn};
 use crate::error::Result;
+use crate::learner::LearnerModel;
 
 /// Persists conversation sessions.
 ///
@@ -99,4 +100,30 @@ pub trait SessionStore: Send + Sync {
     /// Returns `Ok(None)` for a DB with no sessions. Reserves `Err` for
     /// genuine I/O / decoding failures.
     async fn most_recent_session_learner_id(&self) -> Result<Option<Uuid>>;
+}
+
+/// Persists the per-child `LearnerModel` to disk.
+///
+/// One implementation lives per DB file (the application invariant: at
+/// most one `learners` row per file). `load_learner` returns `Ok(None)`
+/// if the file has never had a learner row created — first-run signal.
+///
+/// `save_learner` is monotonic on concepts: it upserts every concept
+/// in `learner.concepts` but never deletes `learner_concepts` rows.
+/// Concept state is monotonic across a child's lifetime — knowing-then-
+/// not-knowing is a separate event ("forgetting") that should be an
+/// explicit operation, not a side effect.
+#[async_trait]
+pub trait LearnerStore: Send + Sync {
+    /// Look up the (single) learner row in this DB. Returns Ok(None) if
+    /// the file has never had a learner row created.
+    async fn load_learner(&self) -> Result<Option<LearnerModel>>;
+
+    /// Persist the full current state of `learner`. Idempotent at the
+    /// row level: the `learners` row is upserted (`INSERT … ON CONFLICT
+    /// DO UPDATE`), and `learner_concepts` rows are upserted by
+    /// `(learner_id, concept_id)` PRIMARY KEY. Concepts dropped from
+    /// `learner.concepts` are NOT removed from the DB — concept state is
+    /// monotonic across a child's lifetime.
+    async fn save_learner(&self, learner: &LearnerModel) -> Result<()>;
 }
