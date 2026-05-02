@@ -1,9 +1,12 @@
 //! Phrase splitter — pure text-segmentation helper for streaming TTS.
 //!
 //! Walks an accumulated buffer and emits phrases as soon as a terminator
-//! (`. ! ?`) is followed by whitespace. Kept separate from any specific
-//! backend so the boundary state machine can be unit-tested without
-//! pulling in piper-rs / ONNX Runtime.
+//! (`. ! ?`) is followed by whitespace. Used by `PiperTts` (and the
+//! streaming-TTS stub) because piper-rs's synthesis call is one-shot and
+//! synchronous — there is no native phrase-boundary callback to hook,
+//! so we synthesise streaming at the text layer instead. Kept separate
+//! from any specific backend so the boundary state machine can be
+//! unit-tested without pulling in piper-rs / ONNX Runtime.
 //!
 //! The rule set mirrors what a streaming speech synthesiser actually
 //! needs: split where a human reader would pause for breath, and
@@ -14,9 +17,12 @@ const PHRASE_TERMINATORS: &[char] = &['.', '!', '?'];
 
 /// ASCII-lowercase abbreviations that should NOT be treated as phrase
 /// boundaries. Conservative starting list — extend with evidence.
-/// Internal periods (`e.g`, `i.e`, `u.s`) handled as the trailing token
-/// only; mid-acronym dots like `U.S.A.` would still split. Acceptable
-/// for the children's-conversation register Piper sees today.
+/// Internal periods (`e.g`, `i.e`, `u.s`) are the trailing-token-only
+/// case this list covers. Mid-acronym dots like `U.S.A.` do not split
+/// either, but for a different reason: the boundary rule requires
+/// whitespace immediately after the terminator, and `U.S.A.` has no
+/// whitespace between its interior dots. Acceptable for the children's-
+/// conversation register Piper sees today.
 const ABBREVIATIONS: &[&str] = &[
     "mr", "mrs", "ms", "dr", "prof", "sr", "jr", "st", "vs", "etc", "ie", "eg", "us", "uk",
 ];
@@ -225,5 +231,16 @@ mod tests {
         let mut s = PhraseSplitter::new();
         let phrases = s.push("Wow! Really? ");
         assert_eq!(phrases, vec!["Wow!", "Really?"]);
+    }
+
+    #[test]
+    fn multi_byte_whitespace_after_terminator_splits_correctly() {
+        // U+3000 IDEOGRAPHIC SPACE is 3 bytes in UTF-8; the trailing-
+        // whitespace consumer must advance by len_utf8(), not by 1, or
+        // the next phrase will start with stray bytes (or panic at a
+        // codepoint boundary).
+        let mut s = PhraseSplitter::new();
+        let phrases = s.push("Hello.\u{3000}World. ");
+        assert_eq!(phrases, vec!["Hello.", "World."]);
     }
 }
