@@ -9,6 +9,7 @@ use uuid::Uuid;
 use crate::classifier::EngagementAssessment;
 use crate::conversation::{Session, SessionId, Turn};
 use crate::error::Result;
+use crate::learner::LearnerModel;
 
 /// Persists conversation sessions.
 ///
@@ -90,4 +91,50 @@ pub trait SessionStore: Send + Sync {
         classifier_identifier: &str,
         k: usize,
     ) -> Result<Vec<EngagementAssessment>>;
+
+    /// Return the `learner_id` of the most-recent session in this DB,
+    /// if any. Used by the CLI on first-run after a v3 → v4 upgrade to
+    /// adopt the existing session-id as the new learner's persistent
+    /// UUID, eliminating the otherwise-orphan-session class.
+    ///
+    /// Returns `Ok(None)` for a DB with no sessions. Reserves `Err` for
+    /// genuine I/O / decoding failures.
+    async fn most_recent_session_learner_id(&self) -> Result<Option<Uuid>>;
+}
+
+/// Persists the per-child `LearnerModel` to disk.
+///
+/// One implementation lives per DB file (the application invariant: at
+/// most one `learners` row per file). `load_learner` returns `Ok(None)`
+/// if the file has never had a learner row created — first-run signal.
+///
+/// `save_learner` is monotonic on concepts: it upserts every concept
+/// in `learner.concepts` but never deletes `learner_concepts` rows.
+/// Concept state is monotonic across a child's lifetime — knowing-then-
+/// not-knowing is a separate event ("forgetting") that should be an
+/// explicit operation, not a side effect.
+#[async_trait]
+pub trait LearnerStore: Send + Sync {
+    /// Look up the (single) learner row in this DB. Returns Ok(None) if
+    /// the file has never had a learner row created.
+    ///
+    /// **Returned `recent_assessments` is always empty.** That field is
+    /// the per-session classifier trajectory buffer; it lives in
+    /// `turn_classifications`, not in the `learners` table. Callers that
+    /// need it populated MUST follow this call with
+    /// `SessionStore::load_recent_assessments(session_id, classifier, k)`
+    /// — typically as part of resuming a session via
+    /// `DialogueManager::resume_session`. Code paths that load a learner
+    /// without resuming a session will see an empty buffer; if that
+    /// matters to them, they need to call `load_recent_assessments`
+    /// themselves.
+    async fn load_learner(&self) -> Result<Option<LearnerModel>>;
+
+    /// Persist the full current state of `learner`. Idempotent at the
+    /// row level: the `learners` row is upserted (`INSERT … ON CONFLICT
+    /// DO UPDATE`), and `learner_concepts` rows are upserted by
+    /// `(learner_id, concept_id)` PRIMARY KEY. Concepts dropped from
+    /// `learner.concepts` are NOT removed from the DB — concept state is
+    /// monotonic across a child's lifetime.
+    async fn save_learner(&self, learner: &LearnerModel) -> Result<()>;
 }

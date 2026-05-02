@@ -18,4 +18,4 @@ pub mod consts;
 pub mod dialogue_manager;
 pub mod prompt_builder;
 
-pub use dialogue_manager::DialogueManager;
+pub use dialogue_manager::{DialogueManager, DialogueManagerStores};
