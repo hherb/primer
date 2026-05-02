@@ -1,13 +1,13 @@
 # Primer — Next Session Brief
 
 **Audience:** future Claude Code session continuing work on this repo.
-**Last updated:** 2026-05-01 (after engagement-classifier landing: Phase 0.3 intent gaps fixed, `primer-classifier` crate, schema v3, 180 tests).
+**Last updated:** 2026-05-02 (after learner-model-persistence landing: schema v4, `LearnerStore` trait, CLI adoption flow, 223 tests).
 
 ## First moves when you start
 
 1. Read [CLAUDE.md](CLAUDE.md) — repo conventions, gotchas, build commands. **Workspace root is `src/`, not the repo root** — every cargo command runs from `src/`.
-2. Skim [ROADMAP.md](ROADMAP.md). Phase 0.1 streaming + `--model` + conversation persistence + **resume-past-session + long-term memory** are checked off. Open Phase 0.1 item: graceful API-error handling. Three Phase 0.3 bullets (Encouragement reachable, factual-question routing, session-length-aware Disengaging) are now ticked; five remain open.
-3. From `src/`: `cargo build && cargo test`. Should be green: **180 tests** across the workspace.
+2. Skim [ROADMAP.md](ROADMAP.md). Phase 0.1 streaming + `--model` + conversation persistence + **resume-past-session + long-term memory** are checked off. Open Phase 0.1 item: graceful API-error handling. Four Phase 0.3 bullets (Encouragement reachable, factual-question routing, session-length-aware Disengaging, **learner-model SQLite persistence**) are now ticked; four remain open.
+3. From `src/`: `cargo build && cargo test`. Should be green: **223 tests** across the workspace.
 4. From `src/`: `cargo clippy --workspace --all-targets`. Should be 100 % clean (no warnings).
 5. **Don't assume nothing changed since this brief was written.** Read the current state of the files you intend to touch first — Horst may have made interim changes.
 
@@ -30,6 +30,17 @@ What landed in PR #2:
 - **`build_prompt` signature changed**: now takes `summary: &str` and `retrieved_older: &[Turn]`. Every existing caller updated.
 - **`resolve_session_db_path(explicit, home, name, no_persist)`** is a pure path computation — `HOME` is looked up once in `main` and passed in. Tests pass synthetic paths instead of mutating `HOME`.
 
+### Learner-model SQLite persistence — Phase 0.3 (merged into `main`)
+
+What landed in PR #5:
+- **Schema v4** — three new objects added by `apply_v4_migrations` (idempotent, single-transaction, schema-only): `understanding_depths` lookup table (seeded from the closed `UnderstandingDepth` enum via the existing validate-and-seed helper), `learners` table (one row per DB file — application invariant — holds `LearnerProfile` + `LearningPreferences` + a `current_engagement_state_id` snapshot, with `Vec<String>` fields encoded as JSON in TEXT columns), and `learner_concepts` junction (PK `(learner_id, concept_id)`, FKs into `learners` / `concepts` / `understanding_depths`, with `notes` as JSON-in-TEXT).
+- **`LearnerStore` trait** in `primer-core::storage` with `load_learner` + `save_learner`. Implemented on `SqliteSessionStore` (same struct, both traits). `save_learner` is a single-transaction upsert that uses `INSERT … ON CONFLICT(id) DO UPDATE` on `learners` (so we don't cascade-wipe `learner_concepts` via the FK — same lesson `save_session` learned) and `INSERT … ON CONFLICT(learner_id, concept_id) DO UPDATE` on `learner_concepts`. **Concepts are monotonic** — dropping a `ConceptState` from `LearnerModel.concepts` does NOT delete the on-disk row. Forgetting is an explicit operation that has no surface yet.
+- **`SessionStore::most_recent_session_learner_id() -> Result<Option<Uuid>>`** — returns the `learner_id` of the most-recent session in the DB, used by the CLI's first-run-after-upgrade adoption flow.
+- **CLI adoption flow** in `main.rs`. On startup: `load_learner` first; if `Some`, persisted UUID + name win (warn on `--name` mismatch via both `tracing::warn!` AND `eprintln!` so it's visible at default log levels; `--age` updates persisted to cover birthdays); if `None`, call `most_recent_session_learner_id` to inherit an existing `sessions.learner_id` (eliminating orphan sessions on v3 → v4 upgrade) or mint fresh; either way `save_learner` materialises the row. New `create_learner_with_id(id, name, age)` helper takes a pre-determined UUID.
+- **`DialogueManager` wired** with `Option<Arc<dyn LearnerStore>>` between `storage` and `classifier`. `save_learner` now fires at every existing `save_session` site (open_session, resume_session, per-turn — covers Ok and mid-stream Err — close_session) under the same warn-on-error policy.
+- **Closes the divergence bug.** The previously-documented "in-memory `LearnerModel` and `Session.learner_id` can diverge after resume" footgun is gone — the persisted UUID always wins, and the test `divergence_bug_closed_via_cli_startup_flow` proves the v3-DB-with-orphan-session adoption case end-to-end.
+- **Test count 195 → 223.** Coverage added across `primer-core` (UnderstandingDepth::ALL), `primer-storage` (catalog, v4 migration with rollback test, FK enforcement, `most_recent_session_learner_id`, `LearnerStore` round-trip, monotonicity, every-variant), `primer-pedagogy` (DialogueManager wiring + divergence-bug-closed integration test), and `primer-cli` (birthday + name-mismatch).
+
 ### Engagement classifier — Phase 0.3 intent gaps (merged into `main`)
 
 What landed in the engagement-classifier work:
@@ -48,29 +59,26 @@ What landed in the engagement-classifier work:
 ### Verification status
 
 - `cargo build --workspace` → clean.
-- `cargo test --workspace` → **180 passed, 0 failed.**
+- `cargo test --workspace` → **223 passed, 0 failed.**
 - `cargo clippy --workspace --all-targets` → fully clean.
 - `cargo fmt --check` → clean.
 - Manual REPL end-to-end against the stub backend: `--no-persist --name "José"` runs in-memory and the Unicode name renders; first-run banner shows on first default-path open and is silent on second; `--no-persist --resume <uuid>` rejected at clap parse.
-- Migration: covered by `migrate_v1_db_with_turns_adds_columns_and_backfills_fts` (hand-rolls a v1 schema on disk, opens via the store, asserts columns and FTS rows present afterwards) and `apply_v2_migrations_rolls_back_on_failure` (fault-injects a missing `turns` table; verifies the column ALTERs and FTS table did NOT persist). v3 migration covered by analogous `apply_v3_migrations_is_idempotent` and schema-inspection tests.
+- Migration: v2 covered by `migrate_v1_db_with_turns_adds_columns_and_backfills_fts` and `apply_v2_migrations_rolls_back_on_failure`; v3 by analogous `apply_v3_migrations_is_idempotent` and schema-inspection tests; v4 by `apply_v4_migrations_creates_three_tables`, `apply_v4_migrations_is_idempotent`, `apply_v4_migrations_does_not_insert_learners_row`, and `apply_v4_migrations_rolls_back_on_failure` (fault-injects a name collision against the v4 index name; verifies all three new tables are absent post-rollback).
 
 ## The next task: pick one
 
-Phase 0.1 is complete except for graceful API-error handling. Phase 0.2 (knowledge bootstrapping) and Phase 0.3 (pedagogical engine) are open. Three Phase 0.3 bullets (`Encouragement` reachable, factual-question routing, session-length-aware `Disengaging`) landed with the engagement classifier. Five Phase 0.3 bullets remain open:
+Phase 0.1 is complete except for graceful API-error handling. Phase 0.2 (knowledge bootstrapping) and Phase 0.3 (pedagogical engine) are open. Four Phase 0.3 bullets have landed (`Encouragement` reachable, factual-question routing, session-length-aware `Disengaging`, **learner-model SQLite persistence**). Four Phase 0.3 bullets remain open:
 
-1. Concept extraction from child responses (currently always `vec![]`).
+1. Concept extraction from child responses (currently always `vec![]` for child turns — the persistence path is wired and waiting).
 2. LLM-based comprehension classifier (assess genuine understanding vs. parroting vs. confusion).
-3. Learner-model SQLite persistence so concept-mastery state survives across sessions.
-4. Per-child vocabulary tracking with spaced repetition (see ROADMAP 0.3 for the full schema constraint).
-5. Session time tracking with gentle break suggestions.
+3. Per-child vocabulary tracking with spaced repetition (will reuse `learner_concepts` with `concept_id = "vocab:..."`; see ROADMAP 0.3 for the full schema constraint).
+4. Session time tracking with gentle break suggestions.
 
 Recommended in order of leverage and unblockedness:
 
-### Option A (recommended) — Learner-model SQLite persistence (Phase 0.3, design exists)
+### Option A (recommended) — Concept extraction from child responses (Phase 0.3, naturally next)
 
-There's a fairly detailed spec at `docs/superpowers/specs/2026-04-30-session-persistence-sqlite-design.md` that already sketches a `learner_concepts` table reusing `concepts(id)` as an FK plus a new `understanding_depths` lookup table for `UnderstandingDepth`. This is the natural extension of `primer-storage`: validate-and-seed for closed enums, append-only writes (or upsert-by-natural-key in this case), SQLite separate from RAG. Some upfront benefit now that resume exists — a returning child can pick up not just the conversation but their concept-mastery state. **This also closes the documented "in-memory `LearnerModel` and `Session.learner_id` can diverge after resume" gap.** Schema would land as a v3 → v4 migration (v3 is the `turn_classifications` table from the engagement-classifier work).
-
-Wants a real design conversation about exactly which fields persist. Don't start without re-reading the spec and confirming current shape with Horst.
+The biggest unblock. `learner_concepts` exists, `save_learner` runs every turn, but `turn.concepts` is still `vec![]` for child input — so the concept counts and depths are frozen at zero. Even simple keyword matching against a small concept taxonomy ("gravity", "photosynthesis", "Rayleigh", etc.) would start populating `learner_concepts` rows and exercising the path that just landed. The minimal v1 is a `extract_concepts(text: &str) -> Vec<String>` function in `primer-pedagogy` that the dialogue manager calls when adding the child's turn. A more ambitious v2 plugs in an LLM classifier (overlaps with bullet #2). Talk to Horst about how taxonomical-vs-LLM you want to be.
 
 ### Option B — Graceful API errors (Phase 0.1 leftover)
 
@@ -92,14 +100,14 @@ Don't start any of these without evidence the simpler version is a problem.
 
 ## Files most relevant to start in
 
-- **Option A**: `docs/superpowers/specs/2026-04-30-session-persistence-sqlite-design.md` (spec), `src/crates/primer-core/src/learner.rs` (the `LearnerModel` / `ConceptState` / `UnderstandingDepth` types), `src/crates/primer-storage/src/{lib,schema,catalog}.rs` (extend the existing pattern). Schema is now at v3; new fields land as a v3 → v4 migration using the `apply_v3_migrations`-shaped pattern (idempotent column-add, **wrapped in a single transaction**).
-- **Option B**: `src/crates/primer-inference/src/cloud.rs` (top of `generate_stream`), `src/crates/primer-core/src/error.rs` (you'll likely add a new `PrimerError` variant or two).
-- **Option D**: `src/crates/primer-storage/src/lib.rs` (`sanitize_fts_phrase`, `retrieve_session_turns`), `src/crates/primer-pedagogy/src/dialogue_manager.rs` (`refresh_summary_if_due`, `refresh_summary_if_stale`, `retrieve_long_term_memory`).
+- **Option A (concept extraction)**: `src/crates/primer-pedagogy/src/dialogue_manager.rs` (the call site is in `update_learner_model` around line 600 — it's already wired to call something; you need to give it something to call). `src/crates/primer-core/src/conversation.rs` (`Turn.concepts: Vec<String>`). For the LLM-classifier variant, mirror `primer-classifier` for the trait shape. The `learner_concepts` schema is in place — concepts that come back from extraction will round-trip through `save_learner` automatically.
+- **Option B (graceful API errors)**: `src/crates/primer-inference/src/cloud.rs` (top of `generate_stream`), `src/crates/primer-core/src/error.rs` (you'll likely add a new `PrimerError` variant or two).
+- **Option D (better summarization & retrieval)**: `src/crates/primer-storage/src/lib.rs` (`sanitize_fts_phrase`, `retrieve_session_turns`), `src/crates/primer-pedagogy/src/dialogue_manager.rs` (`refresh_summary_if_due`, `refresh_summary_if_stale`, `retrieve_long_term_memory`).
 
 ## Patterns to reuse, not reinvent
 
 - **Categorical text → integer FK lookup tables.** Mandatory for any new SQLite schema. Closed Rust enum = source of truth, validate-and-seed on `open()`. See `primer-storage::schema::validate_and_seed_lookup`.
-- **Idempotent schema migrations, transaction-wrapped.** `apply_v2_migrations` / `apply_v3_migrations` in `primer-storage::schema` are the templates: `pragma_table_info` checks before each ALTER, `CREATE … IF NOT EXISTS` for tables/triggers, detect "did the table exist before this open" if you need to backfill, and **wrap the whole body in `conn.unchecked_transaction()` + `tx.commit()`** so a partial failure rolls back. Schema is currently at v3 (`turn_classifications`); next migration is v4.
+- **Idempotent schema migrations, transaction-wrapped.** `apply_v2_migrations` / `apply_v3_migrations` / `apply_v4_migrations` in `primer-storage::schema` are the templates: `pragma_table_info` checks before each ALTER, `CREATE … IF NOT EXISTS` for tables/triggers, detect "did the table exist before this open" if you need to backfill, and **wrap the whole body in `conn.unchecked_transaction()` + `tx.commit()`** so a partial failure rolls back. Schema is currently at v4 (`learners`, `learner_concepts`, `understanding_depths`); next migration is v5.
 - **Append-only persistence.** If a Rust-side type is append-only in memory, persistence should mirror that — don't DELETE-then-INSERT. The `INSERT OR REPLACE` ↔ FK-cascade footgun is real.
 - **Streaming bridge.** `bytes_stream` → parser buffer → `mpsc::unbounded` → `Box::pin(rx)`. See `cloud.rs::generate_stream` and `ollama.rs::generate_stream`.
 - **FTS5 query sanitization.** `sanitize_fts_phrase` in `primer-storage::lib`: alphanumeric-only tokens, drop FTS5 reserved keywords, OR-join quoted tokens. Pair with `LIMIT k` and BM25 ranking.
@@ -120,7 +128,9 @@ Don't start any of these without evidence the simpler version is a problem.
 - **Save failures from `SqliteSessionStore` are logged, not propagated.** Watch out if a future feature needs to *know* a save succeeded.
 - **`save_session` assumes append-only memory.** If you ever introduce a way to mutate or delete already-recorded turns in `Session`, the storage layer's `SELECT COUNT(*)`-based skip will silently drop your changes. Document any such mutation up front.
 - **Synchronous summarization on the hot path.** Each summary refresh is one extra inference call per ~K turns, blocking the turn it triggers on. Acceptable at default K=20; if perceived latency is bad, defer to a background tokio task — don't optimize prematurely.
-- **In-memory `LearnerModel` and `Session.learner_id` can diverge after resume.** The CLI builds the LearnerModel from `--name`/`--age` flags; the loaded session keeps its original `learner_id`. Closed by Option A (learner-model persistence).
+- **`LearnerStore::save_learner` is monotonic on concepts.** `learner_concepts` rows are upserted but never deleted by `save_learner` — a concept dropped from `LearnerModel.concepts` survives on disk. If you need explicit forgetting later, add an explicit method; don't make it a side effect. Same shape as the `Session.turns` append-only invariant.
+- **`learners` table assumes one row per DB file.** This is application-level only — the schema doesn't enforce it. `load_learner` uses `ORDER BY id LIMIT 1` defensively, but a future bug that inserts a second row would silently lose data on the next `save_learner`. If multi-learner-per-file ever lands, drop the invariant explicitly and rework the trait.
+- **Persisted name vs `--name` mismatch fires both `tracing::warn!` and `eprintln!`.** The eprintln is intentional — `RUST_LOG=warn` shouldn't be required to see "your typo'd name was ignored." Don't quietly drop it.
 - **`dirs` crate is intentionally not in workspace deps.** The CLI uses `std::env::var("HOME")` for both `~/.primer_env` and `~/.primer/`. If you ever need cross-platform home dir support, add `dirs` then; until then, keep the dep surface small.
 - **`unicode-normalization` is a workspace dep now.** Used by `primer-cli::slug` for NFC normalization. If you ever stash filenames anywhere else from user-supplied strings, route them through the same path.
 - **`retrieve_session_turns` index-lag invariant.** Documented on the trait method: callers must use `exclude_indices_at_or_after = total - window` because the in-memory child turn is one save ahead of the FTS index. Lower bounds (e.g. `total - window - 1`) silently return stale or duplicate results.
