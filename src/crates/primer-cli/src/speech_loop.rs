@@ -682,12 +682,15 @@ pub async fn run<'a>(
                 }
                 let tail: Vec<f32> = combined[usable..].to_vec();
                 if is_flush {
-                    // End of turn: process any leftover (zero-padded to
-                    // chunk_in) AND drain rubato's internal latency via
-                    // process_partial. The zero-pad lands on trailing
-                    // silence; the partial-drain releases ~output_delay
-                    // samples that were being held inside the FFT
-                    // machinery for the next chunk that will never come.
+                    // End of turn: zero-pad the leftover to chunk_in
+                    // and process. The zero-pad lands on trailing
+                    // silence; subsequent silence chunks push out any
+                    // remaining FFT-buffered output. process_partial()
+                    // alone proved insufficient on FftFixedIn — the
+                    // last syllable still got swallowed. Feeding 4
+                    // silence chunks (≈186 ms of input silence) reliably
+                    // drains the internal latency. Trailing silence
+                    // is harmless; cpal just plays it.
                     if !tail.is_empty() {
                         let mut padded = tail;
                         padded.resize(output_chunk_in, 0.0);
@@ -695,8 +698,12 @@ pub async fn run<'a>(
                             out_buf.extend(o);
                         }
                     }
-                    if let Ok(o) = resampler.flush() {
-                        out_buf.extend(o);
+                    let silence = vec![0.0_f32; output_chunk_in];
+                    for _ in 0..4 {
+                        match resampler.process(&silence) {
+                            Ok(o) => out_buf.extend(o),
+                            Err(_) => break,
+                        }
                     }
                     output_leftover = Vec::new();
                 } else {
@@ -708,20 +715,21 @@ pub async fn run<'a>(
             // No resampling path: nothing to flush.
             return;
         }
-        // Push to speaker ringbuf, retrying briefly on full-buffer.
+        // Push to speaker ringbuf, blocking until it accepts every
+        // sample. The previous 1-second drop-on-timeout was the very
+        // bug we hunted for the swallowed-end-of-response: when the
+        // producer outpaces cpal's drain (synthesis is faster than
+        // playback), we briefly fill the buffer and need to wait, not
+        // give up. cpal drains continuously so this never hangs in
+        // practice. If a real wedge ever happens (cpal stream errored,
+        // device removed, etc.) the higher-level errored callback
+        // already logs it; this loop will then iterate forever, making
+        // the bug loud.
         let mut written = 0;
-        let mut retries = 0u32;
         while written < samples.len() {
             let n = spk_prod.push_slice(&samples[written..]);
             written += n;
             if written < samples.len() {
-                if retries > 200 {
-                    // ~1 s total — give up; the speaker is probably
-                    // wedged. Drop the rest.
-                    tracing::warn!("speaker ringbuf wedged; dropping {} samples", samples.len() - written);
-                    break;
-                }
-                retries += 1;
                 std::thread::sleep(std::time::Duration::from_millis(5));
             }
         }
