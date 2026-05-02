@@ -731,6 +731,10 @@ mod tests {
         ) -> Result<Vec<primer_core::classifier::EngagementAssessment>> {
             Ok(vec![])
         }
+
+        async fn most_recent_session_learner_id(&self) -> Result<Option<uuid::Uuid>> {
+            Ok(None)
+        }
     }
 
     fn test_learner() -> LearnerModel {

@@ -90,4 +90,13 @@ pub trait SessionStore: Send + Sync {
         classifier_identifier: &str,
         k: usize,
     ) -> Result<Vec<EngagementAssessment>>;
+
+    /// Return the `learner_id` of the most-recent session in this DB,
+    /// if any. Used by the CLI on first-run after a v3 → v4 upgrade to
+    /// adopt the existing session-id as the new learner's persistent
+    /// UUID, eliminating the otherwise-orphan-session class.
+    ///
+    /// Returns `Ok(None)` for a DB with no sessions. Reserves `Err` for
+    /// genuine I/O / decoding failures.
+    async fn most_recent_session_learner_id(&self) -> Result<Option<Uuid>>;
 }

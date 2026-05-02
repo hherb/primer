@@ -579,6 +579,28 @@ impl primer_core::storage::SessionStore for SqliteSessionStore {
         rows.reverse();
         Ok(rows)
     }
+
+    async fn most_recent_session_learner_id(&self) -> Result<Option<Uuid>> {
+        let conn = self.conn.lock().unwrap();
+        let row: Option<String> = conn
+            .query_row(
+                "SELECT learner_id FROM sessions ORDER BY started_at DESC LIMIT 1",
+                [],
+                |r| r.get(0),
+            )
+            .optional()
+            .map_err(|e| PrimerError::Storage(format!("most_recent_session_learner_id: {e}")))?;
+
+        match row {
+            None => Ok(None),
+            Some(s) => {
+                let uuid = Uuid::parse_str(&s).map_err(|e| {
+                    PrimerError::Storage(format!("parse learner_id {s}: {e}"))
+                })?;
+                Ok(Some(uuid))
+            }
+        }
+    }
 }
 
 fn parse_rfc3339(s: &str, field: &str) -> Result<DateTime<Utc>> {
@@ -2096,5 +2118,46 @@ mod tests {
             );
             assert!(result.is_err(), "expected FK constraint failure on depth_id = 99");
         }
+    }
+
+    #[tokio::test]
+    async fn most_recent_session_learner_id_returns_none_on_empty_db() {
+        let store = SqliteSessionStore::open(std::path::Path::new(":memory:")).unwrap();
+        let result = store.most_recent_session_learner_id().await.unwrap();
+        assert_eq!(result, None);
+    }
+
+    #[tokio::test]
+    async fn most_recent_session_learner_id_returns_single_existing_learner_id() {
+        use primer_core::conversation::Session;
+
+        let store = SqliteSessionStore::open(std::path::Path::new(":memory:")).unwrap();
+        let learner_id = uuid::Uuid::new_v4();
+        let session = Session::new(learner_id);
+        store.save_session(&session).await.unwrap();
+
+        let result = store.most_recent_session_learner_id().await.unwrap();
+        assert_eq!(result, Some(learner_id));
+    }
+
+    #[tokio::test]
+    async fn most_recent_session_learner_id_picks_most_recent_when_multiple_distinct() {
+        use chrono::{Duration, Utc};
+        use primer_core::conversation::Session;
+
+        let store = SqliteSessionStore::open(std::path::Path::new(":memory:")).unwrap();
+        let older_learner = uuid::Uuid::new_v4();
+        let newer_learner = uuid::Uuid::new_v4();
+
+        let mut older = Session::new(older_learner);
+        older.started_at = Utc::now() - Duration::hours(2);
+        let mut newer = Session::new(newer_learner);
+        newer.started_at = Utc::now();
+
+        store.save_session(&older).await.unwrap();
+        store.save_session(&newer).await.unwrap();
+
+        let result = store.most_recent_session_learner_id().await.unwrap();
+        assert_eq!(result, Some(newer_learner));
     }
 }
