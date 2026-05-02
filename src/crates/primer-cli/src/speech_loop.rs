@@ -35,6 +35,62 @@ pub struct SpeechLoopConfig<'a> {
     pub verbose: bool,
 }
 
+use std::sync::Arc;
+
+use primer_core::speech::{StreamingSpeechToText, StreamingTextToSpeech, VoiceActivityDetector};
+
+/// Trait-injected backends consumed by `run_loop`. Production wires real
+/// silero / whisper / piper instances; tests wire mocks. Keeping the
+/// state machine generic over these means we exercise the full select!
+/// machinery in unit tests without any audio hardware.
+pub struct LoopBackends {
+    pub vad: Box<dyn VoiceActivityDetector>,
+    pub stt: Arc<dyn StreamingSpeechToText>,
+    pub tts: Arc<dyn StreamingTextToSpeech>,
+}
+
+/// One commit cycle: receives transcripts on `transcript_rx`, runs the
+/// LLM, returns the full Primer reply (for the caller to print and feed
+/// into TTS). Production wires this through `DialogueManager`; tests
+/// wire a closure that returns canned output.
+///
+/// **Lifetime:** the trait is NOT `'static` — `DialogueResponder` (Task 21)
+/// borrows the `&mut DialogueManager`, which has its own borrowed
+/// `&dyn InferenceBackend`. `run_loop` does not `tokio::spawn` the
+/// responder, only `select!`s on it, so a `'static` bound would be
+/// over-restrictive.
+pub trait Responder: Send {
+    /// Generate a response to `transcript`, calling `on_chunk` per chunk.
+    /// Awaiting this future = "LLM is thinking". Cancellable via
+    /// dropping the future (no `JoinHandle` involved — `run_loop` keeps
+    /// the future on the stack via `tokio::pin!`).
+    fn respond<'a>(
+        &'a mut self,
+        transcript: &'a str,
+        on_chunk: Box<dyn FnMut(&str) + Send + 'a>,
+    ) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<String>> + Send + 'a>>;
+}
+
+/// Drive the state machine until a quit phrase or exhausted VAD events.
+/// `events` is the source of `VadEvent`s the loop reads (production
+/// wires the audio capture task; tests wire a `tokio::sync::mpsc`
+/// pre-filled with a script).
+///
+/// The `'r` lifetime on the boxed responder lets `DialogueResponder`
+/// (Task 21) borrow `&mut DialogueManager` rather than own it.
+pub async fn run_loop<'r>(
+    backends: LoopBackends,
+    mut events: tokio::sync::mpsc::UnboundedReceiver<primer_core::speech::VadEvent>,
+    mut responder: Box<dyn Responder + 'r>,
+    on_committed_audio: Box<dyn FnMut(Vec<f32>) + Send>,
+) -> Result<Vec<String>> {
+    // Stub — implemented across Tasks 14, 16, 17.
+    let _ = (&backends, &mut events, &mut responder, &on_committed_audio);
+    Err(primer_core::error::PrimerError::Speech(
+        "run_loop not yet implemented".into(),
+    ))
+}
+
 /// Entry point: run the voice REPL until Ctrl+C or a quit phrase is heard.
 ///
 /// Phase 4 stub — real implementation lands across Phases 5/6/7.
@@ -46,7 +102,7 @@ pub async fn run(_cfg: SpeechLoopConfig<'_>) -> Result<()> {
 
 #[cfg(test)]
 mod mocks {
-    use std::sync::Mutex;
+    use std::sync::{Arc, Mutex};
 
     use primer_core::error::Result;
     use primer_core::speech::{
@@ -221,6 +277,69 @@ mod mocks {
         let mut session = tts.open_session(&voice).unwrap();
         assert_eq!(session.push_text("hi.").unwrap().len(), 1);
         assert_eq!(session.push_text("").unwrap().len(), 0);
+    }
+
+    /// Test 1 — happy path: scripted SpeechEnd → LLM called with expected
+    /// transcript → audio chunks committed → run_loop returns transcripts.
+    #[tokio::test]
+    async fn happy_path_records_one_round_trip() {
+        use std::sync::Mutex;
+
+        use primer_core::speech::VadEvent;
+
+        let backends = super::LoopBackends {
+            vad: Box::new(MockVad::new(vec![
+                VadEvent::SpeechStart,
+                VadEvent::SpeechEnd,
+            ])),
+            stt: Arc::new(MockStreamingStt::new("hello primer")),
+            tts: Arc::new(MockStreamingTts::new(64)),
+        };
+
+        let (event_tx, event_rx) = tokio::sync::mpsc::unbounded_channel();
+        event_tx.send(VadEvent::SpeechStart).unwrap();
+        event_tx.send(VadEvent::SpeechEnd).unwrap();
+        drop(event_tx);
+
+        let captured_transcript = Arc::new(Mutex::new(String::new()));
+        let captured_clone = Arc::clone(&captured_transcript);
+        struct ScriptedResponder {
+            captured_transcript: Arc<Mutex<String>>,
+        }
+        impl super::Responder for ScriptedResponder {
+            fn respond<'a>(
+                &'a mut self,
+                transcript: &'a str,
+                mut on_chunk: Box<dyn FnMut(&str) + Send + 'a>,
+            ) -> std::pin::Pin<
+                Box<
+                    dyn std::future::Future<Output = primer_core::error::Result<String>>
+                        + Send
+                        + 'a,
+                >,
+            > {
+                *self.captured_transcript.lock().unwrap() = transcript.to_string();
+                Box::pin(async move {
+                    on_chunk("Hello, child.");
+                    Ok("Hello, child.".to_string())
+                })
+            }
+        }
+        let responder = Box::new(ScriptedResponder {
+            captured_transcript: captured_clone,
+        });
+
+        let committed = Arc::new(Mutex::new(Vec::<f32>::new()));
+        let committed_clone = Arc::clone(&committed);
+        let on_audio: Box<dyn FnMut(Vec<f32>) + Send> = Box::new(move |samples| {
+            committed_clone.lock().unwrap().extend(samples);
+        });
+
+        let result = super::run_loop(backends, event_rx, responder, on_audio).await;
+        let transcripts = result.expect("loop ok");
+        assert_eq!(transcripts, vec!["hello primer".to_string()]);
+        assert_eq!(*captured_transcript.lock().unwrap(), "hello primer");
+        assert!(!committed.lock().unwrap().is_empty(), "audio was committed");
     }
 }
 
