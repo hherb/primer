@@ -17,12 +17,17 @@ const PHRASE_TERMINATORS: &[char] = &['.', '!', '?'];
 
 /// ASCII-lowercase abbreviations that should NOT be treated as phrase
 /// boundaries. Conservative starting list — extend with evidence.
-/// Internal periods (`e.g`, `i.e`, `u.s`) are the trailing-token-only
-/// case this list covers. Mid-acronym dots like `U.S.A.` do not split
-/// either, but for a different reason: the boundary rule requires
-/// whitespace immediately after the terminator, and `U.S.A.` has no
-/// whitespace between its interior dots. Acceptable for the children's-
-/// conversation register Piper sees today.
+/// Used when a single `.` is followed by whitespace (e.g. `Dr. Smith`).
+///
+/// Acronym handling deserves a separate mention: the *interior* dots of
+/// a multi-letter acronym like `U.S.A.` are never boundary candidates,
+/// because the boundary rule requires whitespace immediately after the
+/// terminator and there's no whitespace between interior dots. The
+/// *trailing* `.` (followed by whitespace) DOES split — yielding
+/// `"U.S.A."` as one phrase, exactly what we want when the acronym ends
+/// a sentence. Sentence-medial cases (`I live in U.S.A. today.`) split
+/// after `U.S.A.`; that's a known imperfection, acceptable for the
+/// children's-conversation register Piper sees today.
 const ABBREVIATIONS: &[&str] = &[
     "mr", "mrs", "ms", "dr", "prof", "sr", "jr", "st", "vs", "etc", "ie", "eg", "us", "uk",
 ];

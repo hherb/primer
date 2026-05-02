@@ -213,13 +213,28 @@ pub struct AudioChunk {
 /// chunks as soon as the synthesiser has enough context. Call
 /// [`Self::finalize`] when the LLM stream has ended to drain the trailing
 /// buffer. `Send` but not `Sync`: each Primer turn owns its own session.
+///
+/// # Blocking
+///
+/// Both [`Self::push_text`] and [`Self::finalize`] are synchronous and may
+/// run CPU-heavy synthesis (e.g. ONNX inference) on the calling thread.
+/// Async callers MUST wrap session calls in `tokio::task::spawn_blocking`
+/// (or an equivalent) to keep the runtime free. The trait stays sync so
+/// pure backends (the stub, future fixed-buffer ones) don't pay an async
+/// surface tax.
 pub trait SynthesisSession: Send {
     /// Push text; receive any audio chunks that became available as a
     /// result. May return an empty Vec when the buffer doesn't yet
     /// contain a complete phrase.
+    ///
+    /// May block the calling thread for the duration of synthesis — see
+    /// the [trait-level `# Blocking` note](Self).
     fn push_text(&mut self, text: &str) -> Result<Vec<AudioChunk>>;
 
     /// Drain remaining buffered text and finalize. Consumes the session.
+    ///
+    /// May block for one final synthesis call — see the trait-level
+    /// `# Blocking` note.
     fn finalize(self: Box<Self>) -> Result<Vec<AudioChunk>>;
 }
 

@@ -80,8 +80,3 @@ version = "0.19.0"
 [features]
 compile-espeak-intonations = ["espeak-rs/compile-espeak-intonations"]
 default = ["compile-espeak-intonations"]
-
-[lints.rust]
-# process_chunk_audio is unused after inlining its body into synthesize_chunk
-# to resolve a borrow-checker conflict introduced by the ort rc.10 Mutex patch.
-dead_code = "allow"

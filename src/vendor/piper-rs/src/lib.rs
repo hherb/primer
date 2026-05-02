@@ -803,6 +803,11 @@ impl SpeechStreamer {
         };
         Ok(audio)
     }
+    // Body inlined into `synthesize_chunk` as part of the ort 2.0.0-rc.10
+    // patch to resolve a borrow-checker conflict between the session
+    // guard's lifetime and the extracted output array. Kept around so
+    // the upstream-diff stays small and a future un-vendoring is easier.
+    #[allow(dead_code)]
     #[inline(always)]
     fn process_chunk_audio(
         &mut self,

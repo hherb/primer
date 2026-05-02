@@ -47,7 +47,7 @@
 //! the typical loading flow.
 
 use std::path::Path;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 
 use async_trait::async_trait;
 use piper_rs::VitsModel;
@@ -81,11 +81,21 @@ const DEFAULT_LENGTH_SCALE: f32 = 1.0;
 /// supported. Construct multiple `PiperTts` if you need multiple voices;
 /// `open_session(voice)` returns `Err` if `voice.model_id` doesn't
 /// match the constructor-time voice.
+///
+/// Synth-config writes to the shared model are serialised through
+/// `synth_config_lock` so concurrent `synthesize` / `open_session` calls
+/// can't clobber each other's `length_scale` mid-mutation. The vendored
+/// `piper-rs` keeps the synthesis config in an internal `RwLock` and
+/// our `apply_synth_config` does a get-modify-set; without this guard
+/// two paths racing into that sequence could lose updates.
 pub struct PiperTts {
     model: Arc<dyn PiperModel + Send + Sync>,
     voice: VoiceProfile,
     speaker_id: Option<i64>,
     sample_rate: u32,
+    /// Serialises the get-modify-set sequence in `apply_synth_config`.
+    /// See struct doc for why; never held across an `await`.
+    synth_config_lock: Mutex<()>,
 }
 
 impl PiperTts {
@@ -112,12 +122,19 @@ impl PiperTts {
             },
             speaker_id: None,
             sample_rate,
+            synth_config_lock: Mutex::new(()),
         })
     }
 
-    /// Set the default `VoiceProfile` for sessions opened via this backend.
+    /// Override the default `VoiceProfile` for sessions opened via this
+    /// backend. The loaded model's `model_id` is preserved — passing a
+    /// `VoiceProfile` with a different `model_id` is a no-op for that
+    /// field. (One backend instance, one voice; mixing them at runtime
+    /// is not supported and used to surface as a delayed
+    /// `open_session` error, which was unhelpfully far from the
+    /// mistake.)
     pub fn with_voice(mut self, voice: VoiceProfile) -> Self {
-        self.voice = voice;
+        self.voice = merge_voice(&self.voice.model_id, voice);
         self
     }
 
@@ -128,13 +145,7 @@ impl PiperTts {
     }
 
     fn validate_voice(&self, requested: &VoiceProfile) -> Result<()> {
-        if requested.model_id != self.voice.model_id {
-            return Err(PrimerError::Speech(format!(
-                "piper voice mismatch: backend loaded {:?}, session asked for {:?}",
-                self.voice.model_id, requested.model_id
-            )));
-        }
-        Ok(())
+        check_voice_match(&self.voice.model_id, &requested.model_id)
     }
 
     fn length_scale_for(voice: &VoiceProfile) -> f32 {
@@ -148,9 +159,20 @@ impl PiperTts {
     /// Apply synthesis parameters to the shared model before synthesis.
     ///
     /// Writes `length_scale` and optional `speaker_id` through the model's
-    /// internal `RwLock`. Safe on a single-child device where simultaneous
-    /// synthesis calls are not expected.
+    /// internal `RwLock`. The `synth_config_lock` mutex serialises the
+    /// get-modify-set sequence so a concurrent caller (e.g. one-shot
+    /// `synthesize` running at the same time as a `open_session`) can't
+    /// land its set between our get and our set and lose the update.
     fn apply_synth_config(&self, length_scale: f32) -> Result<()> {
+        // Hold for the entirety of get→modify→set so it's atomic from
+        // the perspective of any other PiperTts method on this instance.
+        // `unwrap_or_else` recovers from poisoning; an earlier panic
+        // mid-mutation can't have left the vendored RwLock in an
+        // observably broken state because both halves run RAII-clean.
+        let _guard = self
+            .synth_config_lock
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
         // Retrieve current defaults so we preserve noise_scale / noise_w.
         let current = self
             .model
@@ -168,6 +190,29 @@ impl PiperTts {
         self.model
             .set_fallback_synthesis_config(&cfg)
             .map_err(|e| PrimerError::Speech(format!("piper set synth config: {e}")))
+    }
+}
+
+/// Compare a loaded model's `model_id` against a session-requested one.
+/// Extracted as a free function so the comparison can be unit-tested
+/// without loading a real ONNX model.
+fn check_voice_match(loaded: &str, requested: &str) -> Result<()> {
+    if requested != loaded {
+        return Err(PrimerError::Speech(format!(
+            "piper voice mismatch: backend loaded {loaded:?}, session asked for {requested:?}"
+        )));
+    }
+    Ok(())
+}
+
+/// Merge an override `VoiceProfile` over a loaded model's identity:
+/// keep `loaded_model_id`, take everything else from `override_voice`.
+/// Extracted from `PiperTts::with_voice` so the model_id-preservation
+/// invariant is unit-testable without loading an ONNX model.
+fn merge_voice(loaded_model_id: &str, override_voice: VoiceProfile) -> VoiceProfile {
+    VoiceProfile {
+        model_id: loaded_model_id.to_string(),
+        ..override_voice
     }
 }
 
@@ -295,17 +340,111 @@ impl SynthesisSession for PiperSession {
 mod tests {
     use super::*;
 
-    /// Real-model smoke test. Skipped unless `$PIPER_TEST_MODEL_ONNX` and
-    /// `$PIPER_TEST_MODEL_CONFIG` are set, because piper-rs needs an
-    /// actual voice file pair on disk and CI doesn't ship them.
+    /// `length_scale = 1.0 / rate` when rate is positive.
+    #[test]
+    fn length_scale_inverts_positive_rate() {
+        let v = VoiceProfile {
+            rate: 2.0,
+            ..VoiceProfile::default()
+        };
+        assert!((PiperTts::length_scale_for(&v) - 0.5).abs() < f32::EPSILON);
+    }
+
+    /// `rate = 1.0` round-trips to the default length_scale.
+    #[test]
+    fn length_scale_default_for_unit_rate() {
+        let v = VoiceProfile {
+            rate: 1.0,
+            ..VoiceProfile::default()
+        };
+        assert!((PiperTts::length_scale_for(&v) - DEFAULT_LENGTH_SCALE).abs() < f32::EPSILON);
+    }
+
+    /// Zero / negative / NaN rates fall back to the default rather than
+    /// dividing by zero or producing a non-finite length_scale. This
+    /// behaviour is forgiving by design — the alternative was a hard
+    /// error, but a single-child REPL prefers degrading to default
+    /// pace over panicking on a misconfigured `VoiceProfile`.
+    #[test]
+    fn length_scale_falls_back_to_default_on_non_positive_rate() {
+        for bad in [0.0, -1.0, f32::NAN] {
+            let v = VoiceProfile {
+                rate: bad,
+                ..VoiceProfile::default()
+            };
+            assert_eq!(PiperTts::length_scale_for(&v), DEFAULT_LENGTH_SCALE);
+        }
+    }
+
+    /// A request with the same model_id as the loaded model is accepted.
+    #[test]
+    fn check_voice_match_accepts_same_id() {
+        assert!(check_voice_match("en_US-amy-medium", "en_US-amy-medium").is_ok());
+    }
+
+    /// A mismatched model_id is rejected with a `PrimerError::Speech`
+    /// that names BOTH ids — diagnosing a misconfiguration is the whole
+    /// point of the early validation, so we lock the wording.
+    #[test]
+    fn check_voice_match_rejects_mismatched_id() {
+        let err = check_voice_match("en_US-amy", "fr_FR-bob").unwrap_err();
+        let s = format!("{err}");
+        assert!(s.contains("en_US-amy"), "missing loaded id in: {s}");
+        assert!(s.contains("fr_FR-bob"), "missing requested id in: {s}");
+    }
+
+    /// `merge_voice` overrides rate/pitch but PRESERVES the loaded
+    /// model_id. Before this guard, callers who passed a different
+    /// model_id via `PiperTts::with_voice` silently broke every
+    /// subsequent `open_session`. The foreign model_id is dropped on
+    /// the floor, not surfaced as an error — keeps the builder
+    /// ergonomic while making the footgun impossible.
+    ///
+    /// Unit-tested at the helper level so we don't need to fabricate a
+    /// `PiperTts` (which requires an `Arc<dyn PiperModel>` — non-trivial
+    /// to mock since some of the trait's signatures use crate-private
+    /// types). `with_voice` itself is a one-liner over this helper.
+    #[test]
+    fn merge_voice_preserves_loaded_model_id() {
+        let merged = merge_voice(
+            "loaded-id",
+            VoiceProfile {
+                model_id: "ATTACKER-WRONG-ID".to_string(),
+                rate: 1.5,
+                pitch: 0.2,
+            },
+        );
+        assert_eq!(merged.model_id, "loaded-id");
+        assert!((merged.rate - 1.5).abs() < f32::EPSILON);
+        assert!((merged.pitch - 0.2).abs() < f32::EPSILON);
+    }
+
+    /// Same loaded id + override-with-default still yields the loaded id.
+    /// Sanity check for the most common call:
+    /// `PiperTts::new(...).with_voice(VoiceProfile::default())`.
+    #[test]
+    fn merge_voice_overwrites_model_id_even_when_override_is_default() {
+        let merged = merge_voice("loaded-id", VoiceProfile::default());
+        assert_eq!(merged.model_id, "loaded-id");
+        assert!((merged.rate - VoiceProfile::default().rate).abs() < f32::EPSILON);
+    }
+
+    /// Real-model smoke test. Skipped unless BOTH
+    /// `$PIPER_TEST_MODEL_ONNX` and `$PIPER_TEST_MODEL_CONFIG` are set,
+    /// because piper-rs needs a voice file pair on disk and CI doesn't
+    /// ship them. Only one of the two set is treated as a
+    /// misconfiguration and panics so the running developer notices.
     #[tokio::test]
     #[ignore]
     async fn piper_smoke_synthesise_returns_non_empty_audio() {
-        let onnx = match std::env::var("PIPER_TEST_MODEL_ONNX") {
-            Ok(p) => p,
-            Err(_) => return, // env not set; treat as skip even without --ignored harness
+        let (onnx, cfg) = match (
+            std::env::var("PIPER_TEST_MODEL_ONNX").ok(),
+            std::env::var("PIPER_TEST_MODEL_CONFIG").ok(),
+        ) {
+            (Some(o), Some(c)) => (o, c),
+            (None, None) => return,
+            _ => panic!("PIPER_TEST_MODEL_ONNX and PIPER_TEST_MODEL_CONFIG must be set together"),
         };
-        let cfg = std::env::var("PIPER_TEST_MODEL_CONFIG").expect("PIPER_TEST_MODEL_CONFIG");
         let tts = PiperTts::new(&onnx, &cfg).expect("load piper");
         let voice = tts.voice.clone();
         let audio = tts.synthesize("Hello.", &voice).await.expect("synthesise");
