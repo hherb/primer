@@ -61,6 +61,132 @@ impl Resampler {
     }
 }
 
+use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
+use cpal::{SampleFormat, Stream, StreamConfig};
+use ringbuf::traits::{Consumer, Producer, Split};
+use ringbuf::{HeapCons, HeapRb};
+
+/// Default capacity (in samples) for the mic SPSC ring buffer.
+/// Sized to hold ~250 ms of 48 kHz mono audio so a brief consumer
+/// stall doesn't drop samples. cpal callbacks fire every few ms.
+const MIC_RINGBUF_CAPACITY: usize = 12_000;
+
+/// Microphone capture: opens the default input device, pushes mono f32
+/// samples into a ring buffer. The cpal `Stream` is held inside this
+/// struct — dropping the struct stops capture.
+///
+/// Multi-channel devices are summed to mono in the cpal callback (cheap
+/// per-frame work; runs on cpal's audio thread so must not allocate).
+pub struct MicCapture {
+    /// cpal stream — held to keep capture alive. Underscore-named so
+    /// the field's drop-on-drop role is explicit.
+    _stream: Stream,
+    /// Native sample rate of the opened input device. Callers feed this
+    /// into [`Resampler::new`] when targeting silero/whisper at 16 kHz.
+    pub sample_rate: u32,
+    /// Native channel count of the opened input device. Capture sums to
+    /// mono, but callers may want this for diagnostics.
+    pub channels: u16,
+}
+
+impl MicCapture {
+    /// Open the default input device and start capture.
+    ///
+    /// Returns a `(MicCapture, HeapCons<f32>)` pair. The capture struct
+    /// must stay alive for samples to keep arriving; the consumer is the
+    /// pull-side of the ring buffer.
+    pub fn start() -> Result<(Self, HeapCons<f32>)> {
+        let host = cpal::default_host();
+        let device = host
+            .default_input_device()
+            .ok_or_else(|| PrimerError::Speech("no default input device".into()))?;
+        let supported = device
+            .default_input_config()
+            .map_err(|e| PrimerError::Speech(format!("default input config: {e}")))?;
+        let sample_rate = supported.sample_rate();
+        let channels = supported.channels();
+        let format = supported.sample_format();
+        let config: StreamConfig = supported.into();
+
+        let rb = HeapRb::<f32>::new(MIC_RINGBUF_CAPACITY);
+        let (mut prod, cons) = rb.split();
+
+        let err_callback = |err| tracing::error!("cpal input stream error: {err}");
+
+        let stream = match format {
+            SampleFormat::F32 => device.build_input_stream(
+                &config,
+                move |samples: &[f32], _info| push_mono_f32(&mut prod, samples, channels),
+                err_callback,
+                None,
+            ),
+            SampleFormat::I16 => device.build_input_stream(
+                &config,
+                move |samples: &[i16], _info| push_mono_i16(&mut prod, samples, channels),
+                err_callback,
+                None,
+            ),
+            SampleFormat::U16 => device.build_input_stream(
+                &config,
+                move |samples: &[u16], _info| push_mono_u16(&mut prod, samples, channels),
+                err_callback,
+                None,
+            ),
+            other => {
+                return Err(PrimerError::Speech(format!(
+                    "unsupported sample format: {other:?}"
+                )))
+            }
+        }
+        .map_err(|e| PrimerError::Speech(format!("build input stream: {e}")))?;
+
+        stream
+            .play()
+            .map_err(|e| PrimerError::Speech(format!("start input stream: {e}")))?;
+
+        Ok((
+            Self {
+                _stream: stream,
+                sample_rate,
+                channels,
+            },
+            cons,
+        ))
+    }
+}
+
+/// Push interleaved f32 samples into the ring buffer, summing channels
+/// to mono. Drops samples on overflow (cpal callback cannot block).
+fn push_mono_f32(prod: &mut ringbuf::HeapProd<f32>, samples: &[f32], channels: u16) {
+    let n = channels.max(1) as usize;
+    for frame in samples.chunks_exact(n) {
+        let mono = frame.iter().sum::<f32>() / n as f32;
+        let _ = prod.try_push(mono);
+    }
+}
+
+fn push_mono_i16(prod: &mut ringbuf::HeapProd<f32>, samples: &[i16], channels: u16) {
+    let n = channels.max(1) as usize;
+    let scale = 1.0 / (i16::MAX as f32);
+    for frame in samples.chunks_exact(n) {
+        let mono: f32 = frame.iter().map(|&s| s as f32 * scale).sum::<f32>() / n as f32;
+        let _ = prod.try_push(mono);
+    }
+}
+
+fn push_mono_u16(prod: &mut ringbuf::HeapProd<f32>, samples: &[u16], channels: u16) {
+    let n = channels.max(1) as usize;
+    let scale = 1.0 / (u16::MAX as f32 / 2.0);
+    for frame in samples.chunks_exact(n) {
+        let mono: f32 = frame
+            .iter()
+            .map(|&s| (s as f32 - (u16::MAX as f32 / 2.0)) * scale)
+            .sum::<f32>()
+            / n as f32;
+        let _ = prod.try_push(mono);
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -97,5 +223,29 @@ mod tests {
             matches!(err, PrimerError::Speech(_)),
             "expected PrimerError::Speech, got {err:?}"
         );
+    }
+
+    #[test]
+    fn push_mono_f32_sums_stereo_to_mono() {
+        let rb = HeapRb::<f32>::new(64);
+        let (mut prod, mut cons) = rb.split();
+        // Stereo frames: (1.0, 0.5), (-0.5, 0.5)
+        let stereo: Vec<f32> = vec![1.0, 0.5, -0.5, 0.5];
+        push_mono_f32(&mut prod, &stereo, 2);
+        let frame0 = cons.try_pop().expect("frame 0");
+        let frame1 = cons.try_pop().expect("frame 1");
+        assert!((frame0 - 0.75).abs() < 1e-6);
+        assert!((frame1 - 0.0).abs() < 1e-6);
+    }
+
+    #[test]
+    fn push_mono_f32_passes_through_mono() {
+        let rb = HeapRb::<f32>::new(64);
+        let (mut prod, mut cons) = rb.split();
+        let mono: Vec<f32> = vec![0.1, 0.2, 0.3];
+        push_mono_f32(&mut prod, &mono, 1);
+        assert!((cons.try_pop().unwrap() - 0.1).abs() < 1e-6);
+        assert!((cons.try_pop().unwrap() - 0.2).abs() < 1e-6);
+        assert!((cons.try_pop().unwrap() - 0.3).abs() < 1e-6);
     }
 }
