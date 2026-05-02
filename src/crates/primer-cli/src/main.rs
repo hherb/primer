@@ -10,6 +10,9 @@
 //!   primer --name Binti --age 8                         # Set learner profile
 //!   primer --resume <uuid>                              # Resume a past session
 
+#[cfg(feature = "speech")]
+mod speech_loop;
+
 use std::io::{self, BufRead, Write};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
