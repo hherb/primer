@@ -2121,11 +2121,100 @@ mod tests {
         // Reflecting" arm, so the value DOES change. We need an input
         // that keeps Engaged as Engaged: a long input. But that would
         // also keep dirty stable (Engaged → Engaged is no change).
-        let _ = dm.respond_to("yes that is exactly what I think").await.unwrap();
+        let _ = dm
+            .respond_to("yes that is exactly what I think")
+            .await
+            .unwrap();
         assert_eq!(
             store.save_count(),
             after_dirty,
             "idle turn (Engaged → Engaged) must NOT save again"
+        );
+    }
+
+    /// Always-failing learner store: every `save_learner` returns Err.
+    /// Used to prove that save failures are logged-and-swallowed rather
+    /// than propagated up through the dialogue-manager API.
+    struct FailingLearnerStore {
+        attempts: Mutex<u32>,
+    }
+    impl FailingLearnerStore {
+        fn new() -> Self {
+            Self {
+                attempts: Mutex::new(0),
+            }
+        }
+        fn attempt_count(&self) -> u32 {
+            *self.attempts.lock().unwrap()
+        }
+    }
+    #[async_trait]
+    impl primer_core::storage::LearnerStore for FailingLearnerStore {
+        async fn save_learner(&self, _learner: &LearnerModel) -> Result<()> {
+            *self.attempts.lock().unwrap() += 1;
+            Err(PrimerError::Storage(
+                "simulated save_learner failure".into(),
+            ))
+        }
+        async fn load_learner(&self) -> Result<Option<LearnerModel>> {
+            Ok(None)
+        }
+    }
+
+    #[tokio::test]
+    async fn save_learner_failure_does_not_propagate_through_respond_to() {
+        // A failing LearnerStore must be visible only as a tracing::warn —
+        // the conversation must continue. Otherwise a flaky disk would
+        // shut down the child's session, which is the wrong failure mode
+        // for a children's product.
+        let mut learner = test_learner();
+        learner.current_engagement = EngagementState::Reflecting;
+        let failing = Arc::new(FailingLearnerStore::new());
+        let backend = RepeatingBackend;
+        let knowledge = EmptyKnowledge;
+
+        let mut dm = DialogueManager::new(
+            learner,
+            &backend,
+            &knowledge,
+            DialogueManagerStores {
+                session: None,
+                learner: Some(Arc::clone(&failing) as Arc<dyn LearnerStore>),
+            },
+            stub_classifier(),
+            ClassifierSettings::default(),
+            PedagogyConfig::default(),
+        );
+
+        // open_session must succeed despite the underlying save failing.
+        let _ = dm
+            .open_session()
+            .await
+            .expect("open_session must not propagate save_learner errors");
+        let after_open = failing.attempt_count();
+        assert!(after_open >= 1, "open_session must attempt to save");
+
+        // A dirty turn must succeed despite the underlying save failing.
+        let reply = dm
+            .respond_to("this is a longer answer with many words")
+            .await
+            .expect("respond_to must not propagate save_learner errors");
+        assert!(!reply.is_empty(), "Primer reply must still come through");
+        assert!(
+            failing.attempt_count() > after_open,
+            "per-turn dirty save must be attempted, even though it errors"
+        );
+
+        // close_session must also swallow the error (no return value, no panic).
+        dm.close_session().await;
+
+        // Because every save errors, the dirty flag should still be set
+        // — the save site only clears dirty on success. This is the
+        // correct invariant: a failed save did NOT actually flush, so
+        // marking clean would be a lie.
+        assert!(
+            dm.learner_dirty,
+            "dirty must remain set when save_learner errors so a future save still runs"
         );
     }
 
