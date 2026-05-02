@@ -282,15 +282,32 @@ pub async fn run_loop<'r>(
             }
             let mut session = backends.tts.open_session(&backends.voice)?;
             let tts_rate = backends.tts.sample_rate();
+            // ~200 ms of silence inserted between AudioChunks (each
+            // chunk is one phrase). Gives the listener a perceptible
+            // pause at sentence boundaries without adding much to
+            // total response time.
+            const INTER_PHRASE_SILENCE_MS: u32 = 200;
+            let inter_phrase_silence_samples =
+                (tts_rate * INTER_PHRASE_SILENCE_MS / 1000) as usize;
             let mut total_samples_at_tts_rate: usize = 0;
             for chunk in session.push_text(&tts_text)? {
                 total_samples_at_tts_rate += chunk.samples.len();
                 on_committed_audio(chunk.samples);
+                let silence = vec![0.0_f32; inter_phrase_silence_samples];
+                total_samples_at_tts_rate += silence.len();
+                on_committed_audio(silence);
             }
             for chunk in session.finalize()? {
                 total_samples_at_tts_rate += chunk.samples.len();
                 on_committed_audio(chunk.samples);
+                let silence = vec![0.0_f32; inter_phrase_silence_samples];
+                total_samples_at_tts_rate += silence.len();
+                on_committed_audio(silence);
             }
+            // Flush sentinel: empty Vec signals on_audio (production)
+            // to drain any resampler-leftover tail. Tests no-op on
+            // empty since their mock callbacks just `extend(samples)`.
+            on_committed_audio(Vec::new());
             // Wait for the speaker to drain. cpal pulls at hardware rate;
             // the audio we just queued has duration = samples / tts_rate.
             // Add a 200 ms safety margin for output-resampler latency,
@@ -619,6 +636,10 @@ pub async fn run<'a>(
         tts: std::sync::Arc::clone(&tts),
         voice: primer_core::speech::VoiceProfile {
             model_id: cfg.voice_id.to_string(),
+            // Slow Piper slightly: length_scale = 1.0 / rate, so
+            // rate < 1.0 stretches each phoneme. 0.9 is barely
+            // perceptible but easier for younger children to follow.
+            rate: 0.9,
             ..primer_core::speech::VoiceProfile::default()
         },
     };
@@ -626,21 +647,20 @@ pub async fn run<'a>(
     // ── on_audio callback: push synth chunks to the speaker ─────────
     // Uses a leftover buffer carried across calls so partial tails of
     // each phrase are PREPENDED to the next call's samples instead of
-    // zero-padded. Without this, the FftFixedIn resampler's per-call
-    // tail-padding produced an audible swallowed-syllable artifact at
-    // every phrase boundary. The very last phrase still has a leftover
-    // that we don't flush — accept the artifact on the final word for
-    // the POC; a proper flush callback can come later.
+    // zero-padded. An empty input Vec is the FLUSH sentinel: zero-pad
+    // whatever's still in the leftover and process it as the very last
+    // block (this is end-of-turn, so the zero-pad artifact at the tail
+    // is silence anyway).
     let output_resampler_for_cb = std::sync::Arc::clone(&output_resampler);
     let mut output_leftover: Vec<f32> = Vec::with_capacity(output_chunk_in);
     let on_audio: Box<dyn FnMut(Vec<f32>) + Send> = Box::new(move |samples| {
+        let is_flush = samples.is_empty();
         let mut samples = samples;
         if need_output_resample {
             let mut guard = output_resampler_for_cb.lock().unwrap();
             if let Some(resampler) = guard.as_mut() {
                 // Prepend leftover from prior call, then process as many
-                // full output_chunk_in blocks as possible. Whatever's
-                // left becomes the new leftover.
+                // full output_chunk_in blocks as possible.
                 let mut combined: Vec<f32> =
                     Vec::with_capacity(output_leftover.len() + samples.len());
                 combined.append(&mut output_leftover);
@@ -659,10 +679,25 @@ pub async fn run<'a>(
                     }
                     i += output_chunk_in;
                 }
-                // Carry the tail forward to the next call.
-                output_leftover = combined[usable..].to_vec();
+                let tail: Vec<f32> = combined[usable..].to_vec();
+                if is_flush && !tail.is_empty() {
+                    // End of turn: zero-pad the leftover to chunk_in
+                    // and process. The zero-pad lands on silence at the
+                    // very tail of the response, so it's inaudible.
+                    let mut padded = tail;
+                    padded.resize(output_chunk_in, 0.0);
+                    if let Ok(o) = resampler.process(&padded) {
+                        out_buf.extend(o);
+                    }
+                    output_leftover = Vec::new();
+                } else {
+                    output_leftover = tail;
+                }
                 samples = out_buf;
             }
+        } else if is_flush {
+            // No resampling path: nothing to flush.
+            return;
         }
         // Push to speaker ringbuf, retrying briefly on full-buffer.
         let mut written = 0;
