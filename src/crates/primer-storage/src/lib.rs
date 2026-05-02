@@ -76,6 +76,11 @@ impl SqliteSessionStore {
         // classifiers, and turn_classifications tables.
         schema::apply_v3_migrations(&conn)?;
 
+        // v4 migrations: idempotent on every open. Adds understanding_depths,
+        // learners, and learner_concepts tables (schema-only — adoption of
+        // existing-session learner_id is the CLI's job).
+        schema::apply_v4_migrations(&conn)?;
+
         if existing_version != schema::USER_VERSION {
             conn.execute_batch(&format!("PRAGMA user_version = {};", schema::USER_VERSION))
                 .map_err(|e| PrimerError::Storage(format!("set user_version failed: {e}")))?;
@@ -87,9 +92,11 @@ impl SqliteSessionStore {
         let speakers = catalog::expected_speakers();
         let intents = catalog::expected_intents();
         let engagement_states = catalog::expected_engagement_states();
+        let understanding_depths = catalog::expected_understanding_depths();
         schema::validate_and_seed_lookup(&conn, "speakers", &speakers)?;
         schema::validate_and_seed_lookup(&conn, "pedagogical_intents", &intents)?;
         schema::validate_and_seed_lookup(&conn, "engagement_states", &engagement_states)?;
+        schema::validate_and_seed_lookup(&conn, "understanding_depths", &understanding_depths)?;
 
         Ok(Self {
             conn: Mutex::new(conn),
@@ -2022,5 +2029,72 @@ mod tests {
             .await
             .unwrap();
         assert!(loaded.is_empty());
+    }
+
+    #[tokio::test]
+    async fn open_fresh_db_creates_v4_schema_with_understanding_depths_seeded() {
+        let path = tempfile_path();
+        let _store = SqliteSessionStore::open(&path).unwrap();
+
+        // Inspect the file directly via a raw rusqlite connection.
+        let conn = Connection::open(&path).unwrap();
+        let v: i64 = conn
+            .query_row("PRAGMA user_version", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(v, schema::USER_VERSION);
+
+        let count: i64 = conn
+            .query_row("SELECT COUNT(*) FROM understanding_depths", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(count, 6, "expected all 6 UnderstandingDepth variants seeded");
+
+        let learners: i64 = conn
+            .query_row("SELECT COUNT(*) FROM learners", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(learners, 0, "open() must not insert any learners row");
+
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[tokio::test]
+    async fn fk_enforcement_rejects_unknown_depth_id_in_learner_concepts() {
+        // Proves PRAGMA foreign_keys = ON covers the v4 tables too.
+        // We cannot exercise this through save_learner (which only ever uses
+        // valid depth_ids from the catalog), so reach for the underlying
+        // connection and try to insert a row with depth_id = 99.
+        let store = SqliteSessionStore::open(std::path::Path::new(":memory:")).unwrap();
+
+        // Pre-seed: a learners row + a concepts row, so the only FK that can
+        // fail is depth_id.
+        {
+            let conn = store.conn.lock().unwrap();
+            conn.execute(
+                "INSERT INTO learners (
+                     id, name, age, languages, created_at, last_active,
+                     pref_narrative, pref_socratic, pref_visual, pref_kinesthetic,
+                     typical_session_minutes, high_engagement_topics,
+                     early_disengagement_secs, current_engagement_state_id
+                 ) VALUES (?1, 'Test', 8, '[]', '2026-01-01T00:00:00Z', '2026-01-01T00:00:00Z',
+                           0.5, 0.5, 0.5, 0.5, 20.0, '[]', 300, 1)",
+                rusqlite::params!["00000000-0000-0000-0000-000000000001"],
+            )
+            .unwrap();
+            conn.execute(
+                "INSERT INTO concepts (name) VALUES ('test:concept')",
+                [],
+            )
+            .unwrap();
+
+            let result = conn.execute(
+                "INSERT INTO learner_concepts (
+                     learner_id, concept_id, depth_id, confidence,
+                     encounter_count, last_encountered, notes
+                 ) VALUES ('00000000-0000-0000-0000-000000000001',
+                           (SELECT id FROM concepts WHERE name = 'test:concept'),
+                           99, 0.5, 1, NULL, '[]')",
+                [],
+            );
+            assert!(result.is_err(), "expected FK constraint failure on depth_id = 99");
+        }
     }
 }
