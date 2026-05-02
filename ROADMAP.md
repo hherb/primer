@@ -92,9 +92,10 @@ This roadmap is organised around one principle: **get a working conversation loo
 
 ### 2.2 — Text-to-speech
 
-- [ ] Implement `PiperBackend` for TTS
+- [x] Implement `PiperBackend` for TTS
 - [ ] Select/create a warm, patient voice profile (the Primer should sound like a favourite teacher, not a GPS)
-- [ ] Implement streaming TTS: begin speaking before generation is complete (sentence-boundary chunking)
+- [x] Implement streaming TTS: begin speaking before generation is complete (sentence-boundary chunking)
+- 2026-05-02 — Streaming `StreamingTextToSpeech` trait + Piper backend (vendored + ort-rc.10 patch). Smoke binary `tts_hello`. PR <number-TBD>.
 
 ### 2.3 — Conversation flow with speech
 
