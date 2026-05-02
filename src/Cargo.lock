@@ -1616,6 +1616,7 @@ dependencies = [
  "primer-core",
  "serde_json",
  "silero-vad-rust",
+ "tempfile",
  "thiserror 2.0.18",
  "tokio",
  "tracing",

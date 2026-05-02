@@ -27,4 +27,8 @@ pub mod whisper;
 pub use whisper::WhisperStt;
 
 #[cfg(feature = "piper")]
+pub mod piper;
+#[cfg(feature = "piper")]
 pub mod piper_config;
+#[cfg(feature = "piper")]
+pub use piper::PiperTts;

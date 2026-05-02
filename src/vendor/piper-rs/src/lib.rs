@@ -9,8 +9,8 @@ use std::sync::Mutex;
 mod audio;
 mod core;
 pub use audio::synth;
-use core::{Audio, AudioInfo, AudioSamples, AudioStreamIterator, Phonemes, PiperModel};
-pub use core::{PiperAudioResult, PiperError, PiperResult};
+use core::{Audio, AudioInfo, AudioSamples, AudioStreamIterator, Phonemes};
+pub use core::{PiperAudioResult, PiperError, PiperModel, PiperResult};
 
 use std::any::Any;
 use std::borrow::Cow;
