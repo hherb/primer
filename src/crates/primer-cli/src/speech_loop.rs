@@ -78,11 +78,15 @@ pub trait Responder: Send {
 ///
 /// The `'r` lifetime on the boxed responder lets `DialogueResponder`
 /// (Task 21) borrow `&mut DialogueManager` rather than own it.
+///
+/// `verbose` gates `[vad]`/`[stt]` debug lines on stderr.
+/// `[child]` and `[primer]` lines are always printed on stdout.
 pub async fn run_loop<'r>(
     mut backends: LoopBackends,
     mut events: tokio::sync::mpsc::UnboundedReceiver<primer_core::speech::VadEvent>,
     mut responder: Box<dyn Responder + 'r>,
     mut on_committed_audio: Box<dyn FnMut(Vec<f32>) + Send>,
+    verbose: bool,
 ) -> Result<Vec<String>> {
     use primer_core::speech::VadEvent;
 
@@ -125,6 +129,9 @@ pub async fn run_loop<'r>(
             stt_session = backends.stt.open_session()?;
 
             if transcript_so_far.is_empty() {
+                if verbose {
+                    eprintln!("[stt] empty transcript, looping");
+                }
                 break;
             }
 
@@ -158,6 +165,9 @@ pub async fn run_loop<'r>(
                         match event {
                             Some(VadEvent::SpeechStart) => {
                                 // Cancel: drop the future, loop back, keep listening.
+                                if verbose {
+                                    eprintln!("[vad] aborted (resumed speech)");
+                                }
                                 true
                             }
                             Some(VadEvent::SpeechEnd) | Some(VadEvent::None) => {
@@ -197,6 +207,7 @@ pub async fn run_loop<'r>(
         if transcript_so_far.is_empty() {
             continue;
         }
+        println!("[child] {}", transcript_so_far);
         if is_quit_phrase(&transcript_so_far) {
             transcripts.push(transcript_so_far);
             break 'outer;
@@ -205,6 +216,7 @@ pub async fn run_loop<'r>(
 
         // ── SPEAK ─────────────────────────────────────────────────────
         if !accumulated.is_empty() {
+            println!("[primer] {}", accumulated);
             let voice = primer_core::speech::VoiceProfile::default();
             let mut session = backends.tts.open_session(&voice)?;
             for chunk in session.push_text(&accumulated)? {
@@ -551,7 +563,7 @@ pub async fn run<'a>(
     let responder: Box<dyn Responder + '_> = Box::new(DialogueResponder { dialogue });
 
     // ── Drive the loop ─────────────────────────────────────────────
-    let result = run_loop(backends, event_rx, responder, on_audio).await;
+    let result = run_loop(backends, event_rx, responder, on_audio, cfg.verbose).await;
 
     // ── Tell the audio thread to stop and wait for it ──────────────
     stop_flag.store(true, std::sync::atomic::Ordering::SeqCst);
@@ -968,7 +980,7 @@ mod mocks {
             committed_clone.lock().unwrap().extend(samples);
         });
 
-        let result = super::run_loop(backends, event_rx, responder, on_audio).await;
+        let result = super::run_loop(backends, event_rx, responder, on_audio, false).await;
         let transcripts = result.expect("loop ok");
         assert_eq!(transcripts, vec!["hello primer".to_string()]);
         assert_eq!(*captured_transcript.lock().unwrap(), "hello primer");
@@ -1021,6 +1033,7 @@ mod mocks {
             event_rx,
             Box::new(WhitespaceResponder),
             on_audio,
+            false,
         )
         .await;
         // "goodbye" hits the quit-phrase check, so the loop exits with
@@ -1097,6 +1110,7 @@ mod mocks {
                 event_rx,
                 Box::new(CountingResponder { count: cc_clone }),
                 on_audio,
+                false,
             ),
         )
         .await
@@ -1162,6 +1176,7 @@ mod mocks {
             event_rx,
             Box::new(PromptResponder),
             on_audio,
+            false,
         )
         .await
         .expect("loop ok");
