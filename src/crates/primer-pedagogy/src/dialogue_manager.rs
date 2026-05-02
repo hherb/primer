@@ -44,9 +44,9 @@ use crate::prompt_builder;
 /// the conversation by calling `respond_to()` in a loop.
 ///
 /// `inference` and `knowledge` are borrowed references: they are used
-/// only synchronously inside method bodies. `storage` and `classifier`
-/// are `Arc<dyn …>` so they can be captured by the post-response
-/// classifier task (`tokio::spawn` requires `'static`).
+/// only synchronously inside method bodies. `storage`, `learner_store`,
+/// and `classifier` are `Arc<dyn …>` so they can be captured by the
+/// post-response classifier task (`tokio::spawn` requires `'static`).
 pub struct DialogueManager<'a> {
     /// The learner model — updated in place as we learn about the child.
     pub learner: LearnerModel,
@@ -104,9 +104,9 @@ pub(crate) fn apply_assessment(
 impl<'a> DialogueManager<'a> {
     /// Create a new dialogue manager for a session.
     ///
-    /// `storage` and `classifier` are `Arc<dyn …>` so they can be
-    /// captured inside the post-response classifier task without
-    /// lifetime constraints (`tokio::spawn` requires `'static`).
+    /// `storage`, `learner_store`, and `classifier` are `Arc<dyn …>` so
+    /// they can be captured inside the post-response classifier task
+    /// without lifetime constraints (`tokio::spawn` requires `'static`).
     pub fn new(
         learner: LearnerModel,
         inference: &'a dyn InferenceBackend,
