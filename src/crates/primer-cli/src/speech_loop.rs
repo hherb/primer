@@ -30,6 +30,18 @@ fn is_quit_phrase(transcript: &str) -> bool {
     QUIT_PHRASES.iter().any(|p| lower.contains(p))
 }
 
+/// Strip markdown emphasis markers so Piper's espeak phonemizer doesn't
+/// pronounce them ("*why*" → "asterisks why asterisks"). The Primer's
+/// stub responses (and many cloud LLM responses) use `*emphasis*` and
+/// `**strong**` for emphasis. Backticks for `code` are also stripped.
+/// Underscore-emphasis is rare and ambiguous (it shows up in identifiers
+/// too) — left alone for now.
+fn strip_markdown_for_tts(text: &str) -> String {
+    text.chars()
+        .filter(|c| !matches!(c, '*' | '`'))
+        .collect()
+}
+
 /// Configuration passed into `run` from `main`.
 pub struct SpeechLoopConfig<'a> {
     pub whisper_model: &'a Path,
@@ -257,6 +269,10 @@ pub async fn run_loop<'r>(
         // ── SPEAK ─────────────────────────────────────────────────────
         if !accumulated.is_empty() {
             println!("[primer] {}", accumulated);
+            // Strip markdown so Piper doesn't pronounce '*' / '`'. The
+            // text shown to the user keeps the markdown; only the audio
+            // input to the synthesiser is stripped.
+            let tts_text = strip_markdown_for_tts(&accumulated);
             // Gate the mic: from here until the speaker has drained, the
             // audio thread should discard incoming samples (the Primer's
             // own voice would otherwise be transcribed as the next child
@@ -267,7 +283,7 @@ pub async fn run_loop<'r>(
             let mut session = backends.tts.open_session(&backends.voice)?;
             let tts_rate = backends.tts.sample_rate();
             let mut total_samples_at_tts_rate: usize = 0;
-            for chunk in session.push_text(&accumulated)? {
+            for chunk in session.push_text(&tts_text)? {
                 total_samples_at_tts_rate += chunk.samples.len();
                 on_committed_audio(chunk.samples);
             }
@@ -608,40 +624,43 @@ pub async fn run<'a>(
     };
 
     // ── on_audio callback: push synth chunks to the speaker ─────────
+    // Uses a leftover buffer carried across calls so partial tails of
+    // each phrase are PREPENDED to the next call's samples instead of
+    // zero-padded. Without this, the FftFixedIn resampler's per-call
+    // tail-padding produced an audible swallowed-syllable artifact at
+    // every phrase boundary. The very last phrase still has a leftover
+    // that we don't flush — accept the artifact on the final word for
+    // the POC; a proper flush callback can come later.
     let output_resampler_for_cb = std::sync::Arc::clone(&output_resampler);
+    let mut output_leftover: Vec<f32> = Vec::with_capacity(output_chunk_in);
     let on_audio: Box<dyn FnMut(Vec<f32>) + Send> = Box::new(move |samples| {
         let mut samples = samples;
-        // Resample if needed. We pad/truncate the input to match
-        // `output_chunk_in`; piper hands us variable-size chunks per
-        // phrase, so we slice them.
         if need_output_resample {
             let mut guard = output_resampler_for_cb.lock().unwrap();
             if let Some(resampler) = guard.as_mut() {
-                let mut out_buf: Vec<f32> = Vec::with_capacity(samples.len() * 2);
-                let chunks = samples.chunks(output_chunk_in);
-                for chunk in chunks {
-                    if chunk.len() == output_chunk_in {
-                        match resampler.process(chunk) {
-                            Ok(o) => out_buf.extend(o),
-                            Err(e) => {
-                                tracing::warn!("output resampler error: {e}");
-                                return;
-                            }
-                        }
-                    } else {
-                        // Pad short tail with zeros to reach the fixed
-                        // input chunk size.
-                        let mut padded = chunk.to_vec();
-                        padded.resize(output_chunk_in, 0.0);
-                        match resampler.process(&padded) {
-                            Ok(o) => out_buf.extend(o),
-                            Err(e) => {
-                                tracing::warn!("output resampler tail error: {e}");
-                                return;
-                            }
+                // Prepend leftover from prior call, then process as many
+                // full output_chunk_in blocks as possible. Whatever's
+                // left becomes the new leftover.
+                let mut combined: Vec<f32> =
+                    Vec::with_capacity(output_leftover.len() + samples.len());
+                combined.append(&mut output_leftover);
+                combined.extend(samples.drain(..));
+                let usable = (combined.len() / output_chunk_in) * output_chunk_in;
+                let mut out_buf: Vec<f32> = Vec::with_capacity(combined.len() * 2);
+                let mut i = 0;
+                while i + output_chunk_in <= usable {
+                    let block = &combined[i..i + output_chunk_in];
+                    match resampler.process(block) {
+                        Ok(o) => out_buf.extend(o),
+                        Err(e) => {
+                            tracing::warn!("output resampler error: {e}");
+                            return;
                         }
                     }
+                    i += output_chunk_in;
                 }
+                // Carry the tail forward to the next call.
+                output_leftover = combined[usable..].to_vec();
                 samples = out_buf;
             }
         }
