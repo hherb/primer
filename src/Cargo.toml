@@ -49,8 +49,14 @@ chrono = { version = "0.4", features = ["serde"] }
 # UUID for session/entity IDs
 uuid = { version = "1", features = ["v4", "serde"] }
 
-# Audio I/O
-# cpal = "0.15"  # uncomment when integrating hardware audio
+# Audio I/O — used by the cpal feature of primer-speech for mic capture
+# and speaker playback. ringbuf provides the lock-free SPSC ring buffers
+# the cpal callbacks push/pull through (cannot block / allocate); rubato
+# does sample-rate conversion (cpal devices on Mac are typically 48 kHz,
+# silero/whisper want 16 kHz, piper voices vary).
+cpal = "0.17"
+ringbuf = "0.4"
+rubato = "0.16"
 
 # CLI
 clap = { version = "4", features = ["derive", "env"] }
