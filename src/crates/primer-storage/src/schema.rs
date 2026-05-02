@@ -212,6 +212,20 @@ pub(crate) fn apply_v3_migrations(conn: &Connection) -> Result<()> {
 }
 
 // ─── v4 schema strings ──────────────────────────────────────────────────────
+//
+// Note on free-text `Vec<String>` columns (`learners.languages`,
+// `learners.high_engagement_topics`, `learner_concepts.notes`): these are
+// stored as JSON-encoded TEXT, not normalised into a lookup table.
+//
+// The "categorical text → lookup table" rule (CLAUDE.md) targets *closed*
+// vocabularies where a Rust enum is the source of truth (`Speaker`,
+// `PedagogicalIntent`, `EngagementState`, `UnderstandingDepth`). The three
+// columns above are open-vocabulary, free-text lists owned by the learner
+// (preferred languages, high-engagement topic phrases, free-form per-concept
+// notes from the dialogue manager). Normalising them would buy nothing the
+// `concepts` table doesn't already prove — they aren't FK targets, aren't
+// queried by exact match, aren't shared across rows, and aren't bounded.
+// JSON-in-TEXT keeps the schema flat and the round-trip lossless.
 
 const CREATE_UNDERSTANDING_DEPTHS_TABLE: &str = "
     CREATE TABLE IF NOT EXISTS understanding_depths (
