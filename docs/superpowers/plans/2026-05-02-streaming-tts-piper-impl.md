@@ -44,7 +44,7 @@
 
 - All `cargo` commands run from `src/` (workspace root, not repo root).
 - Working branch: `feature/streaming-tts-piper`, already created off `main`. The spec doc is already committed at `b19513e`.
-- Test count baseline (counted at start of impl, after the spec commit): **208 unconditional tests** workspace-wide. Final target: **222 unconditional + 1 ignored real-model smoke**. Each task that adds tests notes the running total in its commit message.
+- Test count baseline (counted at start of impl on this branch, off `main`): **195 unconditional tests** workspace-wide (12 + 21 + 8 + 19 + 65 + 10 + 60 across the seven test crates). Final target: **209 unconditional + 1 ignored real-model smoke**. Each task that adds tests notes the running total in its commit message.
 - Commit after every task. Subjects use the existing repo convention (`feat:`, `test:`, `refactor:`, `docs:`). PR title at the end: `feat(speech): streaming TTS trait + Piper impl`.
 - Tests live in `#[cfg(test)] mod tests { ... }` inside the same file as the code under test, mirroring the existing pattern.
 - TDD discipline per task: write failing test → run → verify FAIL → implement → run → verify PASS → commit.
@@ -300,7 +300,7 @@ impl TextToSpeech for StubTts {
 cd src && cargo build --workspace && cargo test --workspace
 ```
 
-Expected: clean build, all 208 + 1 (canary) = 209 tests pass.
+Expected: clean build, all 195 + 1 (canary) = 196 tests pass.
 
 - [ ] **Step 7: Commit Task 1 + Task 2 together**
 
@@ -318,7 +318,7 @@ TextToSpeech) now inherit from Named.
 Mechanical edit only — no behaviour change. Canary test asserts dispatch
 through the super-trait still resolves on every leaf trait.
 
-Tests: 208 → 209.
+Tests: 195 → 196.
 
 Co-Authored-By: Claude Opus 4.7 (1M context) <noreply@anthropic.com>
 EOF
@@ -487,7 +487,7 @@ cd src && cargo test -p primer-core
 cd src && cargo build --workspace && cargo test --workspace
 ```
 
-Expected: 210 tests pass (209 + the new streaming-TTS canary).
+Expected: 197 tests pass (196 + the new streaming-TTS canary).
 
 - [ ] **Step 6: Commit**
 
@@ -500,7 +500,7 @@ Mirrors the streaming-STT lifecycle from PR #3. Open one session per
 Primer turn, push_text accumulates and emits chunks as soon as the
 backend has enough context, finalize drains the trailing buffer.
 
-Tests: 209 → 210 (CannedStreamingTts mock exercises the trait surface
+Tests: 196 → 197 (CannedStreamingTts mock exercises the trait surface
 through Box<dyn StreamingTextToSpeech>).
 
 Co-Authored-By: Claude Opus 4.7 (1M context) <noreply@anthropic.com>
@@ -779,7 +779,7 @@ Expected: all 10 tests pass.
 cd src && cargo build --workspace && cargo test --workspace
 ```
 
-Expected: 220 tests pass (210 + 10).
+Expected: 207 tests pass (197 + 10).
 
 - [ ] **Step 5: Commit**
 
@@ -794,7 +794,7 @@ guard, decimal guard (implicit), and ellipsis collapse. Iteration uses
 char_indices so non-ASCII glyphs in children's names can't trigger a
 UTF-8 boundary panic.
 
-Tests: 210 → 220 (10 cases covering empty, two-sentence, decimal,
+Tests: 197 → 207 (10 cases covering empty, two-sentence, decimal,
 abbreviation, ellipsis, mid-token push, flush drain, flush empty,
 non-ASCII safety, exclamation+question).
 
@@ -1035,7 +1035,7 @@ Expected: 4 tests pass.
 cd src && cargo build --workspace && cargo test --workspace
 ```
 
-Expected: 220 tests pass (no change in default tree — `piper_config` is feature-gated). Confirm `piper_config` tests are NOT included in the default test run.
+Expected: 207 tests pass (no change in default tree — `piper_config` is feature-gated). Confirm `piper_config` tests are NOT included in the default test run.
 
 - [ ] **Step 6: Commit**
 
@@ -1049,7 +1049,7 @@ without constructing a real piper_rs::Piper. Errors clearly when the
 file is missing, unparseable, or lacks a plausible audio.sample_rate.
 
 Tests: +4 under --features piper (gated; default workspace test count
-unchanged at 220).
+unchanged at 207).
 
 Co-Authored-By: Claude Opus 4.7 (1M context) <noreply@anthropic.com>
 EOF
@@ -1342,7 +1342,7 @@ Expected: succeeds (or `cdn.pyke.io` blocked in sandbox — acceptable).
 cd src && cargo build --workspace && cargo test --workspace
 ```
 
-Expected: 220 tests pass — no change in default tree.
+Expected: 207 tests pass — no change in default tree.
 
 - [ ] **Step 5: Confirm the feature test compiles (smoke is `#[ignore]`)**
 
@@ -1370,7 +1370,7 @@ the inversion); pitch warned-once and otherwise ignored (piper-rs 0.1.x
 has no pitch knob); speaker_id via builder.
 
 Smoke test gated behind --features piper AND $PIPER_TEST_MODEL_*; skipped
-on CI. Default workspace test count unchanged at 220.
+on CI. Default workspace test count unchanged at 207.
 
 Co-Authored-By: Claude Opus 4.7 (1M context) <noreply@anthropic.com>
 EOF
@@ -1506,7 +1506,7 @@ Expected: 2 tests pass.
 cd src && cargo test --workspace
 ```
 
-Expected: 222 tests pass (220 + 2).
+Expected: 209 tests pass (207 + 2).
 
 - [ ] **Step 6: Commit**
 
@@ -1520,7 +1520,7 @@ AudioChunk per completed phrase. Lets the new trait surface be
 exercised through dyn dispatch in tests without any backend feature
 being enabled.
 
-Tests: 220 → 222.
+Tests: 207 → 209.
 
 Co-Authored-By: Claude Opus 4.7 (1M context) <noreply@anthropic.com>
 EOF
@@ -1791,7 +1791,7 @@ If a line resembling "Phase 2 / TTS / Piper" exists with a tickable `- [ ]`, cha
 cd src && cargo build --workspace && cargo test --workspace && cargo clippy --workspace --all-targets && cargo fmt --check
 ```
 
-Expected: clean build, 222 unconditional tests pass, no new clippy warnings, fmt clean.
+Expected: clean build, 209 unconditional tests pass, no new clippy warnings, fmt clean.
 
 If clippy emits new warnings on the refactored speech traits or the new piper module, fix them in this same task — don't defer. Common ones to expect:
 - `clippy::needless_pass_by_value` on `VoiceProfile` arguments — accept the lint or pass by reference if natural
@@ -1844,7 +1844,7 @@ Plan: [docs/superpowers/plans/2026-05-02-streaming-tts-piper-impl.md](../docs/su
 
 ## Test plan
 
-- [ ] `cargo test --workspace` — 222 unconditional tests pass (was 208 baseline; +1 Named canary, +1 streaming-TTS canary, +10 PhraseSplitter, +2 StubTts streaming).
+- [ ] `cargo test --workspace` — 209 unconditional tests pass (was 195 baseline; +1 Named canary, +1 streaming-TTS canary, +10 PhraseSplitter, +2 StubTts streaming).
 - [ ] `cargo build --workspace` — default build pulls no `piper-rs` / `hound` / `serde_json` (latter is shared, unchanged in other crates).
 - [ ] `cargo clippy --workspace --all-targets` — clean.
 - [ ] `cargo fmt --check` — clean.
@@ -1868,7 +1868,7 @@ gh pr list --head feature/streaming-tts-piper
 ## Done criteria
 
 - All 11 tasks above committed with the convention-conforming subjects.
-- 222 unconditional workspace tests pass; clippy + fmt clean.
+- 209 unconditional workspace tests pass; clippy + fmt clean.
 - PR opened against `main` titled `feat(speech): streaming TTS trait + Piper impl`.
 - `docs/primer_TTS_next_step.md` either deleted or refreshed as a step-4 carry-forward brief.
 - `CLAUDE.md` reflects the `Named` super-trait, the new TTS trait family, and the `piper` feature.
