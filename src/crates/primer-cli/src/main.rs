@@ -119,6 +119,44 @@ struct Cli {
     /// alongside the conversation, on stderr. Stdout stays clean.
     #[arg(long)]
     verbose: bool,
+
+    /// Run the voice REPL instead of the text REPL. Requires --whisper-model,
+    /// --voice-onnx, --voice-config. Available only when the binary is built
+    /// with --features speech.
+    #[cfg(feature = "speech")]
+    #[arg(long, requires_all = ["whisper_model", "voice_onnx", "voice_config"])]
+    speech: bool,
+
+    /// Path to the whisper.cpp GGML/GGUF model file
+    /// (e.g. ~/models/ggml-small.en.bin). Required if --speech.
+    #[cfg(feature = "speech")]
+    #[arg(long, value_name = "PATH")]
+    whisper_model: Option<PathBuf>,
+
+    /// Path to the Piper voice ONNX file
+    /// (e.g. ~/models/voices/en_GB-alba-medium.onnx). Required if --speech.
+    #[cfg(feature = "speech")]
+    #[arg(long, value_name = "PATH")]
+    voice_onnx: Option<PathBuf>,
+
+    /// Path to the matching Piper voice JSON sidecar
+    /// (e.g. ~/models/voices/en_GB-alba-medium.onnx.json). Required if --speech.
+    #[cfg(feature = "speech")]
+    #[arg(long, value_name = "PATH")]
+    voice_config: Option<PathBuf>,
+
+    /// Voice id used as the VoiceProfile.model_id. Must match the file
+    /// stem of --voice-onnx (Piper rejects mismatches at session open).
+    #[cfg(feature = "speech")]
+    #[arg(long, default_value = "en_GB-alba-medium")]
+    voice: String,
+
+    /// Override silero's min_silence_ms for --speech mode. The default
+    /// (300 ms) is too aggressive given the cancel-on-resume safety net;
+    /// 600 ms reduces false trips at no perceived-latency cost.
+    #[cfg(feature = "speech")]
+    #[arg(long, default_value_t = 600)]
+    mic_silence_ms: u32,
 }
 
 /// Slugify a learner name into a filesystem-safe filename stem.
