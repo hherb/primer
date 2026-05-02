@@ -19,6 +19,11 @@ use primer_core::error::Result;
 /// "bye primer", or the very direct "stop primer".
 const QUIT_PHRASES: &[&str] = &["goodbye", "bye primer", "stop primer"];
 
+/// Spoken when the LLM call fails (rate limit, network, etc.). Goes
+/// through Piper just like any normal Primer turn — the child hears
+/// the apology, then we loop back to LISTEN.
+const FALLBACK_LINE: &str = "Sorry, I had trouble with that. Could you ask again?";
+
 /// Returns true if `transcript` contains any quit phrase (case-insensitive).
 fn is_quit_phrase(transcript: &str) -> bool {
     let lower = transcript.to_lowercase();
@@ -153,12 +158,24 @@ pub async fn run_loop<'r>(
             // (when all senders are dropped), so we must also check is_empty().
             let cancelled = if events.is_closed() && events.is_empty() {
                 // No more VAD events possible: complete the LLM unconditionally.
-                accumulated = llm_fut.await?;
+                accumulated = match llm_fut.await {
+                    Ok(text) => text,
+                    Err(e) => {
+                        tracing::error!("LLM error: {e}");
+                        FALLBACK_LINE.to_string()
+                    }
+                };
                 false
             } else {
                 tokio::select! {
                     res = &mut llm_fut => {
-                        accumulated = res?;
+                        accumulated = match res {
+                            Ok(text) => text,
+                            Err(e) => {
+                                tracing::error!("LLM error: {e}");
+                                FALLBACK_LINE.to_string()
+                            }
+                        };
                         false
                     }
                     event = events.recv() => {
@@ -174,12 +191,24 @@ pub async fn run_loop<'r>(
                                 // Spurious — shouldn't happen during LATENT_THINK
                                 // since we entered on SpeechEnd. Treat as
                                 // continue-waiting by completing the LLM.
-                                accumulated = llm_fut.await?;
+                                accumulated = match llm_fut.await {
+                                    Ok(text) => text,
+                                    Err(e) => {
+                                        tracing::error!("LLM error: {e}");
+                                        FALLBACK_LINE.to_string()
+                                    }
+                                };
                                 false
                             }
                             None => {
                                 // Channel just closed mid-select: complete the LLM.
-                                accumulated = llm_fut.await?;
+                                accumulated = match llm_fut.await {
+                                    Ok(text) => text,
+                                    Err(e) => {
+                                        tracing::error!("LLM error: {e}");
+                                        FALLBACK_LINE.to_string()
+                                    }
+                                };
                                 false
                             }
                         }
