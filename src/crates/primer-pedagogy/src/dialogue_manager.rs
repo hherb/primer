@@ -91,6 +91,17 @@ pub struct DialogueManager<'a> {
     classify_task: Option<JoinHandle<Option<EngagementAssessment>>>,
     /// Pedagogical configuration.
     config: PedagogyConfig,
+    /// Tracks whether `learner` has fields-that-map-to-the-`learners`-table
+    /// changes that haven't been flushed yet. The per-turn save site is
+    /// gated by this flag (lifecycle events at open / resume / close
+    /// always save, regardless). Set to `true` whenever any persisted
+    /// field is mutated; cleared after a successful save.
+    ///
+    /// Future-proofing: today only `current_engagement` is mutated per-turn
+    /// (via `update_learner_model` and `apply_assessment`). When concept
+    /// extraction lands and starts populating `learner.concepts` per-turn,
+    /// it just sets the flag — no save-site changes needed.
+    learner_dirty: bool,
 }
 
 /// Push an `EngagementAssessment` into the learner's history buffer and,
@@ -148,6 +159,7 @@ impl<'a> DialogueManager<'a> {
             classifier_settings,
             classify_task: None,
             config,
+            learner_dirty: false,
         }
     }
 
@@ -171,8 +183,12 @@ impl<'a> DialogueManager<'a> {
             }
         }
         if let Some(ref ls) = self.learner_store {
+            // Lifecycle event: save unconditionally to materialise the row,
+            // then reset the dirty flag — disk now reflects in-memory state.
             if let Err(e) = ls.save_learner(&self.learner).await {
                 tracing::warn!("learner save failed (open_session): {e}");
+            } else {
+                self.learner_dirty = false;
             }
         }
 
@@ -224,8 +240,11 @@ impl<'a> DialogueManager<'a> {
             }
         }
         if let Some(ref ls) = self.learner_store {
+            // Lifecycle event: save unconditionally, reset dirty.
             if let Err(e) = ls.save_learner(&self.learner).await {
                 tracing::warn!("learner save failed (resume_session): {e}");
+            } else {
+                self.learner_dirty = false;
             }
         }
         Ok(())
@@ -344,9 +363,17 @@ impl<'a> DialogueManager<'a> {
                 tracing::warn!("session save failed: {e}");
             }
         }
-        if let Some(ref ls) = self.learner_store {
-            if let Err(e) = ls.save_learner(&self.learner).await {
-                tracing::warn!("learner save failed (per-turn): {e}");
+        // Per-turn learner save is gated by `learner_dirty` so we don't
+        // burn a SQLite write transaction every turn when nothing
+        // persisted has changed. Lifecycle events (open / resume / close)
+        // still save unconditionally; this gate is only the per-turn path.
+        if self.learner_dirty {
+            if let Some(ref ls) = self.learner_store {
+                if let Err(e) = ls.save_learner(&self.learner).await {
+                    tracing::warn!("learner save failed (per-turn): {e}");
+                } else {
+                    self.learner_dirty = false;
+                }
             }
         }
 
@@ -471,8 +498,12 @@ impl<'a> DialogueManager<'a> {
             }
         }
         if let Some(ref ls) = self.learner_store {
+            // Lifecycle event: final flush, save unconditionally and
+            // reset dirty (the manager is going away but be tidy).
             if let Err(e) = ls.save_learner(&self.learner).await {
                 tracing::warn!("learner save failed (close_session): {e}");
+            } else {
+                self.learner_dirty = false;
             }
         }
     }
@@ -494,7 +525,16 @@ impl<'a> DialogueManager<'a> {
         let timeout = self.classifier_settings.blocking_timeout;
         match tokio::time::timeout(timeout, task).await {
             Ok(Ok(Some(assessment))) => {
-                apply_assessment(&mut self.learner, assessment, &self.classifier_settings)
+                // Capture the persisted-field state, apply, and dirty
+                // only if the persisted field actually changed.
+                // `recent_assessments` is rehydrated from
+                // `turn_classifications` on resume, so it does NOT need
+                // to dirty the `learners` row.
+                let before = self.learner.current_engagement;
+                apply_assessment(&mut self.learner, assessment, &self.classifier_settings);
+                if self.learner.current_engagement != before {
+                    self.learner_dirty = true;
+                }
             }
             Ok(Ok(None)) => { /* soft failure; nothing to apply */ }
             Ok(Err(e)) => tracing::warn!(error = ?e, "classifier task panicked"),
@@ -619,7 +659,7 @@ impl<'a> DialogueManager<'a> {
         let word_count = child_input.split_whitespace().count();
 
         use primer_core::learner::EngagementState;
-        self.learner.current_engagement = if word_count == 0 {
+        let new_engagement = if word_count == 0 {
             EngagementState::Disengaging
         } else if word_count < 3 {
             // Could be frustration ("I don't know") or just a short answer.
@@ -631,6 +671,14 @@ impl<'a> DialogueManager<'a> {
         } else {
             EngagementState::Engaged
         };
+        // Only mark dirty if the persisted field actually changed —
+        // assigning the same value back is a no-op for the on-disk row,
+        // and the per-turn save site uses the dirty flag to decide whether
+        // to issue a write transaction.
+        if self.learner.current_engagement != new_engagement {
+            self.learner.current_engagement = new_engagement;
+            self.learner_dirty = true;
+        }
     }
 }
 
@@ -778,6 +826,34 @@ mod tests {
         }
 
         async fn most_recent_session_learner_id(&self) -> Result<Option<uuid::Uuid>> {
+            Ok(None)
+        }
+    }
+
+    /// Learner-store spy: counts `save_learner` calls. Used to prove that
+    /// the per-turn save site fires (or doesn't) per the dirty-flag policy.
+    struct CountingLearnerStore {
+        saves: Mutex<u32>,
+    }
+
+    impl CountingLearnerStore {
+        fn new() -> Self {
+            Self {
+                saves: Mutex::new(0),
+            }
+        }
+        fn save_count(&self) -> u32 {
+            *self.saves.lock().unwrap()
+        }
+    }
+
+    #[async_trait]
+    impl primer_core::storage::LearnerStore for CountingLearnerStore {
+        async fn save_learner(&self, _learner: &LearnerModel) -> Result<()> {
+            *self.saves.lock().unwrap() += 1;
+            Ok(())
+        }
+        async fn load_learner(&self) -> Result<Option<LearnerModel>> {
             Ok(None)
         }
     }
@@ -1913,6 +1989,173 @@ mod tests {
         assert_eq!(
             dm.session.learner_id, u1,
             "adopted learner id must be the original session's learner_id"
+        );
+    }
+
+    // ─── Per-turn save gating (learner_dirty flag) ─────────────────────
+
+    /// Build a manager with a `CountingLearnerStore` and a learner state
+    /// that `update_learner_model` will NOT change for the chosen input.
+    /// `current_engagement = Reflecting` + a 1-or-2-word input maps to
+    /// `Reflecting` again via the `match other => other` branch, so
+    /// `current_engagement` is unchanged → no dirty → no per-turn save.
+    fn dirty_flag_test_setup(
+        starting: EngagementState,
+    ) -> (LearnerModel, Arc<CountingLearnerStore>) {
+        let mut learner = test_learner();
+        learner.current_engagement = starting;
+        let store = Arc::new(CountingLearnerStore::new());
+        (learner, store)
+    }
+
+    #[tokio::test]
+    async fn per_turn_save_skipped_when_no_persisted_field_changes() {
+        // learner starts at Reflecting; the input "ok yes" is < 3 words so
+        // update_learner_model takes the "match other => other" branch
+        // and leaves current_engagement at Reflecting. The classifier is
+        // a stub returning no assessments. The only save_learner call is
+        // the one open_session emits.
+        let (learner, store) = dirty_flag_test_setup(EngagementState::Reflecting);
+        let backend = RepeatingBackend;
+        let knowledge = EmptyKnowledge;
+
+        let mut dm = DialogueManager::new(
+            learner,
+            &backend,
+            &knowledge,
+            DialogueManagerStores {
+                session: None,
+                learner: Some(Arc::clone(&store) as Arc<dyn LearnerStore>),
+            },
+            stub_classifier(),
+            ClassifierSettings::default(),
+            PedagogyConfig::default(),
+        );
+
+        let _ = dm.open_session().await.unwrap();
+        assert_eq!(
+            store.save_count(),
+            1,
+            "open_session must save once (lifecycle event)"
+        );
+
+        let _ = dm.respond_to("ok yes").await.unwrap();
+        assert_eq!(
+            store.save_count(),
+            1,
+            "per-turn save must be SKIPPED when no persisted field changed (still 1 from open)"
+        );
+    }
+
+    #[tokio::test]
+    async fn per_turn_save_fires_when_engagement_changes() {
+        // learner starts at Reflecting; a long input (>=3 words) maps to
+        // Engaged in update_learner_model, which IS a change to a
+        // persisted field. dirty=true → per-turn save fires.
+        let (learner, store) = dirty_flag_test_setup(EngagementState::Reflecting);
+        let backend = RepeatingBackend;
+        let knowledge = EmptyKnowledge;
+
+        let mut dm = DialogueManager::new(
+            learner,
+            &backend,
+            &knowledge,
+            DialogueManagerStores {
+                session: None,
+                learner: Some(Arc::clone(&store) as Arc<dyn LearnerStore>),
+            },
+            stub_classifier(),
+            ClassifierSettings::default(),
+            PedagogyConfig::default(),
+        );
+
+        let _ = dm.open_session().await.unwrap();
+        let count_after_open = store.save_count();
+
+        let _ = dm
+            .respond_to("this is a longer answer with many words")
+            .await
+            .unwrap();
+        assert_eq!(
+            store.save_count(),
+            count_after_open + 1,
+            "per-turn save must fire exactly once when current_engagement changes"
+        );
+    }
+
+    #[tokio::test]
+    async fn dirty_cleared_after_save_so_subsequent_idle_turn_skips_save() {
+        // Sequence: open → dirty turn → idle turn.
+        // After the dirty turn, the flag should be cleared; the idle
+        // turn must not produce a second per-turn save.
+        let (learner, store) = dirty_flag_test_setup(EngagementState::Reflecting);
+        let backend = RepeatingBackend;
+        let knowledge = EmptyKnowledge;
+
+        let mut dm = DialogueManager::new(
+            learner,
+            &backend,
+            &knowledge,
+            DialogueManagerStores {
+                session: None,
+                learner: Some(Arc::clone(&store) as Arc<dyn LearnerStore>),
+            },
+            stub_classifier(),
+            ClassifierSettings::default(),
+            PedagogyConfig::default(),
+        );
+
+        let _ = dm.open_session().await.unwrap();
+        let after_open = store.save_count();
+
+        // Dirty turn — updates engagement Reflecting → Engaged.
+        let _ = dm
+            .respond_to("this is a longer answer with many words")
+            .await
+            .unwrap();
+        let after_dirty = store.save_count();
+        assert_eq!(after_dirty, after_open + 1, "dirty turn must save");
+
+        // Idle turn — current_engagement is now Engaged, input "ok yes"
+        // (word_count<3) maps Engaged → Reflecting via the "Engaged =>
+        // Reflecting" arm, so the value DOES change. We need an input
+        // that keeps Engaged as Engaged: a long input. But that would
+        // also keep dirty stable (Engaged → Engaged is no change).
+        let _ = dm.respond_to("yes that is exactly what I think").await.unwrap();
+        assert_eq!(
+            store.save_count(),
+            after_dirty,
+            "idle turn (Engaged → Engaged) must NOT save again"
+        );
+    }
+
+    #[tokio::test]
+    async fn close_session_always_saves_learner_regardless_of_dirty() {
+        // Lifecycle events flush unconditionally — they're explicit
+        // checkpoints, not "save when dirty" sites.
+        let (learner, store) = dirty_flag_test_setup(EngagementState::Engaged);
+        let backend = RepeatingBackend;
+        let knowledge = EmptyKnowledge;
+
+        let mut dm = DialogueManager::new(
+            learner,
+            &backend,
+            &knowledge,
+            DialogueManagerStores {
+                session: None,
+                learner: Some(Arc::clone(&store) as Arc<dyn LearnerStore>),
+            },
+            stub_classifier(),
+            ClassifierSettings::default(),
+            PedagogyConfig::default(),
+        );
+
+        let _ = dm.open_session().await.unwrap();
+        let after_open = store.save_count();
+        dm.close_session().await;
+        assert!(
+            store.save_count() > after_open,
+            "close_session must save unconditionally"
         );
     }
 }
