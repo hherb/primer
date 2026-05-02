@@ -10,6 +10,7 @@ members = [
     "crates/primer-storage",
     "crates/primer-classifier",
 ]
+exclude = ["vendor/piper-rs"]
 
 [workspace.package]
 version = "0.1.0"
@@ -69,3 +70,9 @@ primer-knowledge = { path = "crates/primer-knowledge" }
 primer-pedagogy = { path = "crates/primer-pedagogy" }
 primer-storage = { path = "crates/primer-storage" }
 primer-classifier = { path = "crates/primer-classifier" }
+
+[patch.crates-io]
+# Vendored piper-rs patched for ort 2.0.0-rc.10 API compatibility.
+# The published 0.1.9 was built against rc.9; the intersection of supported
+# ort versions between piper-rs 0.1.x and silero-vad-rust 6.2 is empty.
+piper-rs = { path = "vendor/piper-rs" }

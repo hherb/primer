@@ -76,6 +76,11 @@ impl SqliteSessionStore {
         // classifiers, and turn_classifications tables.
         schema::apply_v3_migrations(&conn)?;
 
+        // v4 migrations: idempotent on every open. Adds understanding_depths,
+        // learners, and learner_concepts tables (schema-only — adoption of
+        // existing-session learner_id is the CLI's job).
+        schema::apply_v4_migrations(&conn)?;
+
         if existing_version != schema::USER_VERSION {
             conn.execute_batch(&format!("PRAGMA user_version = {};", schema::USER_VERSION))
                 .map_err(|e| PrimerError::Storage(format!("set user_version failed: {e}")))?;
@@ -87,9 +92,11 @@ impl SqliteSessionStore {
         let speakers = catalog::expected_speakers();
         let intents = catalog::expected_intents();
         let engagement_states = catalog::expected_engagement_states();
+        let understanding_depths = catalog::expected_understanding_depths();
         schema::validate_and_seed_lookup(&conn, "speakers", &speakers)?;
         schema::validate_and_seed_lookup(&conn, "pedagogical_intents", &intents)?;
         schema::validate_and_seed_lookup(&conn, "engagement_states", &engagement_states)?;
+        schema::validate_and_seed_lookup(&conn, "understanding_depths", &understanding_depths)?;
 
         Ok(Self {
             conn: Mutex::new(conn),
@@ -572,12 +579,388 @@ impl primer_core::storage::SessionStore for SqliteSessionStore {
         rows.reverse();
         Ok(rows)
     }
+
+    async fn most_recent_session_learner_id(&self) -> Result<Option<Uuid>> {
+        let conn = self.conn.lock().unwrap();
+        let row: Option<String> = conn
+            .query_row(
+                "SELECT learner_id FROM sessions ORDER BY started_at DESC LIMIT 1",
+                [],
+                |r| r.get(0),
+            )
+            .optional()
+            .map_err(|e| PrimerError::Storage(format!("most_recent_session_learner_id: {e}")))?;
+
+        match row {
+            None => Ok(None),
+            Some(s) => {
+                let uuid = Uuid::parse_str(&s)
+                    .map_err(|e| PrimerError::Storage(format!("parse learner_id {s}: {e}")))?;
+                Ok(Some(uuid))
+            }
+        }
+    }
+}
+
+#[async_trait]
+impl primer_core::storage::LearnerStore for SqliteSessionStore {
+    async fn save_learner(&self, learner: &primer_core::learner::LearnerModel) -> Result<()> {
+        let mut conn = self.conn.lock().unwrap();
+        let tx = conn
+            .transaction()
+            .map_err(|e| PrimerError::Storage(format!("save_learner begin tx: {e}")))?;
+
+        // 1. Upsert the learners row. Use proper UPSERT (ON CONFLICT DO
+        // UPDATE) so we do NOT cascade-wipe learner_concepts via the FK.
+        // INSERT OR REPLACE would do exactly that — see the save_session
+        // notes for the same footgun.
+        let languages_json = serde_json::to_string(&learner.profile.languages)
+            .map_err(|e| PrimerError::Storage(format!("encode languages: {e}")))?;
+        let topics_json = serde_json::to_string(&learner.preferences.high_engagement_topics)
+            .map_err(|e| PrimerError::Storage(format!("encode high_engagement_topics: {e}")))?;
+        let early_secs = learner.preferences.early_disengagement_threshold.as_secs() as i64;
+        let engagement_state_id = catalog::engagement_state_id(learner.current_engagement);
+
+        tx.execute(
+            "INSERT INTO learners (
+                 id, name, age, languages, created_at, last_active,
+                 pref_narrative, pref_socratic, pref_visual, pref_kinesthetic,
+                 typical_session_minutes, high_engagement_topics,
+                 early_disengagement_secs, current_engagement_state_id
+             ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14)
+             ON CONFLICT(id) DO UPDATE SET
+                 name = excluded.name,
+                 age = excluded.age,
+                 languages = excluded.languages,
+                 last_active = excluded.last_active,
+                 pref_narrative = excluded.pref_narrative,
+                 pref_socratic = excluded.pref_socratic,
+                 pref_visual = excluded.pref_visual,
+                 pref_kinesthetic = excluded.pref_kinesthetic,
+                 typical_session_minutes = excluded.typical_session_minutes,
+                 high_engagement_topics = excluded.high_engagement_topics,
+                 early_disengagement_secs = excluded.early_disengagement_secs,
+                 current_engagement_state_id = excluded.current_engagement_state_id",
+            rusqlite::params![
+                learner.profile.id.to_string(),
+                learner.profile.name,
+                learner.profile.age as i64,
+                languages_json,
+                learner.profile.created_at.to_rfc3339(),
+                learner.profile.last_active.to_rfc3339(),
+                learner.preferences.narrative as f64,
+                learner.preferences.socratic as f64,
+                learner.preferences.visual as f64,
+                learner.preferences.kinesthetic as f64,
+                learner.preferences.typical_session_minutes as f64,
+                topics_json,
+                early_secs,
+                engagement_state_id,
+            ],
+        )
+        .map_err(|e| PrimerError::Storage(format!("upsert learner: {e}")))?;
+
+        // 2. For each concept, ensure the concepts row exists and upsert
+        //    learner_concepts.
+        if !learner.concepts.is_empty() {
+            let mut insert_concept = tx
+                .prepare("INSERT OR IGNORE INTO concepts (name) VALUES (?1)")
+                .map_err(|e| PrimerError::Storage(format!("prepare insert concept: {e}")))?;
+            let mut select_concept = tx
+                .prepare("SELECT id FROM concepts WHERE name = ?1")
+                .map_err(|e| PrimerError::Storage(format!("prepare select concept: {e}")))?;
+            let mut upsert_lc = tx
+                .prepare(
+                    "INSERT INTO learner_concepts (
+                         learner_id, concept_id, depth_id, confidence,
+                         encounter_count, last_encountered, notes
+                     ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)
+                     ON CONFLICT(learner_id, concept_id) DO UPDATE SET
+                         depth_id = excluded.depth_id,
+                         confidence = excluded.confidence,
+                         encounter_count = excluded.encounter_count,
+                         last_encountered = excluded.last_encountered,
+                         notes = excluded.notes",
+                )
+                .map_err(|e| PrimerError::Storage(format!("prepare upsert lc: {e}")))?;
+
+            // Per-call cache to skip re-querying concepts within one save.
+            let mut concept_id_cache: std::collections::HashMap<String, i64> =
+                std::collections::HashMap::new();
+
+            for concept in &learner.concepts {
+                let cid = match concept_id_cache.get(&concept.concept_id).copied() {
+                    Some(id) => id,
+                    None => {
+                        insert_concept
+                            .execute(rusqlite::params![concept.concept_id])
+                            .map_err(|e| {
+                                PrimerError::Storage(format!(
+                                    "upsert concept {}: {e}",
+                                    concept.concept_id
+                                ))
+                            })?;
+                        let id: i64 = select_concept
+                            .query_row(rusqlite::params![concept.concept_id], |r| r.get(0))
+                            .map_err(|e| {
+                                PrimerError::Storage(format!(
+                                    "select concept {}: {e}",
+                                    concept.concept_id
+                                ))
+                            })?;
+                        concept_id_cache.insert(concept.concept_id.clone(), id);
+                        id
+                    }
+                };
+
+                let notes_json = serde_json::to_string(&concept.notes)
+                    .map_err(|e| PrimerError::Storage(format!("encode notes: {e}")))?;
+                let last_encountered = concept.last_encountered.map(|t| t.to_rfc3339());
+
+                upsert_lc
+                    .execute(rusqlite::params![
+                        learner.profile.id.to_string(),
+                        cid,
+                        catalog::understanding_depth_id(concept.depth),
+                        concept.confidence as f64,
+                        concept.encounter_count as i64,
+                        last_encountered,
+                        notes_json,
+                    ])
+                    .map_err(|e| PrimerError::Storage(format!("upsert learner_concept: {e}")))?;
+            }
+
+            drop(upsert_lc);
+            drop(select_concept);
+            drop(insert_concept);
+        }
+
+        tx.commit()
+            .map_err(|e| PrimerError::Storage(format!("save_learner commit: {e}")))?;
+        Ok(())
+    }
+
+    async fn load_learner(&self) -> Result<Option<primer_core::learner::LearnerModel>> {
+        use primer_core::learner::{
+            ConceptState, LearnerModel, LearnerProfile, LearningPreferences,
+        };
+        use std::time::Duration;
+
+        let conn = self.conn.lock().unwrap();
+
+        // Step 1: the learners row.
+        type LearnerRow = (
+            String,
+            String,
+            i64,
+            String,
+            String,
+            String,
+            f64,
+            f64,
+            f64,
+            f64,
+            f64,
+            String,
+            i64,
+            i64,
+        );
+        // The application invariant is one learner per DB file (the file
+        // path is the identity boundary), so any row here is THE learner.
+        // `ORDER BY id` is defensive: if a future bug or test fixture ever
+        // inserts a second row, we deterministically pick the lowest id
+        // rather than relying on SQLite's undefined no-ORDER-BY ordering.
+        let row: Option<LearnerRow> = conn
+            .query_row(
+                "SELECT id, name, age, languages, created_at, last_active,
+                        pref_narrative, pref_socratic, pref_visual, pref_kinesthetic,
+                        typical_session_minutes, high_engagement_topics,
+                        early_disengagement_secs, current_engagement_state_id
+                 FROM learners ORDER BY id LIMIT 1",
+                [],
+                |r| {
+                    Ok((
+                        r.get(0)?,
+                        r.get(1)?,
+                        r.get(2)?,
+                        r.get(3)?,
+                        r.get(4)?,
+                        r.get(5)?,
+                        r.get(6)?,
+                        r.get(7)?,
+                        r.get(8)?,
+                        r.get(9)?,
+                        r.get(10)?,
+                        r.get(11)?,
+                        r.get(12)?,
+                        r.get(13)?,
+                    ))
+                },
+            )
+            .optional()
+            .map_err(|e| PrimerError::Storage(format!("load_learner select: {e}")))?;
+
+        let Some((
+            id_str,
+            name,
+            age,
+            languages_json,
+            created_str,
+            last_active_str,
+            pref_narrative,
+            pref_socratic,
+            pref_visual,
+            pref_kinesthetic,
+            typical_session_minutes,
+            topics_json,
+            early_secs,
+            engagement_state_id,
+        )) = row
+        else {
+            return Ok(None);
+        };
+
+        let id = Uuid::parse_str(&id_str)
+            .map_err(|e| PrimerError::Storage(format!("parse learner id {id_str}: {e}")))?;
+        let languages: Vec<String> = serde_json::from_str(&languages_json)
+            .map_err(|e| PrimerError::Storage(format!("decode languages: {e}")))?;
+        let high_engagement_topics: Vec<String> = serde_json::from_str(&topics_json)
+            .map_err(|e| PrimerError::Storage(format!("decode high_engagement_topics: {e}")))?;
+        let created_at = parse_rfc3339(&created_str, "learners.created_at")?;
+        let last_active = parse_rfc3339(&last_active_str, "learners.last_active")?;
+        let current_engagement = catalog::engagement_state_from_id(engagement_state_id)
+            .ok_or_else(|| {
+                PrimerError::Storage(format!(
+                    "unknown engagement_state_id {engagement_state_id} on learners row"
+                ))
+            })?;
+
+        // Defensive integer narrowing: a corrupt or hostile DB row must
+        // produce a clear `Storage` error rather than silently truncate.
+        // Sources of badness include: a future schema migration that
+        // widens an int column without updating the loader, manual
+        // sqlite3 edits, a third-party tool writing the file, or a
+        // hardware-level bit flip. The `as` cast on i64 → u8/u32 wraps
+        // mod 2^N — that's the wrong failure mode here.
+        let profile = LearnerProfile {
+            id,
+            name,
+            age: i64_to_u8(age, "learners.age")?,
+            languages,
+            created_at,
+            last_active,
+        };
+        // Float narrowing (f64 → f32) is left as `as`. Rust's `as`
+        // semantics saturate to ±infinity on overflow, which is loud
+        // (NaN/inf will surface in any downstream comparison) and the
+        // values we store are bounded f32-range by construction.
+        let early_disengagement_secs = i64_to_u64(early_secs, "learners.early_disengagement_secs")?;
+        let preferences = LearningPreferences {
+            narrative: pref_narrative as f32,
+            socratic: pref_socratic as f32,
+            visual: pref_visual as f32,
+            kinesthetic: pref_kinesthetic as f32,
+            typical_session_minutes: typical_session_minutes as f32,
+            high_engagement_topics,
+            early_disengagement_threshold: Duration::from_secs(early_disengagement_secs),
+        };
+
+        // Step 2: every learner_concepts row, joined to concepts for the
+        // string concept_id.
+        let mut stmt = conn
+            .prepare(
+                "SELECT c.name, lc.depth_id, lc.confidence, lc.encounter_count,
+                        lc.last_encountered, lc.notes
+                 FROM learner_concepts lc
+                 JOIN concepts c ON c.id = lc.concept_id
+                 WHERE lc.learner_id = ?1",
+            )
+            .map_err(|e| PrimerError::Storage(format!("prepare load_learner concepts: {e}")))?;
+        let rows = stmt
+            .query_map(rusqlite::params![id.to_string()], |r| {
+                Ok((
+                    r.get::<_, String>(0)?,
+                    r.get::<_, i64>(1)?,
+                    r.get::<_, f64>(2)?,
+                    r.get::<_, i64>(3)?,
+                    r.get::<_, Option<String>>(4)?,
+                    r.get::<_, String>(5)?,
+                ))
+            })
+            .map_err(|e| PrimerError::Storage(format!("query learner_concepts: {e}")))?;
+
+        let mut concepts: Vec<ConceptState> = Vec::new();
+        for row in rows {
+            let (
+                concept_name,
+                depth_id,
+                confidence,
+                encounter_count,
+                last_encountered_opt,
+                notes_json,
+            ) = row.map_err(|e| PrimerError::Storage(format!("read learner_concepts: {e}")))?;
+            let depth = catalog::understanding_depth_from_id(depth_id)
+                .ok_or_else(|| PrimerError::Storage(format!("unknown depth_id {depth_id}")))?;
+            let last_encountered = last_encountered_opt
+                .as_deref()
+                .map(|s| parse_rfc3339(s, "learner_concepts.last_encountered"))
+                .transpose()?;
+            let notes: Vec<String> = serde_json::from_str(&notes_json)
+                .map_err(|e| PrimerError::Storage(format!("decode notes: {e}")))?;
+            concepts.push(ConceptState {
+                concept_id: concept_name,
+                depth,
+                confidence: confidence as f32,
+                encounter_count: i64_to_u32(encounter_count, "learner_concepts.encounter_count")?,
+                last_encountered,
+                notes,
+            });
+        }
+
+        Ok(Some(LearnerModel {
+            profile,
+            concepts,
+            preferences,
+            current_engagement,
+            recent_assessments: vec![],
+        }))
+    }
 }
 
 fn parse_rfc3339(s: &str, field: &str) -> Result<DateTime<Utc>> {
     DateTime::parse_from_rfc3339(s)
         .map(|dt| dt.with_timezone(&Utc))
         .map_err(|e| PrimerError::Storage(format!("parse {field} {s:?}: {e}")))
+}
+
+/// Narrow a SQLite-stored `i64` to `u8`. SQLite's INTEGER column type
+/// is 64-bit signed, but the in-memory model uses `u8` for `age`. A
+/// silent `as` cast wraps mod 256 (so 300 → 44, -1 → 255), which is
+/// exactly the wrong failure mode for a corrupt-DB read path.
+fn i64_to_u8(value: i64, field: &str) -> Result<u8> {
+    u8::try_from(value).map_err(|_| {
+        PrimerError::Storage(format!(
+            "{field} value {value} is outside the valid u8 range 0..=255"
+        ))
+    })
+}
+
+/// Narrow a SQLite-stored `i64` to `u32`. Same rationale as
+/// `i64_to_u8`.
+fn i64_to_u32(value: i64, field: &str) -> Result<u32> {
+    u32::try_from(value).map_err(|_| {
+        PrimerError::Storage(format!(
+            "{field} value {value} is outside the valid u32 range 0..=4294967295"
+        ))
+    })
+}
+
+/// Narrow a SQLite-stored `i64` to `u64`. Negatives are rejected
+/// rather than clamped — a stored negative seconds value indicates
+/// corruption, not "interpret as zero".
+fn i64_to_u64(value: i64, field: &str) -> Result<u64> {
+    u64::try_from(value)
+        .map_err(|_| PrimerError::Storage(format!("{field} value {value} must be non-negative")))
 }
 
 /// Sanitize an arbitrary user query into an FTS5 expression that is
@@ -1800,8 +2183,8 @@ mod tests {
     }
 
     #[test]
-    fn user_version_is_three() {
-        assert_eq!(schema::USER_VERSION, 3);
+    fn user_version_is_four() {
+        assert_eq!(schema::USER_VERSION, 4);
     }
 
     // ─── save_classification / load_recent_assessments ───────────────
@@ -2022,5 +2405,528 @@ mod tests {
             .await
             .unwrap();
         assert!(loaded.is_empty());
+    }
+
+    #[tokio::test]
+    async fn open_fresh_db_creates_v4_schema_with_understanding_depths_seeded() {
+        let path = tempfile_path();
+        let _store = SqliteSessionStore::open(&path).unwrap();
+
+        // Inspect the file directly via a raw rusqlite connection.
+        let conn = Connection::open(&path).unwrap();
+        let v: i64 = conn
+            .query_row("PRAGMA user_version", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(v, schema::USER_VERSION);
+
+        let count: i64 = conn
+            .query_row("SELECT COUNT(*) FROM understanding_depths", [], |r| {
+                r.get(0)
+            })
+            .unwrap();
+        assert_eq!(
+            count, 6,
+            "expected all 6 UnderstandingDepth variants seeded"
+        );
+
+        let learners: i64 = conn
+            .query_row("SELECT COUNT(*) FROM learners", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(learners, 0, "open() must not insert any learners row");
+
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[tokio::test]
+    async fn fk_enforcement_rejects_unknown_depth_id_in_learner_concepts() {
+        // Proves PRAGMA foreign_keys = ON covers the v4 tables too.
+        // We cannot exercise this through save_learner (which only ever uses
+        // valid depth_ids from the catalog), so reach for the underlying
+        // connection and try to insert a row with depth_id = 99.
+        let store = SqliteSessionStore::open(std::path::Path::new(":memory:")).unwrap();
+
+        // Pre-seed: a learners row + a concepts row, so the only FK that can
+        // fail is depth_id.
+        {
+            let conn = store.conn.lock().unwrap();
+            conn.execute(
+                "INSERT INTO learners (
+                     id, name, age, languages, created_at, last_active,
+                     pref_narrative, pref_socratic, pref_visual, pref_kinesthetic,
+                     typical_session_minutes, high_engagement_topics,
+                     early_disengagement_secs, current_engagement_state_id
+                 ) VALUES (?1, 'Test', 8, '[]', '2026-01-01T00:00:00Z', '2026-01-01T00:00:00Z',
+                           0.5, 0.5, 0.5, 0.5, 20.0, '[]', 300, 1)",
+                rusqlite::params!["00000000-0000-0000-0000-000000000001"],
+            )
+            .unwrap();
+            conn.execute("INSERT INTO concepts (name) VALUES ('test:concept')", [])
+                .unwrap();
+
+            let result = conn.execute(
+                "INSERT INTO learner_concepts (
+                     learner_id, concept_id, depth_id, confidence,
+                     encounter_count, last_encountered, notes
+                 ) VALUES ('00000000-0000-0000-0000-000000000001',
+                           (SELECT id FROM concepts WHERE name = 'test:concept'),
+                           99, 0.5, 1, NULL, '[]')",
+                [],
+            );
+            assert!(
+                result.is_err(),
+                "expected FK constraint failure on depth_id = 99"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn most_recent_session_learner_id_returns_none_on_empty_db() {
+        let store = SqliteSessionStore::open(std::path::Path::new(":memory:")).unwrap();
+        let result = store.most_recent_session_learner_id().await.unwrap();
+        assert_eq!(result, None);
+    }
+
+    #[tokio::test]
+    async fn most_recent_session_learner_id_returns_single_existing_learner_id() {
+        use primer_core::conversation::Session;
+
+        let store = SqliteSessionStore::open(std::path::Path::new(":memory:")).unwrap();
+        let learner_id = uuid::Uuid::new_v4();
+        let session = Session::new(learner_id);
+        store.save_session(&session).await.unwrap();
+
+        let result = store.most_recent_session_learner_id().await.unwrap();
+        assert_eq!(result, Some(learner_id));
+    }
+
+    #[tokio::test]
+    async fn most_recent_session_learner_id_picks_most_recent_when_multiple_distinct() {
+        use chrono::{Duration, Utc};
+        use primer_core::conversation::Session;
+
+        let store = SqliteSessionStore::open(std::path::Path::new(":memory:")).unwrap();
+        let older_learner = uuid::Uuid::new_v4();
+        let newer_learner = uuid::Uuid::new_v4();
+
+        let mut older = Session::new(older_learner);
+        older.started_at = Utc::now() - Duration::hours(2);
+        let mut newer = Session::new(newer_learner);
+        newer.started_at = Utc::now();
+
+        store.save_session(&older).await.unwrap();
+        store.save_session(&newer).await.unwrap();
+
+        let result = store.most_recent_session_learner_id().await.unwrap();
+        assert_eq!(result, Some(newer_learner));
+    }
+}
+
+#[cfg(test)]
+mod learner_store_tests {
+    use super::*;
+    use chrono::Utc;
+    use primer_core::learner::{
+        ConceptState, EngagementState, LearnerModel, LearnerProfile, LearningPreferences,
+        UnderstandingDepth,
+    };
+    use primer_core::storage::LearnerStore;
+    use std::time::Duration;
+    use uuid::Uuid;
+
+    fn open_in_mem() -> SqliteSessionStore {
+        SqliteSessionStore::open(std::path::Path::new(":memory:")).unwrap()
+    }
+
+    fn sample_learner() -> LearnerModel {
+        LearnerModel {
+            profile: LearnerProfile {
+                id: Uuid::new_v4(),
+                name: "Binti".into(),
+                age: 8,
+                languages: vec!["en".into(), "fr".into()],
+                created_at: Utc::now(),
+                last_active: Utc::now(),
+            },
+            concepts: vec![
+                ConceptState {
+                    concept_id: "physics:gravity".into(),
+                    depth: UnderstandingDepth::Comprehension,
+                    confidence: 0.7,
+                    encounter_count: 3,
+                    last_encountered: Some(Utc::now()),
+                    notes: vec!["mass vs weight confusion".into()],
+                },
+                ConceptState {
+                    concept_id: "biology:photosynthesis".into(),
+                    depth: UnderstandingDepth::Aware,
+                    confidence: 0.4,
+                    encounter_count: 1,
+                    last_encountered: None,
+                    notes: vec![],
+                },
+            ],
+            preferences: LearningPreferences {
+                narrative: 0.8,
+                socratic: 0.7,
+                visual: 0.5,
+                kinesthetic: 0.3,
+                typical_session_minutes: 25.0,
+                high_engagement_topics: vec!["dinosaurs".into(), "space".into()],
+                early_disengagement_threshold: Duration::from_secs(420),
+            },
+            current_engagement: EngagementState::Engaged,
+            recent_assessments: vec![],
+        }
+    }
+
+    #[tokio::test]
+    async fn save_learner_writes_one_row_to_learners_table() {
+        let store = open_in_mem();
+        store.save_learner(&sample_learner()).await.unwrap();
+
+        let conn = store.conn.lock().unwrap();
+        let count: i64 = conn
+            .query_row("SELECT COUNT(*) FROM learners", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(count, 1);
+    }
+
+    #[tokio::test]
+    async fn save_learner_writes_one_learner_concepts_row_per_concept() {
+        let store = open_in_mem();
+        store.save_learner(&sample_learner()).await.unwrap();
+
+        let conn = store.conn.lock().unwrap();
+        let count: i64 = conn
+            .query_row("SELECT COUNT(*) FROM learner_concepts", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(count, 2);
+    }
+
+    #[tokio::test]
+    async fn save_learner_is_idempotent_on_repeat_calls() {
+        let store = open_in_mem();
+        let l = sample_learner();
+        store.save_learner(&l).await.unwrap();
+        store.save_learner(&l).await.unwrap();
+
+        let conn = store.conn.lock().unwrap();
+        let learners: i64 = conn
+            .query_row("SELECT COUNT(*) FROM learners", [], |r| r.get(0))
+            .unwrap();
+        let learner_concepts: i64 = conn
+            .query_row("SELECT COUNT(*) FROM learner_concepts", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(learners, 1);
+        assert_eq!(learner_concepts, 2);
+    }
+
+    #[tokio::test]
+    async fn save_learner_updates_concept_in_place() {
+        let store = open_in_mem();
+        let mut l = sample_learner();
+        store.save_learner(&l).await.unwrap();
+
+        // Mutate the first concept's encounter_count and depth.
+        l.concepts[0].encounter_count = 7;
+        l.concepts[0].depth = UnderstandingDepth::Application;
+        store.save_learner(&l).await.unwrap();
+
+        let conn = store.conn.lock().unwrap();
+        let (count, depth_id): (i64, i64) = conn
+            .query_row(
+                "SELECT lc.encounter_count, lc.depth_id
+                 FROM learner_concepts lc
+                 JOIN concepts c ON c.id = lc.concept_id
+                 WHERE c.name = 'physics:gravity'",
+                [],
+                |r| Ok((r.get(0)?, r.get(1)?)),
+            )
+            .unwrap();
+        assert_eq!(count, 7);
+        assert_eq!(
+            depth_id,
+            crate::catalog::understanding_depth_id(UnderstandingDepth::Application)
+        );
+
+        // Still only two rows total — no duplicate.
+        let total: i64 = conn
+            .query_row("SELECT COUNT(*) FROM learner_concepts", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(total, 2);
+    }
+
+    #[tokio::test]
+    async fn save_learner_is_monotonic_on_concepts() {
+        let store = open_in_mem();
+        let mut l = sample_learner();
+        store.save_learner(&l).await.unwrap();
+
+        // Drop one concept from the in-memory Vec.
+        l.concepts.truncate(1);
+        store.save_learner(&l).await.unwrap();
+
+        let conn = store.conn.lock().unwrap();
+        let total: i64 = conn
+            .query_row("SELECT COUNT(*) FROM learner_concepts", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(total, 2, "dropped concept must remain on disk");
+    }
+
+    #[tokio::test]
+    async fn save_learner_persists_every_understanding_depth_variant() {
+        let store = open_in_mem();
+        let mut l = sample_learner();
+        l.concepts.clear();
+        for d in UnderstandingDepth::ALL {
+            l.concepts.push(ConceptState {
+                concept_id: format!("test:{}", crate::catalog::understanding_depth_name(*d)),
+                depth: *d,
+                confidence: 0.5,
+                encounter_count: 1,
+                last_encountered: None,
+                notes: vec![],
+            });
+        }
+        store.save_learner(&l).await.unwrap();
+
+        let conn = store.conn.lock().unwrap();
+        let total: i64 = conn
+            .query_row("SELECT COUNT(*) FROM learner_concepts", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(total as usize, UnderstandingDepth::ALL.len());
+    }
+
+    #[tokio::test]
+    async fn load_learner_returns_none_for_empty_db() {
+        let store = open_in_mem();
+        let result = store.load_learner().await.unwrap();
+        assert!(result.is_none());
+    }
+
+    #[tokio::test]
+    async fn save_then_load_round_trips_every_field() {
+        let store = open_in_mem();
+        let original = sample_learner();
+        store.save_learner(&original).await.unwrap();
+
+        let loaded = store.load_learner().await.unwrap().expect("learner row");
+
+        // Profile.
+        assert_eq!(loaded.profile.id, original.profile.id);
+        assert_eq!(loaded.profile.name, original.profile.name);
+        assert_eq!(loaded.profile.age, original.profile.age);
+        assert_eq!(loaded.profile.languages, original.profile.languages);
+        // Timestamps round-trip via RFC 3339; allow sub-second equality.
+        assert_eq!(
+            loaded.profile.created_at.timestamp(),
+            original.profile.created_at.timestamp()
+        );
+        assert_eq!(
+            loaded.profile.last_active.timestamp(),
+            original.profile.last_active.timestamp()
+        );
+
+        // Preferences.
+        assert!((loaded.preferences.narrative - original.preferences.narrative).abs() < 1e-6);
+        assert!((loaded.preferences.socratic - original.preferences.socratic).abs() < 1e-6);
+        assert!((loaded.preferences.visual - original.preferences.visual).abs() < 1e-6);
+        assert!((loaded.preferences.kinesthetic - original.preferences.kinesthetic).abs() < 1e-6);
+        assert_eq!(
+            loaded.preferences.high_engagement_topics,
+            original.preferences.high_engagement_topics
+        );
+        assert_eq!(
+            loaded.preferences.early_disengagement_threshold,
+            original.preferences.early_disengagement_threshold
+        );
+
+        // Engagement snapshot.
+        assert_eq!(loaded.current_engagement, original.current_engagement);
+
+        // Concepts — match by concept_id (order is not guaranteed by SELECT).
+        assert_eq!(loaded.concepts.len(), original.concepts.len());
+        for original_c in &original.concepts {
+            let loaded_c = loaded
+                .concepts
+                .iter()
+                .find(|c| c.concept_id == original_c.concept_id)
+                .expect("concept present");
+            assert_eq!(loaded_c.depth, original_c.depth);
+            assert!((loaded_c.confidence - original_c.confidence).abs() < 1e-6);
+            assert_eq!(loaded_c.encounter_count, original_c.encounter_count);
+            assert_eq!(loaded_c.notes, original_c.notes);
+            assert_eq!(
+                loaded_c.last_encountered.map(|t| t.timestamp()),
+                original_c.last_encountered.map(|t| t.timestamp()),
+            );
+        }
+
+        // recent_assessments is rehydrated separately from
+        // turn_classifications and is not part of the round-trip.
+        assert!(loaded.recent_assessments.is_empty());
+    }
+
+    /// Inject a row with an out-of-range `age` to prove that
+    /// `load_learner` does not silently truncate `i64 → u8`. A corrupt
+    /// or hostile DB with `age = 300` must error rather than return a
+    /// learner with `age = 44` (300 mod 256).
+    #[tokio::test]
+    async fn load_learner_rejects_age_outside_u8_range() {
+        let store = open_in_mem();
+        {
+            let conn = store.conn.lock().unwrap();
+            conn.execute(
+                "INSERT INTO learners (
+                     id, name, age, languages, created_at, last_active,
+                     pref_narrative, pref_socratic, pref_visual, pref_kinesthetic,
+                     typical_session_minutes, high_engagement_topics,
+                     early_disengagement_secs, current_engagement_state_id
+                 ) VALUES (?1, 'Test', 300, '[]', '2026-01-01T00:00:00Z', '2026-01-01T00:00:00Z',
+                           0.5, 0.5, 0.5, 0.5, 20.0, '[]', 300, 1)",
+                rusqlite::params!["00000000-0000-0000-0000-000000000001"],
+            )
+            .unwrap();
+        }
+        let err = store
+            .load_learner()
+            .await
+            .expect_err("expected out-of-range error, not silent truncation");
+        let msg = format!("{err}");
+        assert!(
+            msg.contains("age"),
+            "error must name the failing field: got {msg:?}"
+        );
+        assert!(
+            msg.contains("300"),
+            "error must include the offending value: got {msg:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn load_learner_rejects_negative_age() {
+        let store = open_in_mem();
+        {
+            let conn = store.conn.lock().unwrap();
+            conn.execute(
+                "INSERT INTO learners (
+                     id, name, age, languages, created_at, last_active,
+                     pref_narrative, pref_socratic, pref_visual, pref_kinesthetic,
+                     typical_session_minutes, high_engagement_topics,
+                     early_disengagement_secs, current_engagement_state_id
+                 ) VALUES (?1, 'Test', -1, '[]', '2026-01-01T00:00:00Z', '2026-01-01T00:00:00Z',
+                           0.5, 0.5, 0.5, 0.5, 20.0, '[]', 300, 1)",
+                rusqlite::params!["00000000-0000-0000-0000-000000000002"],
+            )
+            .unwrap();
+        }
+        let err = store
+            .load_learner()
+            .await
+            .expect_err("expected negative-age error");
+        assert!(format!("{err}").contains("age"));
+    }
+
+    #[tokio::test]
+    async fn load_learner_rejects_negative_encounter_count() {
+        let store = open_in_mem();
+        // Pre-seed a learners row + a concepts row, then inject a bad
+        // learner_concepts row with encounter_count = -1.
+        let learner_id = "00000000-0000-0000-0000-000000000003";
+        {
+            let conn = store.conn.lock().unwrap();
+            conn.execute(
+                "INSERT INTO learners (
+                     id, name, age, languages, created_at, last_active,
+                     pref_narrative, pref_socratic, pref_visual, pref_kinesthetic,
+                     typical_session_minutes, high_engagement_topics,
+                     early_disengagement_secs, current_engagement_state_id
+                 ) VALUES (?1, 'Test', 8, '[]', '2026-01-01T00:00:00Z', '2026-01-01T00:00:00Z',
+                           0.5, 0.5, 0.5, 0.5, 20.0, '[]', 300, 1)",
+                rusqlite::params![learner_id],
+            )
+            .unwrap();
+            conn.execute("INSERT INTO concepts (name) VALUES ('test:bad')", [])
+                .unwrap();
+            conn.execute(
+                "INSERT INTO learner_concepts (
+                     learner_id, concept_id, depth_id, confidence,
+                     encounter_count, last_encountered, notes
+                 ) VALUES (?1, (SELECT id FROM concepts WHERE name = 'test:bad'),
+                           1, 0.5, -1, NULL, '[]')",
+                rusqlite::params![learner_id],
+            )
+            .unwrap();
+        }
+        let err = store
+            .load_learner()
+            .await
+            .expect_err("expected negative encounter_count to error");
+        let msg = format!("{err}");
+        assert!(
+            msg.contains("encounter_count"),
+            "error must name the failing field: got {msg:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn load_learner_rejects_encounter_count_above_u32_max() {
+        let store = open_in_mem();
+        let learner_id = "00000000-0000-0000-0000-000000000004";
+        let too_big: i64 = (u32::MAX as i64) + 1;
+        {
+            let conn = store.conn.lock().unwrap();
+            conn.execute(
+                "INSERT INTO learners (
+                     id, name, age, languages, created_at, last_active,
+                     pref_narrative, pref_socratic, pref_visual, pref_kinesthetic,
+                     typical_session_minutes, high_engagement_topics,
+                     early_disengagement_secs, current_engagement_state_id
+                 ) VALUES (?1, 'Test', 8, '[]', '2026-01-01T00:00:00Z', '2026-01-01T00:00:00Z',
+                           0.5, 0.5, 0.5, 0.5, 20.0, '[]', 300, 1)",
+                rusqlite::params![learner_id],
+            )
+            .unwrap();
+            conn.execute("INSERT INTO concepts (name) VALUES ('test:huge')", [])
+                .unwrap();
+            conn.execute(
+                "INSERT INTO learner_concepts (
+                     learner_id, concept_id, depth_id, confidence,
+                     encounter_count, last_encountered, notes
+                 ) VALUES (?1, (SELECT id FROM concepts WHERE name = 'test:huge'),
+                           1, 0.5, ?2, NULL, '[]')",
+                rusqlite::params![learner_id, too_big],
+            )
+            .unwrap();
+        }
+        let err = store
+            .load_learner()
+            .await
+            .expect_err("expected encounter_count > u32::MAX to error");
+        assert!(format!("{err}").contains("encounter_count"));
+    }
+
+    #[tokio::test]
+    async fn load_learner_rejects_negative_early_disengagement_secs() {
+        let store = open_in_mem();
+        {
+            let conn = store.conn.lock().unwrap();
+            conn.execute(
+                "INSERT INTO learners (
+                     id, name, age, languages, created_at, last_active,
+                     pref_narrative, pref_socratic, pref_visual, pref_kinesthetic,
+                     typical_session_minutes, high_engagement_topics,
+                     early_disengagement_secs, current_engagement_state_id
+                 ) VALUES (?1, 'Test', 8, '[]', '2026-01-01T00:00:00Z', '2026-01-01T00:00:00Z',
+                           0.5, 0.5, 0.5, 0.5, 20.0, '[]', -5, 1)",
+                rusqlite::params!["00000000-0000-0000-0000-000000000005"],
+            )
+            .unwrap();
+        }
+        let err = store
+            .load_learner()
+            .await
+            .expect_err("expected negative early_disengagement_secs to error");
+        assert!(format!("{err}").contains("early_disengagement_secs"));
     }
 }

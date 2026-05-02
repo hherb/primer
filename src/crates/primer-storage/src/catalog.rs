@@ -5,7 +5,7 @@
 
 use primer_core::conversation::{PedagogicalIntent, Speaker};
 use primer_core::error::{PrimerError, Result};
-use primer_core::learner::EngagementState;
+use primer_core::learner::{EngagementState, UnderstandingDepth};
 use rusqlite::{Connection, OptionalExtension, params};
 
 /// Stable on-disk integer ID for every `Speaker` variant.
@@ -133,6 +133,52 @@ pub fn expected_engagement_states() -> Vec<(i64, &'static str)> {
         .collect()
 }
 
+/// Stable on-disk integer ID for every `UnderstandingDepth` variant.
+///
+/// Explicit match arms so reordering variants in `primer-core`
+/// cannot silently shift IDs already on disk.
+pub fn understanding_depth_id(depth: UnderstandingDepth) -> i64 {
+    match depth {
+        UnderstandingDepth::Unknown => 1,
+        UnderstandingDepth::Aware => 2,
+        UnderstandingDepth::Recall => 3,
+        UnderstandingDepth::Comprehension => 4,
+        UnderstandingDepth::Application => 5,
+        UnderstandingDepth::Analysis => 6,
+    }
+}
+
+/// Human-readable name stored alongside the ID in the
+/// `understanding_depths` lookup table.
+pub fn understanding_depth_name(depth: UnderstandingDepth) -> &'static str {
+    match depth {
+        UnderstandingDepth::Unknown => "Unknown",
+        UnderstandingDepth::Aware => "Aware",
+        UnderstandingDepth::Recall => "Recall",
+        UnderstandingDepth::Comprehension => "Comprehension",
+        UnderstandingDepth::Application => "Application",
+        UnderstandingDepth::Analysis => "Analysis",
+    }
+}
+
+/// Reverse lookup: integer ID → `UnderstandingDepth`. Returns `None`
+/// for IDs the current build doesn't know about.
+pub fn understanding_depth_from_id(id: i64) -> Option<UnderstandingDepth> {
+    UnderstandingDepth::ALL
+        .iter()
+        .copied()
+        .find(|v| understanding_depth_id(*v) == id)
+}
+
+/// All `(id, name)` pairs the storage layer expects to see in the
+/// `understanding_depths` lookup table. Used by the validate-and-seed pass.
+pub fn expected_understanding_depths() -> Vec<(i64, &'static str)> {
+    UnderstandingDepth::ALL
+        .iter()
+        .map(|d| (understanding_depth_id(*d), understanding_depth_name(*d)))
+        .collect()
+}
+
 /// Look up an existing `classifiers` row by `identifier`, or insert one
 /// and return the freshly-assigned `AUTOINCREMENT` id.
 ///
@@ -224,6 +270,41 @@ mod engagement_state_tests {
     fn expected_engagement_states_covers_all_variants() {
         let pairs = expected_engagement_states();
         assert_eq!(pairs.len(), EngagementState::ALL.len());
+    }
+}
+
+#[cfg(test)]
+mod understanding_depth_tests {
+    use super::*;
+    use primer_core::learner::UnderstandingDepth;
+
+    #[test]
+    fn understanding_depth_id_is_stable_for_every_variant() {
+        assert_eq!(understanding_depth_id(UnderstandingDepth::Unknown), 1);
+        assert_eq!(understanding_depth_id(UnderstandingDepth::Aware), 2);
+        assert_eq!(understanding_depth_id(UnderstandingDepth::Recall), 3);
+        assert_eq!(understanding_depth_id(UnderstandingDepth::Comprehension), 4);
+        assert_eq!(understanding_depth_id(UnderstandingDepth::Application), 5);
+        assert_eq!(understanding_depth_id(UnderstandingDepth::Analysis), 6);
+    }
+
+    #[test]
+    fn understanding_depth_from_id_is_inverse_of_id() {
+        for d in UnderstandingDepth::ALL {
+            let id = understanding_depth_id(*d);
+            assert_eq!(understanding_depth_from_id(id), Some(*d));
+        }
+    }
+
+    #[test]
+    fn understanding_depth_from_id_returns_none_on_unknown_id() {
+        assert!(understanding_depth_from_id(999).is_none());
+    }
+
+    #[test]
+    fn expected_understanding_depths_covers_all_variants() {
+        let pairs = expected_understanding_depths();
+        assert_eq!(pairs.len(), UnderstandingDepth::ALL.len());
     }
 }
 
