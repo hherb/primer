@@ -437,6 +437,35 @@ pub async fn run<'a>(
     //    the audio thread; run_loop sees a ChannelStt wrapper) ─────────
     let whisper = std::sync::Arc::new(WhisperStt::new(cfg.whisper_model)?);
 
+    // ── Locate espeak-ng-data for Piper's phonemizer ───────────────
+    // espeak-rs-sys ships an incomplete data set in OUT_DIR (only `lang/`
+    // and `voices/`, missing `phontab` and other core files). We probe
+    // common system locations and set PIPER_ESPEAKNG_DATA_DIRECTORY (the
+    // env var espeak-ng's loader checks) to the parent of a complete
+    // espeak-ng-data directory. Skipped if the env var is already set.
+    if std::env::var_os("PIPER_ESPEAKNG_DATA_DIRECTORY").is_none() {
+        const ESPEAK_PARENT_CANDIDATES: &[&str] = &[
+            "/opt/homebrew/share",  // macOS Apple Silicon (brew install espeak-ng)
+            "/usr/local/share",     // macOS Intel / generic
+            "/usr/share",           // Linux (apt/dnf install espeak-ng-data)
+        ];
+        for parent in ESPEAK_PARENT_CANDIDATES {
+            let probe = std::path::Path::new(parent).join("espeak-ng-data/phontab");
+            if probe.is_file() {
+                if cfg.verbose {
+                    eprintln!("[tts] found espeak-ng-data under {}", parent);
+                }
+                // SAFETY: setting env vars in process is widely supported but
+                // is technically unsafe in multi-threaded contexts. We're
+                // single-threaded at this point (no audio threads spawned yet).
+                unsafe {
+                    std::env::set_var("PIPER_ESPEAKNG_DATA_DIRECTORY", parent);
+                }
+                break;
+            }
+        }
+    }
+
     // ── Build TTS (real piper) ─────────────────────────────────────
     let tts: std::sync::Arc<dyn StreamingTextToSpeech> =
         std::sync::Arc::new(PiperTts::new(cfg.voice_onnx, cfg.voice_config)?);
