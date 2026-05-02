@@ -1800,8 +1800,8 @@ mod tests {
     }
 
     #[test]
-    fn user_version_is_three() {
-        assert_eq!(schema::USER_VERSION, 3);
+    fn user_version_is_four() {
+        assert_eq!(schema::USER_VERSION, 4);
     }
 
     // ─── save_classification / load_recent_assessments ───────────────

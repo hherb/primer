@@ -17,7 +17,12 @@ use rusqlite::Connection;
 /// Bumped to 3 when we added the `engagement_states`, `classifiers`,
 /// and `turn_classifications` tables that back the engagement-classifier
 /// feature (Phase 0.3).
-pub const USER_VERSION: i64 = 3;
+///
+/// Bumped to 4 when we added the `understanding_depths` lookup table
+/// plus `learners` and `learner_concepts` tables that back learner-model
+/// SQLite persistence (Phase 0.3). Schema-only — adoption of an existing
+/// session's `learner_id` happens at the CLI layer, not in this migration.
+pub const USER_VERSION: i64 = 4;
 
 /// Idempotent CREATE statements for the base (v1) schema. Run on every
 /// `open()`. v2-specific objects are added by `apply_v2_migrations`.
@@ -206,6 +211,88 @@ pub(crate) fn apply_v3_migrations(conn: &Connection) -> Result<()> {
     Ok(())
 }
 
+// ─── v4 schema strings ──────────────────────────────────────────────────────
+
+const CREATE_UNDERSTANDING_DEPTHS_TABLE: &str = "
+    CREATE TABLE IF NOT EXISTS understanding_depths (
+        id   INTEGER PRIMARY KEY,
+        name TEXT NOT NULL UNIQUE
+    )
+";
+
+const CREATE_LEARNERS_TABLE: &str = "
+    CREATE TABLE IF NOT EXISTS learners (
+        id                          TEXT PRIMARY KEY,
+        name                        TEXT NOT NULL,
+        age                         INTEGER NOT NULL,
+        languages                   TEXT NOT NULL,
+        created_at                  TEXT NOT NULL,
+        last_active                 TEXT NOT NULL,
+        pref_narrative              REAL NOT NULL,
+        pref_socratic               REAL NOT NULL,
+        pref_visual                 REAL NOT NULL,
+        pref_kinesthetic            REAL NOT NULL,
+        typical_session_minutes     REAL NOT NULL,
+        high_engagement_topics      TEXT NOT NULL,
+        early_disengagement_secs    INTEGER NOT NULL,
+        current_engagement_state_id INTEGER NOT NULL REFERENCES engagement_states(id)
+    )
+";
+
+const CREATE_LEARNER_CONCEPTS_TABLE: &str = "
+    CREATE TABLE IF NOT EXISTS learner_concepts (
+        learner_id        TEXT NOT NULL REFERENCES learners(id) ON DELETE CASCADE,
+        concept_id        INTEGER NOT NULL REFERENCES concepts(id),
+        depth_id          INTEGER NOT NULL REFERENCES understanding_depths(id),
+        confidence        REAL NOT NULL,
+        encounter_count   INTEGER NOT NULL,
+        last_encountered  TEXT,
+        notes             TEXT NOT NULL DEFAULT '[]',
+        PRIMARY KEY (learner_id, concept_id)
+    )
+";
+
+const CREATE_LEARNER_CONCEPTS_INDEX: &str = "
+    CREATE INDEX IF NOT EXISTS idx_learner_concepts_learner
+        ON learner_concepts(learner_id)
+";
+
+/// Apply v4 migrations idempotently. Safe to run on a fresh DB (after
+/// v3 objects exist), on a v3 DB being upgraded, and on a v4 DB being
+/// re-opened.
+///
+/// All steps run inside a single transaction so a partial failure rolls
+/// back to the pre-migration state.
+///
+/// v4 adds:
+/// - `understanding_depths` lookup table (seeded by the validate pass
+///   in `open()` after this migration runs).
+/// - `learners` table — one row per learner DB file (application-level
+///   invariant), holds profile + preferences + engagement snapshot.
+/// - `learner_concepts` junction table for per-learner concept-mastery
+///   state, FK'd into `learners`, `concepts`, and `understanding_depths`.
+/// - `idx_learner_concepts_learner` index on the junction table.
+///
+/// Schema-only. Adopting an existing session's `learner_id` for the new
+/// learners row is the CLI's responsibility — `apply_v4_migrations` runs
+/// without CLI flag access and cannot populate `name` / `age`.
+pub(crate) fn apply_v4_migrations(conn: &Connection) -> Result<()> {
+    let tx = conn
+        .unchecked_transaction()
+        .map_err(|e| PrimerError::Storage(format!("v4 migration: failed to begin tx: {e}")))?;
+    tx.execute(CREATE_UNDERSTANDING_DEPTHS_TABLE, [])
+        .map_err(|e| PrimerError::Storage(format!("v4 migration: understanding_depths: {e}")))?;
+    tx.execute(CREATE_LEARNERS_TABLE, [])
+        .map_err(|e| PrimerError::Storage(format!("v4 migration: learners: {e}")))?;
+    tx.execute(CREATE_LEARNER_CONCEPTS_TABLE, [])
+        .map_err(|e| PrimerError::Storage(format!("v4 migration: learner_concepts: {e}")))?;
+    tx.execute(CREATE_LEARNER_CONCEPTS_INDEX, [])
+        .map_err(|e| PrimerError::Storage(format!("v4 migration: index: {e}")))?;
+    tx.commit()
+        .map_err(|e| PrimerError::Storage(format!("v4 migration: commit: {e}")))?;
+    Ok(())
+}
+
 fn column_exists(conn: &Connection, table: &str, column: &str) -> Result<bool> {
     let sql = format!("SELECT COUNT(*) FROM pragma_table_info('{table}') WHERE name = ?1");
     let count: i64 = conn
@@ -291,4 +378,111 @@ pub fn validate_and_seed_lookup(
     }
 
     Ok(())
+}
+
+#[cfg(test)]
+mod v4_tests {
+    use super::*;
+    use crate::catalog::expected_understanding_depths;
+    use rusqlite::Connection;
+
+    fn fresh_v3_conn() -> Connection {
+        let conn = Connection::open_in_memory().unwrap();
+        conn.execute_batch("PRAGMA foreign_keys = ON;").unwrap();
+        conn.execute_batch(SCHEMA_SQL).unwrap();
+        apply_v2_migrations(&conn).unwrap();
+        apply_v3_migrations(&conn).unwrap();
+        conn
+    }
+
+    fn table_exists(conn: &Connection, name: &str) -> bool {
+        let count: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name=?1",
+                rusqlite::params![name],
+                |r| r.get(0),
+            )
+            .unwrap();
+        count > 0
+    }
+
+    #[test]
+    fn apply_v4_migrations_creates_three_tables() {
+        let conn = fresh_v3_conn();
+        apply_v4_migrations(&conn).unwrap();
+        assert!(table_exists(&conn, "understanding_depths"));
+        assert!(table_exists(&conn, "learners"));
+        assert!(table_exists(&conn, "learner_concepts"));
+    }
+
+    #[test]
+    fn apply_v4_migrations_is_idempotent() {
+        let conn = fresh_v3_conn();
+        apply_v4_migrations(&conn).unwrap();
+        apply_v4_migrations(&conn).unwrap(); // second call must not fail or duplicate
+        let count: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name='learners'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(count, 1);
+    }
+
+    #[test]
+    fn apply_v4_migrations_does_not_insert_learners_row() {
+        let conn = fresh_v3_conn();
+        apply_v4_migrations(&conn).unwrap();
+        let count: i64 = conn
+            .query_row("SELECT COUNT(*) FROM learners", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(count, 0, "v4 migration must not insert any learners rows");
+    }
+
+    #[test]
+    fn understanding_depths_is_seeded_after_v4_with_validate_and_seed() {
+        let conn = fresh_v3_conn();
+        apply_v4_migrations(&conn).unwrap();
+        validate_and_seed_lookup(
+            &conn,
+            "understanding_depths",
+            &expected_understanding_depths(),
+        )
+        .unwrap();
+        let count: i64 = conn
+            .query_row("SELECT COUNT(*) FROM understanding_depths", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(count, 6);
+    }
+
+    #[test]
+    fn user_version_constant_is_four() {
+        assert_eq!(USER_VERSION, 4);
+    }
+
+    #[test]
+    fn apply_v4_migrations_rolls_back_on_failure() {
+        // Fault-injection: pre-create a TABLE colliding with the v4 index
+        // name so the CREATE INDEX step fails, forcing the migration's
+        // transaction to roll back the preceding CREATE TABLE statements.
+        let conn = Connection::open_in_memory().unwrap();
+        conn.execute_batch("PRAGMA foreign_keys = ON;").unwrap();
+        conn.execute_batch(SCHEMA_SQL).unwrap();
+        apply_v2_migrations(&conn).unwrap();
+        apply_v3_migrations(&conn).unwrap();
+        conn.execute_batch(
+            "CREATE TABLE idx_learner_concepts_learner (id INTEGER PRIMARY KEY);",
+        )
+        .unwrap();
+
+        let result = apply_v4_migrations(&conn);
+        assert!(result.is_err(), "expected migration to fail");
+
+        // The transaction must have rolled back: learners,
+        // learner_concepts, and understanding_depths must NOT exist.
+        assert!(!table_exists(&conn, "learners"));
+        assert!(!table_exists(&conn, "learner_concepts"));
+        assert!(!table_exists(&conn, "understanding_depths"));
+    }
 }
