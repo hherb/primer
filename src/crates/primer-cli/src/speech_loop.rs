@@ -219,18 +219,518 @@ pub async fn run_loop<'r>(
     Ok(transcripts)
 }
 
-/// Entry point: run the voice REPL until Ctrl+C or a quit phrase is heard.
+/// Adapter that lets `&mut DialogueManager` satisfy the [`Responder`]
+/// trait. The lifetime `'a` is the dialogue manager's borrowed-backends
+/// lifetime; `'b` is how long this adapter lives. `'a: 'b` keeps the
+/// nested-borrow well-formed.
+struct DialogueResponder<'a, 'b> {
+    dialogue: &'b mut primer_pedagogy::DialogueManager<'a>,
+}
+
+impl<'a, 'b> Responder for DialogueResponder<'a, 'b>
+where
+    'a: 'b,
+{
+    fn respond<'r>(
+        &'r mut self,
+        transcript: &'r str,
+        mut on_chunk: Box<dyn FnMut(&str) + Send + 'r>,
+    ) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<String>> + Send + 'r>> {
+        // We own a `String` copy of the transcript inside the future so
+        // the borrow on `transcript` doesn't have to outlive the await.
+        let transcript = transcript.to_string();
+        Box::pin(async move {
+            self.dialogue
+                .respond_to_streaming(&transcript, |chunk| on_chunk(chunk))
+                .await
+        })
+    }
+}
+
+/// No-op VAD used in the production [`LoopBackends`]. The real VAD lives
+/// in the audio capture thread; `run_loop` only reads `VadEvent`s from a
+/// channel and never invokes `backends.vad`. Including a real VAD in the
+/// struct just to satisfy the type would mean loading two ONNX sessions
+/// for nothing. This placeholder is unused but keeps the type happy.
+#[cfg(feature = "speech")]
+struct NoopVad;
+
+#[cfg(feature = "speech")]
+impl primer_core::speech::Named for NoopVad {
+    fn name(&self) -> &str {
+        "noop-vad"
+    }
+}
+
+#[cfg(feature = "speech")]
+impl VoiceActivityDetector for NoopVad {
+    fn sample_rate(&self) -> u32 {
+        16_000
+    }
+    fn chunk_samples(&self) -> usize {
+        512
+    }
+    fn process_chunk(
+        &mut self,
+        _samples: &[f32],
+    ) -> Result<primer_core::speech::VadFrame> {
+        Err(primer_core::error::PrimerError::Speech(
+            "NoopVad::process_chunk should never be called (audio thread owns the real VAD)".into(),
+        ))
+    }
+    fn reset(&mut self) {}
+}
+
+/// `StreamingSpeechToText` adapter: hands out sessions whose `finalize`
+/// pulls a transcript from a `std::sync::mpsc` channel populated by the
+/// audio capture thread. This decouples the audio thread (which owns
+/// the real `WhisperStream` and pushes mic samples into it) from
+/// `run_loop` (which only reads `VadEvent`s and calls `finalize` on the
+/// session it opened).
 ///
-/// Phase 7 stub — Task 21 wires real backends + Responder adapter.
+/// **Ordering contract:** the audio thread MUST send the transcript on
+/// `tx` BEFORE emitting `VadEvent::SpeechEnd` on the event channel. That
+/// way, by the time `run_loop` calls `session.finalize()` (after seeing
+/// `SpeechEnd`), the transcript is already buffered in the channel.
+#[cfg(feature = "speech")]
+struct ChannelStt {
+    rx: std::sync::Arc<std::sync::Mutex<std::sync::mpsc::Receiver<String>>>,
+}
+
+#[cfg(feature = "speech")]
+impl primer_core::speech::Named for ChannelStt {
+    fn name(&self) -> &str {
+        "channel-stt"
+    }
+}
+
+#[cfg(feature = "speech")]
+impl StreamingSpeechToText for ChannelStt {
+    fn sample_rate(&self) -> u32 {
+        16_000
+    }
+    fn open_session(
+        &self,
+    ) -> Result<Box<dyn primer_core::speech::TranscriptionSession>> {
+        Ok(Box::new(ChannelSttSession {
+            rx: std::sync::Arc::clone(&self.rx),
+        }))
+    }
+}
+
+#[cfg(feature = "speech")]
+struct ChannelSttSession {
+    rx: std::sync::Arc<std::sync::Mutex<std::sync::mpsc::Receiver<String>>>,
+}
+
+#[cfg(feature = "speech")]
+impl primer_core::speech::TranscriptionSession for ChannelSttSession {
+    fn push_audio(
+        &mut self,
+        _samples: &[f32],
+    ) -> Result<Vec<primer_core::speech::TranscriptSegment>> {
+        // run_loop never calls push_audio on this session (samples are
+        // pushed directly into whisper inside the audio thread). If
+        // someone wires it up differently this is a silent no-op.
+        Ok(vec![])
+    }
+    fn finalize(
+        self: Box<Self>,
+    ) -> Result<Vec<primer_core::speech::TranscriptSegment>> {
+        // Try to receive a transcript. The audio thread sends BEFORE
+        // emitting SpeechEnd, so by the time run_loop calls us the
+        // transcript is normally already buffered. We use try_recv with
+        // a brief retry to tolerate any tiny scheduling jitter, then
+        // fall back to a blocking recv with a short timeout.
+        let rx = self.rx.lock().map_err(|_| {
+            primer_core::error::PrimerError::Speech(
+                "ChannelSttSession: transcript receiver mutex poisoned".into(),
+            )
+        })?;
+        match rx.recv_timeout(std::time::Duration::from_millis(500)) {
+            Ok(text) => Ok(vec![primer_core::speech::TranscriptSegment {
+                text,
+                start_ms: 0,
+                end_ms: 0,
+            }]),
+            Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {
+                // No transcript was queued — treat as empty utterance
+                // (run_loop already short-circuits on empty).
+                Ok(vec![])
+            }
+            Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => {
+                // Audio thread is gone; surface an error so run_loop
+                // exits cleanly via `?`.
+                Err(primer_core::error::PrimerError::Speech(
+                    "audio thread disconnected before producing transcript".into(),
+                ))
+            }
+        }
+    }
+}
+
+/// Entry point: run the voice REPL until Ctrl+C or a quit phrase is heard.
+#[cfg(feature = "speech")]
 pub async fn run<'a>(
     cfg: SpeechLoopConfig<'_>,
     dialogue: &mut primer_pedagogy::DialogueManager<'a>,
 ) -> Result<()> {
-    // Phase 7 stub — Task 21 wires real backends + Responder adapter.
-    let _ = (cfg, dialogue);
+    use primer_core::speech::VadEvent;
+    use primer_speech::{
+        MicCapture, PiperTts, Resampler, SileroVad, SileroVadParams, SpeakerSink, WhisperStt,
+    };
+    use ringbuf::traits::Producer as _;
+
+    // ── Build VAD (real, lives in audio thread) ─────────────────────
+    let vad_params = SileroVadParams {
+        min_silence_ms: cfg.mic_silence_ms,
+        ..SileroVadParams::default()
+    };
+    let mut audio_vad = SileroVad::new(vad_params)?;
+
+    // ── Build STT (real whisper.cpp; the streaming session lives in
+    //    the audio thread; run_loop sees a ChannelStt wrapper) ─────────
+    let whisper = std::sync::Arc::new(WhisperStt::new(cfg.whisper_model)?);
+
+    // ── Build TTS (real piper) ─────────────────────────────────────
+    let tts: std::sync::Arc<dyn StreamingTextToSpeech> =
+        std::sync::Arc::new(PiperTts::new(cfg.voice_onnx, cfg.voice_config)?);
+    let tts_sample_rate = tts.sample_rate();
+
+    // ── Open mic ───────────────────────────────────────────────────
+    let (mic, mic_cons) = MicCapture::start()?;
+    let mic_rate = mic.sample_rate;
+    if cfg.verbose {
+        eprintln!(
+            "[speech] mic opened: {}Hz, {} channels",
+            mic_rate, mic.channels
+        );
+    }
+
+    // ── Open speaker ───────────────────────────────────────────────
+    let (spk, mut spk_prod) = SpeakerSink::start()?;
+    let spk_rate = spk.sample_rate;
+    if cfg.verbose {
+        eprintln!(
+            "[speech] speaker opened: {}Hz, {} channels",
+            spk_rate, spk.channels
+        );
+    }
+
+    // ── Input resampler: mic_rate → 16 kHz for VAD/whisper ─────────
+    // We want each Resampler::process call to yield exactly
+    // CHUNK_SAMPLES (512) at 16 kHz. Pick the input chunk size as
+    // 512 * mic_rate / 16_000 (e.g. 1536 at 48 kHz).
+    let vad_rate = audio_vad.sample_rate();
+    let vad_chunk = audio_vad.chunk_samples();
+    let in_chunk_samples: usize =
+        (vad_chunk as u64 * mic_rate as u64 / vad_rate as u64) as usize;
+    let mut input_resampler: Option<Resampler> = if mic_rate != vad_rate {
+        Some(Resampler::new(mic_rate, vad_rate, in_chunk_samples)?)
+    } else {
+        None
+    };
+
+    // ── Output resampler factory: piper_rate → spk_rate, lazy
+    //    constructed inside the on_audio callback so chunk sizing is
+    //    decided once (per chunk size). For simplicity we resample with a
+    //    fixed input chunk size that we pad/truncate the TTS chunk to. ─
+    let need_output_resample = tts_sample_rate != spk_rate;
+    // Output resampler operates on a fixed chunk size; build per-callback
+    // padding/buffering to feed it. We keep it inside a Mutex<Option<…>>
+    // so the on_audio FnMut can mutate it across calls.
+    let output_chunk_in: usize = 1024;
+    let output_resampler = std::sync::Arc::new(std::sync::Mutex::new(
+        if need_output_resample {
+            Some(Resampler::new(tts_sample_rate, spk_rate, output_chunk_in)?)
+        } else {
+            None
+        },
+    ));
+
+    // ── Channels ───────────────────────────────────────────────────
+    let (event_tx, event_rx) = tokio::sync::mpsc::unbounded_channel::<VadEvent>();
+    let (transcript_tx, transcript_rx) = std::sync::mpsc::channel::<String>();
+    // Cancellation flag — set when run_loop exits to tell the audio
+    // thread to stop.
+    let stop_flag = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+
+    // ── Spawn audio capture thread ─────────────────────────────────
+    // Owns: mic_cons, input_resampler, audio_vad, whisper (Arc),
+    //       event_tx, transcript_tx, stop_flag.
+    // Drives: the LISTEN-side state machine (raw mic → resample →
+    //         silero → whisper push), at audio rate.
+    let whisper_for_thread = std::sync::Arc::clone(&whisper);
+    let stop_flag_thread = std::sync::Arc::clone(&stop_flag);
+    let audio_thread = std::thread::Builder::new()
+        .name("primer-speech-audio".into())
+        .spawn(move || {
+            run_audio_thread(
+                mic_cons,
+                input_resampler.take(),
+                in_chunk_samples,
+                vad_chunk,
+                &mut audio_vad,
+                whisper_for_thread,
+                event_tx,
+                transcript_tx,
+                stop_flag_thread,
+            )
+        })
+        .map_err(|e| {
+            primer_core::error::PrimerError::Speech(format!("spawn audio thread: {e}"))
+        })?;
+
+    // ── Build LoopBackends with the channel STT wrapper ────────────
+    let backends = LoopBackends {
+        vad: Box::new(NoopVad),
+        stt: std::sync::Arc::new(ChannelStt {
+            rx: std::sync::Arc::new(std::sync::Mutex::new(transcript_rx)),
+        }),
+        tts: std::sync::Arc::clone(&tts),
+    };
+
+    // ── on_audio callback: push synth chunks to the speaker ─────────
+    let output_resampler_for_cb = std::sync::Arc::clone(&output_resampler);
+    let on_audio: Box<dyn FnMut(Vec<f32>) + Send> = Box::new(move |samples| {
+        let mut samples = samples;
+        // Resample if needed. We pad/truncate the input to match
+        // `output_chunk_in`; piper hands us variable-size chunks per
+        // phrase, so we slice them.
+        if need_output_resample {
+            let mut guard = output_resampler_for_cb.lock().unwrap();
+            if let Some(resampler) = guard.as_mut() {
+                let mut out_buf: Vec<f32> = Vec::with_capacity(samples.len() * 2);
+                let chunks = samples.chunks(output_chunk_in);
+                for chunk in chunks {
+                    if chunk.len() == output_chunk_in {
+                        match resampler.process(chunk) {
+                            Ok(o) => out_buf.extend(o),
+                            Err(e) => {
+                                tracing::warn!("output resampler error: {e}");
+                                return;
+                            }
+                        }
+                    } else {
+                        // Pad short tail with zeros to reach the fixed
+                        // input chunk size.
+                        let mut padded = chunk.to_vec();
+                        padded.resize(output_chunk_in, 0.0);
+                        match resampler.process(&padded) {
+                            Ok(o) => out_buf.extend(o),
+                            Err(e) => {
+                                tracing::warn!("output resampler tail error: {e}");
+                                return;
+                            }
+                        }
+                    }
+                }
+                samples = out_buf;
+            }
+        }
+        // Push to speaker ringbuf, retrying briefly on full-buffer.
+        let mut written = 0;
+        let mut retries = 0u32;
+        while written < samples.len() {
+            let n = spk_prod.push_slice(&samples[written..]);
+            written += n;
+            if written < samples.len() {
+                if retries > 200 {
+                    // ~1 s total — give up; the speaker is probably
+                    // wedged. Drop the rest.
+                    tracing::warn!("speaker ringbuf wedged; dropping {} samples", samples.len() - written);
+                    break;
+                }
+                retries += 1;
+                std::thread::sleep(std::time::Duration::from_millis(5));
+            }
+        }
+    });
+
+    // ── Wire DialogueManager via the Responder adapter ─────────────
+    let responder: Box<dyn Responder + '_> = Box::new(DialogueResponder { dialogue });
+
+    // ── Drive the loop ─────────────────────────────────────────────
+    let result = run_loop(backends, event_rx, responder, on_audio).await;
+
+    // ── Tell the audio thread to stop and wait for it ──────────────
+    stop_flag.store(true, std::sync::atomic::Ordering::SeqCst);
+    if let Err(panic) = audio_thread.join() {
+        tracing::warn!("audio thread panicked: {panic:?}");
+    }
+
+    // Keep cpal streams alive until here (drop now via end of scope).
+    drop(mic);
+    drop(spk);
+
+    let transcripts = result?;
+    if cfg.verbose {
+        eprintln!(
+            "[speech] session ended after {} turn(s)",
+            transcripts.len()
+        );
+    }
+    Ok(())
+}
+
+/// Stub implementation when the `speech` feature is disabled. Returns
+/// an error so the binary fails fast if `--speech` is somehow set
+/// without the feature.
+#[cfg(not(feature = "speech"))]
+pub async fn run<'a>(
+    _cfg: SpeechLoopConfig<'_>,
+    _dialogue: &mut primer_pedagogy::DialogueManager<'a>,
+) -> Result<()> {
     Err(primer_core::error::PrimerError::Speech(
-        "speech_loop::run not yet wired (see Task 21)".into(),
+        "primer-cli was built without the `speech` feature".into(),
     ))
+}
+
+/// Body of the audio capture thread.
+///
+/// Pulls mic samples from `mic_cons`, resamples to the VAD rate when
+/// needed, runs the VAD on fixed-size chunks, and drives the per-
+/// utterance whisper session: open on `SpeechStart`, push every chunk
+/// while in speech, finalize on `SpeechEnd` and SEND the transcript on
+/// `transcript_tx` BEFORE forwarding the `SpeechEnd` event on
+/// `event_tx`. That ordering guarantees `ChannelSttSession::finalize`
+/// (called by `run_loop` after seeing the event) finds a transcript.
+///
+/// Polling cadence: a 5 ms sleep between empty mic-buffer reads. cpal's
+/// callback fires every few ms, so this stays well within real-time
+/// tolerances. A `tokio::Notify` would be marginally better but a
+/// 5 ms idle sleep is invisible to humans.
+#[cfg(feature = "speech")]
+#[allow(clippy::too_many_arguments)]
+fn run_audio_thread(
+    mut mic_cons: ringbuf::HeapCons<f32>,
+    mut input_resampler: Option<primer_speech::Resampler>,
+    in_chunk_samples: usize,
+    vad_chunk_samples: usize,
+    vad: &mut primer_speech::SileroVad,
+    whisper: std::sync::Arc<primer_speech::WhisperStt>,
+    event_tx: tokio::sync::mpsc::UnboundedSender<primer_core::speech::VadEvent>,
+    transcript_tx: std::sync::mpsc::Sender<String>,
+    stop_flag: std::sync::Arc<std::sync::atomic::AtomicBool>,
+) -> Result<()> {
+    use primer_core::speech::{StreamingSpeechToText, TranscriptionSession, VadEvent};
+    use ringbuf::traits::Consumer as _;
+
+    let mut raw_buf: Vec<f32> = Vec::with_capacity(in_chunk_samples * 2);
+    let mut vad_in_buf: Vec<f32> = Vec::with_capacity(vad_chunk_samples * 2);
+    // The active whisper session, if we're in speech.
+    let mut active_session: Option<Box<dyn TranscriptionSession>> = None;
+
+    loop {
+        if stop_flag.load(std::sync::atomic::Ordering::SeqCst) {
+            // Drain whisper if mid-utterance.
+            if let Some(s) = active_session.take() {
+                let _ = s.finalize();
+            }
+            return Ok(());
+        }
+
+        // Drain available samples from the mic ringbuf.
+        let mut produced_any = false;
+        while let Some(s) = mic_cons.try_pop() {
+            raw_buf.push(s);
+            produced_any = true;
+            if raw_buf.len() >= 8192 {
+                // Hard cap: don't let the buffer balloon if we're
+                // resampling unevenly.
+                break;
+            }
+        }
+        if !produced_any {
+            std::thread::sleep(std::time::Duration::from_millis(5));
+            continue;
+        }
+
+        // Convert raw_buf into VAD-rate chunks.
+        if let Some(resampler) = input_resampler.as_mut() {
+            // Process exactly `in_chunk_samples`-sized blocks.
+            let usable = (raw_buf.len() / in_chunk_samples) * in_chunk_samples;
+            let mut consumed = 0;
+            while consumed + in_chunk_samples <= usable {
+                let block = &raw_buf[consumed..consumed + in_chunk_samples];
+                match resampler.process(block) {
+                    Ok(out) => vad_in_buf.extend(out),
+                    Err(e) => {
+                        tracing::warn!("input resampler error: {e}");
+                        // Skip the block.
+                    }
+                }
+                consumed += in_chunk_samples;
+            }
+            // Drop consumed samples from raw_buf.
+            raw_buf.drain(..consumed);
+        } else {
+            // Native rate already matches VAD rate.
+            vad_in_buf.extend(raw_buf.drain(..));
+        }
+
+        // Process VAD chunks while we have enough samples.
+        while vad_in_buf.len() >= vad_chunk_samples {
+            let chunk: Vec<f32> = vad_in_buf.drain(..vad_chunk_samples).collect();
+            // Push into whisper if we have an active session.
+            if let Some(session) = active_session.as_mut() {
+                if let Err(e) = session.push_audio(&chunk) {
+                    tracing::warn!("whisper push_audio: {e}");
+                }
+            }
+            let frame = match vad.process_chunk(&chunk) {
+                Ok(f) => f,
+                Err(e) => {
+                    tracing::warn!("vad process_chunk: {e}");
+                    continue;
+                }
+            };
+            match frame.event {
+                VadEvent::SpeechStart => {
+                    // Open a fresh whisper session if one isn't already open.
+                    if active_session.is_none() {
+                        match whisper.open_session() {
+                            Ok(s) => active_session = Some(s),
+                            Err(e) => {
+                                tracing::warn!("whisper open_session: {e}");
+                            }
+                        }
+                    }
+                    if event_tx.send(VadEvent::SpeechStart).is_err() {
+                        // run_loop has dropped; exit thread.
+                        return Ok(());
+                    }
+                }
+                VadEvent::SpeechEnd => {
+                    // Finalize whisper, send transcript BEFORE the event.
+                    let segments = match active_session.take() {
+                        Some(s) => match s.finalize() {
+                            Ok(segs) => segs,
+                            Err(e) => {
+                                tracing::warn!("whisper finalize: {e}");
+                                Vec::new()
+                            }
+                        },
+                        None => Vec::new(),
+                    };
+                    let text: String = segments
+                        .iter()
+                        .map(|s| s.text.as_str())
+                        .collect::<Vec<_>>()
+                        .join("")
+                        .trim()
+                        .to_string();
+                    if transcript_tx.send(text).is_err() {
+                        return Ok(());
+                    }
+                    if event_tx.send(VadEvent::SpeechEnd).is_err() {
+                        return Ok(());
+                    }
+                }
+                VadEvent::None => {}
+            }
+        }
+    }
 }
 
 #[cfg(test)]
