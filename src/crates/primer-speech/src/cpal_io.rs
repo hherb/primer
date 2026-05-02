@@ -59,6 +59,19 @@ impl Resampler {
             .next()
             .ok_or_else(|| PrimerError::Speech("rubato returned no channels".into()))
     }
+
+    /// Drain rubato's internal latency without feeding more input.
+    /// Call once at end of stream; the held-back samples (typically
+    /// `output_delay()` worth) come out as the final block.
+    /// Without this, the last ~50 ms of input audio is silently
+    /// retained inside the FFT machinery and never plays.
+    pub fn flush(&mut self) -> Result<Vec<f32>> {
+        let out = self
+            .inner
+            .process_partial::<&[f32]>(None, None)
+            .map_err(|e| PrimerError::Speech(format!("rubato flush: {e}")))?;
+        Ok(out.into_iter().next().unwrap_or_default())
+    }
 }
 
 use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};

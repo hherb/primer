@@ -310,13 +310,14 @@ pub async fn run_loop<'r>(
             on_committed_audio(Vec::new());
             // Wait for the speaker to drain. cpal pulls at hardware rate;
             // the audio we just queued has duration = samples / tts_rate.
-            // Add a 200 ms safety margin for output-resampler latency,
-            // ringbuf drain, and any per-phrase synthesis stutter so the
-            // tail of the Primer's voice doesn't reach the mic before we
-            // un-gate.
+            // Add a 400 ms safety margin to cover: cpal output buffer
+            // latency, the resampler.flush()'s output_delay samples (not
+            // counted in total_samples_at_tts_rate), and any per-phrase
+            // synthesis stutter — so the tail of the Primer's voice
+            // doesn't reach the mic before we un-gate.
             if let Some(flag) = is_speaking.as_ref() {
                 let duration_secs =
-                    total_samples_at_tts_rate as f32 / tts_rate as f32 + 0.2;
+                    total_samples_at_tts_rate as f32 / tts_rate as f32 + 0.4;
                 tokio::time::sleep(std::time::Duration::from_secs_f32(duration_secs))
                     .await;
                 flag.store(false, std::sync::atomic::Ordering::SeqCst);
@@ -680,13 +681,21 @@ pub async fn run<'a>(
                     i += output_chunk_in;
                 }
                 let tail: Vec<f32> = combined[usable..].to_vec();
-                if is_flush && !tail.is_empty() {
-                    // End of turn: zero-pad the leftover to chunk_in
-                    // and process. The zero-pad lands on silence at the
-                    // very tail of the response, so it's inaudible.
-                    let mut padded = tail;
-                    padded.resize(output_chunk_in, 0.0);
-                    if let Ok(o) = resampler.process(&padded) {
+                if is_flush {
+                    // End of turn: process any leftover (zero-padded to
+                    // chunk_in) AND drain rubato's internal latency via
+                    // process_partial. The zero-pad lands on trailing
+                    // silence; the partial-drain releases ~output_delay
+                    // samples that were being held inside the FFT
+                    // machinery for the next chunk that will never come.
+                    if !tail.is_empty() {
+                        let mut padded = tail;
+                        padded.resize(output_chunk_in, 0.0);
+                        if let Ok(o) = resampler.process(&padded) {
+                            out_buf.extend(o);
+                        }
+                    }
+                    if let Ok(o) = resampler.flush() {
                         out_buf.extend(o);
                     }
                     output_leftover = Vec::new();
