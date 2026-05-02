@@ -1498,6 +1498,7 @@ dependencies = [
  "chrono",
  "primer-core",
  "rusqlite",
+ "serde_json",
  "thiserror 2.0.18",
  "tokio",
  "tracing",

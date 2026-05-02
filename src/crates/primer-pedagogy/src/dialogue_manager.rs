@@ -32,7 +32,7 @@ use primer_core::error::{PrimerError, Result};
 use primer_core::inference::{GenerationParams, InferenceBackend};
 use primer_core::knowledge::{KnowledgeBase, RetrievalParams};
 use primer_core::learner::LearnerModel;
-use primer_core::storage::SessionStore;
+use primer_core::storage::{LearnerStore, SessionStore};
 use tokio::task::JoinHandle;
 
 use crate::prompt_builder;
@@ -60,6 +60,10 @@ pub struct DialogueManager<'a> {
     /// every `respond_to_streaming` call (success or mid-stream error).
     /// Arc so the classifier task can capture it across turn boundaries.
     storage: Option<Arc<dyn SessionStore>>,
+    /// Optional learner-model persistence. When set, the learner model is
+    /// saved at the same four points as the session (open, resume, per-turn,
+    /// close). Save failures are logged, not propagated.
+    learner_store: Option<Arc<dyn LearnerStore>>,
     /// Engagement classifier — called after each Primer response to assess
     /// the child's engagement state. Arc for the same spawn-capture reason.
     classifier: Arc<dyn EngagementClassifier>,
@@ -108,6 +112,7 @@ impl<'a> DialogueManager<'a> {
         inference: &'a dyn InferenceBackend,
         knowledge: &'a dyn KnowledgeBase,
         storage: Option<Arc<dyn SessionStore>>,
+        learner_store: Option<Arc<dyn LearnerStore>>,
         classifier: Arc<dyn EngagementClassifier>,
         classifier_settings: ClassifierSettings,
         config: PedagogyConfig,
@@ -119,6 +124,7 @@ impl<'a> DialogueManager<'a> {
             inference,
             knowledge,
             storage,
+            learner_store,
             classifier,
             classifier_settings,
             classify_task: None,
@@ -143,6 +149,11 @@ impl<'a> DialogueManager<'a> {
         if let Some(ref store) = self.storage {
             if let Err(e) = store.save_session(&self.session).await {
                 tracing::warn!("session save failed: {e}");
+            }
+        }
+        if let Some(ref ls) = self.learner_store {
+            if let Err(e) = ls.save_learner(&self.learner).await {
+                tracing::warn!("learner save failed (open_session): {e}");
             }
         }
 
@@ -191,6 +202,11 @@ impl<'a> DialogueManager<'a> {
         if let Some(ref store) = self.storage {
             if let Err(e) = store.save_session(&self.session).await {
                 tracing::warn!("session save failed during resume: {e}");
+            }
+        }
+        if let Some(ref ls) = self.learner_store {
+            if let Err(e) = ls.save_learner(&self.learner).await {
+                tracing::warn!("learner save failed (resume_session): {e}");
             }
         }
         Ok(())
@@ -302,11 +318,16 @@ impl<'a> DialogueManager<'a> {
             self.refresh_summary_if_due().await;
         }
 
-        // 5. Save the session if a store is configured. Runs on both Ok
-        //    and Err paths. Save failures are logged, not propagated.
+        // 5. Save the session and learner if stores are configured. Runs on both
+        //    Ok and Err paths. Save failures are logged, not propagated.
         if let Some(ref store) = self.storage {
             if let Err(e) = store.save_session(&self.session).await {
                 tracing::warn!("session save failed: {e}");
+            }
+        }
+        if let Some(ref ls) = self.learner_store {
+            if let Err(e) = ls.save_learner(&self.learner).await {
+                tracing::warn!("learner save failed (per-turn): {e}");
             }
         }
 
@@ -428,6 +449,11 @@ impl<'a> DialogueManager<'a> {
         if let Some(ref store) = self.storage {
             if let Err(e) = store.save_session(&self.session).await {
                 tracing::warn!("session save failed during close: {e}");
+            }
+        }
+        if let Some(ref ls) = self.learner_store {
+            if let Err(e) = ls.save_learner(&self.learner).await {
+                tracing::warn!("learner save failed (close_session): {e}");
             }
         }
     }
@@ -775,6 +801,7 @@ mod tests {
             &backend,
             &knowledge,
             None,
+            None,
             stub_classifier(),
             ClassifierSettings::default(),
             PedagogyConfig::default(),
@@ -806,6 +833,7 @@ mod tests {
             &backend,
             &knowledge,
             None,
+            None,
             stub_classifier(),
             ClassifierSettings::default(),
             PedagogyConfig::default(),
@@ -827,6 +855,7 @@ mod tests {
             test_learner(),
             &backend,
             &knowledge,
+            None,
             None,
             stub_classifier(),
             ClassifierSettings::default(),
@@ -850,6 +879,7 @@ mod tests {
             test_learner(),
             &backend,
             &knowledge,
+            None,
             None,
             stub_classifier(),
             ClassifierSettings::default(),
@@ -877,6 +907,7 @@ mod tests {
             &backend,
             &knowledge,
             None,
+            None,
             stub_classifier(),
             ClassifierSettings::default(),
             PedagogyConfig::default(),
@@ -902,6 +933,7 @@ mod tests {
             &backend,
             &knowledge,
             None,
+            None,
             stub_classifier(),
             ClassifierSettings::default(),
             PedagogyConfig::default(),
@@ -921,6 +953,7 @@ mod tests {
             &backend,
             &knowledge,
             Some(Arc::clone(&store) as Arc<dyn SessionStore>),
+            None,
             stub_classifier(),
             ClassifierSettings::default(),
             PedagogyConfig::default(),
@@ -947,6 +980,7 @@ mod tests {
             &backend,
             &knowledge,
             Some(Arc::clone(&store) as Arc<dyn SessionStore>),
+            None,
             stub_classifier(),
             ClassifierSettings::default(),
             PedagogyConfig::default(),
@@ -973,6 +1007,7 @@ mod tests {
             &backend,
             &knowledge,
             Some(Arc::clone(&store) as Arc<dyn SessionStore>),
+            None,
             stub_classifier(),
             ClassifierSettings::default(),
             PedagogyConfig::default(),
@@ -999,6 +1034,7 @@ mod tests {
             &backend,
             &knowledge,
             Some(Arc::clone(&store) as Arc<dyn SessionStore>),
+            None,
             stub_classifier(),
             ClassifierSettings::default(),
             PedagogyConfig::default(),
@@ -1044,6 +1080,7 @@ mod tests {
             &backend,
             &knowledge,
             None,
+            None,
             stub_classifier(),
             ClassifierSettings::default(),
             PedagogyConfig::default(),
@@ -1068,6 +1105,7 @@ mod tests {
             &backend,
             &knowledge,
             Some(Arc::clone(&store) as Arc<dyn SessionStore>),
+            None,
             stub_classifier(),
             ClassifierSettings::default(),
             PedagogyConfig::default(),
@@ -1090,6 +1128,7 @@ mod tests {
             test_learner(),
             &backend,
             &knowledge,
+            None,
             None,
             stub_classifier(),
             ClassifierSettings::default(),
@@ -1117,6 +1156,7 @@ mod tests {
             test_learner(),
             &backend,
             &knowledge,
+            None,
             None,
             stub_classifier(),
             ClassifierSettings::default(),
@@ -1151,6 +1191,7 @@ mod tests {
             &backend,
             &knowledge,
             None,
+            None,
             stub_classifier(),
             ClassifierSettings::default(),
             PedagogyConfig::default(),
@@ -1174,6 +1215,7 @@ mod tests {
             test_learner(),
             &backend,
             &knowledge,
+            None,
             None,
             stub_classifier(),
             ClassifierSettings::default(),
@@ -1207,6 +1249,7 @@ mod tests {
             &backend,
             &knowledge,
             None,
+            None,
             stub_classifier(),
             ClassifierSettings::default(),
             PedagogyConfig::default(),
@@ -1229,6 +1272,7 @@ mod tests {
             test_learner(),
             &backend,
             &knowledge,
+            None,
             None,
             stub_classifier(),
             ClassifierSettings::default(),
@@ -1390,6 +1434,7 @@ mod tests {
             &backend,
             &knowledge,
             Some(Arc::clone(&storage) as Arc<dyn SessionStore>),
+            None,
             Arc::clone(&classifier),
             settings,
             PedagogyConfig::default(),
@@ -1452,6 +1497,7 @@ mod tests {
             &backend,
             &knowledge,
             Some(Arc::clone(&storage) as Arc<dyn SessionStore>),
+            None,
             Arc::clone(&classifier),
             settings,
             PedagogyConfig::default(),
@@ -1521,6 +1567,7 @@ mod tests {
             test_learner(),
             &backend,
             &knowledge,
+            None,
             None,
             Arc::new(SlowClassifier),
             settings,
@@ -1652,6 +1699,7 @@ mod tests {
             &backend,
             &knowledge,
             Some(Arc::clone(&storage) as Arc<dyn SessionStore>),
+            None,
             Arc::clone(&classifier),
             settings,
             PedagogyConfig::default(),
@@ -1738,6 +1786,109 @@ mod tests {
             4,
             "all four turn classifications must be persisted; got {}",
             recent.len()
+        );
+    }
+
+    #[tokio::test]
+    async fn end_to_end_save_learner_after_open_and_one_turn() {
+        // Build a manager with both Some(SessionStore) and Some(LearnerStore)
+        // backed by the same SqliteSessionStore (which implements both traits).
+        // Run open_session + one turn and verify the learners row was upserted.
+        use primer_core::storage::LearnerStore;
+        use primer_storage::SqliteSessionStore;
+
+        let store =
+            Arc::new(SqliteSessionStore::open(std::path::Path::new(":memory:")).unwrap());
+
+        // Pre-save the learner so the DB has a row to UPDATE rather than INSERT.
+        let learner = test_learner();
+        store.save_learner(&learner).await.unwrap();
+
+        let backend = ScriptedBackend::new(vec![
+            Ok(chunk("Hello!", false)),
+            Ok(chunk("", true)),
+        ]);
+        let knowledge = EmptyKnowledge;
+
+        let mut dm = DialogueManager::new(
+            learner,
+            &backend,
+            &knowledge,
+            Some(Arc::clone(&store) as Arc<dyn SessionStore>),
+            Some(Arc::clone(&store) as Arc<dyn LearnerStore>),
+            stub_classifier(),
+            ClassifierSettings::default(),
+            PedagogyConfig::default(),
+        );
+
+        let _greeting = dm.open_session().await.unwrap();
+        let _reply = dm.respond_to("hello").await.unwrap();
+
+        // load_learner should return the persisted row.
+        let loaded = store.load_learner().await.unwrap().expect("learner row must exist");
+        assert_eq!(
+            loaded.profile.id, dm.learner.profile.id,
+            "persisted learner id must match"
+        );
+    }
+
+    #[tokio::test]
+    async fn divergence_bug_closed_via_cli_startup_flow() {
+        // Fixture: a fresh DB seeded with a session under UUID U1, no
+        // learners row yet (simulates the v3 → v4 upgrade-on-first-open).
+        // Then run the CLI's first-run startup flow:
+        //   load_learner() == None
+        //   most_recent_session_learner_id() == Some(U1)
+        //   mint LearnerModel with id=U1, save_learner(...)
+        // Assert the resulting LearnerModel.profile.id == U1.
+        use primer_core::conversation::Session as ConversationSession;
+        use primer_core::storage::{LearnerStore, SessionStore};
+        use primer_storage::SqliteSessionStore;
+
+        let store =
+            Arc::new(SqliteSessionStore::open(std::path::Path::new(":memory:")).unwrap());
+        let u1 = uuid::Uuid::new_v4();
+        let s = ConversationSession::new(u1);
+        store.save_session(&s).await.unwrap();
+
+        // Simulate the CLI startup flow.
+        let load_result = store.load_learner().await.unwrap();
+        assert!(load_result.is_none(), "no learner row yet");
+
+        let adopted = store
+            .most_recent_session_learner_id()
+            .await
+            .unwrap()
+            .expect("session exists");
+        assert_eq!(adopted, u1);
+
+        let mut adopted_learner = test_learner();
+        adopted_learner.profile.id = adopted;
+        store.save_learner(&adopted_learner).await.unwrap();
+
+        // Construct a DialogueManager with the adopted learner.
+        let backend = ScriptedBackend::new(vec![Ok(chunk("", true))]);
+        let knowledge = EmptyKnowledge;
+        let mut dm = DialogueManager::new(
+            adopted_learner,
+            &backend,
+            &knowledge,
+            Some(Arc::clone(&store) as Arc<dyn SessionStore>),
+            Some(Arc::clone(&store) as Arc<dyn LearnerStore>),
+            stub_classifier(),
+            ClassifierSettings::default(),
+            PedagogyConfig::default(),
+        );
+
+        let _ = dm.open_session().await.unwrap();
+
+        assert_eq!(
+            dm.session.learner_id, dm.learner.profile.id,
+            "session learner_id must match adopted learner id"
+        );
+        assert_eq!(
+            dm.session.learner_id, u1,
+            "adopted learner id must be the original session's learner_id"
         );
     }
 }

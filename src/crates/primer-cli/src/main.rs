@@ -503,6 +503,7 @@ async fn main() -> anyhow::Result<()> {
         backend.as_ref(),
         &knowledge as &dyn KnowledgeBase,
         Some(Arc::clone(&session_store)),
+        None, // learner_store — wired in next commit
         classifier,
         classifier_settings,
         pedagogy_config,
