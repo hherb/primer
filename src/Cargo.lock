@@ -1435,8 +1435,6 @@ checksum = "a89322df9ebe1c1578d689c92318e070967d1042b512afbe49518723f4e6d5cd"
 [[package]]
 name = "piper-rs"
 version = "0.1.9"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "59ae201fce47228d58b8ff1afa9a70015da6ead273da796c32808900a36988e2"
 dependencies = [
  "espeak-rs",
  "flume",
