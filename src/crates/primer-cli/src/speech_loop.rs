@@ -79,16 +79,76 @@ pub trait Responder: Send {
 /// The `'r` lifetime on the boxed responder lets `DialogueResponder`
 /// (Task 21) borrow `&mut DialogueManager` rather than own it.
 pub async fn run_loop<'r>(
-    backends: LoopBackends,
+    mut backends: LoopBackends,
     mut events: tokio::sync::mpsc::UnboundedReceiver<primer_core::speech::VadEvent>,
     mut responder: Box<dyn Responder + 'r>,
-    on_committed_audio: Box<dyn FnMut(Vec<f32>) + Send>,
+    mut on_committed_audio: Box<dyn FnMut(Vec<f32>) + Send>,
 ) -> Result<Vec<String>> {
-    // Stub — implemented across Tasks 14, 16, 17.
-    let _ = (&backends, &mut events, &mut responder, &on_committed_audio);
-    Err(primer_core::error::PrimerError::Speech(
-        "run_loop not yet implemented".into(),
-    ))
+    use primer_core::speech::VadEvent;
+
+    let mut transcripts: Vec<String> = Vec::new();
+
+    'outer: loop {
+        // ── LISTEN ────────────────────────────────────────────────────
+        // Open a fresh whisper session for this utterance. We accumulate
+        // pseudo-audio (real audio comes from the capture task in
+        // production; mocks short-circuit on finalize) and watch for
+        // SpeechEnd.
+        let mut stt_session = backends.stt.open_session()?;
+        let mut in_speech = false;
+        loop {
+            let Some(event) = events.recv().await else {
+                // Event channel closed: caller wants us to stop.
+                break 'outer;
+            };
+            match event {
+                VadEvent::SpeechStart => {
+                    in_speech = true;
+                }
+                VadEvent::SpeechEnd if in_speech => {
+                    break;
+                }
+                _ => {}
+            }
+        }
+
+        // Finalize whisper, build full transcript text.
+        let segments = stt_session.finalize()?;
+        let transcript: String = segments.iter().map(|s| s.text.as_str()).collect::<Vec<_>>().join("");
+        let transcript = transcript.trim().to_string();
+
+        if transcript.is_empty() {
+            // Empty utterance — VAD blip or whisper noise. Loop back.
+            continue;
+        }
+
+        if is_quit_phrase(&transcript) {
+            transcripts.push(transcript);
+            break 'outer;
+        }
+
+        transcripts.push(transcript.clone());
+
+        // ── LATENT_THINK + SPEAK (Tasks 16/17) — placeholder for now ──
+        // We just call the responder synchronously and pretend audio
+        // committed. Cancellation arms come in Task 16.
+        let mut accumulated = String::new();
+        let on_chunk = Box::new(|chunk: &str| accumulated.push_str(chunk));
+        responder.respond(&transcript, on_chunk).await?;
+        if !accumulated.is_empty() {
+            // Synthesise: call the TTS session once with the full reply.
+            let voice = primer_core::speech::VoiceProfile::default();
+            let mut session = backends.tts.open_session(&voice)?;
+            for chunk in session.push_text(&accumulated)? {
+                on_committed_audio(chunk.samples);
+            }
+            for chunk in session.finalize()? {
+                on_committed_audio(chunk.samples);
+            }
+        }
+    }
+
+    Ok(transcripts)
 }
 
 /// Entry point: run the voice REPL until Ctrl+C or a quit phrase is heard.
