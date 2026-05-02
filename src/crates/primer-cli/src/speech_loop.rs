@@ -52,6 +52,11 @@ pub struct LoopBackends {
     pub vad: Box<dyn VoiceActivityDetector>,
     pub stt: Arc<dyn StreamingSpeechToText>,
     pub tts: Arc<dyn StreamingTextToSpeech>,
+    /// Voice profile passed to `tts.open_session(...)`. Production wires
+    /// the model_id from `--voice` (e.g. `en_GB-alba-medium`); tests can
+    /// use `VoiceProfile::default()`. Piper rejects mismatches, so this
+    /// must align with the loaded voice ONNX file stem.
+    pub voice: primer_core::speech::VoiceProfile,
 }
 
 /// One commit cycle: receives transcripts on `transcript_rx`, runs the
@@ -246,8 +251,7 @@ pub async fn run_loop<'r>(
         // ── SPEAK ─────────────────────────────────────────────────────
         if !accumulated.is_empty() {
             println!("[primer] {}", accumulated);
-            let voice = primer_core::speech::VoiceProfile::default();
-            let mut session = backends.tts.open_session(&voice)?;
+            let mut session = backends.tts.open_session(&backends.voice)?;
             for chunk in session.push_text(&accumulated)? {
                 on_committed_audio(chunk.samples);
             }
@@ -529,6 +533,10 @@ pub async fn run<'a>(
             rx: std::sync::Arc::new(std::sync::Mutex::new(transcript_rx)),
         }),
         tts: std::sync::Arc::clone(&tts),
+        voice: primer_core::speech::VoiceProfile {
+            model_id: cfg.voice_id.to_string(),
+            ..primer_core::speech::VoiceProfile::default()
+        },
     };
 
     // ── on_audio callback: push synth chunks to the speaker ─────────
@@ -968,6 +976,7 @@ mod mocks {
             ])),
             stt: Arc::new(MockStreamingStt::new("hello primer")),
             tts: Arc::new(MockStreamingTts::new(64)),
+            voice: primer_core::speech::VoiceProfile::default(),
         };
 
         let (event_tx, event_rx) = tokio::sync::mpsc::unbounded_channel();
@@ -1030,6 +1039,7 @@ mod mocks {
             ])),
             stt: Arc::new(MockStreamingStt::new("goodbye")),
             tts: Arc::new(MockStreamingTts::new(64)),
+            voice: primer_core::speech::VoiceProfile::default(),
         };
 
         let (event_tx, event_rx) = tokio::sync::mpsc::unbounded_channel();
@@ -1089,6 +1099,7 @@ mod mocks {
             vad: Box::new(MockVad::new(vec![])), // unused — events come from the channel
             stt: Arc::new(MockStreamingStt::new("why does the sky look blue")),
             tts: Arc::new(MockStreamingTts::new(64)),
+            voice: primer_core::speech::VoiceProfile::default(),
         };
 
         let (event_tx, event_rx) = tokio::sync::mpsc::unbounded_channel();
@@ -1171,6 +1182,7 @@ mod mocks {
             vad: Box::new(MockVad::new(vec![])),
             stt: Arc::new(MockStreamingStt::new("hi primer")),
             tts: Arc::new(MockStreamingTts::new(64)),
+            voice: primer_core::speech::VoiceProfile::default(),
         };
 
         let (event_tx, event_rx) = tokio::sync::mpsc::unbounded_channel();
