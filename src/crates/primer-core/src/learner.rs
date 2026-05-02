@@ -61,6 +61,17 @@ pub enum UnderstandingDepth {
     Analysis,
 }
 
+impl UnderstandingDepth {
+    pub const ALL: &'static [Self] = &[
+        Self::Unknown,
+        Self::Aware,
+        Self::Recall,
+        Self::Comprehension,
+        Self::Application,
+        Self::Analysis,
+    ];
+}
+
 /// A node in the learner's concept graph.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ConceptState {
@@ -193,6 +204,17 @@ mod tests {
         assert_eq!(EngagementState::ALL.len(), 6);
         assert!(EngagementState::ALL.contains(&EngagementState::FrustratedStuck));
         assert!(EngagementState::ALL.contains(&EngagementState::FrustratedTrying));
+    }
+
+    #[test]
+    fn understanding_depth_all_lists_every_variant() {
+        assert_eq!(UnderstandingDepth::ALL.len(), 6);
+        assert!(UnderstandingDepth::ALL.contains(&UnderstandingDepth::Unknown));
+        assert!(UnderstandingDepth::ALL.contains(&UnderstandingDepth::Aware));
+        assert!(UnderstandingDepth::ALL.contains(&UnderstandingDepth::Recall));
+        assert!(UnderstandingDepth::ALL.contains(&UnderstandingDepth::Comprehension));
+        assert!(UnderstandingDepth::ALL.contains(&UnderstandingDepth::Application));
+        assert!(UnderstandingDepth::ALL.contains(&UnderstandingDepth::Analysis));
     }
 }
 
