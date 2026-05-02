@@ -28,3 +28,14 @@ serde.workspace = true
 serde_json.workspace = true
 toml.workspace = true
 anyhow.workspace = true
+
+[features]
+# Voice REPL via --speech. Pulls every speech backend feature so the
+# state machine can compose VAD → STT → DialogueManager → TTS → cpal
+# without further conditional compilation in the binary.
+speech = [
+    "primer-speech/silero",
+    "primer-speech/whisper",
+    "primer-speech/piper",
+    "primer-speech/cpal",
+]
