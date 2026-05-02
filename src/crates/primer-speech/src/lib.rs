@@ -25,3 +25,6 @@ pub use silero::{SileroVad, SileroVadParams};
 pub mod whisper;
 #[cfg(feature = "whisper")]
 pub use whisper::WhisperStt;
+
+#[cfg(feature = "piper")]
+pub mod piper_config;

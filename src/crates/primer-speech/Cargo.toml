@@ -38,6 +38,8 @@ serde_json = { workspace = true, optional = true }
 # default build dep tree.
 hound = "3"
 clap = { workspace = true }
+# Temp files used by the piper_config unit tests (under --features piper).
+tempfile = "3"
 
 [features]
 default = []
