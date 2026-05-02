@@ -190,6 +190,59 @@ pub trait TextToSpeech: Named + Send + Sync {
     async fn synthesize(&self, text: &str, voice: &VoiceProfile) -> Result<AudioBuffer>;
 }
 
+/// One PCM chunk emitted by a [`SynthesisSession`] during streaming.
+///
+/// Emitted as soon as the underlying model has enough context to commit
+/// audio (typically once a phrase boundary is reached). Concatenate the
+/// `samples` of every chunk in order to reconstruct the full utterance.
+/// `sample_rate` is carried per-chunk even though every chunk in one
+/// session shares one — keeps this type usable by audio sinks that don't
+/// hold a reference to the originating backend.
+#[derive(Debug, Clone)]
+pub struct AudioChunk {
+    /// PCM samples, f32, mono.
+    pub samples: Vec<f32>,
+    /// Sample rate in Hz.
+    pub sample_rate: u32,
+}
+
+/// A single streaming-synthesis session.
+///
+/// Created by [`StreamingTextToSpeech::open_session`]. Push partial text
+/// from the LLM via [`Self::push_text`]; each push may emit zero or more
+/// chunks as soon as the synthesiser has enough context. Call
+/// [`Self::finalize`] when the LLM stream has ended to drain the trailing
+/// buffer. `Send` but not `Sync`: each Primer turn owns its own session.
+pub trait SynthesisSession: Send {
+    /// Push text; receive any audio chunks that became available as a
+    /// result. May return an empty Vec when the buffer doesn't yet
+    /// contain a complete phrase.
+    fn push_text(&mut self, text: &str) -> Result<Vec<AudioChunk>>;
+
+    /// Drain remaining buffered text and finalize. Consumes the session.
+    fn finalize(self: Box<Self>) -> Result<Vec<AudioChunk>>;
+}
+
+/// Streaming text-to-speech backend.
+///
+/// Open one [`SynthesisSession`] per Primer turn. The backend itself is
+/// shareable across sessions (`Send + Sync`); per-session state lives
+/// inside the session handle. A backend may also implement the one-shot
+/// [`TextToSpeech`] trait — `name()` lives on the [`Named`] super-trait
+/// so it's only written once per backend struct.
+pub trait StreamingTextToSpeech: Named + Send + Sync {
+    /// Sample rate of audio chunks this backend will emit (Hz). Carried
+    /// on each [`AudioChunk`] as well so downstream sinks don't need to
+    /// hold a reference to this backend.
+    fn sample_rate(&self) -> u32;
+
+    /// Open a fresh synthesis session for the given voice profile.
+    ///
+    /// May error if the backend cannot serve `voice` (for example, the
+    /// loaded model has a different `model_id` than the requested voice).
+    fn open_session(&self, voice: &VoiceProfile) -> Result<Box<dyn SynthesisSession>>;
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -399,5 +452,71 @@ mod tests {
 
         let tts: Box<dyn TextToSpeech> = Box::new(CannedTts);
         assert_eq!(Named::name(&*tts), "canned-tts");
+    }
+
+    /// Mock streaming-TTS that emits one canned `AudioChunk` per push.
+    struct CannedStreamingTts;
+
+    /// Sample rate used by the canned mock — matches a Piper-class voice
+    /// so the value isn't a magic literal in the canary test.
+    const CANNED_TTS_SAMPLE_RATE: u32 = 22_050;
+    /// Each push from the canned mock yields this many samples.
+    const CANNED_TTS_SAMPLES_PER_CHUNK: usize = 64;
+
+    struct CannedSynthesisSession {
+        scripted: std::vec::IntoIter<&'static str>,
+        sample_rate: u32,
+    }
+
+    impl SynthesisSession for CannedSynthesisSession {
+        fn push_text(&mut self, _text: &str) -> Result<Vec<AudioChunk>> {
+            match self.scripted.next() {
+                Some(_) => Ok(vec![AudioChunk {
+                    samples: vec![0.0; CANNED_TTS_SAMPLES_PER_CHUNK],
+                    sample_rate: self.sample_rate,
+                }]),
+                None => Ok(vec![]),
+            }
+        }
+        fn finalize(self: Box<Self>) -> Result<Vec<AudioChunk>> {
+            Ok(vec![])
+        }
+    }
+
+    impl Named for CannedStreamingTts {
+        fn name(&self) -> &str {
+            "canned-stream-tts"
+        }
+    }
+
+    impl StreamingTextToSpeech for CannedStreamingTts {
+        fn sample_rate(&self) -> u32 {
+            CANNED_TTS_SAMPLE_RATE
+        }
+        fn open_session(&self, _voice: &VoiceProfile) -> Result<Box<dyn SynthesisSession>> {
+            Ok(Box::new(CannedSynthesisSession {
+                scripted: vec!["alpha", "beta"].into_iter(),
+                sample_rate: CANNED_TTS_SAMPLE_RATE,
+            }))
+        }
+    }
+
+    #[test]
+    fn streaming_tts_session_yields_chunks_and_finalizes() {
+        let tts: Box<dyn StreamingTextToSpeech> = Box::new(CannedStreamingTts);
+        assert_eq!(Named::name(&*tts), "canned-stream-tts");
+        assert_eq!(tts.sample_rate(), CANNED_TTS_SAMPLE_RATE);
+        let voice = VoiceProfile::default();
+        let mut session = tts.open_session(&voice).unwrap();
+        let c0 = session.push_text("hello.").unwrap();
+        let c1 = session.push_text(" world.").unwrap();
+        let c2 = session.push_text("").unwrap();
+        assert_eq!(c0.len(), 1);
+        assert_eq!(c0[0].samples.len(), CANNED_TTS_SAMPLES_PER_CHUNK);
+        assert_eq!(c0[0].sample_rate, CANNED_TTS_SAMPLE_RATE);
+        assert_eq!(c1.len(), 1);
+        assert!(c2.is_empty());
+        let trailing = session.finalize().unwrap();
+        assert!(trailing.is_empty());
     }
 }
