@@ -140,10 +140,11 @@ pub async fn run_loop<'r>(
             tokio::pin!(llm_fut);
 
             // Wait for either: (a) llm done, (b) VAD SpeechStart (cancel).
-            // If the VAD event channel is already closed, we still need to
-            // complete the LLM call — channel closure only means no more
-            // new speech events, not that we should discard work in flight.
-            let cancelled = if events.is_closed() {
+            // If the VAD event channel is both closed AND drained, we can
+            // complete the LLM unconditionally — no more events will arrive.
+            // Note: is_closed() alone returns true even with buffered messages
+            // (when all senders are dropped), so we must also check is_empty().
+            let cancelled = if events.is_closed() && events.is_empty() {
                 // No more VAD events possible: complete the LLM unconditionally.
                 accumulated = llm_fut.await?;
                 false
@@ -522,6 +523,92 @@ mod mocks {
         let transcripts = result.expect("loop ok");
         assert_eq!(transcripts, vec!["goodbye".to_string()]);
         assert!(committed.lock().unwrap().is_empty(), "no audio for whitespace");
+    }
+
+    /// Test 2 — cancel on resumed speech: SpeechEnd, then SpeechStart
+    /// before LLM completes. The LLM is cancelled. When the next
+    /// SpeechEnd arrives, the responder is called again with the
+    /// concatenated transcript. Audio commits on the second attempt.
+    #[tokio::test]
+    async fn cancel_on_resumed_speech_retries_after_continuation() {
+        use primer_core::speech::VadEvent;
+
+        // The MockStreamingStt always finalizes the SAME canned text. To
+        // simulate "first attempt: 'why does'; second: 'why does the sky
+        // look blue'", we need a smarter mock — but for the unit test
+        // we accept that both attempts return the same canned text. The
+        // assertion is about cancellation, not transcript stitching.
+        let backends = super::LoopBackends {
+            vad: Box::new(MockVad::new(vec![])), // unused — events come from the channel
+            stt: Arc::new(MockStreamingStt::new("why does the sky look blue")),
+            tts: Arc::new(MockStreamingTts::new(64)),
+        };
+
+        let (event_tx, event_rx) = tokio::sync::mpsc::unbounded_channel();
+        // First SpeechStart → SpeechEnd: triggers LATENT_THINK.
+        event_tx.send(VadEvent::SpeechStart).unwrap();
+        event_tx.send(VadEvent::SpeechEnd).unwrap();
+        // Then SpeechStart mid-LATENT_THINK: triggers cancel.
+        event_tx.send(VadEvent::SpeechStart).unwrap();
+        // Then SpeechEnd: retry LATENT_THINK.
+        event_tx.send(VadEvent::SpeechEnd).unwrap();
+        drop(event_tx);
+
+        let call_count = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let cc_clone = Arc::clone(&call_count);
+        struct CountingResponder {
+            count: Arc<std::sync::atomic::AtomicUsize>,
+        }
+        impl super::Responder for CountingResponder {
+            fn respond<'a>(
+                &'a mut self,
+                _transcript: &'a str,
+                mut on_chunk: Box<dyn FnMut(&str) + Send + 'a>,
+            ) -> std::pin::Pin<Box<dyn std::future::Future<Output = primer_core::error::Result<String>> + Send + 'a>> {
+                let n = self.count.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                Box::pin(async move {
+                    if n == 0 {
+                        // First call: park forever so the cancel arm wins.
+                        std::future::pending::<()>().await;
+                        unreachable!()
+                    }
+                    // Second call: respond promptly.
+                    on_chunk("Because of Rayleigh scattering.");
+                    Ok("Because of Rayleigh scattering.".to_string())
+                })
+            }
+        }
+
+        let committed: Arc<Mutex<Vec<f32>>> = Arc::new(Mutex::new(Vec::new()));
+        let committed_clone = Arc::clone(&committed);
+        let on_audio: Box<dyn FnMut(Vec<f32>) + Send> = Box::new(move |samples| {
+            committed_clone.lock().unwrap().extend(samples);
+        });
+
+        let result = tokio::time::timeout(
+            std::time::Duration::from_secs(2),
+            super::run_loop(
+                backends,
+                event_rx,
+                Box::new(CountingResponder { count: cc_clone }),
+                on_audio,
+            ),
+        )
+        .await
+        .expect("did not deadlock")
+        .expect("loop ok");
+
+        // run_loop pushes one transcript per outer-loop iteration. Cancel-and-retry
+        // is internal to one iteration. So we expect exactly one transcript.
+        assert_eq!(result.len(), 1, "one commit cycle, one transcript");
+        // Responder was called twice (first cancelled, second succeeded).
+        assert_eq!(
+            call_count.load(std::sync::atomic::Ordering::SeqCst),
+            2,
+            "responder called twice"
+        );
+        // Audio committed (from second responder call).
+        assert!(!committed.lock().unwrap().is_empty(), "audio committed on retry");
     }
 }
 
