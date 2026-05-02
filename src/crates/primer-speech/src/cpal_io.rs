@@ -64,7 +64,7 @@ impl Resampler {
 use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
 use cpal::{SampleFormat, Stream, StreamConfig};
 use ringbuf::traits::{Consumer, Producer, Split};
-use ringbuf::{HeapCons, HeapRb};
+use ringbuf::{HeapCons, HeapProd, HeapRb};
 
 /// Default capacity (in samples) for the mic SPSC ring buffer.
 /// Sized to hold ~250 ms of 48 kHz mono audio so a brief consumer
@@ -187,6 +187,128 @@ fn push_mono_u16(prod: &mut ringbuf::HeapProd<f32>, samples: &[u16], channels: u
     }
 }
 
+/// Default capacity (in samples) for the speaker SPSC ring buffer.
+/// Sized for ~500 ms of 48 kHz mono so the audio thread never starves
+/// while the synthesis worker is mid-phrase. The producer side
+/// (the main task) writes much larger blocks per `try_push_slice`.
+const SPEAKER_RINGBUF_CAPACITY: usize = 24_000;
+
+/// Speaker playback: opens the default output device, drains f32 mono
+/// samples from a ring buffer. The cpal `Stream` is held inside this
+/// struct — dropping the struct stops playback.
+///
+/// Output is upsampled / channel-duplicated from the producer's mono
+/// f32 stream to the device's native format inside the cpal callback.
+/// On underrun, the callback writes silence (no clicks).
+pub struct SpeakerSink {
+    _stream: Stream,
+    /// Sample rate the cpal device is running at. Producers must feed
+    /// audio at this rate (resample upstream if needed).
+    pub sample_rate: u32,
+    pub channels: u16,
+}
+
+impl SpeakerSink {
+    /// Open the default output device and start playback. Returns the
+    /// sink (must stay alive) and the producer side of the sample
+    /// ring buffer (push mono f32 at `self.sample_rate`).
+    pub fn start() -> Result<(Self, HeapProd<f32>)> {
+        let host = cpal::default_host();
+        let device = host
+            .default_output_device()
+            .ok_or_else(|| PrimerError::Speech("no default output device".into()))?;
+        let supported = device
+            .default_output_config()
+            .map_err(|e| PrimerError::Speech(format!("default output config: {e}")))?;
+        let sample_rate = supported.sample_rate(); // cpal 0.17: u32 directly, no .0
+        let channels = supported.channels();
+        let format = supported.sample_format();
+        let config: StreamConfig = supported.into();
+
+        let rb = HeapRb::<f32>::new(SPEAKER_RINGBUF_CAPACITY);
+        let (prod, mut cons) = rb.split();
+
+        let err_callback = |err| tracing::error!("cpal output stream error: {err}");
+
+        let stream = match format {
+            SampleFormat::F32 => device.build_output_stream(
+                &config,
+                move |out: &mut [f32], _info| pull_to_device_f32(&mut cons, out, channels),
+                err_callback,
+                None,
+            ),
+            SampleFormat::I16 => device.build_output_stream(
+                &config,
+                move |out: &mut [i16], _info| pull_to_device_i16(&mut cons, out, channels),
+                err_callback,
+                None,
+            ),
+            SampleFormat::U16 => device.build_output_stream(
+                &config,
+                move |out: &mut [u16], _info| pull_to_device_u16(&mut cons, out, channels),
+                err_callback,
+                None,
+            ),
+            other => {
+                return Err(PrimerError::Speech(format!(
+                    "unsupported sample format: {other:?}"
+                )))
+            }
+        }
+        .map_err(|e| PrimerError::Speech(format!("build output stream: {e}")))?;
+
+        stream
+            .play()
+            .map_err(|e| PrimerError::Speech(format!("start output stream: {e}")))?;
+
+        Ok((
+            Self {
+                _stream: stream,
+                sample_rate,
+                channels,
+            },
+            prod,
+        ))
+    }
+}
+
+/// Pull one mono f32 sample per output frame; duplicate across channels.
+/// On underrun, writes 0.0 (silence). Cannot block / allocate.
+fn pull_to_device_f32(cons: &mut ringbuf::HeapCons<f32>, out: &mut [f32], channels: u16) {
+    let n = channels.max(1) as usize;
+    for frame in out.chunks_exact_mut(n) {
+        let mono = cons.try_pop().unwrap_or(0.0);
+        for slot in frame.iter_mut() {
+            *slot = mono;
+        }
+    }
+}
+
+fn pull_to_device_i16(cons: &mut ringbuf::HeapCons<f32>, out: &mut [i16], channels: u16) {
+    let n = channels.max(1) as usize;
+    for frame in out.chunks_exact_mut(n) {
+        let mono = cons.try_pop().unwrap_or(0.0).clamp(-1.0, 1.0);
+        #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
+        let s = (mono * i16::MAX as f32) as i16;
+        for slot in frame.iter_mut() {
+            *slot = s;
+        }
+    }
+}
+
+fn pull_to_device_u16(cons: &mut ringbuf::HeapCons<f32>, out: &mut [u16], channels: u16) {
+    let n = channels.max(1) as usize;
+    let mid = u16::MAX as f32 / 2.0;
+    for frame in out.chunks_exact_mut(n) {
+        let mono = cons.try_pop().unwrap_or(0.0).clamp(-1.0, 1.0);
+        #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
+        let s = (mono * mid + mid) as u16;
+        for slot in frame.iter_mut() {
+            *slot = s;
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -247,5 +369,19 @@ mod tests {
         assert!((cons.try_pop().unwrap() - 0.1).abs() < 1e-6);
         assert!((cons.try_pop().unwrap() - 0.2).abs() < 1e-6);
         assert!((cons.try_pop().unwrap() - 0.3).abs() < 1e-6);
+    }
+
+    #[test]
+    fn pull_to_device_f32_underruns_to_silence() {
+        let rb = HeapRb::<f32>::new(8);
+        let (mut prod, mut cons) = rb.split();
+        let _ = prod.try_push(0.5);
+        let mut out = vec![99.0f32; 6]; // 3 stereo frames
+        pull_to_device_f32(&mut cons, &mut out, 2);
+        // First frame: 0.5 / 0.5 (stereo dup); rest: silence (0.0).
+        assert!((out[0] - 0.5).abs() < 1e-6);
+        assert!((out[1] - 0.5).abs() < 1e-6);
+        assert!((out[2] - 0.0).abs() < 1e-6);
+        assert!((out[5] - 0.0).abs() < 1e-6);
     }
 }
