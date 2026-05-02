@@ -603,6 +603,151 @@ impl primer_core::storage::SessionStore for SqliteSessionStore {
     }
 }
 
+#[async_trait]
+impl primer_core::storage::LearnerStore for SqliteSessionStore {
+    async fn save_learner(&self, learner: &primer_core::learner::LearnerModel) -> Result<()> {
+        let mut conn = self.conn.lock().unwrap();
+        let tx = conn
+            .transaction()
+            .map_err(|e| PrimerError::Storage(format!("save_learner begin tx: {e}")))?;
+
+        // 1. Upsert the learners row. Use proper UPSERT (ON CONFLICT DO
+        // UPDATE) so we do NOT cascade-wipe learner_concepts via the FK.
+        // INSERT OR REPLACE would do exactly that — see the save_session
+        // notes for the same footgun.
+        let languages_json = serde_json::to_string(&learner.profile.languages)
+            .map_err(|e| PrimerError::Storage(format!("encode languages: {e}")))?;
+        let topics_json = serde_json::to_string(&learner.preferences.high_engagement_topics)
+            .map_err(|e| PrimerError::Storage(format!("encode high_engagement_topics: {e}")))?;
+        let early_secs = learner.preferences.early_disengagement_threshold.as_secs() as i64;
+        let engagement_state_id = catalog::engagement_state_id(learner.current_engagement);
+
+        tx.execute(
+            "INSERT INTO learners (
+                 id, name, age, languages, created_at, last_active,
+                 pref_narrative, pref_socratic, pref_visual, pref_kinesthetic,
+                 typical_session_minutes, high_engagement_topics,
+                 early_disengagement_secs, current_engagement_state_id
+             ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14)
+             ON CONFLICT(id) DO UPDATE SET
+                 name = excluded.name,
+                 age = excluded.age,
+                 languages = excluded.languages,
+                 last_active = excluded.last_active,
+                 pref_narrative = excluded.pref_narrative,
+                 pref_socratic = excluded.pref_socratic,
+                 pref_visual = excluded.pref_visual,
+                 pref_kinesthetic = excluded.pref_kinesthetic,
+                 typical_session_minutes = excluded.typical_session_minutes,
+                 high_engagement_topics = excluded.high_engagement_topics,
+                 early_disengagement_secs = excluded.early_disengagement_secs,
+                 current_engagement_state_id = excluded.current_engagement_state_id",
+            rusqlite::params![
+                learner.profile.id.to_string(),
+                learner.profile.name,
+                learner.profile.age as i64,
+                languages_json,
+                learner.profile.created_at.to_rfc3339(),
+                learner.profile.last_active.to_rfc3339(),
+                learner.preferences.narrative as f64,
+                learner.preferences.socratic as f64,
+                learner.preferences.visual as f64,
+                learner.preferences.kinesthetic as f64,
+                learner.preferences.typical_session_minutes as f64,
+                topics_json,
+                early_secs,
+                engagement_state_id,
+            ],
+        )
+        .map_err(|e| PrimerError::Storage(format!("upsert learner: {e}")))?;
+
+        // 2. For each concept, ensure the concepts row exists and upsert
+        //    learner_concepts.
+        if !learner.concepts.is_empty() {
+            let mut insert_concept = tx
+                .prepare("INSERT OR IGNORE INTO concepts (name) VALUES (?1)")
+                .map_err(|e| PrimerError::Storage(format!("prepare insert concept: {e}")))?;
+            let mut select_concept = tx
+                .prepare("SELECT id FROM concepts WHERE name = ?1")
+                .map_err(|e| PrimerError::Storage(format!("prepare select concept: {e}")))?;
+            let mut upsert_lc = tx
+                .prepare(
+                    "INSERT INTO learner_concepts (
+                         learner_id, concept_id, depth_id, confidence,
+                         encounter_count, last_encountered, notes
+                     ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)
+                     ON CONFLICT(learner_id, concept_id) DO UPDATE SET
+                         depth_id = excluded.depth_id,
+                         confidence = excluded.confidence,
+                         encounter_count = excluded.encounter_count,
+                         last_encountered = excluded.last_encountered,
+                         notes = excluded.notes",
+                )
+                .map_err(|e| PrimerError::Storage(format!("prepare upsert lc: {e}")))?;
+
+            // Per-call cache to skip re-querying concepts within one save.
+            let mut concept_id_cache: std::collections::HashMap<String, i64> =
+                std::collections::HashMap::new();
+
+            for concept in &learner.concepts {
+                let cid = match concept_id_cache.get(&concept.concept_id).copied() {
+                    Some(id) => id,
+                    None => {
+                        insert_concept
+                            .execute(rusqlite::params![concept.concept_id])
+                            .map_err(|e| {
+                                PrimerError::Storage(format!(
+                                    "upsert concept {}: {e}",
+                                    concept.concept_id
+                                ))
+                            })?;
+                        let id: i64 = select_concept
+                            .query_row(rusqlite::params![concept.concept_id], |r| r.get(0))
+                            .map_err(|e| {
+                                PrimerError::Storage(format!(
+                                    "select concept {}: {e}",
+                                    concept.concept_id
+                                ))
+                            })?;
+                        concept_id_cache.insert(concept.concept_id.clone(), id);
+                        id
+                    }
+                };
+
+                let notes_json = serde_json::to_string(&concept.notes)
+                    .map_err(|e| PrimerError::Storage(format!("encode notes: {e}")))?;
+                let last_encountered = concept.last_encountered.map(|t| t.to_rfc3339());
+
+                upsert_lc
+                    .execute(rusqlite::params![
+                        learner.profile.id.to_string(),
+                        cid,
+                        catalog::understanding_depth_id(concept.depth),
+                        concept.confidence as f64,
+                        concept.encounter_count as i64,
+                        last_encountered,
+                        notes_json,
+                    ])
+                    .map_err(|e| PrimerError::Storage(format!("upsert learner_concept: {e}")))?;
+            }
+
+            drop(upsert_lc);
+            drop(select_concept);
+            drop(insert_concept);
+        }
+
+        tx.commit()
+            .map_err(|e| PrimerError::Storage(format!("save_learner commit: {e}")))?;
+        Ok(())
+    }
+
+    async fn load_learner(&self) -> Result<Option<primer_core::learner::LearnerModel>> {
+        // Stub for now — real impl in Task 8. Returning None lets save_learner
+        // tests pass without depending on load_learner.
+        Ok(None)
+    }
+}
+
 fn parse_rfc3339(s: &str, field: &str) -> Result<DateTime<Utc>> {
     DateTime::parse_from_rfc3339(s)
         .map(|dt| dt.with_timezone(&Utc))
@@ -2159,5 +2304,179 @@ mod tests {
 
         let result = store.most_recent_session_learner_id().await.unwrap();
         assert_eq!(result, Some(newer_learner));
+    }
+}
+
+#[cfg(test)]
+mod learner_store_tests {
+    use super::*;
+    use chrono::Utc;
+    use primer_core::learner::{
+        ConceptState, EngagementState, LearnerModel, LearnerProfile, LearningPreferences,
+        UnderstandingDepth,
+    };
+    use primer_core::storage::LearnerStore;
+    use std::time::Duration;
+    use uuid::Uuid;
+
+    fn open_in_mem() -> SqliteSessionStore {
+        SqliteSessionStore::open(std::path::Path::new(":memory:")).unwrap()
+    }
+
+    fn sample_learner() -> LearnerModel {
+        LearnerModel {
+            profile: LearnerProfile {
+                id: Uuid::new_v4(),
+                name: "Binti".into(),
+                age: 8,
+                languages: vec!["en".into(), "fr".into()],
+                created_at: Utc::now(),
+                last_active: Utc::now(),
+            },
+            concepts: vec![
+                ConceptState {
+                    concept_id: "physics:gravity".into(),
+                    depth: UnderstandingDepth::Comprehension,
+                    confidence: 0.7,
+                    encounter_count: 3,
+                    last_encountered: Some(Utc::now()),
+                    notes: vec!["mass vs weight confusion".into()],
+                },
+                ConceptState {
+                    concept_id: "biology:photosynthesis".into(),
+                    depth: UnderstandingDepth::Aware,
+                    confidence: 0.4,
+                    encounter_count: 1,
+                    last_encountered: None,
+                    notes: vec![],
+                },
+            ],
+            preferences: LearningPreferences {
+                narrative: 0.8,
+                socratic: 0.7,
+                visual: 0.5,
+                kinesthetic: 0.3,
+                typical_session_minutes: 25.0,
+                high_engagement_topics: vec!["dinosaurs".into(), "space".into()],
+                early_disengagement_threshold: Duration::from_secs(420),
+            },
+            current_engagement: EngagementState::Engaged,
+            recent_assessments: vec![],
+        }
+    }
+
+    #[tokio::test]
+    async fn save_learner_writes_one_row_to_learners_table() {
+        let store = open_in_mem();
+        store.save_learner(&sample_learner()).await.unwrap();
+
+        let conn = store.conn.lock().unwrap();
+        let count: i64 = conn
+            .query_row("SELECT COUNT(*) FROM learners", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(count, 1);
+    }
+
+    #[tokio::test]
+    async fn save_learner_writes_one_learner_concepts_row_per_concept() {
+        let store = open_in_mem();
+        store.save_learner(&sample_learner()).await.unwrap();
+
+        let conn = store.conn.lock().unwrap();
+        let count: i64 = conn
+            .query_row("SELECT COUNT(*) FROM learner_concepts", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(count, 2);
+    }
+
+    #[tokio::test]
+    async fn save_learner_is_idempotent_on_repeat_calls() {
+        let store = open_in_mem();
+        let l = sample_learner();
+        store.save_learner(&l).await.unwrap();
+        store.save_learner(&l).await.unwrap();
+
+        let conn = store.conn.lock().unwrap();
+        let learners: i64 = conn
+            .query_row("SELECT COUNT(*) FROM learners", [], |r| r.get(0))
+            .unwrap();
+        let learner_concepts: i64 = conn
+            .query_row("SELECT COUNT(*) FROM learner_concepts", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(learners, 1);
+        assert_eq!(learner_concepts, 2);
+    }
+
+    #[tokio::test]
+    async fn save_learner_updates_concept_in_place() {
+        let store = open_in_mem();
+        let mut l = sample_learner();
+        store.save_learner(&l).await.unwrap();
+
+        // Mutate the first concept's encounter_count and depth.
+        l.concepts[0].encounter_count = 7;
+        l.concepts[0].depth = UnderstandingDepth::Application;
+        store.save_learner(&l).await.unwrap();
+
+        let conn = store.conn.lock().unwrap();
+        let (count, depth_id): (i64, i64) = conn
+            .query_row(
+                "SELECT lc.encounter_count, lc.depth_id
+                 FROM learner_concepts lc
+                 JOIN concepts c ON c.id = lc.concept_id
+                 WHERE c.name = 'physics:gravity'",
+                [],
+                |r| Ok((r.get(0)?, r.get(1)?)),
+            )
+            .unwrap();
+        assert_eq!(count, 7);
+        assert_eq!(depth_id, crate::catalog::understanding_depth_id(UnderstandingDepth::Application));
+
+        // Still only two rows total — no duplicate.
+        let total: i64 = conn
+            .query_row("SELECT COUNT(*) FROM learner_concepts", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(total, 2);
+    }
+
+    #[tokio::test]
+    async fn save_learner_is_monotonic_on_concepts() {
+        let store = open_in_mem();
+        let mut l = sample_learner();
+        store.save_learner(&l).await.unwrap();
+
+        // Drop one concept from the in-memory Vec.
+        l.concepts.truncate(1);
+        store.save_learner(&l).await.unwrap();
+
+        let conn = store.conn.lock().unwrap();
+        let total: i64 = conn
+            .query_row("SELECT COUNT(*) FROM learner_concepts", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(total, 2, "dropped concept must remain on disk");
+    }
+
+    #[tokio::test]
+    async fn save_learner_persists_every_understanding_depth_variant() {
+        let store = open_in_mem();
+        let mut l = sample_learner();
+        l.concepts.clear();
+        for d in UnderstandingDepth::ALL {
+            l.concepts.push(ConceptState {
+                concept_id: format!("test:{}", crate::catalog::understanding_depth_name(*d)),
+                depth: *d,
+                confidence: 0.5,
+                encounter_count: 1,
+                last_encountered: None,
+                notes: vec![],
+            });
+        }
+        store.save_learner(&l).await.unwrap();
+
+        let conn = store.conn.lock().unwrap();
+        let total: i64 = conn
+            .query_row("SELECT COUNT(*) FROM learner_concepts", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(total as usize, UnderstandingDepth::ALL.len());
     }
 }
