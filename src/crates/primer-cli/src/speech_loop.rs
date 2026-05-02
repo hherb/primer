@@ -221,10 +221,15 @@ pub async fn run_loop<'r>(
 
 /// Entry point: run the voice REPL until Ctrl+C or a quit phrase is heard.
 ///
-/// Phase 4 stub — real implementation lands across Phases 5/6/7.
-pub async fn run(_cfg: SpeechLoopConfig<'_>) -> Result<()> {
+/// Phase 7 stub — Task 21 wires real backends + Responder adapter.
+pub async fn run<'a>(
+    cfg: SpeechLoopConfig<'_>,
+    dialogue: &mut primer_pedagogy::DialogueManager<'a>,
+) -> Result<()> {
+    // Phase 7 stub — Task 21 wires real backends + Responder adapter.
+    let _ = (cfg, dialogue);
     Err(primer_core::error::PrimerError::Speech(
-        "speech_loop::run not yet implemented".into(),
+        "speech_loop::run not yet wired (see Task 21)".into(),
     ))
 }
 

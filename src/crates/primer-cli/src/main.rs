@@ -373,6 +373,52 @@ fn reconcile_persisted_learner(
     existing
 }
 
+#[cfg(feature = "speech")]
+fn validate_speech_assets(
+    whisper_model: &Path,
+    voice_onnx: &Path,
+    voice_config: &Path,
+    voice_id: &str,
+) -> Result<()> {
+    if !whisper_model.exists() {
+        return Err(PrimerError::Speech(format!(
+            "whisper model not found at {}.\n\
+             Download a GGML model from https://huggingface.co/ggerganov/whisper.cpp \
+             (e.g. ggml-small.en.bin) and pass --whisper-model.",
+            whisper_model.display()
+        )));
+    }
+    if !voice_onnx.exists() {
+        return Err(PrimerError::Speech(format!(
+            "voice ONNX not found at {}.\n\
+             Download a Piper voice from https://huggingface.co/rhasspy/piper-voices \
+             and pass --voice-onnx.",
+            voice_onnx.display()
+        )));
+    }
+    if !voice_config.exists() {
+        return Err(PrimerError::Speech(format!(
+            "voice config not found at {}.\n\
+             Pass --voice-config alongside --voice-onnx (the .onnx and .onnx.json files \
+             ship together).",
+            voice_config.display()
+        )));
+    }
+    let stem = voice_onnx
+        .file_stem()
+        .and_then(|s| s.to_str())
+        .unwrap_or("");
+    if stem != voice_id {
+        tracing::warn!(
+            voice_id,
+            onnx_stem = stem,
+            "--voice id does not match --voice-onnx file stem; \
+             Piper will reject the session at open time"
+        );
+    }
+    Ok(())
+}
+
 fn create_learner_with_id(id: Uuid, name: &str, age: u8) -> LearnerModel {
     LearnerModel {
         profile: LearnerProfile {
@@ -625,6 +671,29 @@ async fn main() -> anyhow::Result<()> {
         classifier_settings,
         pedagogy_config,
     );
+
+    // ─── Speech branch ───────────────────────────────────────────────
+
+    #[cfg(feature = "speech")]
+    if cli.speech {
+        let whisper_model = cli.whisper_model.as_ref().expect("clap requires_all");
+        let voice_onnx = cli.voice_onnx.as_ref().expect("clap requires_all");
+        let voice_config = cli.voice_config.as_ref().expect("clap requires_all");
+        validate_speech_assets(whisper_model, voice_onnx, voice_config, &cli.voice)?;
+
+        let cfg = speech_loop::SpeechLoopConfig {
+            whisper_model,
+            voice_onnx,
+            voice_config,
+            voice_id: &cli.voice,
+            mic_silence_ms: cli.mic_silence_ms,
+            verbose: cli.verbose,
+        };
+        // run() builds backends from cfg, wires DialogueManager via a
+        // Responder adapter, drives the state machine.
+        speech_loop::run(cfg, &mut dm).await?;
+        return Ok(());
+    }
 
     // ─── REPL ────────────────────────────────────────────────────────
 
