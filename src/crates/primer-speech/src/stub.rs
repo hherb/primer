@@ -8,12 +8,14 @@ use primer_core::speech::*;
 /// Used only for testing the pipeline without actual speech recognition.
 pub struct StubStt;
 
-#[async_trait]
-impl SpeechToText for StubStt {
+impl Named for StubStt {
     fn name(&self) -> &str {
         "stub-stt"
     }
+}
 
+#[async_trait]
+impl SpeechToText for StubStt {
     async fn transcribe(&self, audio: &AudioBuffer) -> Result<Transcript> {
         Ok(Transcript {
             text: format!(
@@ -30,12 +32,14 @@ impl SpeechToText for StubStt {
 /// Stub TTS — returns a silent audio buffer.
 pub struct StubTts;
 
-#[async_trait]
-impl TextToSpeech for StubTts {
+impl Named for StubTts {
     fn name(&self) -> &str {
         "stub-tts"
     }
+}
 
+#[async_trait]
+impl TextToSpeech for StubTts {
     async fn synthesize(&self, text: &str, _voice: &VoiceProfile) -> Result<AudioBuffer> {
         tracing::info!(text_len = text.len(), "StubTts: would synthesize");
         Ok(AudioBuffer {

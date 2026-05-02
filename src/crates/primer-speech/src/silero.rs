@@ -14,7 +14,7 @@
 //! is cached under the cargo target directory.
 
 use primer_core::error::{PrimerError, Result};
-use primer_core::speech::{VadFrame, VoiceActivityDetector};
+use primer_core::speech::{Named, VadFrame, VoiceActivityDetector};
 use silero_vad_rust::load_silero_vad;
 use silero_vad_rust::silero_vad::model::OnnxModel;
 
@@ -82,11 +82,13 @@ impl SileroVad {
     }
 }
 
-impl VoiceActivityDetector for SileroVad {
+impl Named for SileroVad {
     fn name(&self) -> &str {
         "silero-vad"
     }
+}
 
+impl VoiceActivityDetector for SileroVad {
     fn sample_rate(&self) -> u32 {
         SAMPLE_RATE
     }

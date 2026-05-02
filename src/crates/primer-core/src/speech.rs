@@ -54,6 +54,16 @@ impl Default for VoiceProfile {
     }
 }
 
+/// Common identifier for any speech backend.
+///
+/// Every speech trait inherits from `Named` so a single struct that
+/// implements both the one-shot and streaming variants of STT or TTS
+/// only writes its `name()` impl once. Removing this would re-introduce
+/// the dual-trait UFCS snag PR #3 had to live with.
+pub trait Named {
+    fn name(&self) -> &str;
+}
+
 /// State-transition event emitted by a [`VoiceActivityDetector`] for a chunk.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum VadEvent {
@@ -84,10 +94,7 @@ pub struct VadFrame {
 /// at the rate reported by [`Self::sample_rate`]. The detector returns a
 /// per-chunk probability and a state-transition event the caller can use to
 /// trigger STT, end-of-utterance handling, etc.
-pub trait VoiceActivityDetector: Send {
-    /// Backend identifier for logging and diagnostics (e.g. `"silero-vad"`).
-    fn name(&self) -> &str;
-
+pub trait VoiceActivityDetector: Named + Send {
     /// Sample rate the detector expects (Hz).
     fn sample_rate(&self) -> u32;
 
@@ -112,10 +119,7 @@ pub trait VoiceActivityDetector: Send {
 /// segments as they arrive instead of blocking until the entire buffer
 /// is processed.
 #[async_trait]
-pub trait SpeechToText: Send + Sync {
-    /// Backend identifier for logging and diagnostics (e.g. `"whisper-cpp"`).
-    fn name(&self) -> &str;
-
+pub trait SpeechToText: Named + Send + Sync {
     /// Transcribe an audio buffer to text.
     async fn transcribe(&self, audio: &AudioBuffer) -> Result<Transcript>;
 }
@@ -162,13 +166,9 @@ pub trait TranscriptionSession: Send {
 /// inside the session handle.
 ///
 /// A backend may also implement the one-shot [`SpeechToText`] trait. When
-/// it does, both traits expose a `name()` method — call it through a
-/// trait object (`(&stt as &dyn SpeechToText).name()`) to disambiguate;
-/// direct calls on the concrete type require UFCS.
-pub trait StreamingSpeechToText: Send + Sync {
-    /// Backend identifier for logging and diagnostics (e.g. `"whisper-cpp"`).
-    fn name(&self) -> &str;
-
+/// it does, `name()` is shared via the [`Named`] super-trait — there is no
+/// longer any UFCS ambiguity.
+pub trait StreamingSpeechToText: Named + Send + Sync {
     /// Sample rate the backend expects (Hz). Sessions reject mismatched audio.
     fn sample_rate(&self) -> u32;
 
@@ -182,10 +182,7 @@ pub trait StreamingSpeechToText: Send + Sync {
 /// interactive voice loops a streaming variant will be added in the next
 /// step of the speech pipeline (see `docs/primer_TTS_next_step.md`).
 #[async_trait]
-pub trait TextToSpeech: Send + Sync {
-    /// Backend identifier for logging and diagnostics (e.g. `"piper"`).
-    fn name(&self) -> &str;
-
+pub trait TextToSpeech: Named + Send + Sync {
     /// Synthesize text to an audio buffer.
     async fn synthesize(&self, text: &str, voice: &VoiceProfile) -> Result<AudioBuffer>;
 }
@@ -217,10 +214,11 @@ mod tests {
     const CANNED_VAD_CHUNK_SAMPLES: usize = 512;
     const CANNED_VAD_THRESHOLD: f32 = 0.5;
 
+    impl Named for CannedVad {
+        fn name(&self) -> &str { "canned" }
+    }
+
     impl VoiceActivityDetector for CannedVad {
-        fn name(&self) -> &str {
-            "canned"
-        }
         fn sample_rate(&self) -> u32 {
             CANNED_VAD_SAMPLE_RATE
         }
@@ -300,10 +298,11 @@ mod tests {
         }
     }
 
+    impl Named for CannedStreamStt {
+        fn name(&self) -> &str { "canned-stream-stt" }
+    }
+
     impl StreamingSpeechToText for CannedStreamStt {
-        fn name(&self) -> &str {
-            "canned-stream-stt"
-        }
         fn sample_rate(&self) -> u32 {
             TEST_SAMPLE_RATE
         }
@@ -333,5 +332,19 @@ mod tests {
         assert!(s2.is_empty());
         let trailing = session.finalize().unwrap();
         assert!(trailing.is_empty());
+    }
+
+    /// Canary that the `Named` super-trait is the single source of `name()`
+    /// across every speech trait. If this fails to compile, the refactor
+    /// regressed and a backend is again declaring `name()` on a leaf trait.
+    #[test]
+    fn named_super_trait_resolves_via_each_speech_trait() {
+        // VAD: CannedVad
+        let vad: Box<dyn VoiceActivityDetector> = Box::new(CannedVad::new(vec![]));
+        assert_eq!(Named::name(&*vad), "canned");
+
+        // Streaming STT: CannedStreamStt
+        let stt: Box<dyn StreamingSpeechToText> = Box::new(CannedStreamStt);
+        assert_eq!(Named::name(&*stt), "canned-stream-stt");
     }
 }

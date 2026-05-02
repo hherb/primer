@@ -19,7 +19,7 @@ use std::sync::Arc;
 use async_trait::async_trait;
 use primer_core::error::{PrimerError, Result};
 use primer_core::speech::{
-    AudioBuffer, SpeechToText, StreamingSpeechToText, Transcript, TranscriptSegment,
+    AudioBuffer, Named, SpeechToText, StreamingSpeechToText, Transcript, TranscriptSegment,
     TranscriptionSession,
 };
 use whisper_cpp_plus::{
@@ -78,12 +78,14 @@ impl WhisperStt {
     }
 }
 
-#[async_trait]
-impl SpeechToText for WhisperStt {
+impl Named for WhisperStt {
     fn name(&self) -> &str {
         BACKEND_NAME
     }
+}
 
+#[async_trait]
+impl SpeechToText for WhisperStt {
     async fn transcribe(&self, audio: &AudioBuffer) -> Result<Transcript> {
         if audio.sample_rate != SAMPLE_RATE {
             return Err(PrimerError::Speech(format!(
@@ -113,10 +115,6 @@ impl SpeechToText for WhisperStt {
 }
 
 impl StreamingSpeechToText for WhisperStt {
-    fn name(&self) -> &str {
-        BACKEND_NAME
-    }
-
     fn sample_rate(&self) -> u32 {
         SAMPLE_RATE
     }
