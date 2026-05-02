@@ -13,6 +13,18 @@ use std::path::Path;
 
 use primer_core::error::Result;
 
+/// Phrases that, if heard in the child's transcript, end the session.
+/// Case-insensitive substring match. Three flavours so the child can
+/// quit whether they say the formal "goodbye", a Primer-direct
+/// "bye primer", or the very direct "stop primer".
+const QUIT_PHRASES: &[&str] = &["goodbye", "bye primer", "stop primer"];
+
+/// Returns true if `transcript` contains any quit phrase (case-insensitive).
+fn is_quit_phrase(transcript: &str) -> bool {
+    let lower = transcript.to_lowercase();
+    QUIT_PHRASES.iter().any(|p| lower.contains(p))
+}
+
 /// Configuration passed into `run` from `main`.
 pub struct SpeechLoopConfig<'a> {
     pub whisper_model: &'a Path,
@@ -209,5 +221,30 @@ mod mocks {
         let mut session = tts.open_session(&voice).unwrap();
         assert_eq!(session.push_text("hi.").unwrap().len(), 1);
         assert_eq!(session.push_text("").unwrap().len(), 0);
+    }
+}
+
+#[cfg(test)]
+mod quit_tests {
+    use super::is_quit_phrase;
+
+    #[test]
+    fn detects_goodbye_case_insensitive() {
+        assert!(is_quit_phrase("Goodbye!"));
+        assert!(is_quit_phrase("alright, GOODBYE then"));
+    }
+
+    #[test]
+    fn detects_bye_primer() {
+        assert!(is_quit_phrase("bye primer"));
+        assert!(is_quit_phrase("Bye Primer."));
+    }
+
+    #[test]
+    fn ignores_unrelated_transcripts() {
+        assert!(!is_quit_phrase("why is the sky blue"));
+        assert!(!is_quit_phrase("hello"));
+        // "bye" alone is NOT a quit phrase — only "bye primer".
+        assert!(!is_quit_phrase("bye"));
     }
 }
