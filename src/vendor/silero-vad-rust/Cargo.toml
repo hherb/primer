@@ -61,7 +61,6 @@ version = "0.16.1"
 [dependencies.ort]
 version = "2.0.0-rc.10"
 features = [
-    "load-dynamic",
     "ndarray",
 ]
 

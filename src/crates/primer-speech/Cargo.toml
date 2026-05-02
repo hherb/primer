@@ -18,7 +18,7 @@ silero-vad-rust = { version = "6.2", default-features = false, optional = true }
 # this, Cargo picks a newer rc whose bundled ndarray version diverges from
 # silero-vad-rust's direct ndarray dep and the type `Array2<f32>` no
 # longer matches across crates.
-ort = { version = "=2.0.0-rc.10", default-features = false, features = ["ndarray"], optional = true }
+ort = { version = "=2.0.0-rc.10", default-features = false, features = ["ndarray", "download-binaries", "copy-dylibs"], optional = true }
 
 # Whisper.cpp — opt-in via the `whisper` feature. Builds bundled C++ source
 # (cmake + a C++ compiler must be present on the build host).
