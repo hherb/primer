@@ -41,6 +41,31 @@ What landed in PR #5:
 - **Closes the divergence bug.** The previously-documented "in-memory `LearnerModel` and `Session.learner_id` can diverge after resume" footgun is gone — the persisted UUID always wins, and the test `divergence_bug_closed_via_cli_startup_flow` proves the v3-DB-with-orphan-session adoption case end-to-end.
 - **Test count 195 → 223.** Coverage added across `primer-core` (UnderstandingDepth::ALL), `primer-storage` (catalog, v4 migration with rollback test, FK enforcement, `most_recent_session_learner_id`, `LearnerStore` round-trip, monotonicity, every-variant), `primer-pedagogy` (DialogueManager wiring + divergence-bug-closed integration test), and `primer-cli` (birthday + name-mismatch).
 
+### Voice round-trip POC — Phase 2 step 4 closed (feature/voice-roundtrip-poc, pending merge)
+
+What landed:
+- **`--speech` mode** on `primer-cli`, gated by a new `speech` Cargo feature that pulls all four `primer-speech` features (`silero`, `whisper`, `piper`, `cpal`).
+- **`primer-speech::cpal_io`** module (gated by a new `cpal` feature) — `MicCapture`, `SpeakerSink`, `Resampler` adapter over `rubato 0.16`. Mic and speaker callbacks push/pull through lock-free `ringbuf::HeapRb`s.
+- **State machine** in `primer-cli::speech_loop`: `LISTEN → LATENT_THINK → SPEAK → LISTEN`. The mic stays open through LATENT_THINK so the Primer never barges in mid-thought; closes at the audio-commit boundary so the child never speaks over the Primer.
+- **`tokio::select!`** over the LLM future, VAD events, and channel-close — a `SpeechStart` mid-LATENT_THINK drops the LLM future and waits for the next `SpeechEnd` to retry.
+- **Vendored silero-vad-rust** at `src/vendor/silero-vad-rust/` with the 2-line `is_multiple_of` → `% N == 0` patch (the upstream API is still unstable on rustc 1.97-nightly).
+- **`rust-toolchain.toml`** pinning Rust 1.87+ (rustup-only; Homebrew rust ignores it — prefer `~/.cargo/bin/cargo`).
+- **--speech**, **--whisper-model**, **--voice-onnx**, **--voice-config**, **--voice**, **--mic-silence-ms** CLI flags. clap `requires_all` enforces the model paths travel with `--speech`.
+- **Quit phrases** (`goodbye`, `bye primer`, `stop primer`) — case-insensitive substring match.
+- **--verbose** in speech mode adds `[vad]` / `[stt]` lines on stderr; `[child]`/`[primer]` always print on stdout.
+- **LLM-error fallback** synthesises a friendly apology and returns to LISTEN rather than terminating.
+- **Test count**: ten `speech_loop` mock-driven tests cover every `select!` arm, plus 5 `cpal_io` unit tests and one `#[ignore]`'d hardware loopback smoke.
+
+Known limitations carried forward:
+- **Two-consecutive-child-turns artefact**: `DialogueManager::respond_to_streaming` records the child turn before the LLM call. If LATENT_THINK aborts on resumed speech, the first utterance gets persisted as a separate turn from the continuation. Clean fix is a speculative-commit DM API.
+- **JoinHandle::abort() doesn't gracefully cancel the underlying HTTP request to Anthropic.** Real cancellation tokens through `DialogueManager` / `CloudBackend` are still future work.
+- **No barge-in / emergency-stop.** Pedagogical (the Primer models listening). Future addition: hardware button or held-modifier-key.
+- **No wake-word.** Strict offline-first rules out Picovoice; `openWakeWord` Python or a custom small ONNX would be the alternatives.
+- **No `--mic` / `--speaker` device-selection flags** — cpal default in / default out only.
+- **No auto-download of whisper / piper assets** — manual paths via flags.
+- **Cancel-and-retry doesn't stitch transcripts** — the audio thread opens a fresh whisper session for the continuation, so the second LLM call sees only the continuation, not the concatenation. Acceptable for the POC; revisit if it surprises children.
+- **Output resampling pads with zeros** at phrase boundaries (1024-sample chunks); brief audible artifact possible. Profile at manual smoke; revisit if audible.
+
 ### Engagement classifier — Phase 0.3 intent gaps (merged into `main`)
 
 What landed in the engagement-classifier work:
