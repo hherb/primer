@@ -58,8 +58,11 @@ impl Default for VoiceProfile {
 ///
 /// Every speech trait inherits from `Named` so a single struct that
 /// implements both the one-shot and streaming variants of STT or TTS
-/// only writes its `name()` impl once. Removing this would re-introduce
-/// the dual-trait UFCS snag PR #3 had to live with.
+/// only writes its `name()` impl once. Without this, both leaf traits
+/// would each declare a `fn name(&self) -> &str` of their own, and a
+/// backend implementing both would end up with two same-signature
+/// methods that callers would have to disambiguate via UFCS
+/// (`<T as SpeechToText>::name(...)`) at every direct call site.
 pub trait Named {
     fn name(&self) -> &str;
 }
@@ -165,9 +168,9 @@ pub trait TranscriptionSession: Send {
 /// is shareable across sessions (`Send + Sync`); per-session state lives
 /// inside the session handle.
 ///
-/// A backend may also implement the one-shot [`SpeechToText`] trait. When
-/// it does, `name()` is shared via the [`Named`] super-trait — there is no
-/// longer any UFCS ambiguity.
+/// A backend may also implement the one-shot [`SpeechToText`] trait —
+/// `name()` lives on the [`Named`] super-trait so it's only written once
+/// per backend struct.
 pub trait StreamingSpeechToText: Named + Send + Sync {
     /// Sample rate the backend expects (Hz). Sessions reject mismatched audio.
     fn sample_rate(&self) -> u32;
@@ -215,7 +218,9 @@ mod tests {
     const CANNED_VAD_THRESHOLD: f32 = 0.5;
 
     impl Named for CannedVad {
-        fn name(&self) -> &str { "canned" }
+        fn name(&self) -> &str {
+            "canned"
+        }
     }
 
     impl VoiceActivityDetector for CannedVad {
@@ -299,7 +304,9 @@ mod tests {
     }
 
     impl Named for CannedStreamStt {
-        fn name(&self) -> &str { "canned-stream-stt" }
+        fn name(&self) -> &str {
+            "canned-stream-stt"
+        }
     }
 
     impl StreamingSpeechToText for CannedStreamStt {
@@ -311,6 +318,47 @@ mod tests {
                 scripted: vec!["hello", " world"].into_iter(),
                 elapsed_ms: 0,
             }))
+        }
+    }
+
+    /// Mock one-shot STT that returns a canned transcript. Used only
+    /// by the Named super-trait canary test below.
+    struct CannedOneShotStt;
+
+    impl Named for CannedOneShotStt {
+        fn name(&self) -> &str {
+            "canned-oneshot-stt"
+        }
+    }
+
+    #[async_trait]
+    impl SpeechToText for CannedOneShotStt {
+        async fn transcribe(&self, _audio: &AudioBuffer) -> Result<Transcript> {
+            Ok(Transcript {
+                text: String::new(),
+                language: None,
+                confidence: None,
+            })
+        }
+    }
+
+    /// Mock TTS that returns a canned silent buffer. Used only by the
+    /// Named super-trait canary test below.
+    struct CannedTts;
+
+    impl Named for CannedTts {
+        fn name(&self) -> &str {
+            "canned-tts"
+        }
+    }
+
+    #[async_trait]
+    impl TextToSpeech for CannedTts {
+        async fn synthesize(&self, _text: &str, _voice: &VoiceProfile) -> Result<AudioBuffer> {
+            Ok(AudioBuffer {
+                samples: Vec::new(),
+                sample_rate: CANNED_VAD_SAMPLE_RATE,
+            })
         }
     }
 
@@ -335,16 +383,21 @@ mod tests {
     }
 
     /// Canary that the `Named` super-trait is the single source of `name()`
-    /// across every speech trait. If this fails to compile, the refactor
-    /// regressed and a backend is again declaring `name()` on a leaf trait.
+    /// across every speech trait — `VoiceActivityDetector`, `SpeechToText`,
+    /// `StreamingSpeechToText`, `TextToSpeech`. Adding a fifth leaf trait
+    /// should add a fifth assertion here.
     #[test]
     fn named_super_trait_resolves_via_each_speech_trait() {
-        // VAD: CannedVad
         let vad: Box<dyn VoiceActivityDetector> = Box::new(CannedVad::new(vec![]));
         assert_eq!(Named::name(&*vad), "canned");
 
-        // Streaming STT: CannedStreamStt
-        let stt: Box<dyn StreamingSpeechToText> = Box::new(CannedStreamStt);
-        assert_eq!(Named::name(&*stt), "canned-stream-stt");
+        let stream_stt: Box<dyn StreamingSpeechToText> = Box::new(CannedStreamStt);
+        assert_eq!(Named::name(&*stream_stt), "canned-stream-stt");
+
+        let oneshot_stt: Box<dyn SpeechToText> = Box::new(CannedOneShotStt);
+        assert_eq!(Named::name(&*oneshot_stt), "canned-oneshot-stt");
+
+        let tts: Box<dyn TextToSpeech> = Box::new(CannedTts);
+        assert_eq!(Named::name(&*tts), "canned-tts");
     }
 }
