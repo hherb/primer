@@ -188,10 +188,11 @@ fn push_mono_u16(prod: &mut ringbuf::HeapProd<f32>, samples: &[u16], channels: u
 }
 
 /// Default capacity (in samples) for the speaker SPSC ring buffer.
-/// Sized for ~500 ms of 48 kHz mono so the audio thread never starves
-/// while the synthesis worker is mid-phrase. The producer side
-/// (the main task) writes much larger blocks per `try_push_slice`.
-const SPEAKER_RINGBUF_CAPACITY: usize = 24_000;
+/// Sized for ~5 s of 48 kHz mono so a multi-second Piper phrase fits
+/// without the producer's `push_slice` retry loop dropping samples.
+/// The producer (`run_loop`'s `on_audio` callback) writes whole phrases
+/// at once; the cpal output callback drains at hardware rate.
+const SPEAKER_RINGBUF_CAPACITY: usize = 240_000;
 
 /// Speaker playback: opens the default output device, drains f32 mono
 /// samples from a ring buffer. The cpal `Stream` is held inside this

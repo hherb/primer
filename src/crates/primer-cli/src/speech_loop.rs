@@ -91,12 +91,18 @@ pub trait Responder: Send {
 ///
 /// `verbose` gates `[vad]`/`[stt]` debug lines on stderr.
 /// `[child]` and `[primer]` lines are always printed on stdout.
+///
+/// `is_speaking` is the gate the audio thread checks to decide whether to
+/// process or discard mic samples. `run_loop` flips it true at the start
+/// of SPEAK and back to false after the synthesised audio has had time
+/// to drain to the speaker. Tests pass `None` (mocks have no audio thread).
 pub async fn run_loop<'r>(
     mut backends: LoopBackends,
     mut events: tokio::sync::mpsc::UnboundedReceiver<primer_core::speech::VadEvent>,
     mut responder: Box<dyn Responder + 'r>,
     mut on_committed_audio: Box<dyn FnMut(Vec<f32>) + Send>,
     verbose: bool,
+    is_speaking: Option<std::sync::Arc<std::sync::atomic::AtomicBool>>,
 ) -> Result<Vec<String>> {
     use primer_core::speech::VadEvent;
 
@@ -251,12 +257,36 @@ pub async fn run_loop<'r>(
         // ── SPEAK ─────────────────────────────────────────────────────
         if !accumulated.is_empty() {
             println!("[primer] {}", accumulated);
+            // Gate the mic: from here until the speaker has drained, the
+            // audio thread should discard incoming samples (the Primer's
+            // own voice would otherwise be transcribed as the next child
+            // utterance via mic→speaker acoustic feedback).
+            if let Some(flag) = is_speaking.as_ref() {
+                flag.store(true, std::sync::atomic::Ordering::SeqCst);
+            }
             let mut session = backends.tts.open_session(&backends.voice)?;
+            let tts_rate = backends.tts.sample_rate();
+            let mut total_samples_at_tts_rate: usize = 0;
             for chunk in session.push_text(&accumulated)? {
+                total_samples_at_tts_rate += chunk.samples.len();
                 on_committed_audio(chunk.samples);
             }
             for chunk in session.finalize()? {
+                total_samples_at_tts_rate += chunk.samples.len();
                 on_committed_audio(chunk.samples);
+            }
+            // Wait for the speaker to drain. cpal pulls at hardware rate;
+            // the audio we just queued has duration = samples / tts_rate.
+            // Add a 200 ms safety margin for output-resampler latency,
+            // ringbuf drain, and any per-phrase synthesis stutter so the
+            // tail of the Primer's voice doesn't reach the mic before we
+            // un-gate.
+            if let Some(flag) = is_speaking.as_ref() {
+                let duration_secs =
+                    total_samples_at_tts_rate as f32 / tts_rate as f32 + 0.2;
+                tokio::time::sleep(std::time::Duration::from_secs_f32(duration_secs))
+                    .await;
+                flag.store(false, std::sync::atomic::Ordering::SeqCst);
             }
         }
     }
@@ -528,14 +558,22 @@ pub async fn run<'a>(
     // Cancellation flag — set when run_loop exits to tell the audio
     // thread to stop.
     let stop_flag = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+    // Speaking gate — set by run_loop's SPEAK phase, checked by the
+    // audio thread. While true, the audio thread drains the mic ringbuf
+    // but discards the samples (no VAD, no whisper push). This is the
+    // anti-feedback guard: without it, the Primer's own TTS leaks
+    // through the speaker → mic → whisper loop and gets transcribed
+    // as the next "child" utterance.
+    let is_speaking = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
 
     // ── Spawn audio capture thread ─────────────────────────────────
     // Owns: mic_cons, input_resampler, audio_vad, whisper (Arc),
-    //       event_tx, transcript_tx, stop_flag.
+    //       event_tx, transcript_tx, stop_flag, is_speaking.
     // Drives: the LISTEN-side state machine (raw mic → resample →
     //         silero → whisper push), at audio rate.
     let whisper_for_thread = std::sync::Arc::clone(&whisper);
     let stop_flag_thread = std::sync::Arc::clone(&stop_flag);
+    let is_speaking_thread = std::sync::Arc::clone(&is_speaking);
     let audio_thread = std::thread::Builder::new()
         .name("primer-speech-audio".into())
         .spawn(move || {
@@ -549,6 +587,7 @@ pub async fn run<'a>(
                 event_tx,
                 transcript_tx,
                 stop_flag_thread,
+                is_speaking_thread,
             )
         })
         .map_err(|e| {
@@ -629,7 +668,15 @@ pub async fn run<'a>(
     let responder: Box<dyn Responder + '_> = Box::new(DialogueResponder { dialogue });
 
     // ── Drive the loop ─────────────────────────────────────────────
-    let result = run_loop(backends, event_rx, responder, on_audio, cfg.verbose).await;
+    let result = run_loop(
+        backends,
+        event_rx,
+        responder,
+        on_audio,
+        cfg.verbose,
+        Some(std::sync::Arc::clone(&is_speaking)),
+    )
+    .await;
 
     // ── Tell the audio thread to stop and wait for it ──────────────
     stop_flag.store(true, std::sync::atomic::Ordering::SeqCst);
@@ -690,6 +737,7 @@ fn run_audio_thread(
     event_tx: tokio::sync::mpsc::UnboundedSender<primer_core::speech::VadEvent>,
     transcript_tx: std::sync::mpsc::Sender<String>,
     stop_flag: std::sync::Arc<std::sync::atomic::AtomicBool>,
+    is_speaking: std::sync::Arc<std::sync::atomic::AtomicBool>,
 ) -> Result<()> {
     use primer_core::speech::{StreamingSpeechToText, TranscriptionSession, VadEvent};
     use ringbuf::traits::Consumer as _;
@@ -706,6 +754,24 @@ fn run_audio_thread(
                 let _ = s.finalize();
             }
             return Ok(());
+        }
+
+        // Anti-feedback gate: while run_loop is in SPEAK, drop everything
+        // the mic captures (the Primer's own voice would otherwise be
+        // transcribed). Also discard any partial whisper session; we'll
+        // open a fresh one when the gate reopens.
+        if is_speaking.load(std::sync::atomic::Ordering::SeqCst) {
+            while mic_cons.try_pop().is_some() {}
+            if let Some(s) = active_session.take() {
+                let _ = s.finalize();
+            }
+            raw_buf.clear();
+            vad_in_buf.clear();
+            // Reset VAD's internal speech-state debouncer so we don't
+            // emit a stale SpeechEnd as soon as the gate reopens.
+            vad.reset();
+            std::thread::sleep(std::time::Duration::from_millis(20));
+            continue;
         }
 
         // Drain available samples from the mic ringbuf.
@@ -1047,7 +1113,7 @@ mod mocks {
             committed_clone.lock().unwrap().extend(samples);
         });
 
-        let result = super::run_loop(backends, event_rx, responder, on_audio, false).await;
+        let result = super::run_loop(backends, event_rx, responder, on_audio, false, None).await;
         let transcripts = result.expect("loop ok");
         assert_eq!(transcripts, vec!["hello primer".to_string()]);
         assert_eq!(*captured_transcript.lock().unwrap(), "hello primer");
@@ -1102,6 +1168,7 @@ mod mocks {
             Box::new(WhitespaceResponder),
             on_audio,
             false,
+            None,
         )
         .await;
         // "goodbye" hits the quit-phrase check, so the loop exits with
@@ -1180,6 +1247,7 @@ mod mocks {
                 Box::new(CountingResponder { count: cc_clone }),
                 on_audio,
                 false,
+                None,
             ),
         )
         .await
@@ -1247,6 +1315,7 @@ mod mocks {
             Box::new(PromptResponder),
             on_audio,
             false,
+            None,
         )
         .await
         .expect("loop ok");
