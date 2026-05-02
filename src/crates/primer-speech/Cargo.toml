@@ -24,10 +24,27 @@ ort = { version = "=2.0.0-rc.10", default-features = false, features = ["ndarray
 # (cmake + a C++ compiler must be present on the build host).
 whisper-cpp-plus = { version = "0.1", default-features = false, optional = true }
 
-# Audio I/O — uncomment when integrating:
-# cpal = "0.15"
+# Piper TTS — opt-in via the `piper` feature. Pulls ort + espeak-rs + riff-wave
+# transitively. Watch for ort rc disagreement with silero-vad-rust 6.2 when
+# both `silero` and `piper` features are enabled.
+piper-rs = { version = "0.1", default-features = false, optional = true }
+# Used by the piper backend to read `audio.sample_rate` from the voice
+# config sidecar JSON. Optional so the default workspace build doesn't
+# pull serde_json into primer-speech.
+serde_json = { workspace = true, optional = true }
+
+[dev-dependencies]
+# WAV writer for the tts_hello example. Dev-only — not part of the
+# default build dep tree.
+hound = "3"
+clap = { workspace = true }
 
 [features]
 default = []
 silero = ["dep:silero-vad-rust", "dep:ort"]
 whisper = ["dep:whisper-cpp-plus"]
+piper = ["dep:piper-rs", "dep:serde_json"]
+
+[[example]]
+name = "tts_hello"
+required-features = ["piper"]
