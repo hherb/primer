@@ -296,15 +296,6 @@ async fn build_classifier(
     }
 }
 
-/// Convenience wrapper that mints a fresh UUID for a brand-new learner.
-/// Calls `create_learner_with_id` with `Uuid::new_v4()`. Kept for callers
-/// that do not need to control the UUID (e.g., tests that don't care about
-/// stable IDs).
-#[allow(dead_code)]
-fn create_learner(name: &str, age: u8) -> LearnerModel {
-    create_learner_with_id(Uuid::new_v4(), name, age)
-}
-
 fn create_learner_with_id(id: Uuid, name: &str, age: u8) -> LearnerModel {
     LearnerModel {
         profile: LearnerProfile {
