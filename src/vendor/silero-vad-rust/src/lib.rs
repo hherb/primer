@@ -1,3 +1,9 @@
+// Vendored copy: silence upstream warnings (unused `path` shadow in
+// utils_vad.rs:110, dead `interleaved_to_mono` helper at utils_vad.rs:731).
+// Drop these allows together with the vendor entry in workspace Cargo.toml
+// once silero-vad-rust upstream cleans them up.
+#![allow(unused_variables, dead_code)]
+
 //! Rust port of the Silero Voice Activity Detector with ONNX Runtime helpers.
 //!
 //! The crate re-exports the most common entry points from [`silero_vad::model`]
