@@ -610,6 +610,60 @@ mod mocks {
         // Audio committed (from second responder call).
         assert!(!committed.lock().unwrap().is_empty(), "audio committed on retry");
     }
+
+    /// Test 3 — commit on first audio: synthesis fires before any
+    /// resumed speech. Audio reaches the speaker callback; subsequent
+    /// VAD events arriving after commit do not affect the in-flight
+    /// SPEAK phase.
+    #[tokio::test]
+    async fn commit_on_first_chunk_proceeds_to_speak() {
+        use primer_core::speech::VadEvent;
+
+        let backends = super::LoopBackends {
+            vad: Box::new(MockVad::new(vec![])),
+            stt: Arc::new(MockStreamingStt::new("hi primer")),
+            tts: Arc::new(MockStreamingTts::new(64)),
+        };
+
+        let (event_tx, event_rx) = tokio::sync::mpsc::unbounded_channel();
+        event_tx.send(VadEvent::SpeechStart).unwrap();
+        event_tx.send(VadEvent::SpeechEnd).unwrap();
+        // Crucially: NO SpeechStart between SpeechEnd and the LLM future
+        // resolving. Commit should proceed.
+        drop(event_tx);
+
+        struct PromptResponder;
+        impl super::Responder for PromptResponder {
+            fn respond<'a>(
+                &'a mut self,
+                _transcript: &'a str,
+                mut on_chunk: Box<dyn FnMut(&str) + Send + 'a>,
+            ) -> std::pin::Pin<Box<dyn std::future::Future<Output = primer_core::error::Result<String>> + Send + 'a>> {
+                Box::pin(async move {
+                    on_chunk("Hello!");
+                    Ok("Hello!".to_string())
+                })
+            }
+        }
+
+        let committed: Arc<Mutex<Vec<f32>>> = Arc::new(Mutex::new(Vec::new()));
+        let committed_clone = Arc::clone(&committed);
+        let on_audio: Box<dyn FnMut(Vec<f32>) + Send> = Box::new(move |samples| {
+            committed_clone.lock().unwrap().extend(samples);
+        });
+
+        let result = super::run_loop(
+            backends,
+            event_rx,
+            Box::new(PromptResponder),
+            on_audio,
+        )
+        .await
+        .expect("loop ok");
+
+        assert_eq!(result, vec!["hi primer".to_string()]);
+        assert!(!committed.lock().unwrap().is_empty(), "audio committed");
+    }
 }
 
 #[cfg(test)]
