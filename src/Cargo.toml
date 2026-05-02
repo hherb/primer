@@ -10,7 +10,7 @@ members = [
     "crates/primer-storage",
     "crates/primer-classifier",
 ]
-exclude = ["vendor/piper-rs"]
+exclude = ["vendor/piper-rs", "vendor/silero-vad-rust"]
 
 [workspace.package]
 version = "0.1.0"
@@ -82,3 +82,8 @@ primer-classifier = { path = "crates/primer-classifier" }
 # The published 0.1.9 was built against rc.9; the intersection of supported
 # ort versions between piper-rs 0.1.x and silero-vad-rust 6.2 is empty.
 piper-rs = { path = "vendor/piper-rs" }
+# Vendored silero-vad-rust patched to replace u32::is_multiple_of (still
+# unstable, see #128101) with `% N == 0`. Two call sites in model.rs and
+# utils_vad.rs. Drop this patch once is_multiple_of is stabilised upstream
+# AND a silero-vad-rust release picks up the API surface.
+silero-vad-rust = { path = "vendor/silero-vad-rust" }
