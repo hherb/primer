@@ -401,6 +401,61 @@ mod mocks {
         assert_eq!(*captured_transcript.lock().unwrap(), "hello primer");
         assert!(!committed.lock().unwrap().is_empty(), "audio was committed");
     }
+
+    /// Test 4 — natural completion, no audio: LLM returns whitespace
+    /// only. Loop should not commit any audio and should return to
+    /// LISTEN cleanly.
+    #[tokio::test]
+    async fn natural_completion_no_audio_does_not_commit() {
+        use primer_core::speech::VadEvent;
+
+        let backends = super::LoopBackends {
+            vad: Box::new(MockVad::new(vec![
+                VadEvent::SpeechStart,
+                VadEvent::SpeechEnd,
+            ])),
+            stt: Arc::new(MockStreamingStt::new("goodbye")),
+            tts: Arc::new(MockStreamingTts::new(64)),
+        };
+
+        let (event_tx, event_rx) = tokio::sync::mpsc::unbounded_channel();
+        event_tx.send(VadEvent::SpeechStart).unwrap();
+        event_tx.send(VadEvent::SpeechEnd).unwrap();
+        drop(event_tx);
+
+        struct WhitespaceResponder;
+        impl super::Responder for WhitespaceResponder {
+            fn respond<'a>(
+                &'a mut self,
+                _transcript: &'a str,
+                mut on_chunk: Box<dyn FnMut(&str) + Send + 'a>,
+            ) -> std::pin::Pin<Box<dyn std::future::Future<Output = primer_core::error::Result<String>> + Send + 'a>> {
+                Box::pin(async move {
+                    on_chunk("");
+                    Ok(String::new())
+                })
+            }
+        }
+
+        let committed: Arc<Mutex<Vec<f32>>> = Arc::new(Mutex::new(Vec::new()));
+        let committed_clone = Arc::clone(&committed);
+        let on_audio: Box<dyn FnMut(Vec<f32>) + Send> = Box::new(move |samples| {
+            committed_clone.lock().unwrap().extend(samples);
+        });
+
+        let result = super::run_loop(
+            backends,
+            event_rx,
+            Box::new(WhitespaceResponder),
+            on_audio,
+        )
+        .await;
+        // "goodbye" hits the quit-phrase check, so the loop exits with
+        // exactly one transcript and no audio committed.
+        let transcripts = result.expect("loop ok");
+        assert_eq!(transcripts, vec!["goodbye".to_string()]);
+        assert!(committed.lock().unwrap().is_empty(), "no audio for whitespace");
+    }
 }
 
 #[cfg(test)]
