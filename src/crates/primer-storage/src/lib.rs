@@ -742,9 +742,134 @@ impl primer_core::storage::LearnerStore for SqliteSessionStore {
     }
 
     async fn load_learner(&self) -> Result<Option<primer_core::learner::LearnerModel>> {
-        // Stub for now — real impl in Task 8. Returning None lets save_learner
-        // tests pass without depending on load_learner.
-        Ok(None)
+        use primer_core::learner::{
+            ConceptState, LearnerModel, LearnerProfile, LearningPreferences,
+        };
+        use std::time::Duration;
+
+        let conn = self.conn.lock().unwrap();
+
+        // Step 1: the learners row.
+        type LearnerRow = (
+            String, String, i64, String, String, String,
+            f64, f64, f64, f64, f64, String, i64, i64,
+        );
+        let row: Option<LearnerRow> = conn
+            .query_row(
+                "SELECT id, name, age, languages, created_at, last_active,
+                        pref_narrative, pref_socratic, pref_visual, pref_kinesthetic,
+                        typical_session_minutes, high_engagement_topics,
+                        early_disengagement_secs, current_engagement_state_id
+                 FROM learners LIMIT 1",
+                [],
+                |r| {
+                    Ok((
+                        r.get(0)?,  r.get(1)?,  r.get(2)?,  r.get(3)?,
+                        r.get(4)?,  r.get(5)?,  r.get(6)?,  r.get(7)?,
+                        r.get(8)?,  r.get(9)?,  r.get(10)?, r.get(11)?,
+                        r.get(12)?, r.get(13)?,
+                    ))
+                },
+            )
+            .optional()
+            .map_err(|e| PrimerError::Storage(format!("load_learner select: {e}")))?;
+
+        let Some((
+            id_str, name, age, languages_json, created_str, last_active_str,
+            pref_narrative, pref_socratic, pref_visual, pref_kinesthetic,
+            typical_session_minutes, topics_json, early_secs, engagement_state_id,
+        )) = row
+        else {
+            return Ok(None);
+        };
+
+        let id = Uuid::parse_str(&id_str)
+            .map_err(|e| PrimerError::Storage(format!("parse learner id {id_str}: {e}")))?;
+        let languages: Vec<String> = serde_json::from_str(&languages_json)
+            .map_err(|e| PrimerError::Storage(format!("decode languages: {e}")))?;
+        let high_engagement_topics: Vec<String> = serde_json::from_str(&topics_json)
+            .map_err(|e| PrimerError::Storage(format!("decode high_engagement_topics: {e}")))?;
+        let created_at = parse_rfc3339(&created_str, "learners.created_at")?;
+        let last_active = parse_rfc3339(&last_active_str, "learners.last_active")?;
+        let current_engagement = catalog::engagement_state_from_id(engagement_state_id)
+            .ok_or_else(|| {
+                PrimerError::Storage(format!(
+                    "unknown engagement_state_id {engagement_state_id} on learners row"
+                ))
+            })?;
+
+        let profile = LearnerProfile {
+            id,
+            name,
+            age: age as u8,
+            languages,
+            created_at,
+            last_active,
+        };
+        let preferences = LearningPreferences {
+            narrative: pref_narrative as f32,
+            socratic: pref_socratic as f32,
+            visual: pref_visual as f32,
+            kinesthetic: pref_kinesthetic as f32,
+            typical_session_minutes: typical_session_minutes as f32,
+            high_engagement_topics,
+            early_disengagement_threshold: Duration::from_secs(early_secs.max(0) as u64),
+        };
+
+        // Step 2: every learner_concepts row, joined to concepts for the
+        // string concept_id.
+        let mut stmt = conn
+            .prepare(
+                "SELECT c.name, lc.depth_id, lc.confidence, lc.encounter_count,
+                        lc.last_encountered, lc.notes
+                 FROM learner_concepts lc
+                 JOIN concepts c ON c.id = lc.concept_id
+                 WHERE lc.learner_id = ?1",
+            )
+            .map_err(|e| PrimerError::Storage(format!("prepare load_learner concepts: {e}")))?;
+        let rows = stmt
+            .query_map(rusqlite::params![id.to_string()], |r| {
+                Ok((
+                    r.get::<_, String>(0)?,
+                    r.get::<_, i64>(1)?,
+                    r.get::<_, f64>(2)?,
+                    r.get::<_, i64>(3)?,
+                    r.get::<_, Option<String>>(4)?,
+                    r.get::<_, String>(5)?,
+                ))
+            })
+            .map_err(|e| PrimerError::Storage(format!("query learner_concepts: {e}")))?;
+
+        let mut concepts: Vec<ConceptState> = Vec::new();
+        for row in rows {
+            let (concept_name, depth_id, confidence, encounter_count, last_encountered_opt, notes_json) =
+                row.map_err(|e| PrimerError::Storage(format!("read learner_concepts: {e}")))?;
+            let depth = catalog::understanding_depth_from_id(depth_id).ok_or_else(|| {
+                PrimerError::Storage(format!("unknown depth_id {depth_id}"))
+            })?;
+            let last_encountered = last_encountered_opt
+                .as_deref()
+                .map(|s| parse_rfc3339(s, "learner_concepts.last_encountered"))
+                .transpose()?;
+            let notes: Vec<String> = serde_json::from_str(&notes_json)
+                .map_err(|e| PrimerError::Storage(format!("decode notes: {e}")))?;
+            concepts.push(ConceptState {
+                concept_id: concept_name,
+                depth,
+                confidence: confidence as f32,
+                encounter_count: encounter_count as u32,
+                last_encountered,
+                notes,
+            });
+        }
+
+        Ok(Some(LearnerModel {
+            profile,
+            concepts,
+            preferences,
+            current_engagement,
+            recent_assessments: vec![],
+        }))
     }
 }
 
@@ -2478,5 +2603,75 @@ mod learner_store_tests {
             .query_row("SELECT COUNT(*) FROM learner_concepts", [], |r| r.get(0))
             .unwrap();
         assert_eq!(total as usize, UnderstandingDepth::ALL.len());
+    }
+
+    #[tokio::test]
+    async fn load_learner_returns_none_for_empty_db() {
+        let store = open_in_mem();
+        let result = store.load_learner().await.unwrap();
+        assert!(result.is_none());
+    }
+
+    #[tokio::test]
+    async fn save_then_load_round_trips_every_field() {
+        let store = open_in_mem();
+        let original = sample_learner();
+        store.save_learner(&original).await.unwrap();
+
+        let loaded = store.load_learner().await.unwrap().expect("learner row");
+
+        // Profile.
+        assert_eq!(loaded.profile.id, original.profile.id);
+        assert_eq!(loaded.profile.name, original.profile.name);
+        assert_eq!(loaded.profile.age, original.profile.age);
+        assert_eq!(loaded.profile.languages, original.profile.languages);
+        // Timestamps round-trip via RFC 3339; allow sub-second equality.
+        assert_eq!(
+            loaded.profile.created_at.timestamp(),
+            original.profile.created_at.timestamp()
+        );
+        assert_eq!(
+            loaded.profile.last_active.timestamp(),
+            original.profile.last_active.timestamp()
+        );
+
+        // Preferences.
+        assert!((loaded.preferences.narrative - original.preferences.narrative).abs() < 1e-6);
+        assert!((loaded.preferences.socratic - original.preferences.socratic).abs() < 1e-6);
+        assert!((loaded.preferences.visual - original.preferences.visual).abs() < 1e-6);
+        assert!((loaded.preferences.kinesthetic - original.preferences.kinesthetic).abs() < 1e-6);
+        assert_eq!(
+            loaded.preferences.high_engagement_topics,
+            original.preferences.high_engagement_topics
+        );
+        assert_eq!(
+            loaded.preferences.early_disengagement_threshold,
+            original.preferences.early_disengagement_threshold
+        );
+
+        // Engagement snapshot.
+        assert_eq!(loaded.current_engagement, original.current_engagement);
+
+        // Concepts — match by concept_id (order is not guaranteed by SELECT).
+        assert_eq!(loaded.concepts.len(), original.concepts.len());
+        for original_c in &original.concepts {
+            let loaded_c = loaded
+                .concepts
+                .iter()
+                .find(|c| c.concept_id == original_c.concept_id)
+                .expect("concept present");
+            assert_eq!(loaded_c.depth, original_c.depth);
+            assert!((loaded_c.confidence - original_c.confidence).abs() < 1e-6);
+            assert_eq!(loaded_c.encounter_count, original_c.encounter_count);
+            assert_eq!(loaded_c.notes, original_c.notes);
+            assert_eq!(
+                loaded_c.last_encountered.map(|t| t.timestamp()),
+                original_c.last_encountered.map(|t| t.timestamp()),
+            );
+        }
+
+        // recent_assessments is rehydrated separately from
+        // turn_classifications and is not part of the round-trip.
+        assert!(loaded.recent_assessments.is_empty());
     }
 }
