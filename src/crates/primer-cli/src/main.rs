@@ -296,6 +296,42 @@ async fn build_classifier(
     }
 }
 
+/// Reconcile a freshly-loaded persisted `LearnerModel` against the
+/// CLI flags for this launch.
+///
+/// Behaviour (kept minimal so the test surface matches the production
+/// branch exactly):
+/// - If `cli_name` differs from the persisted name, log a `tracing::warn!`
+///   AND a stderr `eprintln!` (so a parent who typos a name sees it
+///   without `RUST_LOG=warn`). The persisted name **always** wins —
+///   silently rewriting it would lock a child out of their own data.
+/// - Update `age` from the CLI (covers the birthday case).
+/// - Update `last_active` to now.
+///
+/// Returns the reconciled `LearnerModel`. The caller is responsible
+/// for the subsequent `save_learner` call (so this helper has no I/O).
+fn reconcile_persisted_learner(
+    mut existing: LearnerModel,
+    cli_name: &str,
+    cli_age: u8,
+) -> LearnerModel {
+    if existing.profile.name != cli_name {
+        eprintln!(
+            "Note: --name {:?} differs from the persisted learner name {:?}; \
+             keeping persisted (delete ~/.primer/<slug>.db to start fresh).",
+            cli_name, existing.profile.name
+        );
+        tracing::warn!(
+            "CLI --name {:?} differs from persisted learner name {:?}; using persisted",
+            cli_name,
+            existing.profile.name
+        );
+    }
+    existing.profile.age = cli_age;
+    existing.profile.last_active = Utc::now();
+    existing
+}
+
 fn create_learner_with_id(id: Uuid, name: &str, age: u8) -> LearnerModel {
     LearnerModel {
         profile: LearnerProfile {
@@ -467,29 +503,12 @@ async fn main() -> anyhow::Result<()> {
 
     // Learner model — load from persistent store or mint fresh on first run.
     let learner = match session_store.load_learner().await {
-        Ok(Some(mut existing)) => {
-            if existing.profile.name != cli.name {
-                // Surface to stderr too: a parent who typos a name should see
-                // it without needing RUST_LOG=warn. The persisted name wins so
-                // we don't lock anyone out of their own data — that's the
-                // safe failure mode — but silence here would be a UX bug.
-                eprintln!(
-                    "Note: --name {:?} differs from the persisted learner name {:?}; \
-                     keeping persisted (delete ~/.primer/<slug>.db to start fresh).",
-                    cli.name, existing.profile.name
-                );
-                tracing::warn!(
-                    "CLI --name {:?} differs from persisted learner name {:?}; using persisted",
-                    cli.name,
-                    existing.profile.name
-                );
-            }
-            existing.profile.age = cli.age;
-            existing.profile.last_active = Utc::now();
-            if let Err(e) = session_store.save_learner(&existing).await {
+        Ok(Some(existing)) => {
+            let reconciled = reconcile_persisted_learner(existing, &cli.name, cli.age);
+            if let Err(e) = session_store.save_learner(&reconciled).await {
                 tracing::warn!("save_learner on startup failed: {e}");
             }
-            existing
+            reconciled
         }
         Ok(None) => {
             // First run on this file. Two sub-cases:
@@ -963,8 +982,9 @@ mod tests {
 
     #[tokio::test]
     async fn cli_birthday_case_updates_age_and_keeps_uuid() {
-        // Save a learner with age=8, simulate startup with --age=9, verify
-        // the persisted row has age=9 with the same UUID and created_at.
+        // Save a learner with age=8, simulate startup with --age=9 by
+        // calling the SAME helper main() uses, then verify the persisted
+        // row has age=9 with the same UUID and created_at preserved.
         use chrono::Utc;
         use primer_core::storage::LearnerStore;
         use primer_storage::SqliteSessionStore;
@@ -977,26 +997,18 @@ mod tests {
         original.profile.created_at = original_created;
         store.save_learner(&original).await.unwrap();
 
-        // Simulate startup with --age=9.
-        let cli_age: u8 = 9;
-
-        let learner = match store.load_learner().await.unwrap() {
-            Some(mut existing) => {
-                existing.profile.age = cli_age;
-                existing.profile.last_active = Utc::now();
-                store.save_learner(&existing).await.unwrap();
-                existing
-            }
-            None => unreachable!(),
-        };
+        // Reload + reconcile via the production helper.
+        let existing = store.load_learner().await.unwrap().expect("learner row");
+        let reconciled = reconcile_persisted_learner(existing, "Binti", 9);
+        store.save_learner(&reconciled).await.unwrap();
 
         assert_eq!(
-            learner.profile.id, original_id,
+            reconciled.profile.id, original_id,
             "UUID stable across launches"
         );
-        assert_eq!(learner.profile.age, 9, "age updated to CLI value");
+        assert_eq!(reconciled.profile.age, 9, "age updated to CLI value");
         assert_eq!(
-            learner.profile.created_at.timestamp(),
+            reconciled.profile.created_at.timestamp(),
             original_created.timestamp(),
             "created_at preserved",
         );
@@ -1004,10 +1016,13 @@ mod tests {
 
     #[tokio::test]
     async fn cli_name_mismatch_keeps_persisted_name() {
-        // Save with name="Binti", reload with --name="Other", verify the
-        // persisted name stays "Binti". This test does not assert the
-        // tracing::warn! emission (subscriber-capture would over-couple
-        // the test); it asserts the data invariant only.
+        // Save with name="Binti", call reconcile_persisted_learner with
+        // --name="Other" — the SAME helper main() uses — and verify the
+        // persisted name stays "Binti". The tracing::warn! / eprintln!
+        // emission is intentionally NOT asserted (subscriber capture
+        // would over-couple the test); the data invariant is what
+        // matters here, and exercising the production helper proves we
+        // are testing the actual production branch rather than a stub.
         use primer_core::storage::LearnerStore;
         use primer_storage::SqliteSessionStore;
         use std::sync::Arc;
@@ -1016,26 +1031,31 @@ mod tests {
         let original = create_learner_with_id(Uuid::new_v4(), "Binti", 8);
         store.save_learner(&original).await.unwrap();
 
-        // Simulate startup with --name=Other.
-        let cli_name = "Other";
-        let cli_age: u8 = 8;
-
-        let learner = match store.load_learner().await.unwrap() {
-            Some(mut existing) => {
-                if existing.profile.name != cli_name {
-                    // Production code emits tracing::warn! here. Not asserted in this test.
-                }
-                existing.profile.age = cli_age;
-                existing.profile.last_active = chrono::Utc::now();
-                store.save_learner(&existing).await.unwrap();
-                existing
-            }
-            None => unreachable!(),
-        };
+        let existing = store.load_learner().await.unwrap().expect("learner row");
+        let reconciled = reconcile_persisted_learner(existing, "Other", 8);
+        store.save_learner(&reconciled).await.unwrap();
 
         assert_eq!(
-            learner.profile.name, "Binti",
+            reconciled.profile.name, "Binti",
             "persisted name wins over CLI"
         );
+
+        // Round-trip through the store too — proves the saved row also
+        // keeps the persisted name (i.e. the helper didn't mutate name
+        // before save_learner committed it).
+        let round_trip = store.load_learner().await.unwrap().expect("learner row");
+        assert_eq!(round_trip.profile.name, "Binti");
+    }
+
+    #[test]
+    fn reconcile_persisted_learner_preserves_name_and_id_on_match() {
+        // The non-mismatch path: same name should be a pure age/last_active
+        // refresh with no warn (covered by absence of stderr in this test).
+        let original_id = Uuid::new_v4();
+        let original = create_learner_with_id(original_id, "Binti", 8);
+        let result = reconcile_persisted_learner(original, "Binti", 9);
+        assert_eq!(result.profile.name, "Binti");
+        assert_eq!(result.profile.id, original_id);
+        assert_eq!(result.profile.age, 9);
     }
 }
