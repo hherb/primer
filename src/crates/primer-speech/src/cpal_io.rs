@@ -148,7 +148,7 @@ impl MicCapture {
             other => {
                 return Err(PrimerError::Speech(format!(
                     "unsupported sample format: {other:?}"
-                )))
+                )));
             }
         }
         .map_err(|e| PrimerError::Speech(format!("build input stream: {e}")))?;
@@ -266,7 +266,7 @@ impl SpeakerSink {
             other => {
                 return Err(PrimerError::Speech(format!(
                     "unsupported sample format: {other:?}"
-                )))
+                )));
             }
         }
         .map_err(|e| PrimerError::Speech(format!("build output stream: {e}")))?;
@@ -427,8 +427,7 @@ mod tests {
             buf
         } else {
             let chunk = 1024;
-            let mut r =
-                Resampler::new(mic_rate, spk_rate, chunk).expect("resampler");
+            let mut r = Resampler::new(mic_rate, spk_rate, chunk).expect("resampler");
             let mut out = Vec::new();
             for window in buf.chunks(chunk) {
                 if window.len() != chunk {

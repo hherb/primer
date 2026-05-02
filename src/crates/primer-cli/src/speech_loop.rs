@@ -37,9 +37,7 @@ fn is_quit_phrase(transcript: &str) -> bool {
 /// Underscore-emphasis is rare and ambiguous (it shows up in identifiers
 /// too) — left alone for now.
 fn strip_markdown_for_tts(text: &str) -> String {
-    text.chars()
-        .filter(|c| !matches!(c, '*' | '`'))
-        .collect()
+    text.chars().filter(|c| !matches!(c, '*' | '`')).collect()
 }
 
 /// Configuration passed into `run` from `main`.
@@ -168,10 +166,7 @@ pub async fn run_loop<'r>(
             // (e.g. terminal echo). For unit tests we ignore chunks and
             // rely on the final Result.
             let transcript_clone = transcript_so_far.clone();
-            let llm_fut = responder.respond(
-                &transcript_clone,
-                Box::new(|_chunk: &str| {}),
-            );
+            let llm_fut = responder.respond(&transcript_clone, Box::new(|_chunk: &str| {}));
             tokio::pin!(llm_fut);
 
             // Wait for either: (a) llm done, (b) VAD SpeechStart (cancel).
@@ -287,8 +282,7 @@ pub async fn run_loop<'r>(
             // pause at sentence boundaries without adding much to
             // total response time.
             const INTER_PHRASE_SILENCE_MS: u32 = 200;
-            let inter_phrase_silence_samples =
-                (tts_rate * INTER_PHRASE_SILENCE_MS / 1000) as usize;
+            let inter_phrase_silence_samples = (tts_rate * INTER_PHRASE_SILENCE_MS / 1000) as usize;
             let mut total_samples_at_tts_rate: usize = 0;
             for chunk in session.push_text(&tts_text)? {
                 total_samples_at_tts_rate += chunk.samples.len();
@@ -316,10 +310,8 @@ pub async fn run_loop<'r>(
             // synthesis stutter — so the tail of the Primer's voice
             // doesn't reach the mic before we un-gate.
             if let Some(flag) = is_speaking.as_ref() {
-                let duration_secs =
-                    total_samples_at_tts_rate as f32 / tts_rate as f32 + 0.4;
-                tokio::time::sleep(std::time::Duration::from_secs_f32(duration_secs))
-                    .await;
+                let duration_secs = total_samples_at_tts_rate as f32 / tts_rate as f32 + 0.4;
+                tokio::time::sleep(std::time::Duration::from_secs_f32(duration_secs)).await;
                 flag.store(false, std::sync::atomic::Ordering::SeqCst);
             }
         }
@@ -379,10 +371,7 @@ impl VoiceActivityDetector for NoopVad {
     fn chunk_samples(&self) -> usize {
         512
     }
-    fn process_chunk(
-        &mut self,
-        _samples: &[f32],
-    ) -> Result<primer_core::speech::VadFrame> {
+    fn process_chunk(&mut self, _samples: &[f32]) -> Result<primer_core::speech::VadFrame> {
         Err(primer_core::error::PrimerError::Speech(
             "NoopVad::process_chunk should never be called (audio thread owns the real VAD)".into(),
         ))
@@ -418,9 +407,7 @@ impl StreamingSpeechToText for ChannelStt {
     fn sample_rate(&self) -> u32 {
         16_000
     }
-    fn open_session(
-        &self,
-    ) -> Result<Box<dyn primer_core::speech::TranscriptionSession>> {
+    fn open_session(&self) -> Result<Box<dyn primer_core::speech::TranscriptionSession>> {
         Ok(Box::new(ChannelSttSession {
             rx: std::sync::Arc::clone(&self.rx),
         }))
@@ -443,9 +430,7 @@ impl primer_core::speech::TranscriptionSession for ChannelSttSession {
         // someone wires it up differently this is a silent no-op.
         Ok(vec![])
     }
-    fn finalize(
-        self: Box<Self>,
-    ) -> Result<Vec<primer_core::speech::TranscriptSegment>> {
+    fn finalize(self: Box<Self>) -> Result<Vec<primer_core::speech::TranscriptSegment>> {
         // Try to receive a transcript. The audio thread sends BEFORE
         // emitting SpeechEnd, so by the time run_loop calls us the
         // transcript is normally already buffered. We use try_recv with
@@ -509,9 +494,9 @@ pub async fn run<'a>(
     // espeak-ng-data directory. Skipped if the env var is already set.
     if std::env::var_os("PIPER_ESPEAKNG_DATA_DIRECTORY").is_none() {
         const ESPEAK_PARENT_CANDIDATES: &[&str] = &[
-            "/opt/homebrew/share",  // macOS Apple Silicon (brew install espeak-ng)
-            "/usr/local/share",     // macOS Intel / generic
-            "/usr/share",           // Linux (apt/dnf install espeak-ng-data)
+            "/opt/homebrew/share", // macOS Apple Silicon (brew install espeak-ng)
+            "/usr/local/share",    // macOS Intel / generic
+            "/usr/share",          // Linux (apt/dnf install espeak-ng-data)
         ];
         for parent in ESPEAK_PARENT_CANDIDATES {
             let probe = std::path::Path::new(parent).join("espeak-ng-data/phontab");
@@ -561,8 +546,7 @@ pub async fn run<'a>(
     // 512 * mic_rate / 16_000 (e.g. 1536 at 48 kHz).
     let vad_rate = audio_vad.sample_rate();
     let vad_chunk = audio_vad.chunk_samples();
-    let in_chunk_samples: usize =
-        (vad_chunk as u64 * mic_rate as u64 / vad_rate as u64) as usize;
+    let in_chunk_samples: usize = (vad_chunk as u64 * mic_rate as u64 / vad_rate as u64) as usize;
     let mut input_resampler: Option<Resampler> = if mic_rate != vad_rate {
         Some(Resampler::new(mic_rate, vad_rate, in_chunk_samples)?)
     } else {
@@ -578,13 +562,11 @@ pub async fn run<'a>(
     // padding/buffering to feed it. We keep it inside a Mutex<Option<…>>
     // so the on_audio FnMut can mutate it across calls.
     let output_chunk_in: usize = 1024;
-    let output_resampler = std::sync::Arc::new(std::sync::Mutex::new(
-        if need_output_resample {
-            Some(Resampler::new(tts_sample_rate, spk_rate, output_chunk_in)?)
-        } else {
-            None
-        },
-    ));
+    let output_resampler = std::sync::Arc::new(std::sync::Mutex::new(if need_output_resample {
+        Some(Resampler::new(tts_sample_rate, spk_rate, output_chunk_in)?)
+    } else {
+        None
+    }));
 
     // ── Channels ───────────────────────────────────────────────────
     let (event_tx, event_rx) = tokio::sync::mpsc::unbounded_channel::<VadEvent>();
@@ -624,9 +606,7 @@ pub async fn run<'a>(
                 is_speaking_thread,
             )
         })
-        .map_err(|e| {
-            primer_core::error::PrimerError::Speech(format!("spawn audio thread: {e}"))
-        })?;
+        .map_err(|e| primer_core::error::PrimerError::Speech(format!("spawn audio thread: {e}")))?;
 
     // ── Build LoopBackends with the channel STT wrapper ────────────
     let backends = LoopBackends {
@@ -761,10 +741,7 @@ pub async fn run<'a>(
 
     let transcripts = result?;
     if cfg.verbose {
-        eprintln!(
-            "[speech] session ended after {} turn(s)",
-            transcripts.len()
-        );
+        eprintln!("[speech] session ended after {} turn(s)", transcripts.len());
     }
     Ok(())
 }
@@ -1104,9 +1081,15 @@ mod mocks {
             VadEvent::SpeechEnd,
         ]);
         let chunk = vec![0.0f32; 512];
-        assert_eq!(vad.process_chunk(&chunk).unwrap().event, VadEvent::SpeechStart);
+        assert_eq!(
+            vad.process_chunk(&chunk).unwrap().event,
+            VadEvent::SpeechStart
+        );
         assert_eq!(vad.process_chunk(&chunk).unwrap().event, VadEvent::None);
-        assert_eq!(vad.process_chunk(&chunk).unwrap().event, VadEvent::SpeechEnd);
+        assert_eq!(
+            vad.process_chunk(&chunk).unwrap().event,
+            VadEvent::SpeechEnd
+        );
     }
 
     #[test]
@@ -1219,7 +1202,13 @@ mod mocks {
                 &'a mut self,
                 _transcript: &'a str,
                 mut on_chunk: Box<dyn FnMut(&str) + Send + 'a>,
-            ) -> std::pin::Pin<Box<dyn std::future::Future<Output = primer_core::error::Result<String>> + Send + 'a>> {
+            ) -> std::pin::Pin<
+                Box<
+                    dyn std::future::Future<Output = primer_core::error::Result<String>>
+                        + Send
+                        + 'a,
+                >,
+            > {
                 Box::pin(async move {
                     on_chunk("");
                     Ok(String::new())
@@ -1246,7 +1235,10 @@ mod mocks {
         // exactly one transcript and no audio committed.
         let transcripts = result.expect("loop ok");
         assert_eq!(transcripts, vec!["goodbye".to_string()]);
-        assert!(committed.lock().unwrap().is_empty(), "no audio for whitespace");
+        assert!(
+            committed.lock().unwrap().is_empty(),
+            "no audio for whitespace"
+        );
     }
 
     /// Test 2 — cancel on resumed speech: SpeechEnd, then SpeechStart
@@ -1289,7 +1281,13 @@ mod mocks {
                 &'a mut self,
                 _transcript: &'a str,
                 mut on_chunk: Box<dyn FnMut(&str) + Send + 'a>,
-            ) -> std::pin::Pin<Box<dyn std::future::Future<Output = primer_core::error::Result<String>> + Send + 'a>> {
+            ) -> std::pin::Pin<
+                Box<
+                    dyn std::future::Future<Output = primer_core::error::Result<String>>
+                        + Send
+                        + 'a,
+                >,
+            > {
                 let n = self.count.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
                 Box::pin(async move {
                     if n == 0 {
@@ -1335,7 +1333,10 @@ mod mocks {
             "responder called twice"
         );
         // Audio committed (from second responder call).
-        assert!(!committed.lock().unwrap().is_empty(), "audio committed on retry");
+        assert!(
+            !committed.lock().unwrap().is_empty(),
+            "audio committed on retry"
+        );
     }
 
     /// Test 3 — commit on first audio: synthesis fires before any
@@ -1366,7 +1367,13 @@ mod mocks {
                 &'a mut self,
                 _transcript: &'a str,
                 mut on_chunk: Box<dyn FnMut(&str) + Send + 'a>,
-            ) -> std::pin::Pin<Box<dyn std::future::Future<Output = primer_core::error::Result<String>> + Send + 'a>> {
+            ) -> std::pin::Pin<
+                Box<
+                    dyn std::future::Future<Output = primer_core::error::Result<String>>
+                        + Send
+                        + 'a,
+                >,
+            > {
                 Box::pin(async move {
                     on_chunk("Hello!");
                     Ok("Hello!".to_string())
