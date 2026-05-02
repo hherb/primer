@@ -469,6 +469,15 @@ async fn main() -> anyhow::Result<()> {
     let learner = match session_store.load_learner().await {
         Ok(Some(mut existing)) => {
             if existing.profile.name != cli.name {
+                // Surface to stderr too: a parent who typos a name should see
+                // it without needing RUST_LOG=warn. The persisted name wins so
+                // we don't lock anyone out of their own data — that's the
+                // safe failure mode — but silence here would be a UX bug.
+                eprintln!(
+                    "Note: --name {:?} differs from the persisted learner name {:?}; \
+                     keeping persisted (delete ~/.primer/<slug>.db to start fresh).",
+                    cli.name, existing.profile.name
+                );
                 tracing::warn!(
                     "CLI --name {:?} differs from persisted learner name {:?}; using persisted",
                     cli.name,

@@ -765,13 +765,18 @@ impl primer_core::storage::LearnerStore for SqliteSessionStore {
             i64,
             i64,
         );
+        // The application invariant is one learner per DB file (the file
+        // path is the identity boundary), so any row here is THE learner.
+        // `ORDER BY id` is defensive: if a future bug or test fixture ever
+        // inserts a second row, we deterministically pick the lowest id
+        // rather than relying on SQLite's undefined no-ORDER-BY ordering.
         let row: Option<LearnerRow> = conn
             .query_row(
                 "SELECT id, name, age, languages, created_at, last_active,
                         pref_narrative, pref_socratic, pref_visual, pref_kinesthetic,
                         typical_session_minutes, high_engagement_topics,
                         early_disengagement_secs, current_engagement_state_id
-                 FROM learners LIMIT 1",
+                 FROM learners ORDER BY id LIMIT 1",
                 [],
                 |r| {
                     Ok((
