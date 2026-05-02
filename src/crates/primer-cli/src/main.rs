@@ -24,7 +24,7 @@ use primer_core::error::{PrimerError, Result};
 use primer_core::inference::InferenceBackend;
 use primer_core::knowledge::KnowledgeBase;
 use primer_core::learner::*;
-use primer_core::storage::SessionStore;
+use primer_core::storage::{LearnerStore, SessionStore};
 use primer_inference::stub::StubBackend;
 use primer_knowledge::SqliteKnowledgeBase;
 use primer_pedagogy::DialogueManager;
@@ -296,10 +296,19 @@ async fn build_classifier(
     }
 }
 
+/// Convenience wrapper that mints a fresh UUID for a brand-new learner.
+/// Calls `create_learner_with_id` with `Uuid::new_v4()`. Kept for callers
+/// that do not need to control the UUID (e.g., tests that don't care about
+/// stable IDs).
+#[allow(dead_code)]
 fn create_learner(name: &str, age: u8) -> LearnerModel {
+    create_learner_with_id(Uuid::new_v4(), name, age)
+}
+
+fn create_learner_with_id(id: Uuid, name: &str, age: u8) -> LearnerModel {
     LearnerModel {
         profile: LearnerProfile {
-            id: Uuid::new_v4(),
+            id,
             name: name.to_string(),
             age,
             languages: vec!["en".to_string()],
@@ -439,16 +448,17 @@ async fn main() -> anyhow::Result<()> {
         }
     }
 
-    let session_store = match primer_storage::SqliteSessionStore::open(&session_path) {
-        Ok(s) => s,
-        Err(e) => {
-            eprintln!(
-                "Error: cannot open session-db {}: {e}",
-                session_path.display()
-            );
-            std::process::exit(1);
-        }
-    };
+    let session_store: Arc<primer_storage::SqliteSessionStore> =
+        Arc::new(match primer_storage::SqliteSessionStore::open(&session_path) {
+            Ok(s) => s,
+            Err(e) => {
+                eprintln!(
+                    "Error: cannot open session-db {}: {e}",
+                    session_path.display()
+                );
+                std::process::exit(1);
+            }
+        });
     if cli.no_persist {
         eprintln!("Session DB: in-memory (no persistence; session ends when you exit).");
     } else {
@@ -463,14 +473,57 @@ async fn main() -> anyhow::Result<()> {
         }
     }
 
-    // Learner model.
-    let learner = create_learner(&cli.name, cli.age);
+    // Learner model — load from persistent store or mint fresh on first run.
+    let learner = match session_store.load_learner().await {
+        Ok(Some(mut existing)) => {
+            if existing.profile.name != cli.name {
+                tracing::warn!(
+                    "CLI --name {:?} differs from persisted learner name {:?}; using persisted",
+                    cli.name,
+                    existing.profile.name
+                );
+            }
+            existing.profile.age = cli.age;
+            existing.profile.last_active = Utc::now();
+            if let Err(e) = session_store.save_learner(&existing).await {
+                tracing::warn!("save_learner on startup failed: {e}");
+            }
+            existing
+        }
+        Ok(None) => {
+            // First run on this file. Two sub-cases:
+            //   1. Truly fresh DB → mint a new UUID.
+            //   2. v3 DB with sessions but no learners row → adopt the
+            //      most-recent session's learner_id so existing sessions
+            //      are not orphaned.
+            let id = match session_store.most_recent_session_learner_id().await {
+                Ok(Some(uuid)) => {
+                    tracing::info!("adopted learner_id {uuid} from existing sessions");
+                    uuid
+                }
+                Ok(None) => Uuid::new_v4(),
+                Err(e) => {
+                    tracing::warn!(
+                        "most_recent_session_learner_id failed: {e}; minting fresh UUID"
+                    );
+                    Uuid::new_v4()
+                }
+            };
+            let fresh = create_learner_with_id(id, &cli.name, cli.age);
+            if let Err(e) = session_store.save_learner(&fresh).await {
+                tracing::warn!("save_learner on startup failed: {e}");
+            }
+            fresh
+        }
+        Err(e) => {
+            // load_learner failing on startup is catastrophic — the file
+            // is unreadable or the schema is corrupt. Propagate.
+            return Err(anyhow::anyhow!("load_learner failed on startup: {e}"));
+        }
+    };
 
     // Pedagogy config.
     let pedagogy_config = PedagogyConfig::default();
-
-    // Wrap session store in Arc so it can be captured by the classifier task.
-    let session_store: Arc<dyn SessionStore> = Arc::new(session_store);
 
     let classifier_settings = ClassifierSettings {
         blocking_timeout: std::time::Duration::from_millis(cli.classifier_timeout_ms),
@@ -502,8 +555,8 @@ async fn main() -> anyhow::Result<()> {
         learner,
         backend.as_ref(),
         &knowledge as &dyn KnowledgeBase,
-        Some(Arc::clone(&session_store)),
-        None, // learner_store — wired in next commit
+        Some(Arc::clone(&session_store) as Arc<dyn SessionStore>),
+        Some(Arc::clone(&session_store) as Arc<dyn LearnerStore>),
         classifier,
         classifier_settings,
         pedagogy_config,
@@ -905,5 +958,77 @@ mod tests {
             resolve_session_db_path(None, home, nfd, false),
             PathBuf::from("/h/.primer/josé.db")
         );
+    }
+
+    #[tokio::test]
+    async fn cli_birthday_case_updates_age_and_keeps_uuid() {
+        // Save a learner with age=8, simulate startup with --age=9, verify
+        // the persisted row has age=9 with the same UUID and created_at.
+        use chrono::Utc;
+        use primer_core::storage::LearnerStore;
+        use primer_storage::SqliteSessionStore;
+        use std::sync::Arc;
+
+        let store = Arc::new(SqliteSessionStore::open(std::path::Path::new(":memory:")).unwrap());
+        let original_id = Uuid::new_v4();
+        let original_created = Utc::now() - chrono::Duration::days(365);
+        let mut original = create_learner_with_id(original_id, "Binti", 8);
+        original.profile.created_at = original_created;
+        store.save_learner(&original).await.unwrap();
+
+        // Simulate startup with --age=9.
+        let cli_age: u8 = 9;
+
+        let learner = match store.load_learner().await.unwrap() {
+            Some(mut existing) => {
+                existing.profile.age = cli_age;
+                existing.profile.last_active = Utc::now();
+                store.save_learner(&existing).await.unwrap();
+                existing
+            }
+            None => unreachable!(),
+        };
+
+        assert_eq!(learner.profile.id, original_id, "UUID stable across launches");
+        assert_eq!(learner.profile.age, 9, "age updated to CLI value");
+        assert_eq!(
+            learner.profile.created_at.timestamp(),
+            original_created.timestamp(),
+            "created_at preserved",
+        );
+    }
+
+    #[tokio::test]
+    async fn cli_name_mismatch_keeps_persisted_name() {
+        // Save with name="Binti", reload with --name="Other", verify the
+        // persisted name stays "Binti". This test does not assert the
+        // tracing::warn! emission (subscriber-capture would over-couple
+        // the test); it asserts the data invariant only.
+        use primer_core::storage::LearnerStore;
+        use primer_storage::SqliteSessionStore;
+        use std::sync::Arc;
+
+        let store = Arc::new(SqliteSessionStore::open(std::path::Path::new(":memory:")).unwrap());
+        let original = create_learner_with_id(Uuid::new_v4(), "Binti", 8);
+        store.save_learner(&original).await.unwrap();
+
+        // Simulate startup with --name=Other.
+        let cli_name = "Other";
+        let cli_age: u8 = 8;
+
+        let learner = match store.load_learner().await.unwrap() {
+            Some(mut existing) => {
+                if existing.profile.name != cli_name {
+                    // Production code emits tracing::warn! here. Not asserted in this test.
+                }
+                existing.profile.age = cli_age;
+                existing.profile.last_active = chrono::Utc::now();
+                store.save_learner(&existing).await.unwrap();
+                existing
+            }
+            None => unreachable!(),
+        };
+
+        assert_eq!(learner.profile.name, "Binti", "persisted name wins over CLI");
     }
 }
