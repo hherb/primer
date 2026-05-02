@@ -41,7 +41,7 @@ What landed in PR #5:
 - **Closes the divergence bug.** The previously-documented "in-memory `LearnerModel` and `Session.learner_id` can diverge after resume" footgun is gone — the persisted UUID always wins, and the test `divergence_bug_closed_via_cli_startup_flow` proves the v3-DB-with-orphan-session adoption case end-to-end.
 - **Test count 195 → 223.** Coverage added across `primer-core` (UnderstandingDepth::ALL), `primer-storage` (catalog, v4 migration with rollback test, FK enforcement, `most_recent_session_learner_id`, `LearnerStore` round-trip, monotonicity, every-variant), `primer-pedagogy` (DialogueManager wiring + divergence-bug-closed integration test), and `primer-cli` (birthday + name-mismatch).
 
-### Voice round-trip POC — Phase 2 step 4 closed (merged via PR #N — fill in once gh pr create returns a number)
+### Voice round-trip POC — Phase 2 step 4 closed (PR #7, pending merge into main)
 
 What landed (plan-anticipated):
 - **`--speech` mode** on `primer-cli`, gated by a new `speech` Cargo feature that pulls all four `primer-speech` features (`silero`, `whisper`, `piper`, `cpal`).
