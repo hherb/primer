@@ -439,8 +439,8 @@ async fn main() -> anyhow::Result<()> {
         }
     }
 
-    let session_store: Arc<primer_storage::SqliteSessionStore> =
-        Arc::new(match primer_storage::SqliteSessionStore::open(&session_path) {
+    let session_store: Arc<primer_storage::SqliteSessionStore> = Arc::new(
+        match primer_storage::SqliteSessionStore::open(&session_path) {
             Ok(s) => s,
             Err(e) => {
                 eprintln!(
@@ -449,7 +449,8 @@ async fn main() -> anyhow::Result<()> {
                 );
                 std::process::exit(1);
             }
-        });
+        },
+    );
     if cli.no_persist {
         eprintln!("Session DB: in-memory (no persistence; session ends when you exit).");
     } else {
@@ -980,7 +981,10 @@ mod tests {
             None => unreachable!(),
         };
 
-        assert_eq!(learner.profile.id, original_id, "UUID stable across launches");
+        assert_eq!(
+            learner.profile.id, original_id,
+            "UUID stable across launches"
+        );
         assert_eq!(learner.profile.age, 9, "age updated to CLI value");
         assert_eq!(
             learner.profile.created_at.timestamp(),
@@ -1020,6 +1024,9 @@ mod tests {
             None => unreachable!(),
         };
 
-        assert_eq!(learner.profile.name, "Binti", "persisted name wins over CLI");
+        assert_eq!(
+            learner.profile.name, "Binti",
+            "persisted name wins over CLI"
+        );
     }
 }

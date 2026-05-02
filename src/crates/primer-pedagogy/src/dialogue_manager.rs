@@ -1797,17 +1797,13 @@ mod tests {
         use primer_core::storage::LearnerStore;
         use primer_storage::SqliteSessionStore;
 
-        let store =
-            Arc::new(SqliteSessionStore::open(std::path::Path::new(":memory:")).unwrap());
+        let store = Arc::new(SqliteSessionStore::open(std::path::Path::new(":memory:")).unwrap());
 
         // Pre-save the learner so the DB has a row to UPDATE rather than INSERT.
         let learner = test_learner();
         store.save_learner(&learner).await.unwrap();
 
-        let backend = ScriptedBackend::new(vec![
-            Ok(chunk("Hello!", false)),
-            Ok(chunk("", true)),
-        ]);
+        let backend = ScriptedBackend::new(vec![Ok(chunk("Hello!", false)), Ok(chunk("", true))]);
         let knowledge = EmptyKnowledge;
 
         let mut dm = DialogueManager::new(
@@ -1825,7 +1821,11 @@ mod tests {
         let _reply = dm.respond_to("hello").await.unwrap();
 
         // load_learner should return the persisted row.
-        let loaded = store.load_learner().await.unwrap().expect("learner row must exist");
+        let loaded = store
+            .load_learner()
+            .await
+            .unwrap()
+            .expect("learner row must exist");
         assert_eq!(
             loaded.profile.id, dm.learner.profile.id,
             "persisted learner id must match"
@@ -1845,8 +1845,7 @@ mod tests {
         use primer_core::storage::{LearnerStore, SessionStore};
         use primer_storage::SqliteSessionStore;
 
-        let store =
-            Arc::new(SqliteSessionStore::open(std::path::Path::new(":memory:")).unwrap());
+        let store = Arc::new(SqliteSessionStore::open(std::path::Path::new(":memory:")).unwrap());
         let u1 = uuid::Uuid::new_v4();
         let s = ConversationSession::new(u1);
         store.save_session(&s).await.unwrap();

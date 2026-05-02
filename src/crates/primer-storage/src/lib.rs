@@ -594,9 +594,8 @@ impl primer_core::storage::SessionStore for SqliteSessionStore {
         match row {
             None => Ok(None),
             Some(s) => {
-                let uuid = Uuid::parse_str(&s).map_err(|e| {
-                    PrimerError::Storage(format!("parse learner_id {s}: {e}"))
-                })?;
+                let uuid = Uuid::parse_str(&s)
+                    .map_err(|e| PrimerError::Storage(format!("parse learner_id {s}: {e}")))?;
                 Ok(Some(uuid))
             }
         }
@@ -751,8 +750,20 @@ impl primer_core::storage::LearnerStore for SqliteSessionStore {
 
         // Step 1: the learners row.
         type LearnerRow = (
-            String, String, i64, String, String, String,
-            f64, f64, f64, f64, f64, String, i64, i64,
+            String,
+            String,
+            i64,
+            String,
+            String,
+            String,
+            f64,
+            f64,
+            f64,
+            f64,
+            f64,
+            String,
+            i64,
+            i64,
         );
         let row: Option<LearnerRow> = conn
             .query_row(
@@ -764,10 +775,20 @@ impl primer_core::storage::LearnerStore for SqliteSessionStore {
                 [],
                 |r| {
                     Ok((
-                        r.get(0)?,  r.get(1)?,  r.get(2)?,  r.get(3)?,
-                        r.get(4)?,  r.get(5)?,  r.get(6)?,  r.get(7)?,
-                        r.get(8)?,  r.get(9)?,  r.get(10)?, r.get(11)?,
-                        r.get(12)?, r.get(13)?,
+                        r.get(0)?,
+                        r.get(1)?,
+                        r.get(2)?,
+                        r.get(3)?,
+                        r.get(4)?,
+                        r.get(5)?,
+                        r.get(6)?,
+                        r.get(7)?,
+                        r.get(8)?,
+                        r.get(9)?,
+                        r.get(10)?,
+                        r.get(11)?,
+                        r.get(12)?,
+                        r.get(13)?,
                     ))
                 },
             )
@@ -775,9 +796,20 @@ impl primer_core::storage::LearnerStore for SqliteSessionStore {
             .map_err(|e| PrimerError::Storage(format!("load_learner select: {e}")))?;
 
         let Some((
-            id_str, name, age, languages_json, created_str, last_active_str,
-            pref_narrative, pref_socratic, pref_visual, pref_kinesthetic,
-            typical_session_minutes, topics_json, early_secs, engagement_state_id,
+            id_str,
+            name,
+            age,
+            languages_json,
+            created_str,
+            last_active_str,
+            pref_narrative,
+            pref_socratic,
+            pref_visual,
+            pref_kinesthetic,
+            typical_session_minutes,
+            topics_json,
+            early_secs,
+            engagement_state_id,
         )) = row
         else {
             return Ok(None);
@@ -842,11 +874,16 @@ impl primer_core::storage::LearnerStore for SqliteSessionStore {
 
         let mut concepts: Vec<ConceptState> = Vec::new();
         for row in rows {
-            let (concept_name, depth_id, confidence, encounter_count, last_encountered_opt, notes_json) =
-                row.map_err(|e| PrimerError::Storage(format!("read learner_concepts: {e}")))?;
-            let depth = catalog::understanding_depth_from_id(depth_id).ok_or_else(|| {
-                PrimerError::Storage(format!("unknown depth_id {depth_id}"))
-            })?;
+            let (
+                concept_name,
+                depth_id,
+                confidence,
+                encounter_count,
+                last_encountered_opt,
+                notes_json,
+            ) = row.map_err(|e| PrimerError::Storage(format!("read learner_concepts: {e}")))?;
+            let depth = catalog::understanding_depth_from_id(depth_id)
+                .ok_or_else(|| PrimerError::Storage(format!("unknown depth_id {depth_id}")))?;
             let last_encountered = last_encountered_opt
                 .as_deref()
                 .map(|s| parse_rfc3339(s, "learner_concepts.last_encountered"))
@@ -2336,9 +2373,14 @@ mod tests {
         assert_eq!(v, schema::USER_VERSION);
 
         let count: i64 = conn
-            .query_row("SELECT COUNT(*) FROM understanding_depths", [], |r| r.get(0))
+            .query_row("SELECT COUNT(*) FROM understanding_depths", [], |r| {
+                r.get(0)
+            })
             .unwrap();
-        assert_eq!(count, 6, "expected all 6 UnderstandingDepth variants seeded");
+        assert_eq!(
+            count, 6,
+            "expected all 6 UnderstandingDepth variants seeded"
+        );
 
         let learners: i64 = conn
             .query_row("SELECT COUNT(*) FROM learners", [], |r| r.get(0))
@@ -2371,11 +2413,8 @@ mod tests {
                 rusqlite::params!["00000000-0000-0000-0000-000000000001"],
             )
             .unwrap();
-            conn.execute(
-                "INSERT INTO concepts (name) VALUES ('test:concept')",
-                [],
-            )
-            .unwrap();
+            conn.execute("INSERT INTO concepts (name) VALUES ('test:concept')", [])
+                .unwrap();
 
             let result = conn.execute(
                 "INSERT INTO learner_concepts (
@@ -2386,7 +2425,10 @@ mod tests {
                            99, 0.5, 1, NULL, '[]')",
                 [],
             );
-            assert!(result.is_err(), "expected FK constraint failure on depth_id = 99");
+            assert!(
+                result.is_err(),
+                "expected FK constraint failure on depth_id = 99"
+            );
         }
     }
 
@@ -2555,7 +2597,10 @@ mod learner_store_tests {
             )
             .unwrap();
         assert_eq!(count, 7);
-        assert_eq!(depth_id, crate::catalog::understanding_depth_id(UnderstandingDepth::Application));
+        assert_eq!(
+            depth_id,
+            crate::catalog::understanding_depth_id(UnderstandingDepth::Application)
+        );
 
         // Still only two rows total — no duplicate.
         let total: i64 = conn

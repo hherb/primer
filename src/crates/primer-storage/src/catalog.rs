@@ -139,12 +139,12 @@ pub fn expected_engagement_states() -> Vec<(i64, &'static str)> {
 /// cannot silently shift IDs already on disk.
 pub fn understanding_depth_id(depth: UnderstandingDepth) -> i64 {
     match depth {
-        UnderstandingDepth::Unknown       => 1,
-        UnderstandingDepth::Aware         => 2,
-        UnderstandingDepth::Recall        => 3,
+        UnderstandingDepth::Unknown => 1,
+        UnderstandingDepth::Aware => 2,
+        UnderstandingDepth::Recall => 3,
         UnderstandingDepth::Comprehension => 4,
-        UnderstandingDepth::Application   => 5,
-        UnderstandingDepth::Analysis      => 6,
+        UnderstandingDepth::Application => 5,
+        UnderstandingDepth::Analysis => 6,
     }
 }
 
@@ -152,12 +152,12 @@ pub fn understanding_depth_id(depth: UnderstandingDepth) -> i64 {
 /// `understanding_depths` lookup table.
 pub fn understanding_depth_name(depth: UnderstandingDepth) -> &'static str {
     match depth {
-        UnderstandingDepth::Unknown       => "Unknown",
-        UnderstandingDepth::Aware         => "Aware",
-        UnderstandingDepth::Recall        => "Recall",
+        UnderstandingDepth::Unknown => "Unknown",
+        UnderstandingDepth::Aware => "Aware",
+        UnderstandingDepth::Recall => "Recall",
         UnderstandingDepth::Comprehension => "Comprehension",
-        UnderstandingDepth::Application   => "Application",
-        UnderstandingDepth::Analysis      => "Analysis",
+        UnderstandingDepth::Application => "Application",
+        UnderstandingDepth::Analysis => "Analysis",
     }
 }
 

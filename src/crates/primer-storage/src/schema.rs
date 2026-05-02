@@ -451,7 +451,9 @@ mod v4_tests {
         )
         .unwrap();
         let count: i64 = conn
-            .query_row("SELECT COUNT(*) FROM understanding_depths", [], |r| r.get(0))
+            .query_row("SELECT COUNT(*) FROM understanding_depths", [], |r| {
+                r.get(0)
+            })
             .unwrap();
         assert_eq!(count, 6);
     }
@@ -471,10 +473,8 @@ mod v4_tests {
         conn.execute_batch(SCHEMA_SQL).unwrap();
         apply_v2_migrations(&conn).unwrap();
         apply_v3_migrations(&conn).unwrap();
-        conn.execute_batch(
-            "CREATE TABLE idx_learner_concepts_learner (id INTEGER PRIMARY KEY);",
-        )
-        .unwrap();
+        conn.execute_batch("CREATE TABLE idx_learner_concepts_learner (id INTEGER PRIMARY KEY);")
+            .unwrap();
 
         let result = apply_v4_migrations(&conn);
         assert!(result.is_err(), "expected migration to fail");
