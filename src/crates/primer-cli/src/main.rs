@@ -571,12 +571,15 @@ async fn main() -> anyhow::Result<()> {
 
     // ─── Dialogue manager ────────────────────────────────────────────
 
+    let stores = primer_pedagogy::DialogueManagerStores {
+        session: Some(Arc::clone(&session_store) as Arc<dyn SessionStore>),
+        learner: Some(Arc::clone(&session_store) as Arc<dyn LearnerStore>),
+    };
     let mut dm = DialogueManager::new(
         learner,
         backend.as_ref(),
         &knowledge as &dyn KnowledgeBase,
-        Some(Arc::clone(&session_store) as Arc<dyn SessionStore>),
-        Some(Arc::clone(&session_store) as Arc<dyn LearnerStore>),
+        stores,
         classifier,
         classifier_settings,
         pedagogy_config,

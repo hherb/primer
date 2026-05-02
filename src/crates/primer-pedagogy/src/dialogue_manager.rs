@@ -37,6 +37,23 @@ use tokio::task::JoinHandle;
 
 use crate::prompt_builder;
 
+/// Optional persistence stores for a `DialogueManager`.
+///
+/// Both fields default to `None` — useful for tests that don't care
+/// about persistence. When set, the manager saves to each store at
+/// the points its docstring describes (open / resume / per-turn / close).
+///
+/// Bundled into one struct rather than passed as two arguments because
+/// `DialogueManager::new` was already at the clippy `too_many_arguments`
+/// threshold; keeping a pair of optional `Arc<dyn …>` together is also
+/// the right grouping conceptually — both are "where do I write changes
+/// to disk".
+#[derive(Default, Clone)]
+pub struct DialogueManagerStores {
+    pub session: Option<Arc<dyn SessionStore>>,
+    pub learner: Option<Arc<dyn LearnerStore>>,
+}
+
 /// The dialogue manager for a single session.
 ///
 /// Holds references to all the subsystems it needs, plus the mutable
@@ -104,15 +121,17 @@ pub(crate) fn apply_assessment(
 impl<'a> DialogueManager<'a> {
     /// Create a new dialogue manager for a session.
     ///
-    /// `storage`, `learner_store`, and `classifier` are `Arc<dyn …>` so
-    /// they can be captured inside the post-response classifier task
-    /// without lifetime constraints (`tokio::spawn` requires `'static`).
+    /// `stores` bundles the optional `SessionStore` and `LearnerStore`
+    /// (both `Arc<dyn …>` so the post-response classifier task can
+    /// capture them without lifetime constraints — `tokio::spawn`
+    /// requires `'static`).
+    ///
+    /// `classifier` is also `Arc<dyn …>` for the same reason.
     pub fn new(
         learner: LearnerModel,
         inference: &'a dyn InferenceBackend,
         knowledge: &'a dyn KnowledgeBase,
-        storage: Option<Arc<dyn SessionStore>>,
-        learner_store: Option<Arc<dyn LearnerStore>>,
+        stores: DialogueManagerStores,
         classifier: Arc<dyn EngagementClassifier>,
         classifier_settings: ClassifierSettings,
         config: PedagogyConfig,
@@ -123,8 +142,8 @@ impl<'a> DialogueManager<'a> {
             session,
             inference,
             knowledge,
-            storage,
-            learner_store,
+            storage: stores.session,
+            learner_store: stores.learner,
             classifier,
             classifier_settings,
             classify_task: None,
@@ -800,8 +819,7 @@ mod tests {
             test_learner(),
             &backend,
             &knowledge,
-            None,
-            None,
+            DialogueManagerStores::default(),
             stub_classifier(),
             ClassifierSettings::default(),
             PedagogyConfig::default(),
@@ -832,8 +850,7 @@ mod tests {
             test_learner(),
             &backend,
             &knowledge,
-            None,
-            None,
+            DialogueManagerStores::default(),
             stub_classifier(),
             ClassifierSettings::default(),
             PedagogyConfig::default(),
@@ -855,8 +872,7 @@ mod tests {
             test_learner(),
             &backend,
             &knowledge,
-            None,
-            None,
+            DialogueManagerStores::default(),
             stub_classifier(),
             ClassifierSettings::default(),
             PedagogyConfig::default(),
@@ -879,8 +895,7 @@ mod tests {
             test_learner(),
             &backend,
             &knowledge,
-            None,
-            None,
+            DialogueManagerStores::default(),
             stub_classifier(),
             ClassifierSettings::default(),
             PedagogyConfig::default(),
@@ -906,8 +921,7 @@ mod tests {
             test_learner(),
             &backend,
             &knowledge,
-            None,
-            None,
+            DialogueManagerStores::default(),
             stub_classifier(),
             ClassifierSettings::default(),
             PedagogyConfig::default(),
@@ -932,8 +946,7 @@ mod tests {
             test_learner(),
             &backend,
             &knowledge,
-            None,
-            None,
+            DialogueManagerStores::default(),
             stub_classifier(),
             ClassifierSettings::default(),
             PedagogyConfig::default(),
@@ -952,8 +965,10 @@ mod tests {
             test_learner(),
             &backend,
             &knowledge,
-            Some(Arc::clone(&store) as Arc<dyn SessionStore>),
-            None,
+            DialogueManagerStores {
+                session: Some(Arc::clone(&store) as Arc<dyn SessionStore>),
+                learner: None,
+            },
             stub_classifier(),
             ClassifierSettings::default(),
             PedagogyConfig::default(),
@@ -979,8 +994,10 @@ mod tests {
             test_learner(),
             &backend,
             &knowledge,
-            Some(Arc::clone(&store) as Arc<dyn SessionStore>),
-            None,
+            DialogueManagerStores {
+                session: Some(Arc::clone(&store) as Arc<dyn SessionStore>),
+                learner: None,
+            },
             stub_classifier(),
             ClassifierSettings::default(),
             PedagogyConfig::default(),
@@ -1006,8 +1023,10 @@ mod tests {
             test_learner(),
             &backend,
             &knowledge,
-            Some(Arc::clone(&store) as Arc<dyn SessionStore>),
-            None,
+            DialogueManagerStores {
+                session: Some(Arc::clone(&store) as Arc<dyn SessionStore>),
+                learner: None,
+            },
             stub_classifier(),
             ClassifierSettings::default(),
             PedagogyConfig::default(),
@@ -1033,8 +1052,10 @@ mod tests {
             test_learner(),
             &backend,
             &knowledge,
-            Some(Arc::clone(&store) as Arc<dyn SessionStore>),
-            None,
+            DialogueManagerStores {
+                session: Some(Arc::clone(&store) as Arc<dyn SessionStore>),
+                learner: None,
+            },
             stub_classifier(),
             ClassifierSettings::default(),
             PedagogyConfig::default(),
@@ -1079,8 +1100,7 @@ mod tests {
             test_learner(),
             &backend,
             &knowledge,
-            None,
-            None,
+            DialogueManagerStores::default(),
             stub_classifier(),
             ClassifierSettings::default(),
             PedagogyConfig::default(),
@@ -1104,8 +1124,10 @@ mod tests {
             test_learner(),
             &backend,
             &knowledge,
-            Some(Arc::clone(&store) as Arc<dyn SessionStore>),
-            None,
+            DialogueManagerStores {
+                session: Some(Arc::clone(&store) as Arc<dyn SessionStore>),
+                learner: None,
+            },
             stub_classifier(),
             ClassifierSettings::default(),
             PedagogyConfig::default(),
@@ -1128,8 +1150,7 @@ mod tests {
             test_learner(),
             &backend,
             &knowledge,
-            None,
-            None,
+            DialogueManagerStores::default(),
             stub_classifier(),
             ClassifierSettings::default(),
             PedagogyConfig::default(),
@@ -1156,8 +1177,7 @@ mod tests {
             test_learner(),
             &backend,
             &knowledge,
-            None,
-            None,
+            DialogueManagerStores::default(),
             stub_classifier(),
             ClassifierSettings::default(),
             PedagogyConfig::default(),
@@ -1190,8 +1210,7 @@ mod tests {
             test_learner(),
             &backend,
             &knowledge,
-            None,
-            None,
+            DialogueManagerStores::default(),
             stub_classifier(),
             ClassifierSettings::default(),
             PedagogyConfig::default(),
@@ -1215,8 +1234,7 @@ mod tests {
             test_learner(),
             &backend,
             &knowledge,
-            None,
-            None,
+            DialogueManagerStores::default(),
             stub_classifier(),
             ClassifierSettings::default(),
             PedagogyConfig::default(),
@@ -1248,8 +1266,7 @@ mod tests {
             test_learner(),
             &backend,
             &knowledge,
-            None,
-            None,
+            DialogueManagerStores::default(),
             stub_classifier(),
             ClassifierSettings::default(),
             PedagogyConfig::default(),
@@ -1272,8 +1289,7 @@ mod tests {
             test_learner(),
             &backend,
             &knowledge,
-            None,
-            None,
+            DialogueManagerStores::default(),
             stub_classifier(),
             ClassifierSettings::default(),
             PedagogyConfig::default(),
@@ -1433,8 +1449,10 @@ mod tests {
             learner,
             &backend,
             &knowledge,
-            Some(Arc::clone(&storage) as Arc<dyn SessionStore>),
-            None,
+            DialogueManagerStores {
+                session: Some(Arc::clone(&storage) as Arc<dyn SessionStore>),
+                learner: None,
+            },
             Arc::clone(&classifier),
             settings,
             PedagogyConfig::default(),
@@ -1496,8 +1514,10 @@ mod tests {
             test_learner(),
             &backend,
             &knowledge,
-            Some(Arc::clone(&storage) as Arc<dyn SessionStore>),
-            None,
+            DialogueManagerStores {
+                session: Some(Arc::clone(&storage) as Arc<dyn SessionStore>),
+                learner: None,
+            },
             Arc::clone(&classifier),
             settings,
             PedagogyConfig::default(),
@@ -1567,8 +1587,7 @@ mod tests {
             test_learner(),
             &backend,
             &knowledge,
-            None,
-            None,
+            DialogueManagerStores::default(),
             Arc::new(SlowClassifier),
             settings,
             PedagogyConfig::default(),
@@ -1698,8 +1717,10 @@ mod tests {
             learner,
             &backend,
             &knowledge,
-            Some(Arc::clone(&storage) as Arc<dyn SessionStore>),
-            None,
+            DialogueManagerStores {
+                session: Some(Arc::clone(&storage) as Arc<dyn SessionStore>),
+                learner: None,
+            },
             Arc::clone(&classifier),
             settings,
             PedagogyConfig::default(),
@@ -1810,8 +1831,10 @@ mod tests {
             learner,
             &backend,
             &knowledge,
-            Some(Arc::clone(&store) as Arc<dyn SessionStore>),
-            Some(Arc::clone(&store) as Arc<dyn LearnerStore>),
+            DialogueManagerStores {
+                session: Some(Arc::clone(&store) as Arc<dyn SessionStore>),
+                learner: Some(Arc::clone(&store) as Arc<dyn LearnerStore>),
+            },
             stub_classifier(),
             ClassifierSettings::default(),
             PedagogyConfig::default(),
@@ -1872,8 +1895,10 @@ mod tests {
             adopted_learner,
             &backend,
             &knowledge,
-            Some(Arc::clone(&store) as Arc<dyn SessionStore>),
-            Some(Arc::clone(&store) as Arc<dyn LearnerStore>),
+            DialogueManagerStores {
+                session: Some(Arc::clone(&store) as Arc<dyn SessionStore>),
+                learner: Some(Arc::clone(&store) as Arc<dyn LearnerStore>),
+            },
             stub_classifier(),
             ClassifierSettings::default(),
             PedagogyConfig::default(),
