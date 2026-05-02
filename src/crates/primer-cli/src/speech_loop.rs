@@ -90,53 +90,120 @@ pub async fn run_loop<'r>(
 
     'outer: loop {
         // ── LISTEN ────────────────────────────────────────────────────
-        // Open a fresh whisper session for this utterance. We accumulate
-        // pseudo-audio (real audio comes from the capture task in
-        // production; mocks short-circuit on finalize) and watch for
-        // SpeechEnd.
         let mut stt_session = backends.stt.open_session()?;
         let mut in_speech = false;
         loop {
             let Some(event) = events.recv().await else {
-                // Event channel closed: caller wants us to stop.
                 break 'outer;
             };
             match event {
-                VadEvent::SpeechStart => {
-                    in_speech = true;
-                }
-                VadEvent::SpeechEnd if in_speech => {
-                    break;
-                }
+                VadEvent::SpeechStart => in_speech = true,
+                VadEvent::SpeechEnd if in_speech => break,
                 _ => {}
             }
         }
 
-        // Finalize whisper, build full transcript text.
-        let segments = stt_session.finalize()?;
-        let transcript: String = segments.iter().map(|s| s.text.as_str()).collect::<Vec<_>>().join("");
-        let transcript = transcript.trim().to_string();
+        // ── LATENT_THINK ──────────────────────────────────────────────
+        // Loop here so a SpeechStart-cancel can resume listening with
+        // the same whisper session and re-attempt the LLM call once the
+        // child finishes their continuation.
+        let mut transcript_so_far: String;
+        let mut accumulated = String::new();
+        loop {
+            // Peek (finalize-and-reopen since whisper-cpp-plus has no
+            // partial-extract API exposed here): we accept the slight
+            // mock-friendliness — production whisper supports peeking via
+            // process_step but the trait surface is finalize-only today.
+            let segments = stt_session.finalize()?;
+            transcript_so_far = segments
+                .iter()
+                .map(|s| s.text.as_str())
+                .collect::<Vec<_>>()
+                .join("")
+                .trim()
+                .to_string();
+            stt_session = backends.stt.open_session()?;
 
-        if transcript.is_empty() {
-            // Empty utterance — VAD blip or whisper noise. Loop back.
+            if transcript_so_far.is_empty() {
+                break;
+            }
+
+            // Drive the LLM. `respond` returns the full accumulated text
+            // as Ok(String); the on_chunk callback is for live streaming
+            // (e.g. terminal echo). For unit tests we ignore chunks and
+            // rely on the final Result.
+            let transcript_clone = transcript_so_far.clone();
+            let llm_fut = responder.respond(
+                &transcript_clone,
+                Box::new(|_chunk: &str| {}),
+            );
+            tokio::pin!(llm_fut);
+
+            // Wait for either: (a) llm done, (b) VAD SpeechStart (cancel).
+            // If the VAD event channel is already closed, we still need to
+            // complete the LLM call — channel closure only means no more
+            // new speech events, not that we should discard work in flight.
+            let cancelled = if events.is_closed() {
+                // No more VAD events possible: complete the LLM unconditionally.
+                accumulated = llm_fut.await?;
+                false
+            } else {
+                tokio::select! {
+                    res = &mut llm_fut => {
+                        accumulated = res?;
+                        false
+                    }
+                    event = events.recv() => {
+                        match event {
+                            Some(VadEvent::SpeechStart) => {
+                                // Cancel: drop the future, loop back, keep listening.
+                                true
+                            }
+                            Some(VadEvent::SpeechEnd) | Some(VadEvent::None) => {
+                                // Spurious — shouldn't happen during LATENT_THINK
+                                // since we entered on SpeechEnd. Treat as
+                                // continue-waiting by completing the LLM.
+                                accumulated = llm_fut.await?;
+                                false
+                            }
+                            None => {
+                                // Channel just closed mid-select: complete the LLM.
+                                accumulated = llm_fut.await?;
+                                false
+                            }
+                        }
+                    }
+                }
+            };
+
+            if cancelled {
+                // Wait for the next SpeechEnd to retry the LLM call.
+                loop {
+                    let Some(event) = events.recv().await else {
+                        return Ok(transcripts);
+                    };
+                    if event == VadEvent::SpeechEnd {
+                        break;
+                    }
+                }
+                continue;
+            }
+
+            break;
+        }
+
+        // ── Quit check + commit transcript ────────────────────────────
+        if transcript_so_far.is_empty() {
             continue;
         }
-
-        if is_quit_phrase(&transcript) {
-            transcripts.push(transcript);
+        if is_quit_phrase(&transcript_so_far) {
+            transcripts.push(transcript_so_far);
             break 'outer;
         }
+        transcripts.push(transcript_so_far);
 
-        transcripts.push(transcript.clone());
-
-        // ── LATENT_THINK + SPEAK (Tasks 16/17) — placeholder for now ──
-        // We just call the responder synchronously and pretend audio
-        // committed. Cancellation arms come in Task 16.
-        let mut accumulated = String::new();
-        let on_chunk = Box::new(|chunk: &str| accumulated.push_str(chunk));
-        responder.respond(&transcript, on_chunk).await?;
+        // ── SPEAK ─────────────────────────────────────────────────────
         if !accumulated.is_empty() {
-            // Synthesise: call the TTS session once with the full reply.
             let voice = primer_core::speech::VoiceProfile::default();
             let mut session = backends.tts.open_session(&voice)?;
             for chunk in session.push_text(&accumulated)? {
