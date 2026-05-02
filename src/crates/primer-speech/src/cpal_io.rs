@@ -384,4 +384,55 @@ mod tests {
         assert!((out[2] - 0.0).abs() < 1e-6);
         assert!((out[5] - 0.0).abs() < 1e-6);
     }
+
+    /// Hardware smoke: capture 1 second of mic, immediately play it back to
+    /// the speaker. Manual sanity for cpal device defaults; never in CI.
+    ///
+    /// Run with: `cargo test -p primer-speech --features cpal --release -- --ignored hardware_loopback`
+    #[test]
+    #[ignore = "needs mic + speaker; mac asks for mic permission on first run"]
+    fn hardware_loopback_one_second() {
+        // 1 s of capture
+        let (mic, mut mic_cons) = MicCapture::start().expect("mic");
+        let mic_rate = mic.sample_rate;
+        let mut buf: Vec<f32> = Vec::with_capacity(mic_rate as usize);
+        let started = std::time::Instant::now();
+        while started.elapsed() < std::time::Duration::from_secs(1) {
+            while let Some(s) = mic_cons.try_pop() {
+                buf.push(s);
+            }
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
+        drop(mic);
+
+        // Open speaker; resample mic audio if needed; push.
+        let (spk, mut spk_prod) = SpeakerSink::start().expect("spk");
+        let spk_rate = spk.sample_rate;
+
+        let to_play: Vec<f32> = if mic_rate == spk_rate {
+            buf
+        } else {
+            let chunk = 1024;
+            let mut r =
+                Resampler::new(mic_rate, spk_rate, chunk).expect("resampler");
+            let mut out = Vec::new();
+            for window in buf.chunks(chunk) {
+                if window.len() != chunk {
+                    break;
+                }
+                out.extend(r.process(window).expect("process"));
+            }
+            out
+        };
+
+        use ringbuf::traits::Producer;
+        let mut written = 0;
+        while written < to_play.len() {
+            written += spk_prod.push_slice(&to_play[written..]);
+            std::thread::sleep(std::time::Duration::from_millis(5));
+        }
+        // Let the device drain.
+        std::thread::sleep(std::time::Duration::from_millis(500));
+        drop(spk);
+    }
 }
