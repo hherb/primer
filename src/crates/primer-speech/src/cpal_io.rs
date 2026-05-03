@@ -78,6 +78,9 @@ use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
 use cpal::{SampleFormat, Stream, StreamConfig};
 use ringbuf::traits::{Consumer, Producer, Split};
 use ringbuf::{HeapCons, HeapProd, HeapRb};
+use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::time::Duration;
 
 /// Default capacity (in samples) for the mic SPSC ring buffer.
 /// Sized to hold ~250 ms of 48 kHz mono audio so a brief consumer
@@ -220,6 +223,12 @@ pub struct SpeakerSink {
     /// audio at this rate (resample upstream if needed).
     pub sample_rate: u32,
     pub channels: u16,
+    /// Set to `true` by the cpal `err_callback` if the output stream
+    /// reports an error (device removed, host audio service crashed,
+    /// etc.). Producers should bail their retry loops when this flips
+    /// — otherwise `push_slice` returns 0 forever and the producer
+    /// hangs waiting for a drain that will never come.
+    errored: Arc<AtomicBool>,
 }
 
 impl SpeakerSink {
@@ -242,25 +251,33 @@ impl SpeakerSink {
         let rb = HeapRb::<f32>::new(SPEAKER_RINGBUF_CAPACITY);
         let (prod, mut cons) = rb.split();
 
-        let err_callback = |err| tracing::error!("cpal output stream error: {err}");
+        let errored = Arc::new(AtomicBool::new(false));
+
+        let make_err_callback = || {
+            let flag = Arc::clone(&errored);
+            move |err| {
+                tracing::error!("cpal output stream error: {err}");
+                flag.store(true, Ordering::SeqCst);
+            }
+        };
 
         let stream = match format {
             SampleFormat::F32 => device.build_output_stream(
                 &config,
                 move |out: &mut [f32], _info| pull_to_device_f32(&mut cons, out, channels),
-                err_callback,
+                make_err_callback(),
                 None,
             ),
             SampleFormat::I16 => device.build_output_stream(
                 &config,
                 move |out: &mut [i16], _info| pull_to_device_i16(&mut cons, out, channels),
-                err_callback,
+                make_err_callback(),
                 None,
             ),
             SampleFormat::U16 => device.build_output_stream(
                 &config,
                 move |out: &mut [u16], _info| pull_to_device_u16(&mut cons, out, channels),
-                err_callback,
+                make_err_callback(),
                 None,
             ),
             other => {
@@ -280,10 +297,56 @@ impl SpeakerSink {
                 _stream: stream,
                 sample_rate,
                 channels,
+                errored,
             },
             prod,
         ))
     }
+
+    /// Clone of the "stream errored" flag. Producers call this once at
+    /// startup and pass the clone into [`push_all_with_bail`] so the
+    /// retry loop terminates if the cpal output stream reports an error.
+    pub fn errored_flag(&self) -> Arc<AtomicBool> {
+        Arc::clone(&self.errored)
+    }
+}
+
+/// Push every sample of `samples` into `prod`, retrying with `retry_sleep`
+/// between attempts when the ring buffer is momentarily full. Returns the
+/// total number of samples written.
+///
+/// The retry loop bails — without writing the rest — if `errored` flips
+/// to `true`. This is the failsafe for a cpal output stream that has
+/// stopped draining (device removed, host audio service crashed): without
+/// it, `push_slice` returns 0 forever and the caller hangs mid-response.
+/// In production, callers wire `errored` from [`SpeakerSink::errored_flag`].
+///
+/// `retry_sleep` is parameterised so tests can pass `Duration::ZERO`. The
+/// production caller should pass ~5 ms — long enough to yield CPU between
+/// drain cycles, short enough to keep produce-side latency negligible.
+pub fn push_all_with_bail(
+    prod: &mut HeapProd<f32>,
+    samples: &[f32],
+    errored: &AtomicBool,
+    retry_sleep: Duration,
+) -> usize {
+    let mut written = 0;
+    while written < samples.len() {
+        if errored.load(Ordering::SeqCst) {
+            let dropped = samples.len() - written;
+            tracing::warn!(
+                "cpal output stream errored; discarding {dropped} samples (of {} total)",
+                samples.len()
+            );
+            return written;
+        }
+        let n = prod.push_slice(&samples[written..]);
+        written += n;
+        if written < samples.len() && !retry_sleep.is_zero() {
+            std::thread::sleep(retry_sleep);
+        }
+    }
+    written
 }
 
 /// Pull one mono f32 sample per output frame; duplicate across channels.
@@ -383,6 +446,61 @@ mod tests {
         assert!((cons.try_pop().unwrap() - 0.1).abs() < 1e-6);
         assert!((cons.try_pop().unwrap() - 0.2).abs() < 1e-6);
         assert!((cons.try_pop().unwrap() - 0.3).abs() < 1e-6);
+    }
+
+    #[test]
+    fn push_all_with_bail_writes_everything_when_capacity_is_ample() {
+        let rb = HeapRb::<f32>::new(64);
+        let (mut prod, mut cons) = rb.split();
+        let errored = AtomicBool::new(false);
+        let samples: Vec<f32> = (0..32).map(|i| i as f32).collect();
+
+        let written = push_all_with_bail(&mut prod, &samples, &errored, Duration::ZERO);
+
+        assert_eq!(written, samples.len());
+        let mut drained: Vec<f32> = Vec::new();
+        while let Some(s) = cons.try_pop() {
+            drained.push(s);
+        }
+        assert_eq!(drained, samples);
+    }
+
+    #[test]
+    fn push_all_with_bail_returns_zero_when_already_errored() {
+        let rb = HeapRb::<f32>::new(64);
+        let (mut prod, _cons) = rb.split();
+        let errored = AtomicBool::new(true);
+        let samples = vec![0.5f32; 16];
+
+        let written = push_all_with_bail(&mut prod, &samples, &errored, Duration::ZERO);
+
+        assert_eq!(written, 0);
+    }
+
+    #[test]
+    fn push_all_with_bail_terminates_when_consumer_stalls_and_errored_flips() {
+        // Capacity 4: first push fills the buffer, then push_slice
+        // returns 0 forever (no consumer popping). Without the errored
+        // bail this loop would spin indefinitely; with it, flipping the
+        // flag mid-spin causes the function to return.
+        let rb = HeapRb::<f32>::new(4);
+        let (mut prod, _cons) = rb.split();
+        let errored = Arc::new(AtomicBool::new(false));
+        let samples = vec![0.25f32; 16];
+
+        let flag = Arc::clone(&errored);
+        let flipper = std::thread::spawn(move || {
+            std::thread::sleep(Duration::from_millis(20));
+            flag.store(true, Ordering::SeqCst);
+        });
+
+        // Use a small non-zero retry sleep so the produce loop yields
+        // rather than spinning hot while we wait for the flipper.
+        let written = push_all_with_bail(&mut prod, &samples, &errored, Duration::from_millis(2));
+        flipper.join().unwrap();
+
+        // Filled the buffer, then bailed once the flag flipped.
+        assert_eq!(written, 4, "expected to write exactly the buffer capacity");
     }
 
     #[test]

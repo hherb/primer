@@ -571,7 +571,6 @@ pub async fn run<'a>(
     use primer_speech::{
         MicCapture, PiperTts, Resampler, SileroVad, SileroVadParams, SpeakerSink, WhisperStt,
     };
-    use ringbuf::traits::Producer as _;
 
     // ── Build VAD (real, lives in audio thread) ─────────────────────
     let vad_params = SileroVadParams {
@@ -605,6 +604,11 @@ pub async fn run<'a>(
     // ── Open speaker ───────────────────────────────────────────────
     let (spk, mut spk_prod) = SpeakerSink::start()?;
     let spk_rate = spk.sample_rate;
+    // Shared "stream errored" flag — set by cpal's err_callback if the
+    // output device disappears mid-session. The on_audio retry loop
+    // checks this so it bails instead of spinning forever on a dead
+    // stream where push_slice will return 0 indefinitely.
+    let spk_errored = spk.errored_flag();
     if cfg.verbose {
         eprintln!(
             "[speech] speaker opened: {}Hz, {} channels",
@@ -705,6 +709,7 @@ pub async fn run<'a>(
     // is silence anyway).
     let output_resampler_for_cb = std::sync::Arc::clone(&output_resampler);
     let mut output_leftover: Vec<f32> = Vec::with_capacity(output_chunk_in);
+    let spk_errored_for_cb = std::sync::Arc::clone(&spk_errored);
     let on_audio: Box<dyn FnMut(Vec<f32>) + Send> = Box::new(move |samples| {
         let is_flush = samples.is_empty();
         let mut samples = samples;
@@ -771,19 +776,15 @@ pub async fn run<'a>(
         // bug we hunted for the swallowed-end-of-response: when the
         // producer outpaces cpal's drain (synthesis is faster than
         // playback), we briefly fill the buffer and need to wait, not
-        // give up. cpal drains continuously so this never hangs in
-        // practice. If a real wedge ever happens (cpal stream errored,
-        // device removed, etc.) the higher-level errored callback
-        // already logs it; this loop will then iterate forever, making
-        // the bug loud.
-        let mut written = 0;
-        while written < samples.len() {
-            let n = spk_prod.push_slice(&samples[written..]);
-            written += n;
-            if written < samples.len() {
-                std::thread::sleep(std::time::Duration::from_millis(5));
-            }
-        }
+        // give up. The retry bails when `spk_errored` flips true (cpal
+        // output stream errored, device removed, etc.) instead of
+        // spinning forever on a dead stream.
+        primer_speech::push_all_with_bail(
+            &mut spk_prod,
+            &samples,
+            &spk_errored_for_cb,
+            std::time::Duration::from_millis(5),
+        );
     });
 
     // ── Wire DialogueManager via the Responder adapter ─────────────

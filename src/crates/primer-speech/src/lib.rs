@@ -36,4 +36,4 @@ pub use piper::PiperTts;
 #[cfg(feature = "cpal")]
 pub mod cpal_io;
 #[cfg(feature = "cpal")]
-pub use cpal_io::{MicCapture, Resampler, SpeakerSink};
+pub use cpal_io::{MicCapture, Resampler, SpeakerSink, push_all_with_bail};
