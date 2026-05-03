@@ -251,7 +251,10 @@ mod tests {
 
     #[test]
     fn understanding_depth_display_uses_name() {
-        assert_eq!(format!("{}", UnderstandingDepth::Comprehension), "Comprehension");
+        assert_eq!(
+            format!("{}", UnderstandingDepth::Comprehension),
+            "Comprehension"
+        );
     }
 }
 
