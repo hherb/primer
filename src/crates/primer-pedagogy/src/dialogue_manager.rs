@@ -632,11 +632,13 @@ impl<'a> DialogueManager<'a> {
     /// than propagated — matching `respond_to_streaming`'s save-failure
     /// semantics.
     pub async fn close_session(&mut self) {
-        // Drain the post-response classifier task spawned after the most
-        // recent turn. Without this, a quick exit ("respond_to_streaming"
-        // immediately followed by close_session) races the runtime shutdown
-        // and the last turn_classifications row may never be persisted.
+        // Drain the post-response classifier + extractor tasks spawned
+        // after the most recent turn. Without this, a quick exit
+        // ("respond_to_streaming" immediately followed by "close_session")
+        // races the runtime shutdown and the last turn_classifications /
+        // turn_concepts rows may never be persisted.
         self.await_pending_classification().await;
+        self.await_pending_extraction().await;
 
         self.session.ended_at = Some(Utc::now());
         if let Some(ref store) = self.storage {
@@ -2720,5 +2722,42 @@ mod tests {
             "primer concept 'physics' should be applied to learner; got: {:?}",
             names
         );
+    }
+
+    #[tokio::test]
+    async fn close_session_drains_extractor_task() {
+        let backend = ScriptedBackend::new(vec![Ok(chunk("Hi", true))]);
+        let extractor = Arc::new(primer_extractor::StubConceptExtractor::with_response(
+            ConceptExtraction {
+                child_concepts: vec!["x".into()],
+                primer_concepts: vec![],
+            },
+        ));
+        let store = Arc::new(ConceptCapturingStore::new());
+
+        let stores = DialogueManagerStores {
+            session: Some(store.clone() as Arc<dyn primer_core::storage::SessionStore>),
+            learner: None,
+        };
+
+        let mut dm = DialogueManager::new(
+            test_learner(),
+            &backend as &dyn InferenceBackend,
+            &EmptyKnowledge as &dyn KnowledgeBase,
+            stores,
+            stub_classifier(),
+            ClassifierSettings::default(),
+            extractor as Arc<dyn ConceptExtractor>,
+            ExtractorSettings::default(),
+            PedagogyConfig::default(),
+        );
+
+        dm.respond_to("hi").await.unwrap();
+        // close_session must drain so the extractor's update_turn_concepts
+        // call has landed by the time close returns.
+        dm.close_session().await;
+
+        let captures = store.captured();
+        assert!(!captures.is_empty(), "expected extraction to land before close returns");
     }
 }
