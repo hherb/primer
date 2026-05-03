@@ -94,11 +94,14 @@ pub struct DialogueManager<'a> {
     /// Concept extractor — called after each Primer response to extract
     /// concepts from the just-completed exchange. Arc for the same
     /// spawn-capture reason as `classifier`.
+    #[allow(dead_code)] // wired by Task 9 (spawn site)
     extractor: Arc<dyn ConceptExtractor>,
     /// Tunable parameters for the extractor.
+    #[allow(dead_code)] // wired by Task 10 (await + apply)
     extractor_settings: ExtractorSettings,
     /// Handle to the in-flight extractor task spawned after the previous
     /// turn. `None` when no task is running.
+    #[allow(dead_code)] // wired by Task 9 (spawn site) + Task 11 (close drain)
     extract_task: Option<JoinHandle<Option<ConceptExtraction>>>,
     /// Pedagogical configuration.
     config: PedagogyConfig,
@@ -149,6 +152,11 @@ impl<'a> DialogueManager<'a> {
     /// requires `'static`).
     ///
     /// `classifier` is also `Arc<dyn …>` for the same reason.
+    // 9 args: the extractor pair (extractor + extractor_settings) mirrors
+    // the classifier pair; bundling them in a struct would be premature
+    // until both are exercised by the spawn site (Task 9) and the await
+    // path (Task 10). Revisit if a third pair lands.
+    #[allow(clippy::too_many_arguments)]
     pub fn new(
         learner: LearnerModel,
         inference: &'a dyn InferenceBackend,
