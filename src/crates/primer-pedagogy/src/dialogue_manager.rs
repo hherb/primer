@@ -70,6 +70,8 @@ pub struct DialogueManagerSubsystems {
     pub classifier_settings: ClassifierSettings,
     pub extractor: Arc<dyn ConceptExtractor>,
     pub extractor_settings: ExtractorSettings,
+    pub comprehension: Arc<dyn primer_comprehension::ComprehensionClassifier>,
+    pub comprehension_settings: primer_comprehension::ComprehensionSettings,
 }
 
 /// The dialogue manager for a single session.
@@ -113,11 +115,22 @@ pub struct DialogueManager<'a> {
     extractor: Arc<dyn ConceptExtractor>,
     /// Tunable parameters for the extractor.
     extractor_settings: ExtractorSettings,
-    /// Handle to the in-flight extractor task spawned after the previous
-    /// turn. `None` when no task is running. The result carries the
-    /// (child, primer) turn indices so `await_pending_extraction` can
-    /// sync the extracted concepts back into in-memory `Session.turns`.
-    extract_task: Option<JoinHandle<Option<ExtractionResult>>>,
+    /// Handle to the in-flight post-response chained task (extractor →
+    /// comprehension) spawned after the previous turn. `None` when no
+    /// task is running. The result carries the (child, primer) turn
+    /// indices and both extraction + comprehension outputs so
+    /// `await_pending_post_response` can sync state back into
+    /// in-memory `Session.turns` and `LearnerModel`.
+    post_response_task: Option<JoinHandle<Option<PostResponseResult>>>,
+    /// Comprehension classifier — invoked at the tail of each
+    /// post-response chained task (after extraction). Arc for the same
+    /// spawn-capture reason as `classifier`.
+    comprehension: Arc<dyn primer_comprehension::ComprehensionClassifier>,
+    /// Tunable parameters for the comprehension classifier.
+    comprehension_settings: primer_comprehension::ComprehensionSettings,
+    /// Most recent comprehension result applied to the learner. Cleared
+    /// on session lifecycle events. Used by `--verbose`.
+    last_comprehension: Option<primer_core::comprehension::ComprehensionResult>,
     /// Pedagogical configuration.
     config: PedagogyConfig,
     /// Most recent extractor output applied to the learner. Cleared on
@@ -136,12 +149,18 @@ pub struct DialogueManager<'a> {
     learner_dirty: bool,
 }
 
-/// Output of the spawned extractor task: the extracted concepts plus
-/// the turn indices they apply to. Returned through the `JoinHandle`
-/// so `await_pending_extraction` can sync the extraction back into the
-/// in-memory `Session.turns` AND `LearnerModel.concepts` at the
-/// next-turn boundary.
-struct ExtractionResult {
+/// Output of the spawned post-response task: the extracted concepts
+/// (and their turn indices for syncing back into in-memory
+/// `Session.turns`) plus the comprehension assessments. Returned
+/// through the `JoinHandle` so `await_pending_post_response` can
+/// apply both to in-memory state at the next-turn boundary.
+struct PostResponseResult {
+    extraction: ExtractionPart,
+    comprehension: primer_core::comprehension::ComprehensionResult,
+}
+
+/// The extraction portion of the post-response result.
+struct ExtractionPart {
     child_turn_index: usize,
     primer_turn_index: usize,
     extraction: ConceptExtraction,
@@ -228,8 +247,51 @@ pub(crate) fn apply_extraction(
     changed
 }
 
+/// Apply a `ComprehensionResult` to the in-memory `LearnerModel`.
+///
+/// For each assessment whose `confidence >= settings.confidence_threshold`,
+/// promote `learner.concepts[concept].depth` via monotonic max
+/// (never demote — that's an explicit forgetting event handled
+/// algorithmically over `turn_comprehensions`, not here).
+///
+/// Sub-threshold assessments are still persisted to disk by the
+/// caller (full longitudinal record) but don't update in-memory state.
+///
+/// Concepts not already in `learner.concepts` are skipped — insertion
+/// is the responsibility of `apply_extraction` (which always runs
+/// before this function in the await sequence). The corner case of
+/// an assessment for an unknown concept is tolerated (parser-layer
+/// drops them) but documented here as defensive.
+///
+/// Returns `true` if any depth or confidence was updated; the caller
+/// uses this to set `learner_dirty` so the per-turn save flushes.
+pub(crate) fn apply_comprehension(
+    learner: &mut primer_core::learner::LearnerModel,
+    result: &primer_core::comprehension::ComprehensionResult,
+    settings: &primer_comprehension::ComprehensionSettings,
+) -> bool {
+    let mut changed = false;
+    for a in &result.assessments {
+        if a.confidence < settings.confidence_threshold {
+            continue;
+        }
+        if let Some(c) = learner
+            .concepts
+            .iter_mut()
+            .find(|c| c.concept_id == a.concept)
+        {
+            if a.depth > c.depth {
+                c.depth = a.depth;
+                c.confidence = a.confidence;
+                changed = true;
+            }
+        }
+    }
+    changed
+}
+
 /// Append `new_concepts` to `turns[index].concepts`, preserving order
-/// and skipping names already present. Used by `await_pending_extraction`
+/// and skipping names already present. Used by `await_pending_post_response`
 /// to keep the in-memory `Session.turns` in sync with what the spawned
 /// extractor task wrote to disk via `update_exchange_concepts`. A
 /// silently-out-of-bounds index is treated as a no-op since the
@@ -276,7 +338,10 @@ impl<'a> DialogueManager<'a> {
             classify_task: None,
             extractor: subsystems.extractor,
             extractor_settings: subsystems.extractor_settings,
-            extract_task: None,
+            post_response_task: None,
+            comprehension: subsystems.comprehension,
+            comprehension_settings: subsystems.comprehension_settings,
+            last_comprehension: None,
             config,
             last_extraction: None,
             learner_dirty: false,
@@ -401,7 +466,7 @@ impl<'a> DialogueManager<'a> {
         //    decide_intent sees the updated engagement state and the system
         //    prompt sees freshly-extracted learner concepts.
         self.await_pending_classification().await;
-        self.await_pending_extraction().await;
+        self.await_pending_post_response().await;
 
         // 1. Record the child's turn.
         let child_turn = Turn {
@@ -572,7 +637,7 @@ impl<'a> DialogueManager<'a> {
             //    Same skip-on-error policy as the classifier. The task
             //    self-persists `turn_concepts` for both turns atomically
             //    via `update_exchange_concepts`; the JoinHandle output is
-            //    consumed by `await_pending_extraction` at the start of
+            //    consumed by `await_pending_post_response` at the start of
             //    the next turn so the in-memory `learner.concepts` AND
             //    `session.turns[child/primer].concepts` can be updated.
             let total_turns = self.session.turns.len();
@@ -597,44 +662,107 @@ impl<'a> DialogueManager<'a> {
                     .rev()
                     .collect();
                 let extractor = Arc::clone(&self.extractor);
+                let comprehension = Arc::clone(&self.comprehension);
+                let comp_settings = self.comprehension_settings.clone();
                 let store = self.storage.clone();
                 let session_id = self.session.id;
+                let comp_classifier_id = comprehension.identifier().to_string();
 
                 let task = tokio::spawn(async move {
-                    let ctx = primer_core::extractor::ExtractionContext {
+                    // ── Step 1: Extract concepts ──
+                    let extraction_ctx = primer_core::extractor::ExtractionContext {
                         child_turn: &child_turn,
                         primer_turn: &primer_turn,
                         recent_turns: &recent_turns,
                     };
-                    match extractor.extract(ctx).await {
-                        Ok(extraction) => {
-                            if let Some(store) = store {
-                                if let Err(e) = store
-                                    .update_exchange_concepts(
-                                        session_id,
-                                        child_idx,
-                                        &extraction.child_concepts,
-                                        primer_idx,
-                                        &extraction.primer_concepts,
-                                    )
-                                    .await
-                                {
-                                    tracing::warn!(error = ?e, "update_exchange_concepts failed");
-                                }
-                            }
-                            Some(ExtractionResult {
-                                child_turn_index: child_idx,
-                                primer_turn_index: primer_idx,
-                                extraction,
-                            })
-                        }
+                    let extraction = match extractor.extract(extraction_ctx).await {
+                        Ok(e) => e,
                         Err(e) => {
                             tracing::warn!(error = ?e, "extractor returned error");
-                            None
+                            return None;
+                        }
+                    };
+
+                    // ── Step 2: Persist concepts ──
+                    if let Some(ref store) = store {
+                        if let Err(e) = store
+                            .update_exchange_concepts(
+                                session_id,
+                                child_idx,
+                                &extraction.child_concepts,
+                                primer_idx,
+                                &extraction.primer_concepts,
+                            )
+                            .await
+                        {
+                            tracing::warn!(error = ?e, "update_exchange_concepts failed");
                         }
                     }
+
+                    // ── Step 3: Build candidate concepts (child ∪ primer, dedup, capped) ──
+                    let mut candidates: Vec<String> = Vec::with_capacity(
+                        extraction.child_concepts.len() + extraction.primer_concepts.len(),
+                    );
+                    let mut seen = std::collections::HashSet::new();
+                    for c in extraction
+                        .child_concepts
+                        .iter()
+                        .chain(extraction.primer_concepts.iter())
+                    {
+                        if seen.insert(c.clone()) {
+                            candidates.push(c.clone());
+                            if candidates.len() >= comp_settings.max_concepts_per_call {
+                                break;
+                            }
+                        }
+                    }
+
+                    // ── Step 4: Run comprehension ──
+                    let comp_result = if candidates.is_empty() {
+                        primer_core::comprehension::ComprehensionResult::empty()
+                    } else {
+                        let comp_ctx = primer_core::comprehension::ComprehensionContext {
+                            child_turn: &child_turn,
+                            primer_turn: &primer_turn,
+                            recent_turns: &recent_turns,
+                            candidate_concepts: &candidates,
+                        };
+                        match comprehension.classify(comp_ctx).await {
+                            Ok(r) => r,
+                            Err(e) => {
+                                tracing::warn!(error = ?e, "comprehension returned error");
+                                primer_core::comprehension::ComprehensionResult::empty()
+                            }
+                        }
+                    };
+
+                    // ── Step 5: Persist comprehensions ──
+                    if !comp_result.assessments.is_empty() {
+                        if let Some(ref store) = store {
+                            if let Err(e) = store
+                                .save_comprehensions(
+                                    session_id,
+                                    primer_idx,
+                                    &comp_result.assessments,
+                                    &comp_classifier_id,
+                                )
+                                .await
+                            {
+                                tracing::warn!(error = ?e, "save_comprehensions failed");
+                            }
+                        }
+                    }
+
+                    Some(PostResponseResult {
+                        extraction: ExtractionPart {
+                            child_turn_index: child_idx,
+                            primer_turn_index: primer_idx,
+                            extraction,
+                        },
+                        comprehension: comp_result,
+                    })
                 });
-                self.extract_task = Some(task);
+                self.post_response_task = Some(task);
             }
         }
 
@@ -674,6 +802,18 @@ impl<'a> DialogueManager<'a> {
         self.extractor.identifier()
     }
 
+    /// Most recent comprehension result applied to the learner (used by `--verbose`).
+    /// Cleared on session lifecycle events. Returns `None` until the first
+    /// completed exchange whose comprehension has been awaited.
+    pub fn last_comprehension(&self) -> Option<&primer_core::comprehension::ComprehensionResult> {
+        self.last_comprehension.as_ref()
+    }
+
+    /// Stable identifier of the active comprehension classifier (used by `--verbose`).
+    pub fn comprehension_identifier(&self) -> &str {
+        self.comprehension.identifier()
+    }
+
     /// Check whether the session has run long enough that the Primer
     /// should suggest a break.
     pub fn should_suggest_break(&self) -> bool {
@@ -696,7 +836,7 @@ impl<'a> DialogueManager<'a> {
         // races the runtime shutdown and the last turn_classifications /
         // turn_concepts rows may never be persisted.
         self.await_pending_classification().await;
-        self.await_pending_extraction().await;
+        self.await_pending_post_response().await;
 
         self.session.ended_at = Some(Utc::now());
         if let Some(ref store) = self.storage {
@@ -754,55 +894,70 @@ impl<'a> DialogueManager<'a> {
         }
     }
 
-    /// Wait (up to `extractor_settings.blocking_timeout`) for the extractor
-    /// task spawned after the previous turn, then apply its result to
-    /// `self.learner.concepts` AND sync the extracted concept names back
-    /// into the in-memory `Session.turns[child/primer].concepts` so the
-    /// in-memory state matches what's already on disk via
-    /// `update_exchange_concepts`.
+    /// Wait (up to `extractor_settings.blocking_timeout +
+    /// comprehension_settings.blocking_timeout`) for the post-response
+    /// chained task (extraction → comprehension) to complete.
     ///
-    /// On timeout the task is detached (so the DB-persistence side effect
-    /// can still complete), but the in-memory updates for THIS turn are
-    /// skipped — preferable to blocking the conversation. The pending
-    /// concepts will be visible from `load_learner` / `load_session` on
-    /// next resume regardless.
-    async fn await_pending_extraction(&mut self) {
-        let Some(task) = self.extract_task.take() else {
+    /// On success: applies extraction to in-memory state via
+    /// `apply_extraction` (inserts new concepts at `Aware`, increments
+    /// encounter counts) THEN applies comprehension via
+    /// `apply_comprehension` (monotonic-max promotion of depths, gated
+    /// on `confidence_threshold`).
+    ///
+    /// On timeout: detaches the task (does NOT abort), so DB
+    /// persistence still completes asynchronously. The next-turn intent
+    /// decision proceeds with stale in-memory data — same behaviour as
+    /// the old extractor await.
+    async fn await_pending_post_response(&mut self) {
+        let Some(task) = self.post_response_task.take() else {
             return;
         };
-        let abort = task.abort_handle();
-        let timeout = self.extractor_settings.blocking_timeout;
+        let timeout =
+            self.extractor_settings.blocking_timeout + self.comprehension_settings.blocking_timeout;
+
         match tokio::time::timeout(timeout, task).await {
             Ok(Ok(Some(result))) => {
-                let ExtractionResult {
-                    child_turn_index,
-                    primer_turn_index,
-                    extraction,
-                } = result;
-                merge_concepts_into_turn(
-                    &mut self.session.turns,
-                    child_turn_index,
-                    &extraction.child_concepts,
-                );
-                merge_concepts_into_turn(
-                    &mut self.session.turns,
-                    primer_turn_index,
-                    &extraction.primer_concepts,
-                );
-                if apply_extraction(&mut self.learner, &extraction) {
+                // Apply extraction first so any new concepts are in
+                // learner.concepts before comprehension promotes their
+                // depths.
+                if apply_extraction(&mut self.learner, &result.extraction.extraction) {
                     self.learner_dirty = true;
                 }
-                self.last_extraction = Some(extraction);
-            }
-            Ok(Ok(None)) => { /* soft failure; nothing to apply */ }
-            Ok(Err(e)) => tracing::warn!(error = ?e, "extractor task panicked"),
-            Err(_) => {
-                // Detach (don't abort) so the DB persistence side effect
-                // can still complete; we just skip the in-memory apply.
-                let _ = abort;
-                tracing::debug!(
-                    "extractor exceeded blocking timeout — proceeding without applied concepts"
+                merge_concepts_into_turn(
+                    &mut self.session.turns,
+                    result.extraction.child_turn_index,
+                    &result.extraction.extraction.child_concepts,
                 );
+                merge_concepts_into_turn(
+                    &mut self.session.turns,
+                    result.extraction.primer_turn_index,
+                    &result.extraction.extraction.primer_concepts,
+                );
+                self.last_extraction = Some(result.extraction.extraction);
+
+                // Apply comprehension — promotes depths via monotonic
+                // max for assessments meeting the confidence threshold.
+                if apply_comprehension(
+                    &mut self.learner,
+                    &result.comprehension,
+                    &self.comprehension_settings,
+                ) {
+                    self.learner_dirty = true;
+                }
+                self.last_comprehension = Some(result.comprehension);
+            }
+            Ok(Ok(None)) => {
+                // Task completed but returned None (extractor errored).
+                // No state to apply.
+            }
+            Ok(Err(e)) => tracing::warn!(error = ?e, "post-response task panicked"),
+            Err(_) => {
+                tracing::warn!(
+                    timeout_ms = timeout.as_millis() as u64,
+                    "post-response chain exceeded blocking timeout — proceeding with stale state"
+                );
+                // task is dropped here, but tokio::spawn'd futures
+                // continue to run to completion in the background.
             }
         }
     }
@@ -969,14 +1124,20 @@ mod tests {
         Arc::new(primer_extractor::StubConceptExtractor::new())
     }
 
+    fn stub_comprehension() -> Arc<dyn primer_comprehension::ComprehensionClassifier> {
+        Arc::new(primer_comprehension::StubComprehensionClassifier::new())
+    }
+
     /// Default-everything subsystems bundle for tests that don't care
-    /// about the specifics of the classifier/extractor.
+    /// about the specifics of the classifier/extractor/comprehension.
     fn default_subsystems() -> DialogueManagerSubsystems {
         DialogueManagerSubsystems {
             classifier: stub_classifier(),
             classifier_settings: ClassifierSettings::default(),
             extractor: stub_extractor(),
             extractor_settings: ExtractorSettings::default(),
+            comprehension: stub_comprehension(),
+            comprehension_settings: primer_comprehension::ComprehensionSettings::default(),
         }
     }
 
@@ -990,6 +1151,24 @@ mod tests {
             classifier_settings: ClassifierSettings::default(),
             extractor,
             extractor_settings: ExtractorSettings::default(),
+            comprehension: stub_comprehension(),
+            comprehension_settings: primer_comprehension::ComprehensionSettings::default(),
+        }
+    }
+
+    /// Subsystems bundle for tests that need a specific comprehension
+    /// classifier but otherwise default classifier/extractor/settings.
+    #[allow(dead_code)]
+    fn subsystems_with_comprehension(
+        comprehension: Arc<dyn primer_comprehension::ComprehensionClassifier>,
+    ) -> DialogueManagerSubsystems {
+        DialogueManagerSubsystems {
+            classifier: stub_classifier(),
+            classifier_settings: ClassifierSettings::default(),
+            extractor: stub_extractor(),
+            extractor_settings: ExtractorSettings::default(),
+            comprehension,
+            comprehension_settings: primer_comprehension::ComprehensionSettings::default(),
         }
     }
 
@@ -1783,6 +1962,142 @@ mod tests {
         );
     }
 
+    // ─── apply_comprehension ──────────────────────────────────────────
+
+    #[test]
+    fn apply_comprehension_promotes_depth_via_monotonic_max() {
+        use primer_comprehension::ComprehensionSettings;
+        use primer_core::comprehension::{ComprehensionAssessment, ComprehensionResult};
+        use primer_core::learner::{ConceptState, UnderstandingDepth};
+
+        let mut learner = test_learner();
+        learner.concepts.push(ConceptState {
+            concept_id: "gravity".into(),
+            depth: UnderstandingDepth::Aware,
+            confidence: 0.5,
+            encounter_count: 1,
+            last_encountered: None,
+            notes: vec![],
+        });
+
+        let result = ComprehensionResult {
+            assessments: vec![ComprehensionAssessment {
+                concept: "gravity".into(),
+                depth: UnderstandingDepth::Comprehension,
+                confidence: 0.85,
+                evidence: None,
+            }],
+        };
+        let settings = ComprehensionSettings::default();
+        let changed = apply_comprehension(&mut learner, &result, &settings);
+        assert!(changed);
+        assert_eq!(
+            learner
+                .concepts
+                .iter()
+                .find(|c| c.concept_id == "gravity")
+                .unwrap()
+                .depth,
+            UnderstandingDepth::Comprehension,
+        );
+    }
+
+    #[test]
+    fn apply_comprehension_does_not_demote() {
+        use primer_comprehension::ComprehensionSettings;
+        use primer_core::comprehension::{ComprehensionAssessment, ComprehensionResult};
+        use primer_core::learner::{ConceptState, UnderstandingDepth};
+
+        let mut learner = test_learner();
+        learner.concepts.push(ConceptState {
+            concept_id: "gravity".into(),
+            depth: UnderstandingDepth::Comprehension,
+            confidence: 0.85,
+            encounter_count: 5,
+            last_encountered: None,
+            notes: vec![],
+        });
+        let result = ComprehensionResult {
+            assessments: vec![ComprehensionAssessment {
+                concept: "gravity".into(),
+                depth: UnderstandingDepth::Aware,
+                confidence: 0.95,
+                evidence: None,
+            }],
+        };
+        let settings = ComprehensionSettings::default();
+        let changed = apply_comprehension(&mut learner, &result, &settings);
+        assert!(!changed);
+        assert_eq!(
+            learner
+                .concepts
+                .iter()
+                .find(|c| c.concept_id == "gravity")
+                .unwrap()
+                .depth,
+            UnderstandingDepth::Comprehension,
+        );
+    }
+
+    #[test]
+    fn apply_comprehension_skips_below_confidence_threshold() {
+        use primer_comprehension::ComprehensionSettings;
+        use primer_core::comprehension::{ComprehensionAssessment, ComprehensionResult};
+        use primer_core::learner::{ConceptState, UnderstandingDepth};
+
+        let mut learner = test_learner();
+        learner.concepts.push(ConceptState {
+            concept_id: "gravity".into(),
+            depth: UnderstandingDepth::Aware,
+            confidence: 0.5,
+            encounter_count: 1,
+            last_encountered: None,
+            notes: vec![],
+        });
+        let result = ComprehensionResult {
+            assessments: vec![ComprehensionAssessment {
+                concept: "gravity".into(),
+                depth: UnderstandingDepth::Comprehension,
+                confidence: 0.3, // below default threshold
+                evidence: None,
+            }],
+        };
+        let settings = ComprehensionSettings::default();
+        let changed = apply_comprehension(&mut learner, &result, &settings);
+        assert!(!changed);
+        assert_eq!(
+            learner
+                .concepts
+                .iter()
+                .find(|c| c.concept_id == "gravity")
+                .unwrap()
+                .depth,
+            UnderstandingDepth::Aware,
+        );
+    }
+
+    #[test]
+    fn apply_comprehension_skips_concept_not_in_learner_model() {
+        use primer_comprehension::ComprehensionSettings;
+        use primer_core::comprehension::{ComprehensionAssessment, ComprehensionResult};
+        use primer_core::learner::UnderstandingDepth;
+
+        let mut learner = test_learner(); // empty concepts
+        let result = ComprehensionResult {
+            assessments: vec![ComprehensionAssessment {
+                concept: "missing".into(),
+                depth: UnderstandingDepth::Comprehension,
+                confidence: 0.9,
+                evidence: None,
+            }],
+        };
+        let settings = ComprehensionSettings::default();
+        let changed = apply_comprehension(&mut learner, &result, &settings);
+        assert!(!changed);
+        // No insertion — apply_extraction is the only insertion path.
+        assert!(!learner.concepts.iter().any(|c| c.concept_id == "missing"));
+    }
+
     // ─── Integration: classifier spawned and applied across turns ─────
 
     #[tokio::test]
@@ -1838,6 +2153,8 @@ mod tests {
                 classifier_settings: settings,
                 extractor: stub_extractor(),
                 extractor_settings: ExtractorSettings::default(),
+                comprehension: stub_comprehension(),
+                comprehension_settings: primer_comprehension::ComprehensionSettings::default(),
             },
             PedagogyConfig::default(),
         );
@@ -1907,6 +2224,8 @@ mod tests {
                 classifier_settings: settings,
                 extractor: stub_extractor(),
                 extractor_settings: ExtractorSettings::default(),
+                comprehension: stub_comprehension(),
+                comprehension_settings: primer_comprehension::ComprehensionSettings::default(),
             },
             PedagogyConfig::default(),
         );
@@ -1981,6 +2300,8 @@ mod tests {
                 classifier_settings: settings,
                 extractor: stub_extractor(),
                 extractor_settings: ExtractorSettings::default(),
+                comprehension: stub_comprehension(),
+                comprehension_settings: primer_comprehension::ComprehensionSettings::default(),
             },
             PedagogyConfig::default(),
         );
@@ -2118,6 +2439,8 @@ mod tests {
                 classifier_settings: settings,
                 extractor: stub_extractor(),
                 extractor_settings: ExtractorSettings::default(),
+                comprehension: stub_comprehension(),
+                comprehension_settings: primer_comprehension::ComprehensionSettings::default(),
             },
             PedagogyConfig::default(),
         );
@@ -2562,10 +2885,19 @@ mod tests {
     }
 
     /// Session-store spy that records `update_turn_concepts` calls so
-    /// tests can assert the extractor's persistence side effect.
+    /// tests can assert the extractor's persistence side effect. Also
+    /// records `save_comprehensions` calls so chain tests can assert
+    /// the comprehension persistence side effect.
     struct ConceptCapturingStore {
         inner: CountingStore,
         captures: Mutex<Vec<(usize, Vec<String>)>>,
+        comprehensions: Mutex<
+            Vec<(
+                usize,
+                Vec<primer_core::comprehension::ComprehensionAssessment>,
+                String,
+            )>,
+        >,
     }
 
     impl ConceptCapturingStore {
@@ -2573,10 +2905,20 @@ mod tests {
             Self {
                 inner: CountingStore::new(),
                 captures: Mutex::new(vec![]),
+                comprehensions: Mutex::new(vec![]),
             }
         }
         fn captured(&self) -> Vec<(usize, Vec<String>)> {
             self.captures.lock().unwrap().clone()
+        }
+        fn captured_comprehensions(
+            &self,
+        ) -> Vec<(
+            usize,
+            Vec<primer_core::comprehension::ComprehensionAssessment>,
+            String,
+        )> {
+            self.comprehensions.lock().unwrap().clone()
         }
     }
 
@@ -2660,10 +3002,15 @@ mod tests {
         async fn save_comprehensions(
             &self,
             _session_id: primer_core::conversation::SessionId,
-            _primer_turn_index: usize,
-            _assessments: &[primer_core::comprehension::ComprehensionAssessment],
-            _classifier_identifier: &str,
+            primer_turn_index: usize,
+            assessments: &[primer_core::comprehension::ComprehensionAssessment],
+            classifier_identifier: &str,
         ) -> Result<()> {
+            self.comprehensions.lock().unwrap().push((
+                primer_turn_index,
+                assessments.to_vec(),
+                classifier_identifier.to_string(),
+            ));
             Ok(())
         }
     }
@@ -2836,6 +3183,174 @@ mod tests {
         assert!(
             !captures.is_empty(),
             "expected extraction to land before close returns"
+        );
+    }
+
+    // ─── Chained post-response (extraction → comprehension) ──────────
+
+    #[tokio::test]
+    async fn post_response_chain_persists_extraction_and_comprehension() {
+        use primer_comprehension::StubComprehensionClassifier;
+        use primer_core::comprehension::{ComprehensionAssessment, ComprehensionResult};
+        use primer_core::extractor::ConceptExtraction;
+        use primer_core::learner::UnderstandingDepth;
+
+        let backend = ScriptedBackend::new(vec![Ok(chunk("Hi there!", true))]);
+        let extractor = Arc::new(primer_extractor::StubConceptExtractor::with_response(
+            ConceptExtraction {
+                child_concepts: vec!["gravity".into()],
+                primer_concepts: vec![],
+            },
+        ));
+        let comprehension = Arc::new(StubComprehensionClassifier::with_response(
+            ComprehensionResult {
+                assessments: vec![ComprehensionAssessment {
+                    concept: "gravity".into(),
+                    depth: UnderstandingDepth::Recall,
+                    confidence: 0.8,
+                    evidence: Some("named the concept".into()),
+                }],
+            },
+        )) as Arc<dyn primer_comprehension::ComprehensionClassifier>;
+        let store = Arc::new(ConceptCapturingStore::new());
+
+        let stores = DialogueManagerStores {
+            session: Some(store.clone() as Arc<dyn primer_core::storage::SessionStore>),
+            learner: None,
+        };
+
+        // Build subsystems directly (subsystems_with_extractor doesn't
+        // accept a custom comprehension classifier).
+        let subsystems = DialogueManagerSubsystems {
+            classifier: stub_classifier(),
+            classifier_settings: ClassifierSettings::default(),
+            extractor: extractor as Arc<dyn ConceptExtractor>,
+            extractor_settings: ExtractorSettings::default(),
+            comprehension,
+            comprehension_settings: primer_comprehension::ComprehensionSettings::default(),
+        };
+
+        let mut dm = DialogueManager::new(
+            test_learner(),
+            &backend as &dyn InferenceBackend,
+            &EmptyKnowledge as &dyn KnowledgeBase,
+            stores,
+            subsystems,
+            PedagogyConfig::default(),
+        );
+
+        dm.respond_to("Hello").await.unwrap();
+        // close_session drains the post-response chain so both
+        // update_exchange_concepts and save_comprehensions have landed
+        // and in-memory state has been applied by the time it returns.
+        dm.close_session().await;
+
+        // Extraction persisted: child concept captured.
+        let captures = store.captured();
+        assert!(
+            captures
+                .iter()
+                .any(|(_, names)| names.contains(&"gravity".to_string())),
+            "expected child capture of 'gravity'; got {:?}",
+            captures
+        );
+
+        // Comprehension persisted via save_comprehensions.
+        let comp_captures = store.captured_comprehensions();
+        assert_eq!(
+            comp_captures.len(),
+            1,
+            "expected one save_comprehensions call; got {:?}",
+            comp_captures
+        );
+        let (primer_idx, assessments, classifier_id) = &comp_captures[0];
+        assert_eq!(*primer_idx, 1, "primer turn index should be 1");
+        assert_eq!(assessments.len(), 1);
+        assert_eq!(assessments[0].concept, "gravity");
+        assert_eq!(assessments[0].depth, UnderstandingDepth::Recall);
+        assert_eq!(classifier_id, "stub");
+
+        // Last comprehension applied to learner via await_pending_post_response.
+        let last_comp = dm
+            .last_comprehension()
+            .expect("last_comprehension must be set after the chain runs");
+        assert_eq!(last_comp.assessments.len(), 1);
+        assert_eq!(last_comp.assessments[0].concept, "gravity");
+
+        // learner.concepts has gravity at Recall (extraction inserted at
+        // Aware first; comprehension promoted to Recall via monotonic max).
+        let gravity = dm
+            .learner
+            .concepts
+            .iter()
+            .find(|c| c.concept_id == "gravity")
+            .expect("'gravity' must be in learner concepts");
+        assert_eq!(gravity.depth, UnderstandingDepth::Recall);
+    }
+
+    #[tokio::test]
+    async fn post_response_chain_skips_comprehension_on_empty_extraction() {
+        // Stub extractor returns empty → candidate_concepts is empty →
+        // comprehension MUST NOT be invoked. The spy comprehension
+        // classifier panics if classify() is called.
+        struct PanicOnCall;
+        #[async_trait]
+        impl primer_comprehension::ComprehensionClassifier for PanicOnCall {
+            fn identifier(&self) -> &str {
+                "panic"
+            }
+            async fn classify(
+                &self,
+                _ctx: primer_core::comprehension::ComprehensionContext<'_>,
+            ) -> Result<primer_core::comprehension::ComprehensionResult> {
+                panic!("comprehension must not be called when extractor returned empty");
+            }
+        }
+
+        let backend = ScriptedBackend::new(vec![Ok(chunk("Hi there!", true))]);
+        let extractor =
+            Arc::new(primer_extractor::StubConceptExtractor::new()) as Arc<dyn ConceptExtractor>;
+        let comprehension =
+            Arc::new(PanicOnCall) as Arc<dyn primer_comprehension::ComprehensionClassifier>;
+        let store = Arc::new(ConceptCapturingStore::new());
+
+        let stores = DialogueManagerStores {
+            session: Some(store.clone() as Arc<dyn primer_core::storage::SessionStore>),
+            learner: None,
+        };
+
+        let subsystems = DialogueManagerSubsystems {
+            classifier: stub_classifier(),
+            classifier_settings: ClassifierSettings::default(),
+            extractor,
+            extractor_settings: ExtractorSettings::default(),
+            comprehension,
+            comprehension_settings: primer_comprehension::ComprehensionSettings::default(),
+        };
+
+        let mut dm = DialogueManager::new(
+            test_learner(),
+            &backend as &dyn InferenceBackend,
+            &EmptyKnowledge as &dyn KnowledgeBase,
+            stores,
+            subsystems,
+            PedagogyConfig::default(),
+        );
+
+        dm.respond_to("Hello").await.unwrap();
+        // Drain. If PanicOnCall.classify() were called, the panicked
+        // task would surface as an Err inside await_pending_post_response
+        // (logged) — but the comprehension code path guards on
+        // candidates.is_empty() before invoking classify, so classify
+        // is never reached and no panic surfaces.
+        dm.close_session().await;
+
+        // No comprehension captures because classify was never called.
+        let comp_captures = store.captured_comprehensions();
+        assert!(
+            comp_captures.is_empty(),
+            "save_comprehensions must not be invoked when extraction is empty; got {:?}",
+            comp_captures
         );
     }
 }

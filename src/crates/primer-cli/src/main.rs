@@ -870,11 +870,18 @@ async fn async_main() -> anyhow::Result<()> {
         session: Some(Arc::clone(&session_store) as Arc<dyn SessionStore>),
         learner: Some(Arc::clone(&session_store) as Arc<dyn LearnerStore>),
     };
+    // Bundle 8 placeholder: comprehension defaults to a stub classifier
+    // until Bundle 9 wires up the CLI flags that select a real backend.
+    let comprehension: Arc<dyn primer_comprehension::ComprehensionClassifier> =
+        Arc::new(primer_comprehension::StubComprehensionClassifier::new());
+    let comprehension_settings = primer_comprehension::ComprehensionSettings::default();
     let subsystems = primer_pedagogy::DialogueManagerSubsystems {
         classifier,
         classifier_settings,
         extractor,
         extractor_settings,
+        comprehension,
+        comprehension_settings,
     };
     let mut dm = DialogueManager::new(
         learner,

@@ -12,6 +12,7 @@ path = "src/main.rs"
 primer-core.workspace = true
 primer-classifier.workspace = true
 primer-extractor.workspace = true
+primer-comprehension.workspace = true
 primer-inference = { path = "../primer-inference" }
 primer-speech = { path = "../primer-speech" }
 primer-knowledge = { path = "../primer-knowledge" }
