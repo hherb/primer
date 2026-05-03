@@ -13,6 +13,7 @@
 //! the pedagogical engine.
 
 pub mod classifier;
+pub mod comprehension;
 pub mod config;
 pub mod conversation;
 pub mod error;
