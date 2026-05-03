@@ -828,6 +828,15 @@ mod tests {
         async fn most_recent_session_learner_id(&self) -> Result<Option<uuid::Uuid>> {
             Ok(None)
         }
+
+        async fn update_turn_concepts(
+            &self,
+            _session_id: primer_core::conversation::SessionId,
+            _turn_index: usize,
+            _concepts: &[String],
+        ) -> Result<()> {
+            Ok(())
+        }
     }
 
     /// Learner-store spy: counts `save_learner` calls. Used to prove that

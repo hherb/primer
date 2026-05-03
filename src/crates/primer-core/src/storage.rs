@@ -100,6 +100,29 @@ pub trait SessionStore: Send + Sync {
     /// Returns `Ok(None)` for a DB with no sessions. Reserves `Err` for
     /// genuine I/O / decoding failures.
     async fn most_recent_session_learner_id(&self) -> Result<Option<Uuid>>;
+
+    /// Add concepts to a previously-persisted turn. Resolves
+    /// `(session_id, turn_index)` → `turn_id` internally; lazily creates
+    /// any new `concepts` rows; idempotently links via `turn_concepts`
+    /// (`INSERT OR IGNORE` so calling this twice with overlapping
+    /// concepts is a no-op).
+    ///
+    /// Used by the post-response concept-extractor task to backfill
+    /// concepts onto a turn that `save_session` has already persisted.
+    /// The append-only `save_session` skip-already-persisted invariant
+    /// means concepts cannot be added in the normal save path once a
+    /// turn is on disk; this method exists to fill that gap without
+    /// breaking that invariant.
+    ///
+    /// Returns `Err` if `(session_id, turn_index)` does not resolve to
+    /// an existing turn, or on genuine I/O failure. An empty `concepts`
+    /// slice is a no-op (returns `Ok(())`).
+    async fn update_turn_concepts(
+        &self,
+        session_id: SessionId,
+        turn_index: usize,
+        concepts: &[String],
+    ) -> Result<()>;
 }
 
 /// Persists the per-child `LearnerModel` to disk.
