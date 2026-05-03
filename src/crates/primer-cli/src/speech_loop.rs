@@ -31,13 +31,95 @@ fn is_quit_phrase(transcript: &str) -> bool {
 }
 
 /// Strip markdown emphasis markers so Piper's espeak phonemizer doesn't
-/// pronounce them ("*why*" → "asterisks why asterisks"). The Primer's
-/// stub responses (and many cloud LLM responses) use `*emphasis*` and
-/// `**strong**` for emphasis. Backticks for `code` are also stripped.
-/// Underscore-emphasis is rare and ambiguous (it shows up in identifiers
-/// too) — left alone for now.
+/// pronounce them ("*why*" → "asterisks why asterisks"). Paired
+/// `*emphasis*` and `**strong**` markers are removed; paired
+/// `` `code` `` markers are removed. Bare unmatched `*` or `` ` `` are
+/// left in place. A `*` (or run of `*`) sandwiched between digits is
+/// treated as multiplication and replaced with " times " so `5*3=15`
+/// reads as "5 times 3=15" instead of "53=15". Underscore-emphasis is
+/// rare and ambiguous (shows up in identifiers too) — left alone.
 fn strip_markdown_for_tts(text: &str) -> String {
-    text.chars().filter(|c| !matches!(c, '*' | '`')).collect()
+    let chars: Vec<char> = text.chars().collect();
+    let mut out = String::with_capacity(text.len());
+    let mut i = 0;
+    while i < chars.len() {
+        let c = chars[i];
+        if c == '*' {
+            if let Some(end) = consume_digit_times(&chars, i) {
+                out.push_str(" times ");
+                i = end;
+                continue;
+            }
+            let marker = if i + 1 < chars.len() && chars[i + 1] == '*' {
+                2
+            } else {
+                1
+            };
+            if let Some(close) = find_paired_marker(&chars, i + marker, marker, '*') {
+                let inner: String = chars[i + marker..close].iter().collect();
+                out.push_str(&strip_markdown_for_tts(&inner));
+                i = close + marker;
+                continue;
+            }
+            out.push('*');
+            i += 1;
+        } else if c == '`' {
+            if let Some(close) = find_paired_marker(&chars, i + 1, 1, '`') {
+                let inner: String = chars[i + 1..close].iter().collect();
+                out.push_str(&strip_markdown_for_tts(&inner));
+                i = close + 1;
+                continue;
+            }
+            out.push('`');
+            i += 1;
+        } else {
+            out.push(c);
+            i += 1;
+        }
+    }
+    out
+}
+
+/// If `chars[i]` is the start of a digit-bounded run of `*` (e.g. `*`
+/// or `**` flanked by digits), return the index just past the run.
+/// Otherwise return `None`. The caller emits " times " in that case.
+fn consume_digit_times(chars: &[char], i: usize) -> Option<usize> {
+    if i == 0 || !chars[i - 1].is_ascii_digit() {
+        return None;
+    }
+    let mut j = i;
+    while j < chars.len() && chars[j] == '*' {
+        j += 1;
+    }
+    if j < chars.len() && chars[j].is_ascii_digit() {
+        Some(j)
+    } else {
+        None
+    }
+}
+
+/// Find the next run of exactly `marker_len` consecutive `marker`
+/// characters starting at or after `start`, not adjacent to another
+/// `marker` (so a `*` inside a `**` run never matches a single-`*`
+/// search and vice versa). Returns the start index of that run.
+fn find_paired_marker(
+    chars: &[char],
+    start: usize,
+    marker_len: usize,
+    marker: char,
+) -> Option<usize> {
+    let n = chars.len();
+    let mut i = start;
+    while i + marker_len <= n {
+        let matches = (0..marker_len).all(|k| chars[i + k] == marker);
+        let prev_ok = i == 0 || chars[i - 1] != marker;
+        let next_ok = i + marker_len >= n || chars[i + marker_len] != marker;
+        if matches && prev_ok && next_ok {
+            return Some(i);
+        }
+        i += 1;
+    }
+    None
 }
 
 /// Configuration passed into `run` from `main`.
@@ -1546,6 +1628,69 @@ mod mocks {
             super::FALLBACK_LINE,
             "fallback line was synthesised after LLM error"
         );
+    }
+}
+
+#[cfg(test)]
+mod markdown_tests {
+    use super::strip_markdown_for_tts;
+
+    #[test]
+    fn strips_paired_emphasis_and_strong() {
+        assert_eq!(strip_markdown_for_tts("*why*"), "why");
+        assert_eq!(strip_markdown_for_tts("**important**"), "important");
+        assert_eq!(
+            strip_markdown_for_tts("a *little* bit of **emphasis**"),
+            "a little bit of emphasis"
+        );
+    }
+
+    #[test]
+    fn preserves_multiplication_between_digits() {
+        assert_eq!(strip_markdown_for_tts("5*3=15"), "5 times 3=15");
+        assert_eq!(strip_markdown_for_tts("2 * 3"), "2 * 3");
+        assert_eq!(strip_markdown_for_tts("5*3*2"), "5 times 3 times 2");
+    }
+
+    #[test]
+    fn preserves_exponent_double_star_between_digits() {
+        assert_eq!(strip_markdown_for_tts("5**2"), "5 times 2");
+    }
+
+    #[test]
+    fn leaves_unmatched_star_alone() {
+        assert_eq!(strip_markdown_for_tts("a* footnote"), "a* footnote");
+        assert_eq!(strip_markdown_for_tts("value *= 5"), "value *= 5");
+    }
+
+    #[test]
+    fn strips_paired_backticks_only() {
+        assert_eq!(strip_markdown_for_tts("`code`"), "code");
+        assert_eq!(
+            strip_markdown_for_tts("a single ` backtick"),
+            "a single ` backtick"
+        );
+    }
+
+    #[test]
+    fn handles_mixed_markdown_and_math() {
+        assert_eq!(
+            strip_markdown_for_tts("the answer is **5*3=15** indeed"),
+            "the answer is 5 times 3=15 indeed"
+        );
+    }
+
+    #[test]
+    fn no_op_on_plain_text() {
+        assert_eq!(
+            strip_markdown_for_tts("nothing to strip here"),
+            "nothing to strip here"
+        );
+    }
+
+    #[test]
+    fn empty_input_returns_empty() {
+        assert_eq!(strip_markdown_for_tts(""), "");
     }
 }
 
