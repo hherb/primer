@@ -102,6 +102,9 @@ pub struct DialogueManager<'a> {
     extract_task: Option<JoinHandle<Option<ConceptExtraction>>>,
     /// Pedagogical configuration.
     config: PedagogyConfig,
+    /// Most recent extractor output applied to the learner. Cleared on
+    /// session lifecycle events. Used by `--verbose`.
+    last_extraction: Option<primer_core::extractor::ConceptExtraction>,
     /// Tracks whether `learner` has fields-that-map-to-the-`learners`-table
     /// changes that haven't been flushed yet. The per-turn save site is
     /// gated by this flag (lifecycle events at open / resume / close
@@ -228,6 +231,7 @@ impl<'a> DialogueManager<'a> {
             extractor_settings,
             extract_task: None,
             config,
+            last_extraction: None,
             learner_dirty: false,
         }
     }
@@ -616,6 +620,17 @@ impl<'a> DialogueManager<'a> {
         self.classifier.identifier()
     }
 
+    /// Most recent extractor output applied to the learner (used by `--verbose`).
+    /// Returns `None` until at least one extraction has completed.
+    pub fn last_extraction(&self) -> Option<&primer_core::extractor::ConceptExtraction> {
+        self.last_extraction.as_ref()
+    }
+
+    /// Stable identifier of the active concept extractor (used by `--verbose`).
+    pub fn extractor_identifier(&self) -> &str {
+        self.extractor.identifier()
+    }
+
     /// Check whether the session has run long enough that the Primer
     /// should suggest a break.
     pub fn should_suggest_break(&self) -> bool {
@@ -716,6 +731,7 @@ impl<'a> DialogueManager<'a> {
                 if apply_extraction(&mut self.learner, &extraction) {
                     self.learner_dirty = true;
                 }
+                self.last_extraction = Some(extraction);
             }
             Ok(Ok(None)) => { /* soft failure; nothing to apply */ }
             Ok(Err(e)) => tracing::warn!(error = ?e, "extractor task panicked"),

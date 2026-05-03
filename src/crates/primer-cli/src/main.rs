@@ -972,6 +972,14 @@ async fn async_main() -> anyhow::Result<()> {
                     eprintln!("             — {r}");
                 }
             }
+            if let Some(e) = dm.last_extraction() {
+                eprintln!(
+                    "[extractor] child={:?} primer={:?} ({})",
+                    e.child_concepts,
+                    e.primer_concepts,
+                    dm.extractor_identifier()
+                );
+            }
         }
 
         // Check if the session has run long.
