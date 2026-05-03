@@ -10,7 +10,7 @@ The Primer doesn't teach by telling. It teaches by asking. When a child says "Wh
 
 ## Design Principles
 
-- **The Primar can run on local hardware without internet dependence.**
+- **The Primer can run on local hardware without internet dependence.**
  While the Primer can make use of cloud services (AI API, web search) it is designed to work autonomously and airgapped if that is the user's preference or no connectivity available
 
 - **The Primer never gives a direct answer when it can ask a guiding question instead.** 
@@ -27,11 +27,24 @@ The learner model (what the child knows, how deeply they understand it, what top
 
 ## Status
 
-**Phase 0.1 done; Phase 0.3 progressing.** The trait architecture and module boundaries are in place, you can hold a real Socratic conversation against either the Anthropic Claude API or a local Ollama model with **tokens streaming progressively** into the terminal, and conversations **persist to a normalised SQLite store** on every turn (one DB per child under `~/.primer/`, kept separate from the RAG corpus on privacy grounds). Sessions can be **resumed by UUID** (`--resume <uuid>`), and once a conversation grows past the active context window the Primer keeps long-term memory via a **rolling LLM-generated summary** plus **FTS5 retrieval** over older turns. An **engagement classifier** runs one model behind the chat, persisting per-turn assessments to `turn_classifications` for cross-session analysis. The **learner model** (profile, concept-mastery state, learning preferences, latest engagement snapshot) now **persists across sessions** via a `LearnerStore` trait + schema v4 — a returning child carries forward their identity and progress. Still ahead: knowledge-base bootstrapping (Phase 0.2), concept extraction + comprehension classification + spaced-repetition vocabulary (the rest of Phase 0.3), local llama.cpp inference, speech pipeline, hardware integration. See [ROADMAP.md](ROADMAP.md) for what comes next.
+**Phase 0.1 done; Phase 0.3 progressing.** The trait architecture and module boundaries are in place, and the text REPL holds real Socratic conversations against either the Anthropic Claude API or a local Ollama model.
+
+**What works today:**
+
+- **Streaming generation** — tokens arrive in the terminal as the model produces them.
+- **Conversation persistence** — every turn writes through to a normalised SQLite store (one DB per child under `~/.primer/`, kept separate from the RAG corpus on privacy grounds).
+- **Session resume by UUID** — `--resume <uuid>` picks up a past conversation; no greeting is emitted on resume.
+- **Long-term memory** — once a conversation grows past the active context window, a rolling LLM-generated summary plus FTS5 retrieval over older turns are injected into the system prompt, so the chat-message timeline stays bounded but the model has access to the whole history.
+- **Engagement classifier** — runs one model behind the chat (configurable via `--classifier-backend` / `--classifier-model`), persisting per-turn assessments to `turn_classifications` for cross-session analysis.
+- **Concept extractor** — runs after each completed exchange (configurable via `--extractor-backend` / `--extractor-model`), extracts the topics the child surfaced and the topics the Primer introduced, and writes them atomically to `turn_concepts` while updating the in-memory learner model.
+- **Learner-model persistence** — profile, concept-mastery state, learning preferences, and latest engagement snapshot persist across sessions via a `LearnerStore` trait + schema v4. A returning child carries forward their identity and progress.
+- **Voice round-trip POC** (`--speech`, behind a Cargo feature) — full LISTEN → THINK → SPEAK → LISTEN loop wired end-to-end: Silero VAD opens the mic, Whisper transcribes, the dialogue manager generates the response, Piper synthesises it phrase-by-phrase. No barge-in by design (the Primer never speaks over the child and the child never speaks over the Primer); cancel-on-resume preserves Socratic etiquette without freezing the loop.
+
+**Still ahead** (see [ROADMAP.md](ROADMAP.md)): knowledge-base bootstrapping (Phase 0.2), comprehension classification + spaced-repetition vocabulary (rest of Phase 0.3), local llama.cpp inference, hardening of the speech loop, hardware integration.
 
 ## Architecture
 
-The codebase is a Rust workspace under `src/`, organised into seven crates. The core design principle is **trait-based hardware abstraction**: the pedagogical engine doesn't know or care whether it's talking to a local 7B model on a phone's NPU, llama.cpp on a laptop, or Claude over the network. Backend selection is a runtime config choice, not a code change.
+The codebase is a Rust workspace under `src/`, organised into nine crates. The core design principle is **trait-based hardware abstraction**: the pedagogical engine doesn't know or care whether it's talking to a local 7B model on a phone's NPU, llama.cpp on a laptop, or Claude over the network. Backend selection is a runtime config choice, not a code change.
 
 ```
 src/
@@ -39,9 +52,11 @@ src/
 └── crates/
     ├── primer-core/            # traits + shared types (everyone depends on this)
     ├── primer-inference/       # LLM backends (stub, cloud, ollama; later: llama.cpp, QNN, RKNN)
-    ├── primer-speech/          # STT/TTS backends (stub; later: Whisper, Piper)
+    ├── primer-speech/          # VAD + STT + TTS backends (Silero, Whisper, Piper, cpal)
     ├── primer-knowledge/       # SQLite FTS5 knowledge base for RAG retrieval
-    ├── primer-storage/         # SQLite session persistence (per-child conversation history)
+    ├── primer-storage/         # SQLite session + learner-model persistence
+    ├── primer-classifier/      # per-turn engagement classifier (LLM-backed + stub)
+    ├── primer-extractor/       # per-exchange concept extractor (LLM-backed + stub)
     ├── primer-pedagogy/        # Socratic dialogue engine (prompt builder + dialogue manager)
     └── primer-cli/             # text-mode REPL binary
 ```
@@ -52,7 +67,11 @@ Defines the trait contracts that all backends implement:
 
 - `InferenceBackend` — text generation (streaming and non-streaming)
 - `KnowledgeBase` — passage retrieval with BM25 ranking
-- `SpeechToText` / `TextToSpeech` — audio pipeline (stub for now)
+- `VoiceActivityDetector` — frame-by-frame speech-vs-silence classification
+- `SpeechToText` / `StreamingSpeechToText` — audio → text (one-shot or chunked)
+- `TextToSpeech` / `StreamingTextToSpeech` — text → audio (one-shot or phrase-by-phrase)
+
+All speech traits inherit from a small `Named` trait so a backend that implements both the one-shot and streaming variant of a trait writes its `name()` impl exactly once.
 
 Also defines the learner model types: `LearnerProfile`, `ConceptState` (Bloom's taxonomy depth tracking), `EngagementState`, `LearningPreferences`, and the conversation types (`Session`, `Turn`, `PedagogicalIntent`).
 
@@ -81,9 +100,28 @@ SQLite FTS5-backed knowledge base. Stores passages from Wikipedia, curated encyc
 
 SQLite-backed conversation + learner-model persistence. Every child turn, every Primer turn, and every `close_session` writes through to disk in an append-only schema (turn rowids stay stable across saves). Categorical text columns (`speaker`, `pedagogical_intent`, `concept`, engagement state, understanding depth) are normalised into integer-keyed lookup tables; the matching Rust enums are the canonical source of truth and the storage layer validates the on-disk lookup tables against them on every `open()` — drift is a hard error. Schema version 2 added rolling-summary fields on `sessions` and a `turn_text_fts` FTS5 virtual table for retrieval of older turns. Version 3 added `turn_classifications` for the engagement classifier. Version 4 added the `learners` table + `learner_concepts` junction (one row per child per concept with depth, confidence, encounter count, last-encountered timestamp, notes) plus a `LearnerStore` trait (`save_learner` / `load_learner`) — concepts are monotonic on disk (a concept dropped from the in-memory `Vec` survives, mirroring real cognition), and `INSERT … ON CONFLICT DO UPDATE` upserts avoid the cascade-wipe footgun. Each migration runs inside a single transaction so a partial failure rolls back to the pre-migration state. Adoption of an existing session's `learner_id` on first-run-after-upgrade is a CLI-level concern via `SessionStore::most_recent_session_learner_id`, not part of the migration. The session DB is intentionally separate from the RAG corpus on privacy grounds (different file, different lifecycle); existing v1/v2/v3 databases are migrated in place on first open.
 
+### primer-classifier
+
+Per-turn engagement classifier. The `EngagementClassifier` trait has two implementations: `LlmEngagementClassifier` (wraps any `InferenceBackend` and prompts it for a structured engagement assessment) and `StubEngagementClassifier` (deterministic, for tests). Soft-fail policy throughout — classifier errors never propagate up; they degrade to "unknown / low confidence" and the conversation continues. Classification of turn N runs on a separate model in the natural inter-turn pause; its result is applied at the start of turn N+1's intent decision. Every assessment is persisted to `turn_classifications` for cross-session analysis and future training data.
+
+### primer-extractor
+
+Per-exchange concept extractor. The `ConceptExtractor` trait mirrors `EngagementClassifier`: an LLM-backed implementation (`LlmConceptExtractor`) plus a stub. One LLM call per completed (child, primer) exchange returns the topics the child surfaced and the topics the Primer introduced as separate lists; both are persisted atomically into `turn_concepts` and merged into the in-memory `LearnerModel.concepts`. Same soft-fail policy as the classifier.
+
+### primer-speech
+
+The voice pipeline. Stub backends are always available; real backends sit behind Cargo features:
+
+- **Silero VAD** (`silero` feature) — frame-by-frame voice-activity detection over a 16 kHz capture stream.
+- **Whisper STT** (`whisper` feature) — `whisper.cpp` GGML/GGUF model, used for both streaming partial transcripts and the final phrase commit.
+- **Piper TTS** (`piper` feature) — neural text-to-speech, synthesising one phrase at a time (`PhraseSplitter` chunks the LLM stream on `. ! ?` boundaries) so the Primer can begin speaking before generation has fully finished.
+- **cpal I/O** (`cpal` feature) — cross-platform mic capture + speaker playback, gated by an `is_speaking` flag so the Primer's own audio never leaks back through the mic.
+
+Two pure helper modules (`vad_debounce`, `phrase_split`) carry the streaming state machines so they can be unit-tested without any backend dep. The `--speech` flag in `primer-cli` is gated by a top-level `speech` feature that pulls all four. See the [Voice mode](#voice-mode-experimental-poc) section below for setup.
+
 ### primer-cli
 
-A text-mode REPL for developing and testing the dialogue without any hardware. This is the primary development interface for now.
+A text-mode REPL for developing and testing the dialogue without any hardware. This is the primary development interface for now. With `--features speech` it gains a `--speech` flag that swaps the text REPL for a voice loop driven by `primer-speech`.
 
 ## Building
 
@@ -126,6 +164,41 @@ cargo run --bin primer -- --backend ollama --model llama3.2 --name Binti --age 8
 
 `--model` is required for ollama (e.g. `llama3.2`, `qwen2.5:7b`). The model must already be pulled (`ollama pull llama3.2`).
 
+### Voice mode (experimental POC)
+
+The voice loop is gated by the `speech` Cargo feature on `primer-cli`, so default builds stay light:
+
+```bash
+cargo build --features primer-cli/speech
+```
+
+System prerequisite: **espeak-ng** must be installed for Piper to phonemise text. The bundled `espeak-rs` ships an incomplete subset that fails on most voices.
+
+```bash
+# macOS
+brew install espeak-ng
+# Debian / Ubuntu
+sudo apt install espeak-ng-data
+```
+
+Then download a whisper.cpp model and a Piper voice (the matching `.onnx` and `.onnx.json` sidecar):
+
+```bash
+cargo run --features primer-cli/speech --bin primer -- \
+    --backend cloud --name Binti --age 8 \
+    --speech \
+    --whisper-model ~/models/ggml-small.en.bin \
+    --voice-onnx ~/models/voices/en_GB-alba-medium.onnx \
+    --voice-config ~/models/voices/en_GB-alba-medium.onnx.json \
+    --voice en_GB-alba-medium
+```
+
+`--voice` is the `VoiceProfile.model_id` and **must** match the file stem of `--voice-onnx` — Piper rejects mismatches at session open. Piper voices are at <https://huggingface.co/rhasspy/piper-voices>; whisper.cpp models are at <https://huggingface.co/ggerganov/whisper.cpp>.
+
+Build with `~/.cargo/bin/cargo` rather than a Homebrew rust if both are on `PATH` — silero requires a recent rustc that the project's `rust-toolchain.toml` pins, and Homebrew's older toolchain will fail to compile. The first build downloads ONNX Runtime via `ort`'s `download-binaries` feature; subsequent builds are cached.
+
+This is a working POC, not production-grade. Latency, voice quality, and edge-case handling are all under active iteration.
+
 ### Configuring secrets
 
 Both `.env` (project-local) and `~/.primer_env` (user-global) are auto-loaded at startup. Drop your `ANTHROPIC_API_KEY` into either:
@@ -152,6 +225,34 @@ Project-local `.env` wins over the home file. Both are gitignored. See `.env.exa
 --no-persist                    Run in-memory only — nothing is written to disk and the conversation
                                 evaporates on exit. Mutually exclusive with --resume and --session-db.
 --api-key <key>                 Anthropic API key (or set ANTHROPIC_API_KEY)
+--classifier-backend <name>     Backend for the engagement classifier (default: same as --backend;
+                                pass `stub` to force deterministic empty assessments).
+--classifier-model <id>         Model for the engagement classifier (default: same as --model).
+--classifier-timeout-ms <ms>    Bounded wait for the previous turn's classification before the next
+                                intent decision (default: 500ms).
+--extractor-backend <name>      Backend for the concept extractor (default: same as --backend).
+--extractor-model <id>          Model for the concept extractor (default: same as --model). Useful
+                                for haiku-as-extractor + sonnet-as-chat on bigger machines.
+--extractor-timeout-ms <ms>     Bounded wait for the previous turn's extraction (default: 1500ms).
+--verbose                       Print pedagogical decisions ([intent], [classifier], [extractor]) to
+                                stderr alongside the conversation. Stdout stays clean.
+```
+
+Voice-mode flags (only when built with `--features primer-cli/speech`):
+
+```
+--speech                        Run the voice REPL instead of the text REPL. Requires
+                                --whisper-model, --voice-onnx, --voice-config.
+--whisper-model <path>          Path to the whisper.cpp GGML/GGUF model file
+                                (e.g. ~/models/ggml-small.en.bin).
+--voice-onnx <path>             Path to the Piper voice ONNX file
+                                (e.g. ~/models/voices/en_GB-alba-medium.onnx).
+--voice-config <path>           Path to the matching Piper voice JSON sidecar
+                                (e.g. ~/models/voices/en_GB-alba-medium.onnx.json).
+--voice <id>                    VoiceProfile.model_id; must match the file stem of
+                                --voice-onnx (default: en_GB-alba-medium).
+--mic-silence-ms <ms>           Override Silero's min_silence_ms (default: 600,
+                                bounded to [50, 5000]).
 ```
 
 ### Resuming a past session
