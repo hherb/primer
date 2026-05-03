@@ -7,6 +7,7 @@ use async_trait::async_trait;
 use uuid::Uuid;
 
 use crate::classifier::EngagementAssessment;
+use crate::comprehension::ComprehensionAssessment;
 use crate::conversation::{Session, SessionId, Turn};
 use crate::error::Result;
 use crate::learner::LearnerModel;
@@ -147,6 +148,31 @@ pub trait SessionStore: Send + Sync {
         child_concepts: &[String],
         primer_turn_index: usize,
         primer_concepts: &[String],
+    ) -> Result<()>;
+
+    /// Persist the per-concept comprehension assessments for one
+    /// completed exchange. Resolves `(session_id, primer_turn_index)`
+    /// → `turn_id` internally; lazily creates any new `concepts` and
+    /// `comprehension_classifiers` rows; UNIQUE-constrained on
+    /// `(turn_id, concept_id, classifier_id)` so re-saving the same
+    /// classifier's output for the same turn is a no-op.
+    ///
+    /// `primer_turn_index` is used (not the child turn) because the
+    /// comprehension assessment describes what the child demonstrated
+    /// in the exchange that *concluded* with the Primer's response —
+    /// keying off the Primer turn aligns the row with "the most recent
+    /// thing the model can have an opinion about."
+    ///
+    /// An empty `assessments` slice is a no-op (returns `Ok(())`).
+    /// Returns `Err` if `(session_id, primer_turn_index)` does not
+    /// resolve to an existing turn, or on genuine I/O failure. The
+    /// whole call runs inside a single transaction.
+    async fn save_comprehensions(
+        &self,
+        session_id: SessionId,
+        primer_turn_index: usize,
+        assessments: &[ComprehensionAssessment],
+        classifier_identifier: &str,
     ) -> Result<()>;
 }
 

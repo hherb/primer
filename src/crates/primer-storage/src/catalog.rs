@@ -205,6 +205,33 @@ pub(crate) fn get_or_create_classifier_id(conn: &Connection, identifier: &str) -
     Ok(conn.last_insert_rowid())
 }
 
+/// Resolve a comprehension-classifier identifier string to its
+/// integer id, inserting into `comprehension_classifiers` lazily on
+/// first observation. Mirrors `get_or_create_classifier_id` exactly,
+/// just against the v5 lookup table.
+pub(crate) fn get_or_create_comprehension_classifier_id(
+    conn: &Connection,
+    identifier: &str,
+) -> Result<i64> {
+    if let Some(id) = conn
+        .query_row(
+            "SELECT id FROM comprehension_classifiers WHERE identifier = ?1",
+            params![identifier],
+            |r| r.get::<_, i64>(0),
+        )
+        .optional()
+        .map_err(|e| PrimerError::Storage(format!("comprehension_classifier_id lookup: {e}")))?
+    {
+        return Ok(id);
+    }
+    conn.execute(
+        "INSERT INTO comprehension_classifiers (identifier) VALUES (?1)",
+        params![identifier],
+    )
+    .map_err(|e| PrimerError::Storage(format!("comprehension_classifier_id insert: {e}")))?;
+    Ok(conn.last_insert_rowid())
+}
+
 #[cfg(test)]
 mod classifier_row_tests {
     use super::*;

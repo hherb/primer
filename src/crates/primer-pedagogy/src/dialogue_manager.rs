@@ -1140,6 +1140,16 @@ mod tests {
         ) -> Result<()> {
             Ok(())
         }
+
+        async fn save_comprehensions(
+            &self,
+            _session_id: primer_core::conversation::SessionId,
+            _primer_turn_index: usize,
+            _assessments: &[primer_core::comprehension::ComprehensionAssessment],
+            _classifier_identifier: &str,
+        ) -> Result<()> {
+            Ok(())
+        }
     }
 
     /// Learner-store spy: counts `save_learner` calls. Used to prove that
@@ -2644,6 +2654,16 @@ mod tests {
             if !primer_concepts.is_empty() {
                 captures.push((primer_turn_index, primer_concepts.to_vec()));
             }
+            Ok(())
+        }
+
+        async fn save_comprehensions(
+            &self,
+            _session_id: primer_core::conversation::SessionId,
+            _primer_turn_index: usize,
+            _assessments: &[primer_core::comprehension::ComprehensionAssessment],
+            _classifier_identifier: &str,
+        ) -> Result<()> {
             Ok(())
         }
     }
