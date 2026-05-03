@@ -395,35 +395,24 @@ pub async fn run_loop<'r>(
             // total response time.
             const INTER_PHRASE_SILENCE_MS: u32 = 200;
             let inter_phrase_silence_samples = (tts_rate * INTER_PHRASE_SILENCE_MS / 1000) as usize;
-            let mut total_samples_at_tts_rate: usize = 0;
             for chunk in session.push_text(&tts_text)? {
-                total_samples_at_tts_rate += chunk.samples.len();
                 on_committed_audio(chunk.samples);
-                let silence = vec![0.0_f32; inter_phrase_silence_samples];
-                total_samples_at_tts_rate += silence.len();
-                on_committed_audio(silence);
+                on_committed_audio(vec![0.0_f32; inter_phrase_silence_samples]);
             }
             for chunk in session.finalize()? {
-                total_samples_at_tts_rate += chunk.samples.len();
                 on_committed_audio(chunk.samples);
-                let silence = vec![0.0_f32; inter_phrase_silence_samples];
-                total_samples_at_tts_rate += silence.len();
-                on_committed_audio(silence);
+                on_committed_audio(vec![0.0_f32; inter_phrase_silence_samples]);
             }
-            // Flush sentinel: empty Vec signals on_audio (production)
-            // to drain any resampler-leftover tail. Tests no-op on
-            // empty since their mock callbacks just `extend(samples)`.
+            // Flush sentinel: empty Vec signals on_audio to drain any
+            // resampler-leftover tail AND (in production) wait for cpal
+            // to actually empty the ringbuf before returning. Mock
+            // callbacks no-op on empty input. Replaces the old
+            // `samples / tts_rate + 0.4s` heuristic sleep that lived
+            // here — the exact "speaker has played everything" signal
+            // now lives in the on_audio callback (where the producer
+            // is in scope to query `occupied_len`).
             on_committed_audio(Vec::new());
-            // Wait for the speaker to drain. cpal pulls at hardware rate;
-            // the audio we just queued has duration = samples / tts_rate.
-            // Add a 400 ms safety margin to cover: cpal output buffer
-            // latency, the resampler.flush()'s output_delay samples (not
-            // counted in total_samples_at_tts_rate), and any per-phrase
-            // synthesis stutter — so the tail of the Primer's voice
-            // doesn't reach the mic before we un-gate.
             if let Some(flag) = is_speaking.as_ref() {
-                let duration_secs = total_samples_at_tts_rate as f32 / tts_rate as f32 + 0.4;
-                tokio::time::sleep(std::time::Duration::from_secs_f32(duration_secs)).await;
                 flag.store(false, std::sync::atomic::Ordering::SeqCst);
             }
             // Drain any events the audio thread may have queued in the
@@ -767,9 +756,6 @@ pub async fn run<'a>(
                 }
                 samples = out_buf;
             }
-        } else if is_flush {
-            // No resampling path: nothing to flush.
-            return;
         }
         // Push to speaker ringbuf, blocking until it accepts every
         // sample. The previous 1-second drop-on-timeout was the very
@@ -779,12 +765,31 @@ pub async fn run<'a>(
         // give up. The retry bails when `spk_errored` flips true (cpal
         // output stream errored, device removed, etc.) instead of
         // spinning forever on a dead stream.
-        primer_speech::push_all_with_bail(
-            &mut spk_prod,
-            &samples,
-            &spk_errored_for_cb,
-            std::time::Duration::from_millis(5),
-        );
+        if !samples.is_empty() {
+            primer_speech::push_all_with_bail(
+                &mut spk_prod,
+                &samples,
+                &spk_errored_for_cb,
+                std::time::Duration::from_millis(5),
+            );
+        }
+        // End-of-turn (flush sentinel): wait for cpal to actually drain
+        // the ringbuf before returning, so the mic gate in run_loop
+        // stays closed until the speaker is silent. Replaces the old
+        // heuristic `samples / tts_rate + 0.4s` sleep — exact instead
+        // of "fixed margin that's too short on slow hardware and too
+        // long on fast hardware". Bails on errored stream; capped at 5 s
+        // sanity timeout so a stuck buffer can't hang the REPL.
+        if is_flush {
+            let _ = primer_speech::wait_for_drain(
+                &spk_prod,
+                &spk_errored_for_cb,
+                std::time::Duration::from_millis(10),
+                3,
+                std::time::Duration::from_millis(80),
+                std::time::Duration::from_secs(5),
+            );
+        }
     });
 
     // ── Wire DialogueManager via the Responder adapter ─────────────
@@ -1491,9 +1496,10 @@ mod mocks {
             }
         });
 
-        // 0.4 s + a few ms — slightly more than the SPEAK drain wait.
-        // 64 mock samples / 22 050 Hz ≈ 3 ms, plus a 200 ms inter-phrase
-        // silence and the 400 ms safety margin = ~603 ms total.
+        // 2 s timeout: the mock on_audio doesn't poll for drain so the
+        // gate clears as soon as the synth chunks have been "consumed"
+        // (a few ms). Generous cap, kept high to surface deadlocks
+        // rather than match expected runtime.
         let result = tokio::time::timeout(
             std::time::Duration::from_secs(2),
             super::run_loop(

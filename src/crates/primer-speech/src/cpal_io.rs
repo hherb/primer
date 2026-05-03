@@ -76,7 +76,7 @@ impl Resampler {
 
 use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
 use cpal::{SampleFormat, Stream, StreamConfig};
-use ringbuf::traits::{Consumer, Producer, Split};
+use ringbuf::traits::{Consumer, Observer, Producer, Split};
 use ringbuf::{HeapCons, HeapProd, HeapRb};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -349,6 +349,57 @@ pub fn push_all_with_bail(
     written
 }
 
+/// Block until cpal has fully drained the speaker ringbuf, plus a small
+/// grace period for the cpal output buffer to flush past the ringbuf.
+/// Returns `true` if the drain completed cleanly; `false` if the wait
+/// hit `max_wait` or the stream errored mid-wait. Bails early on
+/// `errored` because a dead stream will never drain.
+///
+/// Why we poll `occupied_len()` instead of trusting the heuristic
+/// `samples / sample_rate + 0.4s`: the producer only knows the *queued*
+/// duration, not the *played* duration. On a slower or contended host,
+/// cpal may take longer than the safety margin to drain — leaking the
+/// tail of the Primer's voice into the mic for transcription as a
+/// "child utterance". Polling the actual ringbuf is exact.
+///
+/// `consecutive_zero_checks` requires that many sequential polls observe
+/// an empty buffer before declaring drain complete; this defends against
+/// a transient zero between two cpal callbacks. `grace` covers the cpal
+/// output device's own internal buffering (typically ~10–30 ms).
+pub fn wait_for_drain(
+    prod: &HeapProd<f32>,
+    errored: &AtomicBool,
+    poll_interval: Duration,
+    consecutive_zero_checks: u32,
+    grace: Duration,
+    max_wait: Duration,
+) -> bool {
+    let start = std::time::Instant::now();
+    let mut zero_streak: u32 = 0;
+    while start.elapsed() < max_wait {
+        if errored.load(Ordering::SeqCst) {
+            tracing::warn!("wait_for_drain: cpal output errored mid-drain; bailing");
+            return false;
+        }
+        if prod.occupied_len() == 0 {
+            zero_streak += 1;
+            if zero_streak >= consecutive_zero_checks {
+                std::thread::sleep(grace);
+                return true;
+            }
+        } else {
+            zero_streak = 0;
+        }
+        std::thread::sleep(poll_interval);
+    }
+    tracing::warn!(
+        "wait_for_drain: ringbuf still has {} samples after {} ms; giving up",
+        prod.occupied_len(),
+        max_wait.as_millis()
+    );
+    false
+}
+
 /// Pull one mono f32 sample per output frame; duplicate across channels.
 /// On underrun, writes 0.0 (silence). Cannot block / allocate.
 fn pull_to_device_f32(cons: &mut ringbuf::HeapCons<f32>, out: &mut [f32], channels: u16) {
@@ -501,6 +552,108 @@ mod tests {
 
         // Filled the buffer, then bailed once the flag flipped.
         assert_eq!(written, 4, "expected to write exactly the buffer capacity");
+    }
+
+    #[test]
+    fn wait_for_drain_returns_true_immediately_when_buffer_empty() {
+        let rb = HeapRb::<f32>::new(64);
+        let (prod, _cons) = rb.split();
+        let errored = AtomicBool::new(false);
+
+        let drained = wait_for_drain(
+            &prod,
+            &errored,
+            Duration::from_millis(1),
+            3,
+            Duration::ZERO,
+            Duration::from_secs(1),
+        );
+
+        assert!(drained, "empty buffer should report drained");
+    }
+
+    #[test]
+    fn wait_for_drain_waits_until_consumer_empties_buffer() {
+        use std::sync::Arc;
+        let rb = HeapRb::<f32>::new(64);
+        let (mut prod, mut cons) = rb.split();
+        let errored = Arc::new(AtomicBool::new(false));
+
+        // Pre-fill the buffer.
+        let samples = vec![0.5f32; 32];
+        let _written = prod.push_slice(&samples);
+        assert!(prod.occupied_len() > 0);
+
+        // Spawn a consumer that drains the buffer after a short delay.
+        let drainer = std::thread::spawn(move || {
+            std::thread::sleep(Duration::from_millis(15));
+            while cons.try_pop().is_some() {}
+            cons // hand back so it isn't dropped (which would close the channel)
+        });
+
+        let drained = wait_for_drain(
+            &prod,
+            &errored,
+            Duration::from_millis(2),
+            3,
+            Duration::ZERO,
+            Duration::from_secs(1),
+        );
+        let _cons = drainer.join().unwrap();
+
+        assert!(drained, "should observe drain after consumer empties");
+    }
+
+    #[test]
+    fn wait_for_drain_returns_false_when_errored() {
+        use std::sync::Arc;
+        let rb = HeapRb::<f32>::new(64);
+        let (mut prod, _cons) = rb.split();
+        let errored = Arc::new(AtomicBool::new(false));
+
+        // Fill the buffer so it never drains naturally (no consumer).
+        let samples = vec![0.5f32; 32];
+        let _written = prod.push_slice(&samples);
+
+        let flag = Arc::clone(&errored);
+        let flipper = std::thread::spawn(move || {
+            std::thread::sleep(Duration::from_millis(20));
+            flag.store(true, Ordering::SeqCst);
+        });
+
+        let drained = wait_for_drain(
+            &prod,
+            &errored,
+            Duration::from_millis(2),
+            3,
+            Duration::ZERO,
+            Duration::from_secs(2),
+        );
+        flipper.join().unwrap();
+
+        assert!(!drained, "should report not-drained when errored mid-wait");
+    }
+
+    #[test]
+    fn wait_for_drain_returns_false_on_max_wait_timeout() {
+        let rb = HeapRb::<f32>::new(64);
+        let (mut prod, _cons) = rb.split();
+        let errored = AtomicBool::new(false);
+
+        // Fill the buffer; never drained.
+        let samples = vec![0.5f32; 32];
+        let _written = prod.push_slice(&samples);
+
+        let drained = wait_for_drain(
+            &prod,
+            &errored,
+            Duration::from_millis(2),
+            3,
+            Duration::ZERO,
+            Duration::from_millis(20),
+        );
+
+        assert!(!drained, "should time out when nothing drains the buffer");
     }
 
     #[test]
