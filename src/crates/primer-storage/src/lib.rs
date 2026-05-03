@@ -40,9 +40,9 @@ impl SqliteSessionStore {
     /// an in-memory database.
     ///
     /// Creates the schema if missing, sets `PRAGMA foreign_keys = ON`,
-    /// asserts/sets `PRAGMA user_version`, and applies v2 and v3
+    /// asserts/sets `PRAGMA user_version`, and applies v2 through v5
     /// migrations to bring older DBs up to date. The migrations are
-    /// idempotent — safe to run on fresh, v1, v2, or v3 DBs. A version
+    /// idempotent — safe to run on a fresh DB or any pre-v5 DB. A version
     /// newer than this build understands is a hard error rather than a
     /// silent downgrade.
     pub fn open(path: &Path) -> Result<Self> {
@@ -1197,7 +1197,8 @@ mod tests {
             .unwrap();
         assert_eq!(fk, 1);
 
-        // All base tables exist, plus the v2 FTS index and the v3 tables.
+        // All base tables exist, plus the v2 FTS index, v3 tables, v4
+        // tables, and v5 tables.
         for table in &[
             "speakers",
             "pedagogical_intents",
@@ -1209,6 +1210,11 @@ mod tests {
             "engagement_states",
             "classifiers",
             "turn_classifications",
+            "understanding_depths",
+            "learners",
+            "learner_concepts",
+            "comprehension_classifiers",
+            "turn_comprehensions",
         ] {
             let count: i64 = conn
                 .query_row(

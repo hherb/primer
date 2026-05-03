@@ -366,6 +366,18 @@ const CREATE_TURN_COMPREHENSIONS_CONCEPT_INDEX: &str = "
 ///   and `comprehension_classifiers`.
 /// - Two helper indices: by turn (to load all assessments for a turn) and
 ///   by concept (to trace a concept's depth trajectory across sessions).
+///
+/// Cascade design note: `turn_comprehensions.session_id` carries an
+/// explicit `ON DELETE CASCADE`, while `turn_id` does not. The
+/// session-id cascade fires first on session deletion (so by the time
+/// SQLite tries to cascade through `turns.session_id ON DELETE CASCADE`,
+/// the dependent comprehension rows are already gone). The duplicate
+/// `session_id` column exists *because* relying on transitive cascade
+/// through `turns` was not possible without one of the two FKs cascading
+/// directly. This is a deliberate divergence from v3's `turn_classifications`,
+/// which omitted `session_id` and consequently cannot cascade-delete a
+/// session whose turns still hold classifications. Future Phase 0.3 work
+/// may bring v3 in line via a v6 migration; v5 is correct as-is.
 pub(crate) fn apply_v5_migrations(conn: &Connection) -> Result<()> {
     let tx = conn
         .unchecked_transaction()
