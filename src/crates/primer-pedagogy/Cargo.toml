@@ -7,6 +7,7 @@ edition.workspace = true
 [dependencies]
 primer-core.workspace = true
 primer-classifier.workspace = true
+primer-extractor.workspace = true
 async-trait.workspace = true
 tokio.workspace = true
 futures.workspace = true

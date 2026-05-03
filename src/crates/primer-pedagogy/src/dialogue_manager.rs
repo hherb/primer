@@ -26,6 +26,8 @@ use chrono::Utc;
 use futures::StreamExt;
 use primer_classifier::{ClassifierSettings, EngagementClassifier};
 use primer_core::classifier::EngagementAssessment;
+use primer_core::extractor::ConceptExtraction;
+use primer_extractor::{ConceptExtractor, ExtractorSettings};
 use primer_core::config::PedagogyConfig;
 use primer_core::conversation::{PedagogicalIntent, Session, Speaker, Turn};
 use primer_core::error::{PrimerError, Result};
@@ -89,6 +91,15 @@ pub struct DialogueManager<'a> {
     /// Handle to the in-flight classifier task spawned after the previous
     /// turn. `None` when no task is running.
     classify_task: Option<JoinHandle<Option<EngagementAssessment>>>,
+    /// Concept extractor — called after each Primer response to extract
+    /// concepts from the just-completed exchange. Arc for the same
+    /// spawn-capture reason as `classifier`.
+    extractor: Arc<dyn ConceptExtractor>,
+    /// Tunable parameters for the extractor.
+    extractor_settings: ExtractorSettings,
+    /// Handle to the in-flight extractor task spawned after the previous
+    /// turn. `None` when no task is running.
+    extract_task: Option<JoinHandle<Option<ConceptExtraction>>>,
     /// Pedagogical configuration.
     config: PedagogyConfig,
     /// Tracks whether `learner` has fields-that-map-to-the-`learners`-table
@@ -145,6 +156,8 @@ impl<'a> DialogueManager<'a> {
         stores: DialogueManagerStores,
         classifier: Arc<dyn EngagementClassifier>,
         classifier_settings: ClassifierSettings,
+        extractor: Arc<dyn ConceptExtractor>,
+        extractor_settings: ExtractorSettings,
         config: PedagogyConfig,
     ) -> Self {
         let session = Session::new(learner.profile.id);
@@ -158,6 +171,9 @@ impl<'a> DialogueManager<'a> {
             classifier,
             classifier_settings,
             classify_task: None,
+            extractor,
+            extractor_settings,
+            extract_task: None,
             config,
             learner_dirty: false,
         }
@@ -690,6 +706,7 @@ mod tests {
     use futures::stream;
     use primer_classifier::StubEngagementClassifier;
     use primer_core::config::PedagogyConfig;
+    use primer_extractor::ExtractorSettings;
     use primer_core::inference::{
         GenerationParams, InferenceBackend, Prompt, TokenChunk, TokenStream,
     };
@@ -702,6 +719,10 @@ mod tests {
 
     fn stub_classifier() -> Arc<dyn EngagementClassifier> {
         Arc::new(StubEngagementClassifier::new())
+    }
+
+    fn stub_extractor() -> Arc<dyn ConceptExtractor> {
+        Arc::new(primer_extractor::StubConceptExtractor::new())
     }
 
     /// Test inference backend that emits a pre-configured sequence of stream items.
@@ -907,6 +928,8 @@ mod tests {
             DialogueManagerStores::default(),
             stub_classifier(),
             ClassifierSettings::default(),
+            stub_extractor(),
+            ExtractorSettings::default(),
             PedagogyConfig::default(),
         );
 
@@ -938,6 +961,8 @@ mod tests {
             DialogueManagerStores::default(),
             stub_classifier(),
             ClassifierSettings::default(),
+            stub_extractor(),
+            ExtractorSettings::default(),
             PedagogyConfig::default(),
         );
 
@@ -960,6 +985,8 @@ mod tests {
             DialogueManagerStores::default(),
             stub_classifier(),
             ClassifierSettings::default(),
+            stub_extractor(),
+            ExtractorSettings::default(),
             PedagogyConfig::default(),
         );
 
@@ -983,6 +1010,8 @@ mod tests {
             DialogueManagerStores::default(),
             stub_classifier(),
             ClassifierSettings::default(),
+            stub_extractor(),
+            ExtractorSettings::default(),
             PedagogyConfig::default(),
         );
 
@@ -1009,6 +1038,8 @@ mod tests {
             DialogueManagerStores::default(),
             stub_classifier(),
             ClassifierSettings::default(),
+            stub_extractor(),
+            ExtractorSettings::default(),
             PedagogyConfig::default(),
         );
 
@@ -1034,6 +1065,8 @@ mod tests {
             DialogueManagerStores::default(),
             stub_classifier(),
             ClassifierSettings::default(),
+            stub_extractor(),
+            ExtractorSettings::default(),
             PedagogyConfig::default(),
         );
 
@@ -1056,6 +1089,8 @@ mod tests {
             },
             stub_classifier(),
             ClassifierSettings::default(),
+            stub_extractor(),
+            ExtractorSettings::default(),
             PedagogyConfig::default(),
         );
 
@@ -1085,6 +1120,8 @@ mod tests {
             },
             stub_classifier(),
             ClassifierSettings::default(),
+            stub_extractor(),
+            ExtractorSettings::default(),
             PedagogyConfig::default(),
         );
 
@@ -1114,6 +1151,8 @@ mod tests {
             },
             stub_classifier(),
             ClassifierSettings::default(),
+            stub_extractor(),
+            ExtractorSettings::default(),
             PedagogyConfig::default(),
         );
 
@@ -1143,6 +1182,8 @@ mod tests {
             },
             stub_classifier(),
             ClassifierSettings::default(),
+            stub_extractor(),
+            ExtractorSettings::default(),
             PedagogyConfig::default(),
         );
 
@@ -1188,6 +1229,8 @@ mod tests {
             DialogueManagerStores::default(),
             stub_classifier(),
             ClassifierSettings::default(),
+            stub_extractor(),
+            ExtractorSettings::default(),
             PedagogyConfig::default(),
         );
         let learner_id = dm.learner.profile.id;
@@ -1215,6 +1258,8 @@ mod tests {
             },
             stub_classifier(),
             ClassifierSettings::default(),
+            stub_extractor(),
+            ExtractorSettings::default(),
             PedagogyConfig::default(),
         );
         let mut loaded = make_test_session_with_turns(3, dm.learner.profile.id);
@@ -1238,6 +1283,8 @@ mod tests {
             DialogueManagerStores::default(),
             stub_classifier(),
             ClassifierSettings::default(),
+            stub_extractor(),
+            ExtractorSettings::default(),
             PedagogyConfig::default(),
         );
         let dm_learner_id = dm.learner.profile.id;
@@ -1265,6 +1312,8 @@ mod tests {
             DialogueManagerStores::default(),
             stub_classifier(),
             ClassifierSettings::default(),
+            stub_extractor(),
+            ExtractorSettings::default(),
             PedagogyConfig::default(),
         );
         // Window is 20; 25 turns gives 5 pre-window turns.
@@ -1298,6 +1347,8 @@ mod tests {
             DialogueManagerStores::default(),
             stub_classifier(),
             ClassifierSettings::default(),
+            stub_extractor(),
+            ExtractorSettings::default(),
             PedagogyConfig::default(),
         );
         // Window is 20; 5 turns is well inside.
@@ -1322,6 +1373,8 @@ mod tests {
             DialogueManagerStores::default(),
             stub_classifier(),
             ClassifierSettings::default(),
+            stub_extractor(),
+            ExtractorSettings::default(),
             PedagogyConfig::default(),
         );
         let mut loaded = make_test_session_with_turns(25, dm.learner.profile.id);
@@ -1354,6 +1407,8 @@ mod tests {
             DialogueManagerStores::default(),
             stub_classifier(),
             ClassifierSettings::default(),
+            stub_extractor(),
+            ExtractorSettings::default(),
             PedagogyConfig::default(),
         );
         let mut loaded = make_test_session_with_turns(30, dm.learner.profile.id);
@@ -1377,6 +1432,8 @@ mod tests {
             DialogueManagerStores::default(),
             stub_classifier(),
             ClassifierSettings::default(),
+            stub_extractor(),
+            ExtractorSettings::default(),
             PedagogyConfig::default(),
         );
         // Pre-load with 21 turns (1 turn pre-window). Far below the
@@ -1540,6 +1597,8 @@ mod tests {
             },
             Arc::clone(&classifier),
             settings,
+            stub_extractor(),
+            ExtractorSettings::default(),
             PedagogyConfig::default(),
         );
 
@@ -1605,6 +1664,8 @@ mod tests {
             },
             Arc::clone(&classifier),
             settings,
+            stub_extractor(),
+            ExtractorSettings::default(),
             PedagogyConfig::default(),
         );
 
@@ -1675,6 +1736,8 @@ mod tests {
             DialogueManagerStores::default(),
             Arc::new(SlowClassifier),
             settings,
+            stub_extractor(),
+            ExtractorSettings::default(),
             PedagogyConfig::default(),
         );
 
@@ -1808,6 +1871,8 @@ mod tests {
             },
             Arc::clone(&classifier),
             settings,
+            stub_extractor(),
+            ExtractorSettings::default(),
             PedagogyConfig::default(),
         );
 
@@ -1922,6 +1987,8 @@ mod tests {
             },
             stub_classifier(),
             ClassifierSettings::default(),
+            stub_extractor(),
+            ExtractorSettings::default(),
             PedagogyConfig::default(),
         );
 
@@ -1986,6 +2053,8 @@ mod tests {
             },
             stub_classifier(),
             ClassifierSettings::default(),
+            stub_extractor(),
+            ExtractorSettings::default(),
             PedagogyConfig::default(),
         );
 
@@ -2038,6 +2107,8 @@ mod tests {
             },
             stub_classifier(),
             ClassifierSettings::default(),
+            stub_extractor(),
+            ExtractorSettings::default(),
             PedagogyConfig::default(),
         );
 
@@ -2075,6 +2146,8 @@ mod tests {
             },
             stub_classifier(),
             ClassifierSettings::default(),
+            stub_extractor(),
+            ExtractorSettings::default(),
             PedagogyConfig::default(),
         );
 
@@ -2111,6 +2184,8 @@ mod tests {
             },
             stub_classifier(),
             ClassifierSettings::default(),
+            stub_extractor(),
+            ExtractorSettings::default(),
             PedagogyConfig::default(),
         );
 
@@ -2192,6 +2267,8 @@ mod tests {
             },
             stub_classifier(),
             ClassifierSettings::default(),
+            stub_extractor(),
+            ExtractorSettings::default(),
             PedagogyConfig::default(),
         );
 
@@ -2245,6 +2322,8 @@ mod tests {
             },
             stub_classifier(),
             ClassifierSettings::default(),
+            stub_extractor(),
+            ExtractorSettings::default(),
             PedagogyConfig::default(),
         );
 
