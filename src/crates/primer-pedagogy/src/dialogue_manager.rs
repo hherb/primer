@@ -29,10 +29,12 @@ use primer_core::classifier::EngagementAssessment;
 use primer_core::config::PedagogyConfig;
 use primer_core::conversation::{PedagogicalIntent, Session, Speaker, Turn};
 use primer_core::error::{PrimerError, Result};
+use primer_core::extractor::ConceptExtraction;
 use primer_core::inference::{GenerationParams, InferenceBackend};
 use primer_core::knowledge::{KnowledgeBase, RetrievalParams};
 use primer_core::learner::LearnerModel;
 use primer_core::storage::{LearnerStore, SessionStore};
+use primer_extractor::{ConceptExtractor, ExtractorSettings};
 use tokio::task::JoinHandle;
 
 use crate::prompt_builder;
@@ -52,6 +54,22 @@ use crate::prompt_builder;
 pub struct DialogueManagerStores {
     pub session: Option<Arc<dyn SessionStore>>,
     pub learner: Option<Arc<dyn LearnerStore>>,
+}
+
+/// Per-turn analysis subsystems wired into the dialogue manager.
+///
+/// Mirrors `DialogueManagerStores`: groups closely-related parameters
+/// (the trait object plus its tunable settings) so `DialogueManager::new`
+/// stays under the clippy `too_many_arguments` threshold without
+/// suppressions. Both classifier and extractor follow the same
+/// "spawn after the response, await with bounded timeout at the start
+/// of the next turn" pattern, so co-locating them here is the right
+/// grouping conceptually as well.
+pub struct DialogueManagerSubsystems {
+    pub classifier: Arc<dyn EngagementClassifier>,
+    pub classifier_settings: ClassifierSettings,
+    pub extractor: Arc<dyn ConceptExtractor>,
+    pub extractor_settings: ExtractorSettings,
 }
 
 /// The dialogue manager for a single session.
@@ -89,8 +107,22 @@ pub struct DialogueManager<'a> {
     /// Handle to the in-flight classifier task spawned after the previous
     /// turn. `None` when no task is running.
     classify_task: Option<JoinHandle<Option<EngagementAssessment>>>,
+    /// Concept extractor — called after each Primer response to extract
+    /// concepts from the just-completed exchange. Arc for the same
+    /// spawn-capture reason as `classifier`.
+    extractor: Arc<dyn ConceptExtractor>,
+    /// Tunable parameters for the extractor.
+    extractor_settings: ExtractorSettings,
+    /// Handle to the in-flight extractor task spawned after the previous
+    /// turn. `None` when no task is running. The result carries the
+    /// (child, primer) turn indices so `await_pending_extraction` can
+    /// sync the extracted concepts back into in-memory `Session.turns`.
+    extract_task: Option<JoinHandle<Option<ExtractionResult>>>,
     /// Pedagogical configuration.
     config: PedagogyConfig,
+    /// Most recent extractor output applied to the learner. Cleared on
+    /// session lifecycle events. Used by `--verbose`.
+    last_extraction: Option<primer_core::extractor::ConceptExtraction>,
     /// Tracks whether `learner` has fields-that-map-to-the-`learners`-table
     /// changes that haven't been flushed yet. The per-turn save site is
     /// gated by this flag (lifecycle events at open / resume / close
@@ -102,6 +134,17 @@ pub struct DialogueManager<'a> {
     /// extraction lands and starts populating `learner.concepts` per-turn,
     /// it just sets the flag — no save-site changes needed.
     learner_dirty: bool,
+}
+
+/// Output of the spawned extractor task: the extracted concepts plus
+/// the turn indices they apply to. Returned through the `JoinHandle`
+/// so `await_pending_extraction` can sync the extraction back into the
+/// in-memory `Session.turns` AND `LearnerModel.concepts` at the
+/// next-turn boundary.
+struct ExtractionResult {
+    child_turn_index: usize,
+    primer_turn_index: usize,
+    extraction: ConceptExtraction,
 }
 
 /// Push an `EngagementAssessment` into the learner's history buffer and,
@@ -129,22 +172,95 @@ pub(crate) fn apply_assessment(
     // trajectory) but current_engagement stays unchanged.
 }
 
+/// Merge a `ConceptExtraction` into the in-memory `LearnerModel.concepts`.
+///
+/// Adds new `ConceptState` rows (depth = `Aware`, confidence =
+/// `consts::INITIAL_CONCEPT_CONFIDENCE`) for concepts not yet seen;
+/// for concepts already in the learner model, increments
+/// `encounter_count` and refreshes `last_encountered`. The updated
+/// state is what `LearnerStore::save_learner` will persist on the
+/// next save (idempotent upsert into `learner_concepts` — monotonic
+/// across the child's lifetime).
+///
+/// Both `child_concepts` and `primer_concepts` feed into the same
+/// `learner.concepts` store, but a concept appearing in BOTH lists
+/// counts as a single encounter — one exchange in which this concept
+/// was mentioned, regardless of which speaker(s) used it. Today the
+/// model doesn't distinguish "a concept the child surfaced" from "a
+/// concept the Primer introduced"; future work could add a per-side
+/// `encounter_count_by_speaker`.
+pub(crate) fn apply_extraction(
+    learner: &mut primer_core::learner::LearnerModel,
+    extraction: &primer_core::extractor::ConceptExtraction,
+) -> bool {
+    use primer_core::learner::{ConceptState, UnderstandingDepth};
+    use std::collections::HashSet;
+
+    let now = Utc::now();
+    let mut changed = false;
+
+    // Dedupe across (child, primer) — one exchange = at most one
+    // encounter per concept name, even if both speakers used it.
+    let mut seen: HashSet<&str> = HashSet::new();
+    let unique_names = extraction
+        .child_concepts
+        .iter()
+        .chain(extraction.primer_concepts.iter())
+        .filter(|name| seen.insert(name.as_str()));
+
+    for name in unique_names {
+        if let Some(existing) = learner.concepts.iter_mut().find(|c| c.concept_id == *name) {
+            existing.encounter_count = existing.encounter_count.saturating_add(1);
+            existing.last_encountered = Some(now);
+            changed = true;
+        } else {
+            learner.concepts.push(ConceptState {
+                concept_id: name.clone(),
+                depth: UnderstandingDepth::Aware,
+                confidence: crate::consts::INITIAL_CONCEPT_CONFIDENCE,
+                encounter_count: 1,
+                last_encountered: Some(now),
+                notes: vec![],
+            });
+            changed = true;
+        }
+    }
+    changed
+}
+
+/// Append `new_concepts` to `turns[index].concepts`, preserving order
+/// and skipping names already present. Used by `await_pending_extraction`
+/// to keep the in-memory `Session.turns` in sync with what the spawned
+/// extractor task wrote to disk via `update_exchange_concepts`. A
+/// silently-out-of-bounds index is treated as a no-op since the
+/// session is append-only and the index was captured at spawn time;
+/// pruning would only happen after the session is reset, in which case
+/// the in-memory update has no consumer anyway.
+pub(crate) fn merge_concepts_into_turn(turns: &mut [Turn], index: usize, new_concepts: &[String]) {
+    let Some(turn) = turns.get_mut(index) else {
+        return;
+    };
+    for name in new_concepts {
+        if !turn.concepts.iter().any(|existing| existing == name) {
+            turn.concepts.push(name.clone());
+        }
+    }
+}
+
 impl<'a> DialogueManager<'a> {
     /// Create a new dialogue manager for a session.
     ///
-    /// `stores` bundles the optional `SessionStore` and `LearnerStore`
-    /// (both `Arc<dyn …>` so the post-response classifier task can
-    /// capture them without lifetime constraints — `tokio::spawn`
-    /// requires `'static`).
-    ///
-    /// `classifier` is also `Arc<dyn …>` for the same reason.
+    /// `stores` bundles the optional `SessionStore` and `LearnerStore`;
+    /// `subsystems` bundles the classifier and extractor along with
+    /// their settings. Both bundles use `Arc<dyn …>` for the trait
+    /// objects so the post-response spawned tasks can capture them
+    /// without lifetime constraints — `tokio::spawn` requires `'static`.
     pub fn new(
         learner: LearnerModel,
         inference: &'a dyn InferenceBackend,
         knowledge: &'a dyn KnowledgeBase,
         stores: DialogueManagerStores,
-        classifier: Arc<dyn EngagementClassifier>,
-        classifier_settings: ClassifierSettings,
+        subsystems: DialogueManagerSubsystems,
         config: PedagogyConfig,
     ) -> Self {
         let session = Session::new(learner.profile.id);
@@ -155,10 +271,14 @@ impl<'a> DialogueManager<'a> {
             knowledge,
             storage: stores.session,
             learner_store: stores.learner,
-            classifier,
-            classifier_settings,
+            classifier: subsystems.classifier,
+            classifier_settings: subsystems.classifier_settings,
             classify_task: None,
+            extractor: subsystems.extractor,
+            extractor_settings: subsystems.extractor_settings,
+            extract_task: None,
             config,
+            last_extraction: None,
             learner_dirty: false,
         }
     }
@@ -276,10 +396,12 @@ impl<'a> DialogueManager<'a> {
     where
         F: FnMut(&str),
     {
-        // 0. Wait for the previous turn's classification (if any) to complete
-        //    with a bounded timeout, then apply it so decide_intent sees the
-        //    updated engagement state.
+        // 0. Wait for the previous turn's classification + extraction (if any)
+        //    to complete with bounded timeouts, then apply their results so
+        //    decide_intent sees the updated engagement state and the system
+        //    prompt sees freshly-extracted learner concepts.
         self.await_pending_classification().await;
+        self.await_pending_extraction().await;
 
         // 1. Record the child's turn.
         let child_turn = Turn {
@@ -340,7 +462,10 @@ impl<'a> DialogueManager<'a> {
             if accumulated.is_empty() {
                 tracing::warn!("Inference stream produced no text");
             }
-            let active_concepts = prompt_builder::extract_active_concepts(&self.session, 4);
+            let active_concepts = prompt_builder::extract_active_concepts(
+                &self.session,
+                crate::consts::ACTIVE_CONCEPT_LOOKBACK,
+            );
             let primer_turn = Turn {
                 speaker: Speaker::Primer,
                 text: accumulated.clone(),
@@ -442,6 +567,75 @@ impl<'a> DialogueManager<'a> {
                 });
                 self.classify_task = Some(task);
             }
+
+            // 7. Spawn an extraction task for the just-completed exchange.
+            //    Same skip-on-error policy as the classifier. The task
+            //    self-persists `turn_concepts` for both turns atomically
+            //    via `update_exchange_concepts`; the JoinHandle output is
+            //    consumed by `await_pending_extraction` at the start of
+            //    the next turn so the in-memory `learner.concepts` AND
+            //    `session.turns[child/primer].concepts` can be updated.
+            let total_turns = self.session.turns.len();
+            if total_turns >= 2
+                && self.session.turns[total_turns - 1].speaker == Speaker::Primer
+                && self.session.turns[total_turns - 2].speaker == Speaker::Child
+            {
+                let child_idx = total_turns - 2;
+                let primer_idx = total_turns - 1;
+                let child_turn = self.session.turns[child_idx].clone();
+                let primer_turn = self.session.turns[primer_idx].clone();
+                let recent_turns: Vec<Turn> = self
+                    .session
+                    .turns
+                    .iter()
+                    .rev()
+                    .skip(2) // skip the just-added child + primer turns
+                    .take(self.extractor_settings.recent_context_turns)
+                    .cloned()
+                    .collect::<Vec<_>>()
+                    .into_iter()
+                    .rev()
+                    .collect();
+                let extractor = Arc::clone(&self.extractor);
+                let store = self.storage.clone();
+                let session_id = self.session.id;
+
+                let task = tokio::spawn(async move {
+                    let ctx = primer_core::extractor::ExtractionContext {
+                        child_turn: &child_turn,
+                        primer_turn: &primer_turn,
+                        recent_turns: &recent_turns,
+                    };
+                    match extractor.extract(ctx).await {
+                        Ok(extraction) => {
+                            if let Some(store) = store {
+                                if let Err(e) = store
+                                    .update_exchange_concepts(
+                                        session_id,
+                                        child_idx,
+                                        &extraction.child_concepts,
+                                        primer_idx,
+                                        &extraction.primer_concepts,
+                                    )
+                                    .await
+                                {
+                                    tracing::warn!(error = ?e, "update_exchange_concepts failed");
+                                }
+                            }
+                            Some(ExtractionResult {
+                                child_turn_index: child_idx,
+                                primer_turn_index: primer_idx,
+                                extraction,
+                            })
+                        }
+                        Err(e) => {
+                            tracing::warn!(error = ?e, "extractor returned error");
+                            None
+                        }
+                    }
+                });
+                self.extract_task = Some(task);
+            }
         }
 
         result
@@ -469,6 +663,17 @@ impl<'a> DialogueManager<'a> {
         self.classifier.identifier()
     }
 
+    /// Most recent extractor output applied to the learner (used by `--verbose`).
+    /// Returns `None` until at least one extraction has completed.
+    pub fn last_extraction(&self) -> Option<&primer_core::extractor::ConceptExtraction> {
+        self.last_extraction.as_ref()
+    }
+
+    /// Stable identifier of the active concept extractor (used by `--verbose`).
+    pub fn extractor_identifier(&self) -> &str {
+        self.extractor.identifier()
+    }
+
     /// Check whether the session has run long enough that the Primer
     /// should suggest a break.
     pub fn should_suggest_break(&self) -> bool {
@@ -485,11 +690,13 @@ impl<'a> DialogueManager<'a> {
     /// than propagated — matching `respond_to_streaming`'s save-failure
     /// semantics.
     pub async fn close_session(&mut self) {
-        // Drain the post-response classifier task spawned after the most
-        // recent turn. Without this, a quick exit ("respond_to_streaming"
-        // immediately followed by close_session) races the runtime shutdown
-        // and the last turn_classifications row may never be persisted.
+        // Drain the post-response classifier + extractor tasks spawned
+        // after the most recent turn. Without this, a quick exit
+        // ("respond_to_streaming" immediately followed by "close_session")
+        // races the runtime shutdown and the last turn_classifications /
+        // turn_concepts rows may never be persisted.
         self.await_pending_classification().await;
+        self.await_pending_extraction().await;
 
         self.session.ended_at = Some(Utc::now());
         if let Some(ref store) = self.storage {
@@ -542,6 +749,59 @@ impl<'a> DialogueManager<'a> {
                 abort.abort();
                 tracing::debug!(
                     "classifier exceeded blocking timeout — proceeding with stale engagement state"
+                );
+            }
+        }
+    }
+
+    /// Wait (up to `extractor_settings.blocking_timeout`) for the extractor
+    /// task spawned after the previous turn, then apply its result to
+    /// `self.learner.concepts` AND sync the extracted concept names back
+    /// into the in-memory `Session.turns[child/primer].concepts` so the
+    /// in-memory state matches what's already on disk via
+    /// `update_exchange_concepts`.
+    ///
+    /// On timeout the task is detached (so the DB-persistence side effect
+    /// can still complete), but the in-memory updates for THIS turn are
+    /// skipped — preferable to blocking the conversation. The pending
+    /// concepts will be visible from `load_learner` / `load_session` on
+    /// next resume regardless.
+    async fn await_pending_extraction(&mut self) {
+        let Some(task) = self.extract_task.take() else {
+            return;
+        };
+        let abort = task.abort_handle();
+        let timeout = self.extractor_settings.blocking_timeout;
+        match tokio::time::timeout(timeout, task).await {
+            Ok(Ok(Some(result))) => {
+                let ExtractionResult {
+                    child_turn_index,
+                    primer_turn_index,
+                    extraction,
+                } = result;
+                merge_concepts_into_turn(
+                    &mut self.session.turns,
+                    child_turn_index,
+                    &extraction.child_concepts,
+                );
+                merge_concepts_into_turn(
+                    &mut self.session.turns,
+                    primer_turn_index,
+                    &extraction.primer_concepts,
+                );
+                if apply_extraction(&mut self.learner, &extraction) {
+                    self.learner_dirty = true;
+                }
+                self.last_extraction = Some(extraction);
+            }
+            Ok(Ok(None)) => { /* soft failure; nothing to apply */ }
+            Ok(Err(e)) => tracing::warn!(error = ?e, "extractor task panicked"),
+            Err(_) => {
+                // Detach (don't abort) so the DB persistence side effect
+                // can still complete; we just skip the in-memory apply.
+                let _ = abort;
+                tracing::debug!(
+                    "extractor exceeded blocking timeout — proceeding without applied concepts"
                 );
             }
         }
@@ -697,11 +957,40 @@ mod tests {
     use primer_core::learner::{
         EngagementState, LearnerModel, LearnerProfile, LearningPreferences,
     };
+    use primer_extractor::ExtractorSettings;
     use std::sync::Mutex;
     use uuid::Uuid;
 
     fn stub_classifier() -> Arc<dyn EngagementClassifier> {
         Arc::new(StubEngagementClassifier::new())
+    }
+
+    fn stub_extractor() -> Arc<dyn ConceptExtractor> {
+        Arc::new(primer_extractor::StubConceptExtractor::new())
+    }
+
+    /// Default-everything subsystems bundle for tests that don't care
+    /// about the specifics of the classifier/extractor.
+    fn default_subsystems() -> DialogueManagerSubsystems {
+        DialogueManagerSubsystems {
+            classifier: stub_classifier(),
+            classifier_settings: ClassifierSettings::default(),
+            extractor: stub_extractor(),
+            extractor_settings: ExtractorSettings::default(),
+        }
+    }
+
+    /// Subsystems bundle for tests that need a specific extractor
+    /// (e.g. scripted concepts) but otherwise default classifier/settings.
+    fn subsystems_with_extractor(
+        extractor: Arc<dyn ConceptExtractor>,
+    ) -> DialogueManagerSubsystems {
+        DialogueManagerSubsystems {
+            classifier: stub_classifier(),
+            classifier_settings: ClassifierSettings::default(),
+            extractor,
+            extractor_settings: ExtractorSettings::default(),
+        }
     }
 
     /// Test inference backend that emits a pre-configured sequence of stream items.
@@ -722,6 +1011,9 @@ mod tests {
         }
         fn summary_call_count(&self) -> u32 {
             *self.summarize_calls.lock().unwrap()
+        }
+        fn set_script(&self, items: Vec<Result<TokenChunk>>) {
+            *self.script.lock().unwrap() = Some(items);
         }
     }
 
@@ -828,6 +1120,26 @@ mod tests {
         async fn most_recent_session_learner_id(&self) -> Result<Option<uuid::Uuid>> {
             Ok(None)
         }
+
+        async fn update_turn_concepts(
+            &self,
+            _session_id: primer_core::conversation::SessionId,
+            _turn_index: usize,
+            _concepts: &[String],
+        ) -> Result<()> {
+            Ok(())
+        }
+
+        async fn update_exchange_concepts(
+            &self,
+            _session_id: primer_core::conversation::SessionId,
+            _child_turn_index: usize,
+            _child_concepts: &[String],
+            _primer_turn_index: usize,
+            _primer_concepts: &[String],
+        ) -> Result<()> {
+            Ok(())
+        }
     }
 
     /// Learner-store spy: counts `save_learner` calls. Used to prove that
@@ -896,8 +1208,7 @@ mod tests {
             &backend,
             &knowledge,
             DialogueManagerStores::default(),
-            stub_classifier(),
-            ClassifierSettings::default(),
+            default_subsystems(),
             PedagogyConfig::default(),
         );
 
@@ -927,8 +1238,7 @@ mod tests {
             &backend,
             &knowledge,
             DialogueManagerStores::default(),
-            stub_classifier(),
-            ClassifierSettings::default(),
+            default_subsystems(),
             PedagogyConfig::default(),
         );
 
@@ -949,8 +1259,7 @@ mod tests {
             &backend,
             &knowledge,
             DialogueManagerStores::default(),
-            stub_classifier(),
-            ClassifierSettings::default(),
+            default_subsystems(),
             PedagogyConfig::default(),
         );
 
@@ -972,8 +1281,7 @@ mod tests {
             &backend,
             &knowledge,
             DialogueManagerStores::default(),
-            stub_classifier(),
-            ClassifierSettings::default(),
+            default_subsystems(),
             PedagogyConfig::default(),
         );
 
@@ -998,8 +1306,7 @@ mod tests {
             &backend,
             &knowledge,
             DialogueManagerStores::default(),
-            stub_classifier(),
-            ClassifierSettings::default(),
+            default_subsystems(),
             PedagogyConfig::default(),
         );
 
@@ -1023,8 +1330,7 @@ mod tests {
             &backend,
             &knowledge,
             DialogueManagerStores::default(),
-            stub_classifier(),
-            ClassifierSettings::default(),
+            default_subsystems(),
             PedagogyConfig::default(),
         );
 
@@ -1045,8 +1351,7 @@ mod tests {
                 session: Some(Arc::clone(&store) as Arc<dyn SessionStore>),
                 learner: None,
             },
-            stub_classifier(),
-            ClassifierSettings::default(),
+            default_subsystems(),
             PedagogyConfig::default(),
         );
 
@@ -1074,8 +1379,7 @@ mod tests {
                 session: Some(Arc::clone(&store) as Arc<dyn SessionStore>),
                 learner: None,
             },
-            stub_classifier(),
-            ClassifierSettings::default(),
+            default_subsystems(),
             PedagogyConfig::default(),
         );
 
@@ -1103,8 +1407,7 @@ mod tests {
                 session: Some(Arc::clone(&store) as Arc<dyn SessionStore>),
                 learner: None,
             },
-            stub_classifier(),
-            ClassifierSettings::default(),
+            default_subsystems(),
             PedagogyConfig::default(),
         );
 
@@ -1132,8 +1435,7 @@ mod tests {
                 session: Some(Arc::clone(&store) as Arc<dyn SessionStore>),
                 learner: None,
             },
-            stub_classifier(),
-            ClassifierSettings::default(),
+            default_subsystems(),
             PedagogyConfig::default(),
         );
 
@@ -1177,8 +1479,7 @@ mod tests {
             &backend,
             &knowledge,
             DialogueManagerStores::default(),
-            stub_classifier(),
-            ClassifierSettings::default(),
+            default_subsystems(),
             PedagogyConfig::default(),
         );
         let learner_id = dm.learner.profile.id;
@@ -1204,8 +1505,7 @@ mod tests {
                 session: Some(Arc::clone(&store) as Arc<dyn SessionStore>),
                 learner: None,
             },
-            stub_classifier(),
-            ClassifierSettings::default(),
+            default_subsystems(),
             PedagogyConfig::default(),
         );
         let mut loaded = make_test_session_with_turns(3, dm.learner.profile.id);
@@ -1227,8 +1527,7 @@ mod tests {
             &backend,
             &knowledge,
             DialogueManagerStores::default(),
-            stub_classifier(),
-            ClassifierSettings::default(),
+            default_subsystems(),
             PedagogyConfig::default(),
         );
         let dm_learner_id = dm.learner.profile.id;
@@ -1254,8 +1553,7 @@ mod tests {
             &backend,
             &knowledge,
             DialogueManagerStores::default(),
-            stub_classifier(),
-            ClassifierSettings::default(),
+            default_subsystems(),
             PedagogyConfig::default(),
         );
         // Window is 20; 25 turns gives 5 pre-window turns.
@@ -1287,8 +1585,7 @@ mod tests {
             &backend,
             &knowledge,
             DialogueManagerStores::default(),
-            stub_classifier(),
-            ClassifierSettings::default(),
+            default_subsystems(),
             PedagogyConfig::default(),
         );
         // Window is 20; 5 turns is well inside.
@@ -1311,8 +1608,7 @@ mod tests {
             &backend,
             &knowledge,
             DialogueManagerStores::default(),
-            stub_classifier(),
-            ClassifierSettings::default(),
+            default_subsystems(),
             PedagogyConfig::default(),
         );
         let mut loaded = make_test_session_with_turns(25, dm.learner.profile.id);
@@ -1343,8 +1639,7 @@ mod tests {
             &backend,
             &knowledge,
             DialogueManagerStores::default(),
-            stub_classifier(),
-            ClassifierSettings::default(),
+            default_subsystems(),
             PedagogyConfig::default(),
         );
         let mut loaded = make_test_session_with_turns(30, dm.learner.profile.id);
@@ -1366,8 +1661,7 @@ mod tests {
             &backend,
             &knowledge,
             DialogueManagerStores::default(),
-            stub_classifier(),
-            ClassifierSettings::default(),
+            default_subsystems(),
             PedagogyConfig::default(),
         );
         // Pre-load with 21 turns (1 turn pre-window). Far below the
@@ -1529,8 +1823,12 @@ mod tests {
                 session: Some(Arc::clone(&storage) as Arc<dyn SessionStore>),
                 learner: None,
             },
-            Arc::clone(&classifier),
-            settings,
+            DialogueManagerSubsystems {
+                classifier: Arc::clone(&classifier),
+                classifier_settings: settings,
+                extractor: stub_extractor(),
+                extractor_settings: ExtractorSettings::default(),
+            },
             PedagogyConfig::default(),
         );
 
@@ -1594,8 +1892,12 @@ mod tests {
                 session: Some(Arc::clone(&storage) as Arc<dyn SessionStore>),
                 learner: None,
             },
-            Arc::clone(&classifier),
-            settings,
+            DialogueManagerSubsystems {
+                classifier: Arc::clone(&classifier),
+                classifier_settings: settings,
+                extractor: stub_extractor(),
+                extractor_settings: ExtractorSettings::default(),
+            },
             PedagogyConfig::default(),
         );
 
@@ -1664,8 +1966,12 @@ mod tests {
             &backend,
             &knowledge,
             DialogueManagerStores::default(),
-            Arc::new(SlowClassifier),
-            settings,
+            DialogueManagerSubsystems {
+                classifier: Arc::new(SlowClassifier),
+                classifier_settings: settings,
+                extractor: stub_extractor(),
+                extractor_settings: ExtractorSettings::default(),
+            },
             PedagogyConfig::default(),
         );
 
@@ -1797,8 +2103,12 @@ mod tests {
                 session: Some(Arc::clone(&storage) as Arc<dyn SessionStore>),
                 learner: None,
             },
-            Arc::clone(&classifier),
-            settings,
+            DialogueManagerSubsystems {
+                classifier: Arc::clone(&classifier),
+                classifier_settings: settings,
+                extractor: stub_extractor(),
+                extractor_settings: ExtractorSettings::default(),
+            },
             PedagogyConfig::default(),
         );
 
@@ -1911,8 +2221,7 @@ mod tests {
                 session: Some(Arc::clone(&store) as Arc<dyn SessionStore>),
                 learner: Some(Arc::clone(&store) as Arc<dyn LearnerStore>),
             },
-            stub_classifier(),
-            ClassifierSettings::default(),
+            default_subsystems(),
             PedagogyConfig::default(),
         );
 
@@ -1975,8 +2284,7 @@ mod tests {
                 session: Some(Arc::clone(&store) as Arc<dyn SessionStore>),
                 learner: Some(Arc::clone(&store) as Arc<dyn LearnerStore>),
             },
-            stub_classifier(),
-            ClassifierSettings::default(),
+            default_subsystems(),
             PedagogyConfig::default(),
         );
 
@@ -2027,8 +2335,7 @@ mod tests {
                 session: None,
                 learner: Some(Arc::clone(&store) as Arc<dyn LearnerStore>),
             },
-            stub_classifier(),
-            ClassifierSettings::default(),
+            default_subsystems(),
             PedagogyConfig::default(),
         );
 
@@ -2064,8 +2371,7 @@ mod tests {
                 session: None,
                 learner: Some(Arc::clone(&store) as Arc<dyn LearnerStore>),
             },
-            stub_classifier(),
-            ClassifierSettings::default(),
+            default_subsystems(),
             PedagogyConfig::default(),
         );
 
@@ -2100,8 +2406,7 @@ mod tests {
                 session: None,
                 learner: Some(Arc::clone(&store) as Arc<dyn LearnerStore>),
             },
-            stub_classifier(),
-            ClassifierSettings::default(),
+            default_subsystems(),
             PedagogyConfig::default(),
         );
 
@@ -2181,8 +2486,7 @@ mod tests {
                 session: None,
                 learner: Some(Arc::clone(&failing) as Arc<dyn LearnerStore>),
             },
-            stub_classifier(),
-            ClassifierSettings::default(),
+            default_subsystems(),
             PedagogyConfig::default(),
         );
 
@@ -2234,8 +2538,7 @@ mod tests {
                 session: None,
                 learner: Some(Arc::clone(&store) as Arc<dyn LearnerStore>),
             },
-            stub_classifier(),
-            ClassifierSettings::default(),
+            default_subsystems(),
             PedagogyConfig::default(),
         );
 
@@ -2245,6 +2548,274 @@ mod tests {
         assert!(
             store.save_count() > after_open,
             "close_session must save unconditionally"
+        );
+    }
+
+    /// Session-store spy that records `update_turn_concepts` calls so
+    /// tests can assert the extractor's persistence side effect.
+    struct ConceptCapturingStore {
+        inner: CountingStore,
+        captures: Mutex<Vec<(usize, Vec<String>)>>,
+    }
+
+    impl ConceptCapturingStore {
+        fn new() -> Self {
+            Self {
+                inner: CountingStore::new(),
+                captures: Mutex::new(vec![]),
+            }
+        }
+        fn captured(&self) -> Vec<(usize, Vec<String>)> {
+            self.captures.lock().unwrap().clone()
+        }
+    }
+
+    #[async_trait]
+    impl primer_core::storage::SessionStore for ConceptCapturingStore {
+        async fn save_session(&self, session: &Session) -> Result<()> {
+            self.inner.save_session(session).await
+        }
+        async fn load_session(&self, id: uuid::Uuid) -> Result<Option<Session>> {
+            self.inner.load_session(id).await
+        }
+        async fn retrieve_session_turns(
+            &self,
+            session_id: uuid::Uuid,
+            query: &str,
+            k: usize,
+            exclude_indices_at_or_after: usize,
+        ) -> Result<Vec<Turn>> {
+            self.inner
+                .retrieve_session_turns(session_id, query, k, exclude_indices_at_or_after)
+                .await
+        }
+        async fn save_classification(
+            &self,
+            session_id: primer_core::conversation::SessionId,
+            turn_index: usize,
+            assessment: &primer_core::classifier::EngagementAssessment,
+            classifier_identifier: &str,
+        ) -> Result<()> {
+            self.inner
+                .save_classification(session_id, turn_index, assessment, classifier_identifier)
+                .await
+        }
+        async fn load_recent_assessments(
+            &self,
+            session_id: primer_core::conversation::SessionId,
+            classifier_identifier: &str,
+            k: usize,
+        ) -> Result<Vec<primer_core::classifier::EngagementAssessment>> {
+            self.inner
+                .load_recent_assessments(session_id, classifier_identifier, k)
+                .await
+        }
+        async fn most_recent_session_learner_id(&self) -> Result<Option<uuid::Uuid>> {
+            self.inner.most_recent_session_learner_id().await
+        }
+        async fn update_turn_concepts(
+            &self,
+            _session_id: primer_core::conversation::SessionId,
+            turn_index: usize,
+            concepts: &[String],
+        ) -> Result<()> {
+            self.captures
+                .lock()
+                .unwrap()
+                .push((turn_index, concepts.to_vec()));
+            Ok(())
+        }
+
+        async fn update_exchange_concepts(
+            &self,
+            _session_id: primer_core::conversation::SessionId,
+            child_turn_index: usize,
+            child_concepts: &[String],
+            primer_turn_index: usize,
+            primer_concepts: &[String],
+        ) -> Result<()> {
+            // Mirror the storage impl: push only the speaker(s) that
+            // actually have concepts, so tests that scripted an
+            // empty-on-one-side extraction don't see a phantom capture.
+            let mut captures = self.captures.lock().unwrap();
+            if !child_concepts.is_empty() {
+                captures.push((child_turn_index, child_concepts.to_vec()));
+            }
+            if !primer_concepts.is_empty() {
+                captures.push((primer_turn_index, primer_concepts.to_vec()));
+            }
+            Ok(())
+        }
+    }
+
+    #[tokio::test]
+    async fn extract_task_persists_concepts_for_both_turns_after_response() {
+        let backend = ScriptedBackend::new(vec![Ok(chunk("Hi there!", true))]);
+        let extractor = Arc::new(primer_extractor::StubConceptExtractor::with_response(
+            ConceptExtraction {
+                child_concepts: vec!["topic-a".into()],
+                primer_concepts: vec!["topic-b".into()],
+            },
+        ));
+        let store = Arc::new(ConceptCapturingStore::new());
+
+        let stores = DialogueManagerStores {
+            session: Some(store.clone() as Arc<dyn primer_core::storage::SessionStore>),
+            learner: None,
+        };
+
+        let mut dm = DialogueManager::new(
+            test_learner(),
+            &backend as &dyn InferenceBackend,
+            &EmptyKnowledge as &dyn KnowledgeBase,
+            stores,
+            subsystems_with_extractor(extractor as Arc<dyn ConceptExtractor>),
+            PedagogyConfig::default(),
+        );
+
+        dm.respond_to("Hello").await.unwrap();
+
+        // Yield until the spawned extractor task lands its captures.
+        for _ in 0..50 {
+            if store.captured().len() >= 2 {
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        }
+
+        let captures = store.captured();
+        assert_eq!(captures.len(), 2, "expected child + primer captures");
+        // Child turn is at index 0, primer at index 1.
+        let child_capture = captures.iter().find(|(i, _)| *i == 0).unwrap();
+        let primer_capture = captures.iter().find(|(i, _)| *i == 1).unwrap();
+        assert_eq!(child_capture.1, vec!["topic-a".to_string()]);
+        assert_eq!(primer_capture.1, vec!["topic-b".to_string()]);
+    }
+
+    #[tokio::test]
+    async fn extract_task_does_not_spawn_on_inference_error() {
+        let backend = ScriptedBackend::new(vec![Err(PrimerError::Inference("boom".into()))]);
+        let extractor = Arc::new(primer_extractor::StubConceptExtractor::with_response(
+            ConceptExtraction {
+                child_concepts: vec!["should-not-persist".into()],
+                primer_concepts: vec![],
+            },
+        ));
+        let store = Arc::new(ConceptCapturingStore::new());
+
+        let stores = DialogueManagerStores {
+            session: Some(store.clone() as Arc<dyn primer_core::storage::SessionStore>),
+            learner: None,
+        };
+
+        let mut dm = DialogueManager::new(
+            test_learner(),
+            &backend as &dyn InferenceBackend,
+            &EmptyKnowledge as &dyn KnowledgeBase,
+            stores,
+            subsystems_with_extractor(extractor as Arc<dyn ConceptExtractor>),
+            PedagogyConfig::default(),
+        );
+
+        let _ = dm.respond_to("Hello").await;
+
+        // Give the runtime a chance to run any spuriously-spawned task.
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+        assert!(
+            store.captured().is_empty(),
+            "extractor must not run on inference error"
+        );
+    }
+
+    #[tokio::test]
+    async fn pending_extraction_applied_to_learner_at_next_turn() {
+        let backend = ScriptedBackend::new(vec![Ok(chunk("Hi turn 1!", true))]);
+        // Two turns of extraction scripted: turn 1 surfaces "gravity" + "physics",
+        // turn 2 surfaces "mass". Only the first one matters for this test —
+        // we want to assert that after respond_to(turn 2), the learner has
+        // gravity from turn 1's extraction.
+        let extractor = Arc::new(primer_extractor::StubConceptExtractor::with_script(vec![
+            ConceptExtraction {
+                child_concepts: vec!["gravity".into()],
+                primer_concepts: vec!["physics".into()],
+            },
+            ConceptExtraction {
+                child_concepts: vec!["mass".into()],
+                primer_concepts: vec![],
+            },
+        ]));
+
+        let mut dm = DialogueManager::new(
+            test_learner(),
+            &backend as &dyn InferenceBackend,
+            &EmptyKnowledge as &dyn KnowledgeBase,
+            DialogueManagerStores::default(),
+            subsystems_with_extractor(extractor as Arc<dyn ConceptExtractor>),
+            PedagogyConfig::default(),
+        );
+
+        dm.respond_to("turn 1").await.unwrap();
+
+        // Refill the backend script for turn 2.
+        backend.set_script(vec![Ok(chunk("Hi turn 2!", true))]);
+
+        // Allow the previous-turn extractor task to complete before turn 2 starts.
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+
+        dm.respond_to("turn 2").await.unwrap();
+
+        let names: std::collections::HashSet<&str> = dm
+            .learner
+            .concepts
+            .iter()
+            .map(|c| c.concept_id.as_str())
+            .collect();
+        assert!(
+            names.contains("gravity"),
+            "child concept 'gravity' should be applied to learner; got: {:?}",
+            names
+        );
+        assert!(
+            names.contains("physics"),
+            "primer concept 'physics' should be applied to learner; got: {:?}",
+            names
+        );
+    }
+
+    #[tokio::test]
+    async fn close_session_drains_extractor_task() {
+        let backend = ScriptedBackend::new(vec![Ok(chunk("Hi", true))]);
+        let extractor = Arc::new(primer_extractor::StubConceptExtractor::with_response(
+            ConceptExtraction {
+                child_concepts: vec!["x".into()],
+                primer_concepts: vec![],
+            },
+        ));
+        let store = Arc::new(ConceptCapturingStore::new());
+
+        let stores = DialogueManagerStores {
+            session: Some(store.clone() as Arc<dyn primer_core::storage::SessionStore>),
+            learner: None,
+        };
+
+        let mut dm = DialogueManager::new(
+            test_learner(),
+            &backend as &dyn InferenceBackend,
+            &EmptyKnowledge as &dyn KnowledgeBase,
+            stores,
+            subsystems_with_extractor(extractor as Arc<dyn ConceptExtractor>),
+            PedagogyConfig::default(),
+        );
+
+        dm.respond_to("hi").await.unwrap();
+        // close_session must drain so the extractor's update_turn_concepts
+        // call has landed by the time close returns.
+        dm.close_session().await;
+
+        let captures = store.captured();
+        assert!(
+            !captures.is_empty(),
+            "expected extraction to land before close returns"
         );
     }
 }

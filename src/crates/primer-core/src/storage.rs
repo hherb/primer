@@ -100,6 +100,54 @@ pub trait SessionStore: Send + Sync {
     /// Returns `Ok(None)` for a DB with no sessions. Reserves `Err` for
     /// genuine I/O / decoding failures.
     async fn most_recent_session_learner_id(&self) -> Result<Option<Uuid>>;
+
+    /// Add concepts to a previously-persisted turn. Resolves
+    /// `(session_id, turn_index)` → `turn_id` internally; lazily creates
+    /// any new `concepts` rows; idempotently links via `turn_concepts`
+    /// (`INSERT OR IGNORE` so calling this twice with overlapping
+    /// concepts is a no-op).
+    ///
+    /// Used by the post-response concept-extractor task to backfill
+    /// concepts onto a turn that `save_session` has already persisted.
+    /// The append-only `save_session` skip-already-persisted invariant
+    /// means concepts cannot be added in the normal save path once a
+    /// turn is on disk; this method exists to fill that gap without
+    /// breaking that invariant.
+    ///
+    /// Returns `Err` if `(session_id, turn_index)` does not resolve to
+    /// an existing turn, or on genuine I/O failure. An empty `concepts`
+    /// slice is a no-op (returns `Ok(())`).
+    async fn update_turn_concepts(
+        &self,
+        session_id: SessionId,
+        turn_index: usize,
+        concepts: &[String],
+    ) -> Result<()>;
+
+    /// Atomically backfill concepts onto the (child, primer) pair of a
+    /// completed exchange. Both turn updates run inside one transaction
+    /// — either both succeed or both roll back, so the DB never ends up
+    /// with half-extracted state from one extractor task.
+    ///
+    /// Resolves `(session_id, child_turn_index)` and
+    /// `(session_id, primer_turn_index)` to row ids, lazily creates any
+    /// new `concepts` rows, and idempotently links via `turn_concepts`
+    /// (`INSERT OR IGNORE`). A per-call concept-name cache avoids
+    /// re-resolving names that appear in both lists.
+    ///
+    /// Used by the post-response concept-extractor task as the single
+    /// persistence call for each exchange. Empty concept slices for
+    /// either turn are skipped silently. Returns `Err` if either turn
+    /// index does not resolve to an existing turn, or on I/O failure;
+    /// an Err rolls back both writes.
+    async fn update_exchange_concepts(
+        &self,
+        session_id: SessionId,
+        child_turn_index: usize,
+        child_concepts: &[String],
+        primer_turn_index: usize,
+        primer_concepts: &[String],
+    ) -> Result<()>;
 }
 
 /// Persists the per-child `LearnerModel` to disk.

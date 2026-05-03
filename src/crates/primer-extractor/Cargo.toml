@@ -1,0 +1,18 @@
+[package]
+name = "primer-extractor"
+version = "0.1.0"
+edition = "2024"
+description = "Concept extractor trait + implementations for the Primer."
+
+[dependencies]
+primer-core.workspace = true
+async-trait.workspace = true
+tokio = { workspace = true, features = ["sync"] }
+tracing.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+
+[dev-dependencies]
+tokio = { workspace = true, features = ["macros", "rt", "sync", "time"] }
+futures.workspace = true
+chrono.workspace = true

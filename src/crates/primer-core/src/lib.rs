@@ -16,6 +16,7 @@ pub mod classifier;
 pub mod config;
 pub mod conversation;
 pub mod error;
+pub mod extractor;
 pub mod inference;
 pub mod knowledge;
 pub mod learner;

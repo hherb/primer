@@ -28,6 +28,9 @@ use primer_core::inference::InferenceBackend;
 use primer_core::knowledge::KnowledgeBase;
 use primer_core::learner::*;
 use primer_core::storage::{LearnerStore, SessionStore};
+use primer_extractor::{
+    ConceptExtractor, ExtractorSettings, LlmConceptExtractor, StubConceptExtractor,
+};
 use primer_inference::stub::StubBackend;
 use primer_knowledge::SqliteKnowledgeBase;
 use primer_pedagogy::DialogueManager;
@@ -111,12 +114,32 @@ struct Cli {
     classifier_model: Option<String>,
 
     /// Maximum time to block awaiting the previous turn's classification
-    /// before the next intent decision. Default 500ms.
-    #[arg(long, default_value_t = 500)]
+    /// before the next intent decision. Defaults to
+    /// `primer_classifier::consts::DEFAULT_BLOCKING_TIMEOUT_MS`.
+    #[arg(long, default_value_t = primer_classifier::consts::DEFAULT_BLOCKING_TIMEOUT_MS)]
     classifier_timeout_ms: u64,
 
-    /// Print pedagogical decisions (intent chosen, classifier output)
-    /// alongside the conversation, on stderr. Stdout stays clean.
+    /// Backend used for the concept extractor. Defaults to the same
+    /// backend used for the chat (`--backend`); `stub` forces deterministic
+    /// extraction (empty concepts) regardless of main backend.
+    #[arg(long)]
+    extractor_backend: Option<String>,
+
+    /// Model used for the concept extractor. Defaults to the same
+    /// model used for the chat (`--model`). Useful for haiku-as-extractor
+    /// + sonnet-as-chat on bigger machines.
+    #[arg(long)]
+    extractor_model: Option<String>,
+
+    /// Maximum time to block awaiting the previous turn's extraction
+    /// before the next intent decision. Defaults to
+    /// `primer_extractor::consts::DEFAULT_BLOCKING_TIMEOUT_MS`.
+    #[arg(long, default_value_t = primer_extractor::consts::DEFAULT_BLOCKING_TIMEOUT_MS)]
+    extractor_timeout_ms: u64,
+
+    /// Print pedagogical decisions (intent chosen, classifier output,
+    /// extractor output) alongside the conversation, on stderr. Stdout
+    /// stays clean.
     #[arg(long)]
     verbose: bool,
 
@@ -248,6 +271,8 @@ struct BackendParams {
     ollama_url: String,
     classifier_backend: Option<String>,
     classifier_model: Option<String>,
+    extractor_backend: Option<String>,
+    extractor_model: Option<String>,
 }
 
 /// Construct an `InferenceBackend` of the named type with the given model.
@@ -298,6 +323,18 @@ async fn build_classifier(
     params: &BackendParams,
     settings: ClassifierSettings,
 ) -> Result<Arc<dyn EngagementClassifier>> {
+    // Warn on a flag combination the user probably didn't mean: passing
+    // --classifier-model alongside an explicit --classifier-backend stub
+    // looks like the model name will take effect, but stub ignores it.
+    if matches!(params.classifier_backend.as_deref(), Some("stub"))
+        && params.classifier_model.is_some()
+    {
+        tracing::warn!(
+            model = ?params.classifier_model,
+            "--classifier-model ignored: --classifier-backend is stub (deterministic, no model)"
+        );
+    }
+
     match (main_backend_name, params.classifier_backend.as_deref()) {
         // Explicit stub override always wins regardless of main backend.
         (_, Some("stub")) => Ok(Arc::new(StubEngagementClassifier::new())),
@@ -347,6 +384,71 @@ async fn build_classifier(
                 }
             }
         }
+    }
+}
+
+/// Construct the concept extractor according to the same dispatch matrix
+/// as `build_classifier`:
+///
+/// | main backend | --extractor-backend | --extractor-model | outcome                                |
+/// |--------------|---------------------|-------------------|----------------------------------------|
+/// | stub         | (unset)             | (any)             | StubConceptExtractor                   |
+/// | *            | "stub"              | (any)             | StubConceptExtractor                   |
+/// | *            | some(X)             | None              | error (model required for non-stub)    |
+/// | *            | some(X)             | some(M)           | LlmConceptExtractor(new backend X, model M) |
+/// | non-stub     | (unset)             | None              | LlmConceptExtractor(Arc::clone main)   |
+/// | non-stub     | (unset)             | some(M)           | LlmConceptExtractor(new backend same type, model M) |
+async fn build_extractor(
+    main_backend: Arc<dyn InferenceBackend>,
+    main_backend_name: &str,
+    main_model: &str,
+    params: &BackendParams,
+    settings: ExtractorSettings,
+) -> Result<Arc<dyn ConceptExtractor>> {
+    // Warn on a flag combination the user probably didn't mean: passing
+    // --extractor-model alongside an explicit --extractor-backend stub
+    // looks like the model name will take effect, but stub ignores it.
+    if matches!(params.extractor_backend.as_deref(), Some("stub"))
+        && params.extractor_model.is_some()
+    {
+        tracing::warn!(
+            model = ?params.extractor_model,
+            "--extractor-model ignored: --extractor-backend is stub (deterministic, no model)"
+        );
+    }
+
+    match (main_backend_name, params.extractor_backend.as_deref()) {
+        (_, Some("stub")) => Ok(Arc::new(StubConceptExtractor::new())),
+        ("stub", None) => Ok(Arc::new(StubConceptExtractor::new())),
+        (_, Some(ext_backend_name)) => {
+            let model = params.extractor_model.clone().ok_or_else(|| {
+                PrimerError::Inference(
+                    "--extractor-model is required when --extractor-backend is set to a non-stub backend".into(),
+                )
+            })?;
+            let ext_backend = build_backend(ext_backend_name, model.clone(), params).await?;
+            Ok(Arc::new(LlmConceptExtractor::new(
+                ext_backend,
+                model,
+                settings,
+            )))
+        }
+        (_, None) => match params.extractor_model.as_deref() {
+            None => Ok(Arc::new(LlmConceptExtractor::new(
+                Arc::clone(&main_backend),
+                main_model.to_string(),
+                settings,
+            ))),
+            Some(override_model) => {
+                let ext_backend =
+                    build_backend(main_backend_name, override_model.to_string(), params).await?;
+                Ok(Arc::new(LlmConceptExtractor::new(
+                    ext_backend,
+                    override_model.to_string(),
+                    settings,
+                )))
+            }
+        },
     }
 }
 
@@ -562,6 +664,8 @@ async fn async_main() -> anyhow::Result<()> {
         ollama_url: cli.ollama_url.clone(),
         classifier_backend: cli.classifier_backend.clone(),
         classifier_model: cli.classifier_model.clone(),
+        extractor_backend: cli.extractor_backend.clone(),
+        extractor_model: cli.extractor_model.clone(),
     };
 
     let backend: Arc<dyn InferenceBackend> =
@@ -736,19 +840,48 @@ async fn async_main() -> anyhow::Result<()> {
         }
     };
 
+    let extractor_settings = ExtractorSettings {
+        blocking_timeout: std::time::Duration::from_millis(cli.extractor_timeout_ms),
+        ..ExtractorSettings::default()
+    };
+
+    let extractor: Arc<dyn ConceptExtractor> = match build_extractor(
+        Arc::clone(&backend),
+        &cli.backend,
+        &main_model,
+        &backend_params,
+        extractor_settings.clone(),
+    )
+    .await
+    {
+        Ok(e) => {
+            eprintln!("Concept extractor: {}", e.identifier());
+            e
+        }
+        Err(e) => {
+            eprintln!("Error constructing concept extractor: {e}");
+            std::process::exit(1);
+        }
+    };
+
     // ─── Dialogue manager ────────────────────────────────────────────
 
     let stores = primer_pedagogy::DialogueManagerStores {
         session: Some(Arc::clone(&session_store) as Arc<dyn SessionStore>),
         learner: Some(Arc::clone(&session_store) as Arc<dyn LearnerStore>),
     };
+    let subsystems = primer_pedagogy::DialogueManagerSubsystems {
+        classifier,
+        classifier_settings,
+        extractor,
+        extractor_settings,
+    };
     let mut dm = DialogueManager::new(
         learner,
         backend.as_ref(),
         &knowledge as &dyn KnowledgeBase,
         stores,
-        classifier,
-        classifier_settings,
+        subsystems,
         pedagogy_config,
     );
 
@@ -869,6 +1002,14 @@ async fn async_main() -> anyhow::Result<()> {
                     eprintln!("             — {r}");
                 }
             }
+            if let Some(e) = dm.last_extraction() {
+                eprintln!(
+                    "[extractor] child={:?} primer={:?} ({})",
+                    e.child_concepts,
+                    e.primer_concepts,
+                    dm.extractor_identifier()
+                );
+            }
         }
 
         // Check if the session has run long.
@@ -897,6 +1038,8 @@ mod classifier_construction_tests {
             ollama_url: "http://localhost:11434".into(),
             classifier_backend: classifier_backend.map(String::from),
             classifier_model: classifier_model.map(String::from),
+            extractor_backend: None,
+            extractor_model: None,
         }
     }
 
@@ -1029,6 +1172,106 @@ mod classifier_construction_tests {
             result.is_err(),
             "should error when --classifier-backend names an unknown backend"
         );
+    }
+}
+
+#[cfg(test)]
+mod extractor_construction_tests {
+    use super::*;
+
+    fn params(extractor_backend: Option<&str>, extractor_model: Option<&str>) -> BackendParams {
+        BackendParams {
+            api_key: Some("k".into()),
+            ollama_url: "http://localhost:11434".into(),
+            classifier_backend: None,
+            classifier_model: None,
+            extractor_backend: extractor_backend.map(String::from),
+            extractor_model: extractor_model.map(String::from),
+        }
+    }
+
+    fn stub_main_backend() -> Arc<dyn InferenceBackend> {
+        Arc::new(primer_inference::stub::StubBackend)
+    }
+
+    #[tokio::test]
+    async fn stub_main_no_flags_gives_stub_extractor() {
+        let e = build_extractor(
+            stub_main_backend(),
+            "stub",
+            "stub",
+            &params(None, None),
+            ExtractorSettings::default(),
+        )
+        .await
+        .unwrap();
+        assert_eq!(e.identifier(), "stub");
+    }
+
+    #[tokio::test]
+    async fn explicit_stub_override_wins() {
+        let e = build_extractor(
+            stub_main_backend(),
+            "ollama",
+            "llama3.2",
+            &params(Some("stub"), None),
+            ExtractorSettings::default(),
+        )
+        .await
+        .unwrap();
+        assert_eq!(e.identifier(), "stub");
+    }
+
+    #[tokio::test]
+    async fn nonstub_backend_without_model_errors() {
+        let r = build_extractor(
+            stub_main_backend(),
+            "ollama",
+            "llama3.2",
+            &params(Some("ollama"), None),
+            ExtractorSettings::default(),
+        )
+        .await;
+        assert!(r.is_err());
+    }
+
+    // Note: `stub_main_backend()` always returns a StubBackend (whose
+    // `name()` is "stub"), even when `main_backend_name` says otherwise.
+    // The identifier therefore reads as `llm:stub:<model>` in these
+    // tests — what they actually verify is that the *model* name flows
+    // through correctly. In production the main_backend_name and the
+    // backend's own `name()` agree by construction.
+    #[tokio::test]
+    async fn no_flags_reuses_main_model_id() {
+        let e = build_extractor(
+            stub_main_backend(),
+            "ollama",
+            "llama3.2",
+            &params(None, None),
+            ExtractorSettings::default(),
+        )
+        .await
+        .unwrap();
+        assert_eq!(e.identifier(), "llm:stub:llama3.2");
+    }
+
+    #[tokio::test]
+    async fn model_only_override_uses_main_backend_type() {
+        // With `--extractor-model haiku` and main backend `ollama`,
+        // `build_backend("ollama", "haiku", ...)` constructs a real
+        // OllamaBackend, so the identifier carries the real backend
+        // name (unlike the `_reuses_main_model_id` test above which
+        // Arc::clones the stub harness).
+        let e = build_extractor(
+            stub_main_backend(),
+            "ollama",
+            "llama3.2",
+            &params(None, Some("haiku")),
+            ExtractorSettings::default(),
+        )
+        .await
+        .unwrap();
+        assert_eq!(e.identifier(), "llm:ollama:haiku");
     }
 }
 
