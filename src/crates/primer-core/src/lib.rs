@@ -20,5 +20,6 @@ pub mod extractor;
 pub mod inference;
 pub mod knowledge;
 pub mod learner;
+pub mod llm_util;
 pub mod speech;
 pub mod storage;
