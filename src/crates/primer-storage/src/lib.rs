@@ -636,9 +636,7 @@ impl primer_core::storage::SessionStore for SqliteSessionStore {
             .prepare("SELECT id FROM concepts WHERE name = ?1")
             .map_err(|e| PrimerError::Storage(format!("prepare select concept: {e}")))?;
         let mut link_concept = tx
-            .prepare(
-                "INSERT OR IGNORE INTO turn_concepts (turn_id, concept_id) VALUES (?1, ?2)",
-            )
+            .prepare("INSERT OR IGNORE INTO turn_concepts (turn_id, concept_id) VALUES (?1, ?2)")
             .map_err(|e| PrimerError::Storage(format!("prepare link concept: {e}")))?;
 
         for name in concepts {
@@ -2605,7 +2603,10 @@ mod tests {
         let loaded = store.load_session(session.id).await.unwrap().unwrap();
         let mut concepts = loaded.turns[0].concepts.clone();
         concepts.sort();
-        assert_eq!(concepts, vec!["biology".to_string(), "photosynthesis".into()]);
+        assert_eq!(
+            concepts,
+            vec!["biology".to_string(), "photosynthesis".into()]
+        );
     }
 
     #[tokio::test]
@@ -2666,7 +2667,10 @@ mod tests {
         let res = store
             .update_turn_concepts(unknown_session, 0, &["x".into()])
             .await;
-        assert!(res.is_err(), "expected Err for unknown (session, turn_index)");
+        assert!(
+            res.is_err(),
+            "expected Err for unknown (session, turn_index)"
+        );
     }
 }
 

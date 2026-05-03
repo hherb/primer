@@ -120,7 +120,8 @@ fn build_extraction_prompt(ctx: &ExtractionContext) -> Prompt {
         child was exposed to via the Primer's response. A topic the Primer \
         asks about counts as Primer-introduced even if the child only \
         acknowledged it. Use [] when a speaker introduced no clear topics. \
-        Do not invent topics absent from the text.".to_string();
+        Do not invent topics absent from the text."
+        .to_string();
 
     let user = format!(
         "Prior context (oldest first):\n{context_section}\n\nTurn to analyse:\n{}: {}\n{}: {}\n\nExtract concepts now.",
@@ -291,11 +292,8 @@ mod tests {
         let backend = Arc::new(CannedBackend(
             r#"{"child_concepts": ["photosynthesis", "Plants"], "primer_concepts": ["chlorophyll"]}"#.into(),
         )) as Arc<dyn InferenceBackend>;
-        let e = LlmConceptExtractor::new(
-            backend,
-            "test-model".into(),
-            ExtractorSettings::default(),
-        );
+        let e =
+            LlmConceptExtractor::new(backend, "test-model".into(), ExtractorSettings::default());
         let c = turn(Speaker::Child, "what's photosynthesis?");
         let p = turn(Speaker::Primer, "great question!");
         let r = e.extract(ctx(&c, &p)).await.unwrap();
@@ -308,11 +306,8 @@ mod tests {
         let backend = Arc::new(CannedBackend(
             r#"Here you go: {"child_concepts": ["gravity"], "primer_concepts": []} done"#.into(),
         )) as Arc<dyn InferenceBackend>;
-        let e = LlmConceptExtractor::new(
-            backend,
-            "test-model".into(),
-            ExtractorSettings::default(),
-        );
+        let e =
+            LlmConceptExtractor::new(backend, "test-model".into(), ExtractorSettings::default());
         let c = turn(Speaker::Child, "?");
         let p = turn(Speaker::Primer, "?");
         let r = e.extract(ctx(&c, &p)).await.unwrap();
@@ -322,12 +317,10 @@ mod tests {
 
     #[tokio::test]
     async fn extract_returns_empty_on_unparseable_output() {
-        let backend = Arc::new(CannedBackend("not json at all".into())) as Arc<dyn InferenceBackend>;
-        let e = LlmConceptExtractor::new(
-            backend,
-            "test-model".into(),
-            ExtractorSettings::default(),
-        );
+        let backend =
+            Arc::new(CannedBackend("not json at all".into())) as Arc<dyn InferenceBackend>;
+        let e =
+            LlmConceptExtractor::new(backend, "test-model".into(), ExtractorSettings::default());
         let c = turn(Speaker::Child, "?");
         let p = turn(Speaker::Primer, "?");
         let r = e.extract(ctx(&c, &p)).await.unwrap();
@@ -359,11 +352,8 @@ mod tests {
         }
 
         let backend = Arc::new(ErrorBackend) as Arc<dyn InferenceBackend>;
-        let e = LlmConceptExtractor::new(
-            backend,
-            "test-model".into(),
-            ExtractorSettings::default(),
-        );
+        let e =
+            LlmConceptExtractor::new(backend, "test-model".into(), ExtractorSettings::default());
         let c = turn(Speaker::Child, "?");
         let p = turn(Speaker::Primer, "?");
         let r = e.extract(ctx(&c, &p)).await.unwrap();
@@ -398,11 +388,8 @@ mod tests {
         let backend = Arc::new(CannedBackend(
             r#"{"child_concepts": ["Gravity", "gravity", "  "], "primer_concepts": []}"#.into(),
         )) as Arc<dyn InferenceBackend>;
-        let e = LlmConceptExtractor::new(
-            backend,
-            "test-model".into(),
-            ExtractorSettings::default(),
-        );
+        let e =
+            LlmConceptExtractor::new(backend, "test-model".into(), ExtractorSettings::default());
         let c = turn(Speaker::Child, "?");
         let p = turn(Speaker::Primer, "?");
         let r = e.extract(ctx(&c, &p)).await.unwrap();

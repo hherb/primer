@@ -22,15 +22,15 @@ use clap::Parser;
 use primer_classifier::{
     ClassifierSettings, EngagementClassifier, LlmEngagementClassifier, StubEngagementClassifier,
 };
-use primer_extractor::{
-    ConceptExtractor, ExtractorSettings, LlmConceptExtractor, StubConceptExtractor,
-};
 use primer_core::config::PedagogyConfig;
 use primer_core::error::{PrimerError, Result};
 use primer_core::inference::InferenceBackend;
 use primer_core::knowledge::KnowledgeBase;
 use primer_core::learner::*;
 use primer_core::storage::{LearnerStore, SessionStore};
+use primer_extractor::{
+    ConceptExtractor, ExtractorSettings, LlmConceptExtractor, StubConceptExtractor,
+};
 use primer_inference::stub::StubBackend;
 use primer_knowledge::SqliteKnowledgeBase;
 use primer_pedagogy::DialogueManager;
@@ -135,8 +135,9 @@ struct Cli {
     #[arg(long, default_value_t = 1500)]
     extractor_timeout_ms: u64,
 
-    /// Print pedagogical decisions (intent chosen, classifier output)
-    /// alongside the conversation, on stderr. Stdout stays clean.
+    /// Print pedagogical decisions (intent chosen, classifier output,
+    /// extractor output) alongside the conversation, on stderr. Stdout
+    /// stays clean.
     #[arg(long)]
     verbose: bool,
 
@@ -1149,10 +1150,7 @@ mod classifier_construction_tests {
 mod extractor_construction_tests {
     use super::*;
 
-    fn params(
-        extractor_backend: Option<&str>,
-        extractor_model: Option<&str>,
-    ) -> BackendParams {
+    fn params(extractor_backend: Option<&str>, extractor_model: Option<&str>) -> BackendParams {
         BackendParams {
             api_key: Some("k".into()),
             ollama_url: "http://localhost:11434".into(),

@@ -26,15 +26,15 @@ use chrono::Utc;
 use futures::StreamExt;
 use primer_classifier::{ClassifierSettings, EngagementClassifier};
 use primer_core::classifier::EngagementAssessment;
-use primer_core::extractor::ConceptExtraction;
-use primer_extractor::{ConceptExtractor, ExtractorSettings};
 use primer_core::config::PedagogyConfig;
 use primer_core::conversation::{PedagogicalIntent, Session, Speaker, Turn};
 use primer_core::error::{PrimerError, Result};
+use primer_core::extractor::ConceptExtraction;
 use primer_core::inference::{GenerationParams, InferenceBackend};
 use primer_core::knowledge::{KnowledgeBase, RetrievalParams};
 use primer_core::learner::LearnerModel;
 use primer_core::storage::{LearnerStore, SessionStore};
+use primer_extractor::{ConceptExtractor, ExtractorSettings};
 use tokio::task::JoinHandle;
 
 use crate::prompt_builder;
@@ -168,11 +168,7 @@ pub(crate) fn apply_extraction(
         .iter()
         .chain(extraction.primer_concepts.iter());
     for name in combined {
-        if let Some(existing) = learner
-            .concepts
-            .iter_mut()
-            .find(|c| c.concept_id == *name)
-        {
+        if let Some(existing) = learner.concepts.iter_mut().find(|c| c.concept_id == *name) {
             existing.encounter_count = existing.encounter_count.saturating_add(1);
             existing.last_encountered = Some(now);
             changed = true;
@@ -889,7 +885,6 @@ mod tests {
     use futures::stream;
     use primer_classifier::StubEngagementClassifier;
     use primer_core::config::PedagogyConfig;
-    use primer_extractor::ExtractorSettings;
     use primer_core::inference::{
         GenerationParams, InferenceBackend, Prompt, TokenChunk, TokenStream,
     };
@@ -897,6 +892,7 @@ mod tests {
     use primer_core::learner::{
         EngagementState, LearnerModel, LearnerProfile, LearningPreferences,
     };
+    use primer_extractor::ExtractorSettings;
     use std::sync::Mutex;
     use uuid::Uuid;
 
@@ -2677,14 +2673,15 @@ mod tests {
 
         // Give the runtime a chance to run any spuriously-spawned task.
         tokio::time::sleep(std::time::Duration::from_millis(50)).await;
-        assert!(store.captured().is_empty(), "extractor must not run on inference error");
+        assert!(
+            store.captured().is_empty(),
+            "extractor must not run on inference error"
+        );
     }
 
     #[tokio::test]
     async fn pending_extraction_applied_to_learner_at_next_turn() {
-        let backend = ScriptedBackend::new(vec![
-            Ok(chunk("Hi turn 1!", true)),
-        ]);
+        let backend = ScriptedBackend::new(vec![Ok(chunk("Hi turn 1!", true))]);
         // Two turns of extraction scripted: turn 1 surfaces "gravity" + "physics",
         // turn 2 surfaces "mass". Only the first one matters for this test —
         // we want to assert that after respond_to(turn 2), the learner has
@@ -2774,6 +2771,9 @@ mod tests {
         dm.close_session().await;
 
         let captures = store.captured();
-        assert!(!captures.is_empty(), "expected extraction to land before close returns");
+        assert!(
+            !captures.is_empty(),
+            "expected extraction to land before close returns"
+        );
     }
 }
