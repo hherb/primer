@@ -1878,6 +1878,19 @@ dependencies = [
 ]
 
 [[package]]
+name = "primer-extractor"
+version = "0.1.0"
+dependencies = [
+ "async-trait",
+ "futures",
+ "primer-core",
+ "serde",
+ "serde_json",
+ "tokio",
+ "tracing",
+]
+
+[[package]]
 name = "primer-inference"
 version = "0.1.0"
 dependencies = [
