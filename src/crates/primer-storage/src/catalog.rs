@@ -148,17 +148,16 @@ pub fn understanding_depth_id(depth: UnderstandingDepth) -> i64 {
     }
 }
 
-/// Human-readable name stored alongside the ID in the
-/// `understanding_depths` lookup table.
+/// Canonical name string for an `UnderstandingDepth` variant.
+///
+/// Delegates to the enum's `name()` method (defined in
+/// `primer_core::learner`). Kept as a free function here for parity
+/// with `engagement_state_name`/`speaker_name`/`pedagogical_intent_name`
+/// — call-sites in this crate read more uniformly that way. The two
+/// must agree byte-for-byte; the v4 lookup-validate-and-seed pass
+/// would fail loudly if they ever diverged.
 pub fn understanding_depth_name(depth: UnderstandingDepth) -> &'static str {
-    match depth {
-        UnderstandingDepth::Unknown => "Unknown",
-        UnderstandingDepth::Aware => "Aware",
-        UnderstandingDepth::Recall => "Recall",
-        UnderstandingDepth::Comprehension => "Comprehension",
-        UnderstandingDepth::Application => "Application",
-        UnderstandingDepth::Analysis => "Analysis",
-    }
+    depth.name()
 }
 
 /// Reverse lookup: integer ID → `UnderstandingDepth`. Returns `None`
