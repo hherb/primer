@@ -19,7 +19,7 @@ pub mod stub;
 
 // Re-exports activated as Tasks 5–7 land:
 // pub use llm::LlmConceptExtractor;
-// pub use settings::ExtractorSettings;
+pub use settings::ExtractorSettings;
 // pub use stub::StubConceptExtractor;
 
 /// Extractor of concepts from one completed exchange.
