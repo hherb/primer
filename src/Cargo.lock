@@ -1846,6 +1846,7 @@ dependencies = [
  "dotenvy",
  "primer-classifier",
  "primer-core",
+ "primer-extractor",
  "primer-inference",
  "primer-knowledge",
  "primer-pedagogy",
@@ -1882,6 +1883,7 @@ name = "primer-extractor"
 version = "0.1.0"
 dependencies = [
  "async-trait",
+ "chrono",
  "futures",
  "primer-core",
  "serde",
@@ -1928,6 +1930,7 @@ dependencies = [
  "futures",
  "primer-classifier",
  "primer-core",
+ "primer-extractor",
  "primer-storage",
  "serde",
  "serde_json",
