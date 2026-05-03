@@ -76,8 +76,11 @@ impl Resampler {
 
 use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
 use cpal::{SampleFormat, Stream, StreamConfig};
-use ringbuf::traits::{Consumer, Producer, Split};
+use ringbuf::traits::{Consumer, Observer, Producer, Split};
 use ringbuf::{HeapCons, HeapProd, HeapRb};
+use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::time::Duration;
 
 /// Default capacity (in samples) for the mic SPSC ring buffer.
 /// Sized to hold ~250 ms of 48 kHz mono audio so a brief consumer
@@ -220,6 +223,12 @@ pub struct SpeakerSink {
     /// audio at this rate (resample upstream if needed).
     pub sample_rate: u32,
     pub channels: u16,
+    /// Set to `true` by the cpal `err_callback` if the output stream
+    /// reports an error (device removed, host audio service crashed,
+    /// etc.). Producers should bail their retry loops when this flips
+    /// — otherwise `push_slice` returns 0 forever and the producer
+    /// hangs waiting for a drain that will never come.
+    errored: Arc<AtomicBool>,
 }
 
 impl SpeakerSink {
@@ -242,25 +251,36 @@ impl SpeakerSink {
         let rb = HeapRb::<f32>::new(SPEAKER_RINGBUF_CAPACITY);
         let (prod, mut cons) = rb.split();
 
-        let err_callback = |err| tracing::error!("cpal output stream error: {err}");
+        let errored = Arc::new(AtomicBool::new(false));
+
+        // Release on the producer side pairs with Acquire on the consumer
+        // (push_all_with_bail / wait_for_drain). SeqCst would also work
+        // but is stricter than this single-flag handshake needs.
+        let make_err_callback = || {
+            let flag = Arc::clone(&errored);
+            move |err| {
+                tracing::error!("cpal output stream error: {err}");
+                flag.store(true, Ordering::Release);
+            }
+        };
 
         let stream = match format {
             SampleFormat::F32 => device.build_output_stream(
                 &config,
                 move |out: &mut [f32], _info| pull_to_device_f32(&mut cons, out, channels),
-                err_callback,
+                make_err_callback(),
                 None,
             ),
             SampleFormat::I16 => device.build_output_stream(
                 &config,
                 move |out: &mut [i16], _info| pull_to_device_i16(&mut cons, out, channels),
-                err_callback,
+                make_err_callback(),
                 None,
             ),
             SampleFormat::U16 => device.build_output_stream(
                 &config,
                 move |out: &mut [u16], _info| pull_to_device_u16(&mut cons, out, channels),
-                err_callback,
+                make_err_callback(),
                 None,
             ),
             other => {
@@ -280,10 +300,117 @@ impl SpeakerSink {
                 _stream: stream,
                 sample_rate,
                 channels,
+                errored,
             },
             prod,
         ))
     }
+
+    /// Clone of the "stream errored" flag. Producers call this once at
+    /// startup and pass the clone into [`push_all_with_bail`] so the
+    /// retry loop terminates if the cpal output stream reports an error.
+    pub fn errored_flag(&self) -> Arc<AtomicBool> {
+        Arc::clone(&self.errored)
+    }
+}
+
+/// Push every sample of `samples` into `prod`, retrying with `retry_sleep`
+/// between attempts when the ring buffer is momentarily full. Returns the
+/// total number of samples written.
+///
+/// The retry loop bails — without writing the rest — if `errored` flips
+/// to `true`. This is the failsafe for a cpal output stream that has
+/// stopped draining (device removed, host audio service crashed): without
+/// it, `push_slice` returns 0 forever and the caller hangs mid-response.
+/// In production, callers wire `errored` from [`SpeakerSink::errored_flag`].
+///
+/// `retry_sleep` is parameterised so tests can pass `Duration::ZERO`. The
+/// production caller should pass ~5 ms — long enough to yield CPU between
+/// drain cycles, short enough to keep produce-side latency negligible.
+///
+/// Acquire on the load pairs with the Release store in cpal's err_callback.
+pub fn push_all_with_bail(
+    prod: &mut HeapProd<f32>,
+    samples: &[f32],
+    errored: &AtomicBool,
+    retry_sleep: Duration,
+) -> usize {
+    let mut written = 0;
+    while written < samples.len() {
+        if errored.load(Ordering::Acquire) {
+            let dropped = samples.len() - written;
+            tracing::warn!(
+                "cpal output stream errored; discarding {dropped} samples (of {} total)",
+                samples.len()
+            );
+            return written;
+        }
+        let n = prod.push_slice(&samples[written..]);
+        written += n;
+        if written < samples.len() && !retry_sleep.is_zero() {
+            std::thread::sleep(retry_sleep);
+        }
+    }
+    written
+}
+
+/// Block until cpal has fully drained the speaker ringbuf, plus a small
+/// grace period for the cpal output buffer to flush past the ringbuf.
+/// Returns `true` if the drain completed cleanly; `false` if the wait
+/// hit `max_wait` or the stream errored mid-wait. Bails early on
+/// `errored` because a dead stream will never drain.
+///
+/// Why we poll `occupied_len()` instead of trusting the heuristic
+/// `samples / sample_rate + 0.4s`: the producer only knows the *queued*
+/// duration, not the *played* duration. On a slower or contended host,
+/// cpal may take longer than the safety margin to drain — leaking the
+/// tail of the Primer's voice into the mic for transcription as a
+/// "child utterance". Polling the actual ringbuf is exact.
+///
+/// `consecutive_zero_checks` requires that many sequential polls observe
+/// an empty buffer before declaring drain complete; this defends against
+/// a transient zero between two cpal callbacks. `grace` covers the cpal
+/// output device's own internal buffering (typically ~10–30 ms) and is
+/// included in `max_wait` — total wallclock spent in this call is at
+/// most `max_wait`, so callers can trust it as a true upper bound. If
+/// `grace >= max_wait` the observation window is zero and the call
+/// times out without observing.
+///
+/// Acquire on the errored load pairs with the Release store in cpal's
+/// err_callback.
+pub fn wait_for_drain(
+    prod: &HeapProd<f32>,
+    errored: &AtomicBool,
+    poll_interval: Duration,
+    consecutive_zero_checks: u32,
+    grace: Duration,
+    max_wait: Duration,
+) -> bool {
+    let start = std::time::Instant::now();
+    let observation_budget = max_wait.saturating_sub(grace);
+    let mut zero_streak: u32 = 0;
+    while start.elapsed() < observation_budget {
+        if errored.load(Ordering::Acquire) {
+            tracing::warn!("wait_for_drain: cpal output errored mid-drain; bailing");
+            return false;
+        }
+        if prod.occupied_len() == 0 {
+            zero_streak += 1;
+            if zero_streak >= consecutive_zero_checks {
+                std::thread::sleep(grace);
+                return true;
+            }
+        } else {
+            zero_streak = 0;
+        }
+        std::thread::sleep(poll_interval);
+    }
+    tracing::warn!(
+        "wait_for_drain: ringbuf still has {} samples after {} ms; giving up",
+        prod.occupied_len(),
+        max_wait.as_millis()
+    );
+    false
 }
 
 /// Pull one mono f32 sample per output frame; duplicate across channels.
@@ -383,6 +510,170 @@ mod tests {
         assert!((cons.try_pop().unwrap() - 0.1).abs() < 1e-6);
         assert!((cons.try_pop().unwrap() - 0.2).abs() < 1e-6);
         assert!((cons.try_pop().unwrap() - 0.3).abs() < 1e-6);
+    }
+
+    #[test]
+    fn push_all_with_bail_writes_everything_when_capacity_is_ample() {
+        let rb = HeapRb::<f32>::new(64);
+        let (mut prod, mut cons) = rb.split();
+        let errored = AtomicBool::new(false);
+        let samples: Vec<f32> = (0..32).map(|i| i as f32).collect();
+
+        let written = push_all_with_bail(&mut prod, &samples, &errored, Duration::ZERO);
+
+        assert_eq!(written, samples.len());
+        let mut drained: Vec<f32> = Vec::new();
+        while let Some(s) = cons.try_pop() {
+            drained.push(s);
+        }
+        assert_eq!(drained, samples);
+    }
+
+    #[test]
+    fn push_all_with_bail_returns_zero_when_already_errored() {
+        let rb = HeapRb::<f32>::new(64);
+        let (mut prod, _cons) = rb.split();
+        let errored = AtomicBool::new(true);
+        let samples = vec![0.5f32; 16];
+
+        let written = push_all_with_bail(&mut prod, &samples, &errored, Duration::ZERO);
+
+        assert_eq!(written, 0);
+    }
+
+    #[test]
+    fn push_all_with_bail_terminates_when_consumer_stalls_and_errored_flips() {
+        // Capacity 4: first push fills the buffer, then push_slice
+        // returns 0 forever (no consumer popping). Without the errored
+        // bail this loop would spin indefinitely; with it, flipping the
+        // flag mid-spin causes the function to return.
+        let rb = HeapRb::<f32>::new(4);
+        let (mut prod, _cons) = rb.split();
+        let errored = Arc::new(AtomicBool::new(false));
+        let samples = vec![0.25f32; 16];
+
+        let flag = Arc::clone(&errored);
+        let flipper = std::thread::spawn(move || {
+            std::thread::sleep(Duration::from_millis(20));
+            flag.store(true, Ordering::Release);
+        });
+
+        // Use a small non-zero retry sleep so the produce loop yields
+        // rather than spinning hot while we wait for the flipper.
+        let written = push_all_with_bail(&mut prod, &samples, &errored, Duration::from_millis(2));
+        flipper.join().unwrap();
+
+        // Wrote at least one sample, then bailed once the flag flipped —
+        // could not have written everything because the consumer never
+        // drained. Range-bounded rather than `== 4` so we don't pin to
+        // ringbuf bulk-push semantics.
+        assert!(
+            (1..samples.len()).contains(&written),
+            "expected partial write (1..{}); got {written}",
+            samples.len()
+        );
+    }
+
+    #[test]
+    fn wait_for_drain_returns_true_immediately_when_buffer_empty() {
+        let rb = HeapRb::<f32>::new(64);
+        let (prod, _cons) = rb.split();
+        let errored = AtomicBool::new(false);
+
+        let drained = wait_for_drain(
+            &prod,
+            &errored,
+            Duration::from_millis(1),
+            3,
+            Duration::ZERO,
+            Duration::from_secs(1),
+        );
+
+        assert!(drained, "empty buffer should report drained");
+    }
+
+    #[test]
+    fn wait_for_drain_waits_until_consumer_empties_buffer() {
+        use std::sync::Arc;
+        let rb = HeapRb::<f32>::new(64);
+        let (mut prod, mut cons) = rb.split();
+        let errored = Arc::new(AtomicBool::new(false));
+
+        // Pre-fill the buffer.
+        let samples = vec![0.5f32; 32];
+        let _written = prod.push_slice(&samples);
+        assert!(prod.occupied_len() > 0);
+
+        // Spawn a consumer that drains the buffer after a short delay.
+        let drainer = std::thread::spawn(move || {
+            std::thread::sleep(Duration::from_millis(15));
+            while cons.try_pop().is_some() {}
+            cons // hand back so it isn't dropped (which would close the channel)
+        });
+
+        let drained = wait_for_drain(
+            &prod,
+            &errored,
+            Duration::from_millis(2),
+            3,
+            Duration::ZERO,
+            Duration::from_secs(1),
+        );
+        let _cons = drainer.join().unwrap();
+
+        assert!(drained, "should observe drain after consumer empties");
+    }
+
+    #[test]
+    fn wait_for_drain_returns_false_when_errored() {
+        use std::sync::Arc;
+        let rb = HeapRb::<f32>::new(64);
+        let (mut prod, _cons) = rb.split();
+        let errored = Arc::new(AtomicBool::new(false));
+
+        // Fill the buffer so it never drains naturally (no consumer).
+        let samples = vec![0.5f32; 32];
+        let _written = prod.push_slice(&samples);
+
+        let flag = Arc::clone(&errored);
+        let flipper = std::thread::spawn(move || {
+            std::thread::sleep(Duration::from_millis(20));
+            flag.store(true, Ordering::Release);
+        });
+
+        let drained = wait_for_drain(
+            &prod,
+            &errored,
+            Duration::from_millis(2),
+            3,
+            Duration::ZERO,
+            Duration::from_secs(2),
+        );
+        flipper.join().unwrap();
+
+        assert!(!drained, "should report not-drained when errored mid-wait");
+    }
+
+    #[test]
+    fn wait_for_drain_returns_false_on_max_wait_timeout() {
+        let rb = HeapRb::<f32>::new(64);
+        let (mut prod, _cons) = rb.split();
+        let errored = AtomicBool::new(false);
+
+        // Fill the buffer; never drained.
+        let samples = vec![0.5f32; 32];
+        let _written = prod.push_slice(&samples);
+
+        let drained = wait_for_drain(
+            &prod,
+            &errored,
+            Duration::from_millis(2),
+            3,
+            Duration::ZERO,
+            Duration::from_millis(20),
+        );
+
+        assert!(!drained, "should time out when nothing drains the buffer");
     }
 
     #[test]
