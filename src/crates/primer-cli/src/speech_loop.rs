@@ -52,7 +52,12 @@ pub struct SpeechLoopConfig<'a> {
 
 use std::sync::Arc;
 
-use primer_core::speech::{StreamingSpeechToText, StreamingTextToSpeech, VoiceActivityDetector};
+use primer_core::speech::{StreamingSpeechToText, StreamingTextToSpeech};
+// Production audio-thread paths call methods on `SileroVad` via the
+// `VoiceActivityDetector` trait. Imported only when the speech feature
+// is enabled — the trait is otherwise unused in this module.
+#[cfg(feature = "speech")]
+use primer_core::speech::VoiceActivityDetector;
 
 /// Bound on the VAD event channel. At ~32 events/s (silero on 512-sample
 /// chunks at 16 kHz), 256 holds ~8 seconds of accumulated events. The
@@ -71,11 +76,10 @@ const VAD_EVENT_CHANNEL_CAPACITY: usize = 256;
 type TranscriptRx = Arc<std::sync::Mutex<std::sync::mpsc::Receiver<String>>>;
 
 /// Trait-injected backends consumed by `run_loop`. Production wires real
-/// silero / whisper / piper instances; tests wire mocks. Keeping the
-/// state machine generic over these means we exercise the full select!
-/// machinery in unit tests without any audio hardware.
+/// whisper / piper instances; tests wire mocks. The VAD lives on the
+/// audio capture thread (production) or is stubbed out via direct VAD
+/// events on the channel (tests), so it's not part of this struct.
 pub struct LoopBackends {
-    pub vad: Box<dyn VoiceActivityDetector>,
     pub stt: Arc<dyn StreamingSpeechToText>,
     pub tts: Arc<dyn StreamingTextToSpeech>,
     /// Voice profile passed to `tts.open_session(...)`. Production wires
@@ -123,7 +127,7 @@ pub trait Responder: Send {
 /// of SPEAK and back to false after the synthesised audio has had time
 /// to drain to the speaker. Tests pass `None` (mocks have no audio thread).
 pub async fn run_loop<'r>(
-    mut backends: LoopBackends,
+    backends: LoopBackends,
     mut events: tokio::sync::mpsc::Receiver<primer_core::speech::VadEvent>,
     mut responder: Box<dyn Responder + 'r>,
     mut on_committed_audio: Box<dyn FnMut(Vec<f32>) + Send>,
@@ -385,37 +389,6 @@ where
     }
 }
 
-/// No-op VAD used in the production [`LoopBackends`]. The real VAD lives
-/// in the audio capture thread; `run_loop` only reads `VadEvent`s from a
-/// channel and never invokes `backends.vad`. Including a real VAD in the
-/// struct just to satisfy the type would mean loading two ONNX sessions
-/// for nothing. This placeholder is unused but keeps the type happy.
-#[cfg(feature = "speech")]
-struct NoopVad;
-
-#[cfg(feature = "speech")]
-impl primer_core::speech::Named for NoopVad {
-    fn name(&self) -> &str {
-        "noop-vad"
-    }
-}
-
-#[cfg(feature = "speech")]
-impl VoiceActivityDetector for NoopVad {
-    fn sample_rate(&self) -> u32 {
-        16_000
-    }
-    fn chunk_samples(&self) -> usize {
-        512
-    }
-    fn process_chunk(&mut self, _samples: &[f32]) -> Result<primer_core::speech::VadFrame> {
-        Err(primer_core::error::PrimerError::Speech(
-            "NoopVad::process_chunk should never be called (audio thread owns the real VAD)".into(),
-        ))
-    }
-    fn reset(&mut self) {}
-}
-
 /// `StreamingSpeechToText` adapter: hands out sessions whose `finalize`
 /// pulls a transcript from a `std::sync::mpsc` channel populated by the
 /// audio capture thread. This decouples the audio thread (which owns
@@ -627,7 +600,6 @@ pub async fn run<'a>(
 
     // ── Build LoopBackends with the channel STT wrapper ────────────
     let backends = LoopBackends {
-        vad: Box::new(NoopVad),
         stt: Arc::new(ChannelStt {
             rx: Arc::new(std::sync::Mutex::new(transcript_rx)),
         }),
@@ -662,7 +634,7 @@ pub async fn run<'a>(
                 let mut combined: Vec<f32> =
                     Vec::with_capacity(output_leftover.len() + samples.len());
                 combined.append(&mut output_leftover);
-                combined.extend(samples.drain(..));
+                combined.append(&mut samples);
                 let usable = (combined.len() / output_chunk_in) * output_chunk_in;
                 let mut out_buf: Vec<f32> = Vec::with_capacity(combined.len() * 2);
                 let mut i = 0;
@@ -878,7 +850,7 @@ fn run_audio_thread(
             raw_buf.drain(..consumed);
         } else {
             // Native rate already matches VAD rate.
-            vad_in_buf.extend(raw_buf.drain(..));
+            vad_in_buf.append(&mut raw_buf);
         }
 
         // Process VAD chunks while we have enough samples.
@@ -953,52 +925,8 @@ mod mocks {
     use primer_core::error::Result;
     use primer_core::speech::{
         AudioChunk, Named, StreamingSpeechToText, StreamingTextToSpeech, SynthesisSession,
-        TranscriptSegment, TranscriptionSession, VadEvent, VadFrame, VoiceActivityDetector,
-        VoiceProfile,
+        TranscriptSegment, TranscriptionSession, VoiceProfile,
     };
-
-    /// Mock VAD that emits a scripted sequence of VadEvents, one per
-    /// `process_chunk` call. The `_samples` arg is ignored — the mock
-    /// reports whatever the script said for that index.
-    pub struct MockVad {
-        script: Mutex<std::vec::IntoIter<VadEvent>>,
-    }
-
-    impl MockVad {
-        pub fn new(events: Vec<VadEvent>) -> Self {
-            Self {
-                script: Mutex::new(events.into_iter()),
-            }
-        }
-    }
-
-    impl Named for MockVad {
-        fn name(&self) -> &str {
-            "mock-vad"
-        }
-    }
-
-    impl VoiceActivityDetector for MockVad {
-        fn sample_rate(&self) -> u32 {
-            16_000
-        }
-        fn chunk_samples(&self) -> usize {
-            512
-        }
-        fn process_chunk(&mut self, _samples: &[f32]) -> Result<VadFrame> {
-            let event = self.script.lock().unwrap().next().unwrap_or(VadEvent::None);
-            let speech_probability = match event {
-                VadEvent::SpeechStart => 0.9,
-                VadEvent::SpeechEnd => 0.1,
-                VadEvent::None => 0.5,
-            };
-            Ok(VadFrame {
-                speech_probability,
-                event,
-            })
-        }
-        fn reset(&mut self) {}
-    }
 
     /// Mock streaming STT: emits a fixed transcript on `finalize`.
     pub struct MockStreamingStt {
@@ -1095,25 +1023,6 @@ mod mocks {
     }
 
     #[test]
-    fn mock_vad_emits_scripted_events() {
-        let mut vad = MockVad::new(vec![
-            VadEvent::SpeechStart,
-            VadEvent::None,
-            VadEvent::SpeechEnd,
-        ]);
-        let chunk = vec![0.0f32; 512];
-        assert_eq!(
-            vad.process_chunk(&chunk).unwrap().event,
-            VadEvent::SpeechStart
-        );
-        assert_eq!(vad.process_chunk(&chunk).unwrap().event, VadEvent::None);
-        assert_eq!(
-            vad.process_chunk(&chunk).unwrap().event,
-            VadEvent::SpeechEnd
-        );
-    }
-
-    #[test]
     fn mock_streaming_stt_finalizes_canned_text() {
         let stt = MockStreamingStt::new("hello world");
         let session = stt.open_session().unwrap();
@@ -1140,10 +1049,6 @@ mod mocks {
         use primer_core::speech::VadEvent;
 
         let backends = super::LoopBackends {
-            vad: Box::new(MockVad::new(vec![
-                VadEvent::SpeechStart,
-                VadEvent::SpeechEnd,
-            ])),
             stt: Arc::new(MockStreamingStt::new("hello primer")),
             tts: Arc::new(MockStreamingTts::new(64)),
             voice: primer_core::speech::VoiceProfile::default(),
@@ -1205,10 +1110,6 @@ mod mocks {
         use primer_core::speech::VadEvent;
 
         let backends = super::LoopBackends {
-            vad: Box::new(MockVad::new(vec![
-                VadEvent::SpeechStart,
-                VadEvent::SpeechEnd,
-            ])),
             stt: Arc::new(MockStreamingStt::new("goodbye")),
             tts: Arc::new(MockStreamingTts::new(64)),
             voice: primer_core::speech::VoiceProfile::default(),
@@ -1276,7 +1177,6 @@ mod mocks {
         // we accept that both attempts return the same canned text. The
         // assertion is about cancellation, not transcript stitching.
         let backends = super::LoopBackends {
-            vad: Box::new(MockVad::new(vec![])), // unused — events come from the channel
             stt: Arc::new(MockStreamingStt::new("why does the sky look blue")),
             tts: Arc::new(MockStreamingTts::new(64)),
             voice: primer_core::speech::VoiceProfile::default(),
@@ -1407,7 +1307,6 @@ mod mocks {
         use primer_core::speech::VadEvent;
 
         let backends = super::LoopBackends {
-            vad: Box::new(MockVad::new(vec![])),
             stt: Arc::new(MockStreamingStt::new("hi primer")),
             tts: Arc::new(MockStreamingTts::new(64)),
             voice: primer_core::speech::VoiceProfile::default(),
@@ -1472,7 +1371,6 @@ mod mocks {
         use primer_core::speech::VadEvent;
 
         let backends = super::LoopBackends {
-            vad: Box::new(MockVad::new(vec![])),
             stt: Arc::new(MockStreamingStt::new("hi")),
             tts: Arc::new(MockStreamingTts::new(64)),
             voice: primer_core::speech::VoiceProfile::default(),
@@ -1595,7 +1493,6 @@ mod mocks {
 
         let captured = Arc::new(Mutex::new(Vec::<String>::new()));
         let backends = super::LoopBackends {
-            vad: Box::new(MockVad::new(vec![])),
             stt: Arc::new(MockStreamingStt::new("hello primer")),
             tts: Arc::new(CapturingTts {
                 captured: Arc::clone(&captured),
