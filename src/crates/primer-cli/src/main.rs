@@ -515,12 +515,24 @@ fn main() -> anyhow::Result<()> {
     runtime.block_on(async_main())
 }
 
+/// Default tracing filter when `RUST_LOG` is unset.
+///
+/// `info` keeps the Primer's own diagnostics (banners, classifier
+/// identifier, dialogue manager warnings) visible. `ort=warn` quiets
+/// ONNX Runtime, which emits ~200 INFO lines per silero/piper session
+/// init describing graph optimisations — useful exactly once and noise
+/// thereafter. `whisper_cpp_plus=warn` and `cpal=warn` silence the
+/// other speech-stack libraries we don't normally want to hear from.
+/// Set `RUST_LOG=debug` (or `RUST_LOG=ort=info`) for the firehose.
+const DEFAULT_LOG_FILTER: &str = "info,ort=warn,whisper_cpp_plus=warn,cpal=warn";
+
 async fn async_main() -> anyhow::Result<()> {
-    // Initialise tracing (set RUST_LOG=debug for verbose output).
+    // Initialise tracing (set RUST_LOG=debug for verbose output, or
+    // RUST_LOG=ort=info to see ONNX Runtime session-init logs).
     tracing_subscriber::fmt()
         .with_env_filter(
             tracing_subscriber::EnvFilter::try_from_default_env()
-                .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("info")),
+                .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new(DEFAULT_LOG_FILTER)),
         )
         .init();
 
