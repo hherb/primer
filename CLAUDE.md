@@ -38,7 +38,7 @@ Env files are auto-loaded at startup. Two locations checked, in order: (1) proje
 
 The central design principle is that **the pedagogical engine is decoupled from any specific inference backend, speech engine, or knowledge store via traits in `primer-core`**. Backend selection is a runtime config choice, not a code change. This is what allows Phase 0 (cloud) to share code with Phase 1 (llama.cpp / QNN NPU / RKNN NPU) and Phase 2 (Whisper + Piper).
 
-The nine crates form a layered dependency graph:
+The ten crates form a layered dependency graph:
 
 ```
 primer-cli  →  primer-pedagogy  →  primer-core  ←  primer-inference, primer-speech, primer-knowledge, primer-storage, primer-classifier, primer-comprehension, primer-extractor
