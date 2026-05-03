@@ -86,8 +86,8 @@ This roadmap is organised around one principle: **get a working conversation loo
 
 ### 2.1 — Speech-to-text
 
-- [ ] Implement `WhisperBackend` for STT (whisper.cpp or candle-whisper)
-- [ ] Add voice activity detection (VAD) so the Primer knows when the child has finished speaking
+- [x] Implement `WhisperBackend` for STT — `StreamingSpeechToText` trait + `WhisperStt` backend. Streaming session emits partial transcript chunks via `StreamingSpeechToText::begin_session`. Landed in voice round-trip POC.
+- [x] Add voice activity detection (VAD) so the Primer knows when the child has finished speaking — Silero VAD via vendored `silero-vad-rust 6.2.1` (with 2-line `is_multiple_of` patch). Landed in voice round-trip POC.
 - [ ] Handle ambient noise gracefully (these are children's rooms, not recording studios)
 
 ### 2.2 — Text-to-speech
@@ -95,13 +95,14 @@ This roadmap is organised around one principle: **get a working conversation loo
 - [x] Implement `PiperBackend` for TTS
 - [ ] Select/create a warm, patient voice profile (the Primer should sound like a favourite teacher, not a GPS)
 - [x] Implement streaming TTS: begin speaking before generation is complete (sentence-boundary chunking)
-- 2026-05-02 — Streaming `StreamingTextToSpeech` trait + Piper backend (vendored + ort-rc.10 patch). Smoke binary `tts_hello`. PR <number-TBD>.
+- 2026-05-02 — Streaming `StreamingTextToSpeech` trait + Piper backend (vendored + ort-rc.10 patch). Smoke binary `tts_hello`. PR #6.
 
 ### 2.3 — Conversation flow with speech
 
 - [ ] Echo cancellation (the Primer's own voice shouldn't trigger STT)
-- [ ] Interrupt handling (if the child starts talking while the Primer is speaking, stop and listen)
+- [x] Interrupt handling (if the child starts talking while the Primer is speaking, stop and listen) — cancel-on-SpeechStart in `speech_loop`: a `SpeechStart` event mid-LATENT_THINK aborts the in-flight LLM future and waits for the next `SpeechEnd` before retrying. Landed in voice round-trip POC.
 - [ ] Silence handling (long pauses during thinking are normal for children — don't rush them)
+- [x] Voice round-trip POC (`--speech` mode) — end-to-end LISTEN → LATENT_THINK → SPEAK → LISTEN state machine in `primer-cli::speech_loop`. `primer-speech::cpal_io` (`MicCapture`, `SpeakerSink`, `Resampler`). `rust-toolchain.toml` pins Rust 1.87+. `--speech`, `--whisper-model`, `--voice-onnx`, `--voice-config`, `--voice`, `--mic-silence-ms` CLI flags. 10+ mock-driven `speech_loop` tests + 5 `cpal_io` unit tests. 2026-05-02.
 
 **Phase 2 exit criteria:** A child can have the Phase 0 conversation entirely by voice, with the Primer speaking responses aloud.
 

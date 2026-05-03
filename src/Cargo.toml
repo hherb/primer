@@ -10,7 +10,7 @@ members = [
     "crates/primer-storage",
     "crates/primer-classifier",
 ]
-exclude = ["vendor/piper-rs"]
+exclude = ["vendor/piper-rs", "vendor/silero-vad-rust"]
 
 [workspace.package]
 version = "0.1.0"
@@ -49,8 +49,14 @@ chrono = { version = "0.4", features = ["serde"] }
 # UUID for session/entity IDs
 uuid = { version = "1", features = ["v4", "serde"] }
 
-# Audio I/O
-# cpal = "0.15"  # uncomment when integrating hardware audio
+# Audio I/O — used by the cpal feature of primer-speech for mic capture
+# and speaker playback. ringbuf provides the lock-free SPSC ring buffers
+# the cpal callbacks push/pull through (cannot block / allocate); rubato
+# does sample-rate conversion (cpal devices on Mac are typically 48 kHz,
+# silero/whisper want 16 kHz, piper voices vary).
+cpal = "0.17"
+ringbuf = "0.4"
+rubato = "0.16"
 
 # CLI
 clap = { version = "4", features = ["derive", "env"] }
@@ -76,3 +82,8 @@ primer-classifier = { path = "crates/primer-classifier" }
 # The published 0.1.9 was built against rc.9; the intersection of supported
 # ort versions between piper-rs 0.1.x and silero-vad-rust 6.2 is empty.
 piper-rs = { path = "vendor/piper-rs" }
+# Vendored silero-vad-rust patched to replace u32::is_multiple_of (still
+# unstable, see #128101) with `% N == 0`. Two call sites in model.rs and
+# utils_vad.rs. Drop this patch once is_multiple_of is stabilised upstream
+# AND a silero-vad-rust release picks up the API surface.
+silero-vad-rust = { path = "vendor/silero-vad-rust" }

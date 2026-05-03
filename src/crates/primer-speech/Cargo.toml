@@ -18,7 +18,7 @@ silero-vad-rust = { version = "6.2", default-features = false, optional = true }
 # this, Cargo picks a newer rc whose bundled ndarray version diverges from
 # silero-vad-rust's direct ndarray dep and the type `Array2<f32>` no
 # longer matches across crates.
-ort = { version = "=2.0.0-rc.10", default-features = false, features = ["ndarray"], optional = true }
+ort = { version = "=2.0.0-rc.10", default-features = false, features = ["ndarray", "download-binaries", "copy-dylibs"], optional = true }
 
 # Whisper.cpp — opt-in via the `whisper` feature. Builds bundled C++ source
 # (cmake + a C++ compiler must be present on the build host).
@@ -33,6 +33,15 @@ piper-rs = { version = "0.1", default-features = false, optional = true }
 # pull serde_json into primer-speech.
 serde_json = { workspace = true, optional = true }
 
+# Audio I/O for the unified speech REPL — opt-in via the `cpal` feature.
+# cpal: cross-platform mic/speaker bindings.
+# ringbuf: lock-free SPSC ring buffers for cpal callbacks.
+# rubato: sample-rate conversion (mic/device → silero/whisper at 16 kHz,
+# piper at voice-config rate → device output rate).
+cpal = { workspace = true, optional = true }
+ringbuf = { workspace = true, optional = true }
+rubato = { workspace = true, optional = true }
+
 [dev-dependencies]
 # WAV writer for the tts_hello example. Dev-only — not part of the
 # default build dep tree.
@@ -46,6 +55,7 @@ default = []
 silero = ["dep:silero-vad-rust", "dep:ort"]
 whisper = ["dep:whisper-cpp-plus"]
 piper = ["dep:piper-rs", "dep:serde_json"]
+cpal = ["dep:cpal", "dep:ringbuf", "dep:rubato"]
 
 [[example]]
 name = "tts_hello"

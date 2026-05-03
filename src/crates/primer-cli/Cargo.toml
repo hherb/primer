@@ -28,3 +28,20 @@ serde.workspace = true
 serde_json.workspace = true
 toml.workspace = true
 anyhow.workspace = true
+# ringbuf is only needed when the speech feature is on (to push synth
+# samples into the cpal speaker stream's SPSC buffer). Listed
+# unconditionally because Cargo doesn't yet support
+# feature-gated workspace deps cleanly; the unused-import on a non-speech
+# build is suppressed via `cfg(feature = "speech")` at the use sites.
+ringbuf.workspace = true
+
+[features]
+# Voice REPL via --speech. Pulls every speech backend feature so the
+# state machine can compose VAD → STT → DialogueManager → TTS → cpal
+# without further conditional compilation in the binary.
+speech = [
+    "primer-speech/silero",
+    "primer-speech/whisper",
+    "primer-speech/piper",
+    "primer-speech/cpal",
+]

@@ -1,0 +1,33 @@
+[package]
+name = "silero-vad-rust"
+version = "6.2.1"
+edition = "2024"
+authors = ["sheldonix"]
+description = "Rust port of the Silero Voice Activity Detector (VAD) running the bundled ONNX models"
+readme = "README.md"
+homepage = "https://github.com/sheldonix/silero-vad-rust"
+repository = "https://github.com/sheldonix/silero-vad-rust"
+documentation = "https://docs.rs/silero-vad-rust"
+license = "MIT"
+keywords = ["silero", "vad", "onnx", "audio", "speech"]
+categories = ["multimedia::audio"]
+exclude = [".gitignore"]
+
+[features]
+default = ["audio-wav"]
+audio-wav = ["hound"]
+
+[dependencies]
+# Safe bindings for ONNX Runtime 1.22
+ort = { version = "2.0.0-rc.10", features = ["load-dynamic", "ndarray"] }
+# n-dimensional array math with slicing and views (kept in sync with ort)
+ndarray = "0.16.1"
+# Flexible concrete Error type for ergonomic error handling
+anyhow = "1.0.100"
+# derive(Error) for strongly typed error enums
+thiserror = "2.0.17"
+# WAV encoder/decoder for PCM audio
+hound = { version = "3.5.1", optional = true }
+[dev-dependencies]
+# Approximate floating point comparisons for tests
+approx = "0.5.1"
