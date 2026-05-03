@@ -137,9 +137,29 @@ struct Cli {
     #[arg(long, default_value_t = primer_extractor::consts::DEFAULT_BLOCKING_TIMEOUT_MS)]
     extractor_timeout_ms: u64,
 
+    /// Backend used for the comprehension classifier. Defaults to the same
+    /// backend used for the chat (`--backend`); `stub` forces deterministic
+    /// comprehension (empty assessments) regardless of main backend.
+    #[arg(long)]
+    comprehension_backend: Option<String>,
+
+    /// Model used for the comprehension classifier. Defaults to the same
+    /// model used for the chat (`--model`). Useful for haiku-as-comprehension
+    /// + sonnet-as-chat configurations on bigger machines.
+    #[arg(long)]
+    comprehension_model: Option<String>,
+
+    /// Maximum time to block awaiting the previous turn's
+    /// extractor → comprehension chain before the next intent decision.
+    /// Combined with `--extractor-timeout-ms` this caps the total
+    /// background-work budget per turn. Defaults to
+    /// `primer_comprehension::consts::DEFAULT_BLOCKING_TIMEOUT_MS`.
+    #[arg(long, default_value_t = primer_comprehension::consts::DEFAULT_BLOCKING_TIMEOUT_MS)]
+    comprehension_timeout_ms: u64,
+
     /// Print pedagogical decisions (intent chosen, classifier output,
-    /// extractor output) alongside the conversation, on stderr. Stdout
-    /// stays clean.
+    /// extractor output, comprehension output) alongside the conversation,
+    /// on stderr. Stdout stays clean.
     #[arg(long)]
     verbose: bool,
 
@@ -273,6 +293,8 @@ struct BackendParams {
     classifier_model: Option<String>,
     extractor_backend: Option<String>,
     extractor_model: Option<String>,
+    comprehension_backend: Option<String>,
+    comprehension_model: Option<String>,
 }
 
 /// Construct an `InferenceBackend` of the named type with the given model.
@@ -447,6 +469,78 @@ async fn build_extractor(
                     override_model.to_string(),
                     settings,
                 )))
+            }
+        },
+    }
+}
+
+/// Construct the comprehension classifier according to the same dispatch matrix
+/// as `build_extractor`:
+///
+/// | main backend | --comprehension-backend | --comprehension-model | outcome                                    |
+/// |--------------|-------------------------|-----------------------|--------------------------------------------|
+/// | stub         | (unset)                 | (any)                 | StubComprehensionClassifier                |
+/// | *            | "stub"                  | (any)                 | StubComprehensionClassifier                |
+/// | *            | some(X)                 | None                  | error (model required for non-stub)        |
+/// | *            | some(X)                 | some(M)               | LlmComprehensionClassifier(new backend X, model M) |
+/// | non-stub     | (unset)                 | None                  | LlmComprehensionClassifier(Arc::clone main) |
+/// | non-stub     | (unset)                 | some(M)               | LlmComprehensionClassifier(new backend same type, model M) |
+async fn build_comprehension(
+    main_backend: Arc<dyn InferenceBackend>,
+    main_backend_name: &str,
+    main_model: &str,
+    params: &BackendParams,
+    settings: primer_comprehension::ComprehensionSettings,
+) -> Result<Arc<dyn primer_comprehension::ComprehensionClassifier>> {
+    if matches!(params.comprehension_backend.as_deref(), Some("stub"))
+        && params.comprehension_model.is_some()
+    {
+        tracing::warn!(
+            model = ?params.comprehension_model,
+            "--comprehension-model ignored: --comprehension-backend is stub (deterministic, no model)"
+        );
+    }
+
+    match (main_backend_name, params.comprehension_backend.as_deref()) {
+        (_, Some("stub")) => Ok(Arc::new(
+            primer_comprehension::StubComprehensionClassifier::new(),
+        )),
+        ("stub", None) => Ok(Arc::new(
+            primer_comprehension::StubComprehensionClassifier::new(),
+        )),
+        (_, Some(comp_backend_name)) => {
+            let model = params.comprehension_model.clone().ok_or_else(|| {
+                PrimerError::Inference(
+                    "--comprehension-model is required when --comprehension-backend is set to a non-stub backend".into(),
+                )
+            })?;
+            let comp_backend = build_backend(comp_backend_name, model.clone(), params).await?;
+            Ok(Arc::new(
+                primer_comprehension::LlmComprehensionClassifier::new(
+                    comp_backend,
+                    model,
+                    settings,
+                ),
+            ))
+        }
+        (_, None) => match params.comprehension_model.as_deref() {
+            None => Ok(Arc::new(
+                primer_comprehension::LlmComprehensionClassifier::new(
+                    Arc::clone(&main_backend),
+                    main_model.to_string(),
+                    settings,
+                ),
+            )),
+            Some(override_model) => {
+                let comp_backend =
+                    build_backend(main_backend_name, override_model.to_string(), params).await?;
+                Ok(Arc::new(
+                    primer_comprehension::LlmComprehensionClassifier::new(
+                        comp_backend,
+                        override_model.to_string(),
+                        settings,
+                    ),
+                ))
             }
         },
     }
@@ -666,6 +760,8 @@ async fn async_main() -> anyhow::Result<()> {
         classifier_model: cli.classifier_model.clone(),
         extractor_backend: cli.extractor_backend.clone(),
         extractor_model: cli.extractor_model.clone(),
+        comprehension_backend: cli.comprehension_backend.clone(),
+        comprehension_model: cli.comprehension_model.clone(),
     };
 
     let backend: Arc<dyn InferenceBackend> =
@@ -864,17 +960,37 @@ async fn async_main() -> anyhow::Result<()> {
         }
     };
 
+    let comprehension_settings = primer_comprehension::ComprehensionSettings {
+        blocking_timeout: std::time::Duration::from_millis(cli.comprehension_timeout_ms),
+        ..primer_comprehension::ComprehensionSettings::default()
+    };
+
+    let comprehension: Arc<dyn primer_comprehension::ComprehensionClassifier> =
+        match build_comprehension(
+            Arc::clone(&backend),
+            &cli.backend,
+            &main_model,
+            &backend_params,
+            comprehension_settings.clone(),
+        )
+        .await
+        {
+            Ok(c) => {
+                eprintln!("Comprehension classifier: {}", c.identifier());
+                c
+            }
+            Err(e) => {
+                eprintln!("Error constructing comprehension classifier: {e}");
+                std::process::exit(1);
+            }
+        };
+
     // ─── Dialogue manager ────────────────────────────────────────────
 
     let stores = primer_pedagogy::DialogueManagerStores {
         session: Some(Arc::clone(&session_store) as Arc<dyn SessionStore>),
         learner: Some(Arc::clone(&session_store) as Arc<dyn LearnerStore>),
     };
-    // Bundle 8 placeholder: comprehension defaults to a stub classifier
-    // until Bundle 9 wires up the CLI flags that select a real backend.
-    let comprehension: Arc<dyn primer_comprehension::ComprehensionClassifier> =
-        Arc::new(primer_comprehension::StubComprehensionClassifier::new());
-    let comprehension_settings = primer_comprehension::ComprehensionSettings::default();
     let subsystems = primer_pedagogy::DialogueManagerSubsystems {
         classifier,
         classifier_settings,
@@ -1017,6 +1133,22 @@ async fn async_main() -> anyhow::Result<()> {
                     dm.extractor_identifier()
                 );
             }
+            if let Some(c) = dm.last_comprehension() {
+                if c.assessments.is_empty() {
+                    eprintln!("[comprehension] (none) ({})", dm.comprehension_identifier());
+                } else {
+                    let pairs: Vec<String> = c
+                        .assessments
+                        .iter()
+                        .map(|a| format!("{}={}({:.2})", a.concept, a.depth, a.confidence))
+                        .collect();
+                    eprintln!(
+                        "[comprehension] {} ({})",
+                        pairs.join(" "),
+                        dm.comprehension_identifier()
+                    );
+                }
+            }
         }
 
         // Check if the session has run long.
@@ -1047,6 +1179,8 @@ mod classifier_construction_tests {
             classifier_model: classifier_model.map(String::from),
             extractor_backend: None,
             extractor_model: None,
+            comprehension_backend: None,
+            comprehension_model: None,
         }
     }
 
@@ -1194,6 +1328,8 @@ mod extractor_construction_tests {
             classifier_model: None,
             extractor_backend: extractor_backend.map(String::from),
             extractor_model: extractor_model.map(String::from),
+            comprehension_backend: None,
+            comprehension_model: None,
         }
     }
 
@@ -1279,6 +1415,100 @@ mod extractor_construction_tests {
         .await
         .unwrap();
         assert_eq!(e.identifier(), "llm:ollama:haiku");
+    }
+}
+
+#[cfg(test)]
+mod comprehension_construction_tests {
+    use super::*;
+
+    fn params(
+        comprehension_backend: Option<&str>,
+        comprehension_model: Option<&str>,
+    ) -> BackendParams {
+        BackendParams {
+            api_key: Some("k".into()),
+            ollama_url: "http://localhost:11434".into(),
+            classifier_backend: None,
+            classifier_model: None,
+            extractor_backend: None,
+            extractor_model: None,
+            comprehension_backend: comprehension_backend.map(String::from),
+            comprehension_model: comprehension_model.map(String::from),
+        }
+    }
+
+    fn stub_main_backend() -> Arc<dyn InferenceBackend> {
+        Arc::new(primer_inference::stub::StubBackend)
+    }
+
+    #[tokio::test]
+    async fn stub_main_no_flags_gives_stub_comprehension() {
+        let c = build_comprehension(
+            stub_main_backend(),
+            "stub",
+            "stub",
+            &params(None, None),
+            primer_comprehension::ComprehensionSettings::default(),
+        )
+        .await
+        .unwrap();
+        assert_eq!(c.identifier(), "stub");
+    }
+
+    #[tokio::test]
+    async fn explicit_stub_override_wins() {
+        let c = build_comprehension(
+            stub_main_backend(),
+            "ollama",
+            "llama3.2",
+            &params(Some("stub"), None),
+            primer_comprehension::ComprehensionSettings::default(),
+        )
+        .await
+        .unwrap();
+        assert_eq!(c.identifier(), "stub");
+    }
+
+    #[tokio::test]
+    async fn nonstub_backend_without_model_errors() {
+        let r = build_comprehension(
+            stub_main_backend(),
+            "ollama",
+            "llama3.2",
+            &params(Some("ollama"), None),
+            primer_comprehension::ComprehensionSettings::default(),
+        )
+        .await;
+        assert!(r.is_err());
+    }
+
+    #[tokio::test]
+    async fn no_flags_reuses_main_model_id() {
+        let c = build_comprehension(
+            stub_main_backend(),
+            "ollama",
+            "llama3.2",
+            &params(None, None),
+            primer_comprehension::ComprehensionSettings::default(),
+        )
+        .await
+        .unwrap();
+        assert_eq!(c.identifier(), "llm:stub:llama3.2");
+    }
+
+    #[tokio::test]
+    async fn model_only_override_uses_main_backend_type() {
+        let c = build_comprehension(
+            stub_main_backend(),
+            "ollama",
+            "llama3.2",
+            &params(None, Some("haiku")),
+            primer_comprehension::ComprehensionSettings::default(),
+        )
+        .await
+        .unwrap();
+        assert_eq!(c.identifier(), "llm:ollama:haiku");
     }
 }
 
