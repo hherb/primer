@@ -8,6 +8,23 @@ A Socratic AI learning companion for children — inspired by the Young Lady's I
 
 The Primer doesn't teach by telling. It teaches by asking. When a child says "Why is the sky blue?", the Primer doesn't recite Rayleigh scattering — it asks "What colour does the sky turn at sunset? Why do you think it changes?" and walks the child toward discovering the answer themselves.
 
+## Design Principles
+
+- **The Primar can run on local hardware without internet dependence.**
+ While the Primer can make use of cloud services (AI API, web search) it is designed to work autonomously and airgapped if that is the user's preference or no connectivity available
+
+- **The Primer never gives a direct answer when it can ask a guiding question instead.** 
+If the child asks a pure factual question ("How far is the moon?"), it answers directly, then pivots: "Now that you know it's 384,000 km — how long would it take to drive there?"
+
+- **The Primer does not try to maximise engagement.** 
+If a child wants to stop, the Primer says "That's enough for today" without guilt. It detects frustration and disengagement from response patterns and adjusts — offering scaffolding, suggesting a topic change, or closing the session.
+
+- **Comprehension is verified, not assumed.** The Primer probes understanding through transfer questions ("Can you explain it to someone who's never heard of it?"), application challenges ("What would happen if gravity were twice as strong?"), and contradiction probing ("Someone told me plants eat soil — what would you say to them?").
+
+- **All data is local.** 
+The learner model (what the child knows, how deeply they understand it, what topics sustain their attention) never leaves the device without explicit parental consent. Cloud inference sends conversation turns per-request; nothing is stored server-side.
+
+
 ## Status
 
 **Phase 0.1 done; Phase 0.3 progressing.** The trait architecture and module boundaries are in place, you can hold a real Socratic conversation against either the Anthropic Claude API or a local Ollama model with **tokens streaming progressively** into the terminal, and conversations **persist to a normalised SQLite store** on every turn (one DB per child under `~/.primer/`, kept separate from the RAG corpus on privacy grounds). Sessions can be **resumed by UUID** (`--resume <uuid>`), and once a conversation grows past the active context window the Primer keeps long-term memory via a **rolling LLM-generated summary** plus **FTS5 retrieval** over older turns. An **engagement classifier** runs one model behind the chat, persisting per-turn assessments to `turn_classifications` for cross-session analysis. The **learner model** (profile, concept-mastery state, learning preferences, latest engagement snapshot) now **persists across sessions** via a `LearnerStore` trait + schema v4 — a returning child carries forward their identity and progress. Still ahead: knowledge-base bootstrapping (Phase 0.2), concept extraction + comprehension classification + spaced-repetition vocabulary (the rest of Phase 0.3), local llama.cpp inference, speech pipeline, hardware integration. See [ROADMAP.md](ROADMAP.md) for what comes next.
@@ -147,16 +164,6 @@ cargo run --bin primer -- --resume <uuid>
 ```
 
 When the resumed session has more than `context_window_turns` (default 20) turns, the Primer maintains long-term memory in two complementary ways: a rolling LLM-generated summary (refreshed on resume only when the loaded one is stale, then every 20 further pre-window turns during active conversation) and FTS5-based retrieval of relevant older turns based on the current child input. Both are injected into the system prompt — the chat-message timeline the model sees stays equal to the last 20 turns, so context budget is bounded even across hours of conversation.
-
-## Design Principles
-
-**The Primer never gives a direct answer when it can ask a guiding question instead.** If the child asks a pure factual question ("How far is the moon?"), it answers directly, then pivots: "Now that you know it's 384,000 km — how long would it take to drive there?"
-
-**The Primer does not try to maximise engagement.** If a child wants to stop, the Primer says "That's enough for today" without guilt. It detects frustration and disengagement from response patterns and adjusts — offering scaffolding, suggesting a topic change, or closing the session.
-
-**All data is local.** The learner model (what the child knows, how deeply they understand it, what topics sustain their attention) never leaves the device without explicit parental consent. Cloud inference sends conversation turns per-request; nothing is stored server-side.
-
-**Comprehension is verified, not assumed.** The Primer probes understanding through transfer questions ("Can you explain it to someone who's never heard of it?"), application challenges ("What would happen if gravity were twice as strong?"), and contradiction probing ("Someone told me plants eat soil — what would you say to them?").
 
 ## License
 
