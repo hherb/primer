@@ -123,6 +123,31 @@ pub trait SessionStore: Send + Sync {
         turn_index: usize,
         concepts: &[String],
     ) -> Result<()>;
+
+    /// Atomically backfill concepts onto the (child, primer) pair of a
+    /// completed exchange. Both turn updates run inside one transaction
+    /// — either both succeed or both roll back, so the DB never ends up
+    /// with half-extracted state from one extractor task.
+    ///
+    /// Resolves `(session_id, child_turn_index)` and
+    /// `(session_id, primer_turn_index)` to row ids, lazily creates any
+    /// new `concepts` rows, and idempotently links via `turn_concepts`
+    /// (`INSERT OR IGNORE`). A per-call concept-name cache avoids
+    /// re-resolving names that appear in both lists.
+    ///
+    /// Used by the post-response concept-extractor task as the single
+    /// persistence call for each exchange. Empty concept slices for
+    /// either turn are skipped silently. Returns `Err` if either turn
+    /// index does not resolve to an existing turn, or on I/O failure;
+    /// an Err rolls back both writes.
+    async fn update_exchange_concepts(
+        &self,
+        session_id: SessionId,
+        child_turn_index: usize,
+        child_concepts: &[String],
+        primer_turn_index: usize,
+        primer_concepts: &[String],
+    ) -> Result<()>;
 }
 
 /// Persists the per-child `LearnerModel` to disk.

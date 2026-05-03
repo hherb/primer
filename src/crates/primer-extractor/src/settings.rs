@@ -22,6 +22,10 @@ pub struct ExtractorSettings {
     /// Hard cap on extracted concepts per speaker. Truncated post-parse
     /// so a runaway list doesn't bloat `concepts` table cardinality.
     pub max_concepts_per_speaker: usize,
+    /// Hard cap on chars per individual concept. Defends against
+    /// pathological "concept = full sentence" outputs from a
+    /// misbehaving LLM. Generous enough for real noun phrases.
+    pub per_concept_chars: usize,
     pub generation_max_tokens: u32,
     pub generation_temperature: f32,
     pub generation_top_p: f32,
@@ -34,6 +38,7 @@ impl Default for ExtractorSettings {
             recent_context_turns: consts::DEFAULT_RECENT_CONTEXT_TURNS,
             max_output_chars: consts::DEFAULT_MAX_EXTRACTOR_OUTPUT_CHARS,
             max_concepts_per_speaker: consts::DEFAULT_MAX_CONCEPTS_PER_SPEAKER,
+            per_concept_chars: consts::DEFAULT_PER_CONCEPT_CHARS,
             generation_max_tokens: consts::DEFAULT_EXTRACTOR_MAX_TOKENS,
             generation_temperature: consts::DEFAULT_EXTRACTOR_TEMPERATURE,
             generation_top_p: consts::DEFAULT_EXTRACTOR_TOP_P,
@@ -61,6 +66,7 @@ mod tests {
             s.max_concepts_per_speaker,
             consts::DEFAULT_MAX_CONCEPTS_PER_SPEAKER
         );
+        assert_eq!(s.per_concept_chars, consts::DEFAULT_PER_CONCEPT_CHARS);
         assert_eq!(
             s.generation_max_tokens,
             consts::DEFAULT_EXTRACTOR_MAX_TOKENS

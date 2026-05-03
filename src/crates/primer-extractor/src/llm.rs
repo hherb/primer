@@ -13,6 +13,7 @@ use primer_core::extractor::{ConceptExtraction, ExtractionContext};
 use primer_core::inference::{InferenceBackend, Message, Prompt, Role};
 
 use crate::ConceptExtractor;
+use crate::consts;
 use crate::settings::ExtractorSettings;
 
 pub struct LlmConceptExtractor {
@@ -22,12 +23,20 @@ pub struct LlmConceptExtractor {
 }
 
 impl LlmConceptExtractor {
+    /// Build a new LLM-backed extractor.
+    ///
+    /// The stable `identifier` is composed as `llm:{backend}:{model}`
+    /// — e.g. `llm:cloud-anthropic:claude-haiku-4-5`. Including the
+    /// backend keeps two extractors using the same model name across
+    /// different backends (cloud vs ollama) distinguishable in any
+    /// future analysis or filtering, mirroring how `turn_classifications`
+    /// filters by classifier identifier.
     pub fn new(
         backend: Arc<dyn InferenceBackend>,
         model: String,
         settings: ExtractorSettings,
     ) -> Self {
-        let identifier = format!("llm:{model}");
+        let identifier = format!("llm:{}:{}", backend.name(), model);
         Self {
             backend,
             settings,
@@ -59,13 +68,16 @@ impl ConceptExtractor for LlmConceptExtractor {
         };
 
         let truncated = truncate_to_chars(&raw, self.settings.max_output_chars);
-        match parse_extraction_output(truncated) {
+        match parse_extraction_output(truncated, self.settings.per_concept_chars) {
             Ok(mut e) => {
                 truncate_concept_lists(&mut e, self.settings.max_concepts_per_speaker);
                 Ok(e)
             }
             Err(reason) => {
-                let snippet: String = truncated.chars().take(200).collect();
+                let snippet: String = truncated
+                    .chars()
+                    .take(consts::LLM_DEBUG_SNIPPET_CHARS)
+                    .collect();
                 warn!(extractor = %self.identifier, raw = %snippet, %reason, "extractor output unparseable");
                 Ok(ConceptExtraction::empty())
             }
@@ -157,27 +169,33 @@ struct ExtractorOutput {
     primer_concepts: Vec<String>,
 }
 
-fn parse_extraction_output(raw: &str) -> std::result::Result<ConceptExtraction, String> {
+fn parse_extraction_output(
+    raw: &str,
+    per_concept_chars: usize,
+) -> std::result::Result<ConceptExtraction, String> {
     let json_str = extract_first_json_object(raw)
         .ok_or_else(|| "no JSON object found in output".to_string())?;
     let parsed: ExtractorOutput =
         serde_json::from_str(json_str).map_err(|e| format!("JSON parse error: {e}"))?;
 
     Ok(ConceptExtraction {
-        child_concepts: normalize_concepts(parsed.child_concepts),
-        primer_concepts: normalize_concepts(parsed.primer_concepts),
+        child_concepts: normalize_concepts(parsed.child_concepts, per_concept_chars),
+        primer_concepts: normalize_concepts(parsed.primer_concepts, per_concept_chars),
     })
 }
 
-/// Lower-case, trim, drop empty/long entries, dedupe (preserving first
-/// occurrence). 64-char cap is generous for any reasonable noun phrase
-/// and prevents pathological "concept = entire sentence" outputs.
-fn normalize_concepts(input: Vec<String>) -> Vec<String> {
+/// Lower-case, trim, drop empty/over-cap entries, dedupe (preserving
+/// first occurrence). The per-concept char cap defends against
+/// pathological "concept = entire sentence" outputs from a
+/// misbehaving LLM. The cap is configurable via `ExtractorSettings`
+/// and defaults to a generous 128 chars (see
+/// `consts::DEFAULT_PER_CONCEPT_CHARS`).
+fn normalize_concepts(input: Vec<String>, per_concept_chars: usize) -> Vec<String> {
     let mut seen = std::collections::HashSet::new();
     let mut out = Vec::with_capacity(input.len());
     for c in input {
         let trimmed = c.trim().to_lowercase();
-        if trimmed.is_empty() || trimmed.chars().count() > 64 {
+        if trimmed.is_empty() || trimmed.chars().count() > per_concept_chars {
             continue;
         }
         if seen.insert(trimmed.clone()) {
@@ -277,14 +295,18 @@ mod tests {
     }
 
     #[test]
-    fn identifier_includes_model_name() {
+    fn identifier_includes_backend_and_model() {
         let backend = Arc::new(CannedBackend("{}".into())) as Arc<dyn InferenceBackend>;
         let e = LlmConceptExtractor::new(
             backend,
             "claude-haiku-4-5".into(),
             ExtractorSettings::default(),
         );
-        assert_eq!(e.identifier(), "llm:claude-haiku-4-5");
+        // CannedBackend.name() returns "canned", so the identifier
+        // composes as `llm:{backend}:{model}`. This format keeps two
+        // extractors using the same model across different backends
+        // distinguishable.
+        assert_eq!(e.identifier(), "llm:canned:claude-haiku-4-5");
     }
 
     #[tokio::test]
@@ -381,6 +403,24 @@ mod tests {
         let r = e.extract(ctx(&c, &p)).await.unwrap();
         assert_eq!(r.child_concepts.len(), 5);
         assert_eq!(r.primer_concepts.len(), 5);
+    }
+
+    #[tokio::test]
+    async fn extract_drops_concepts_over_per_concept_cap() {
+        // With a tight per-concept cap of 5, "gravity" (7) is dropped;
+        // "mass" (4) survives. Confirms the cap is read from settings.
+        let backend = Arc::new(CannedBackend(
+            r#"{"child_concepts": ["gravity", "mass"], "primer_concepts": []}"#.into(),
+        )) as Arc<dyn InferenceBackend>;
+        let settings = ExtractorSettings {
+            per_concept_chars: 5,
+            ..ExtractorSettings::default()
+        };
+        let e = LlmConceptExtractor::new(backend, "test-model".into(), settings);
+        let c = turn(Speaker::Child, "?");
+        let p = turn(Speaker::Primer, "?");
+        let r = e.extract(ctx(&c, &p)).await.unwrap();
+        assert_eq!(r.child_concepts, vec!["mass"]);
     }
 
     #[tokio::test]

@@ -114,8 +114,9 @@ struct Cli {
     classifier_model: Option<String>,
 
     /// Maximum time to block awaiting the previous turn's classification
-    /// before the next intent decision. Default 500ms.
-    #[arg(long, default_value_t = 500)]
+    /// before the next intent decision. Defaults to
+    /// `primer_classifier::consts::DEFAULT_BLOCKING_TIMEOUT_MS`.
+    #[arg(long, default_value_t = primer_classifier::consts::DEFAULT_BLOCKING_TIMEOUT_MS)]
     classifier_timeout_ms: u64,
 
     /// Backend used for the concept extractor. Defaults to the same
@@ -131,8 +132,9 @@ struct Cli {
     extractor_model: Option<String>,
 
     /// Maximum time to block awaiting the previous turn's extraction
-    /// before the next intent decision. Default 1500ms.
-    #[arg(long, default_value_t = 1500)]
+    /// before the next intent decision. Defaults to
+    /// `primer_extractor::consts::DEFAULT_BLOCKING_TIMEOUT_MS`.
+    #[arg(long, default_value_t = primer_extractor::consts::DEFAULT_BLOCKING_TIMEOUT_MS)]
     extractor_timeout_ms: u64,
 
     /// Print pedagogical decisions (intent chosen, classifier output,
@@ -321,6 +323,18 @@ async fn build_classifier(
     params: &BackendParams,
     settings: ClassifierSettings,
 ) -> Result<Arc<dyn EngagementClassifier>> {
+    // Warn on a flag combination the user probably didn't mean: passing
+    // --classifier-model alongside an explicit --classifier-backend stub
+    // looks like the model name will take effect, but stub ignores it.
+    if matches!(params.classifier_backend.as_deref(), Some("stub"))
+        && params.classifier_model.is_some()
+    {
+        tracing::warn!(
+            model = ?params.classifier_model,
+            "--classifier-model ignored: --classifier-backend is stub (deterministic, no model)"
+        );
+    }
+
     match (main_backend_name, params.classifier_backend.as_deref()) {
         // Explicit stub override always wins regardless of main backend.
         (_, Some("stub")) => Ok(Arc::new(StubEngagementClassifier::new())),
@@ -391,6 +405,18 @@ async fn build_extractor(
     params: &BackendParams,
     settings: ExtractorSettings,
 ) -> Result<Arc<dyn ConceptExtractor>> {
+    // Warn on a flag combination the user probably didn't mean: passing
+    // --extractor-model alongside an explicit --extractor-backend stub
+    // looks like the model name will take effect, but stub ignores it.
+    if matches!(params.extractor_backend.as_deref(), Some("stub"))
+        && params.extractor_model.is_some()
+    {
+        tracing::warn!(
+            model = ?params.extractor_model,
+            "--extractor-model ignored: --extractor-backend is stub (deterministic, no model)"
+        );
+    }
+
     match (main_backend_name, params.extractor_backend.as_deref()) {
         (_, Some("stub")) => Ok(Arc::new(StubConceptExtractor::new())),
         ("stub", None) => Ok(Arc::new(StubConceptExtractor::new())),
@@ -844,15 +870,18 @@ async fn async_main() -> anyhow::Result<()> {
         session: Some(Arc::clone(&session_store) as Arc<dyn SessionStore>),
         learner: Some(Arc::clone(&session_store) as Arc<dyn LearnerStore>),
     };
+    let subsystems = primer_pedagogy::DialogueManagerSubsystems {
+        classifier,
+        classifier_settings,
+        extractor,
+        extractor_settings,
+    };
     let mut dm = DialogueManager::new(
         learner,
         backend.as_ref(),
         &knowledge as &dyn KnowledgeBase,
         stores,
-        classifier,
-        classifier_settings,
-        extractor,
-        extractor_settings,
+        subsystems,
         pedagogy_config,
     );
 
@@ -1206,6 +1235,12 @@ mod extractor_construction_tests {
         assert!(r.is_err());
     }
 
+    // Note: `stub_main_backend()` always returns a StubBackend (whose
+    // `name()` is "stub"), even when `main_backend_name` says otherwise.
+    // The identifier therefore reads as `llm:stub:<model>` in these
+    // tests — what they actually verify is that the *model* name flows
+    // through correctly. In production the main_backend_name and the
+    // backend's own `name()` agree by construction.
     #[tokio::test]
     async fn no_flags_reuses_main_model_id() {
         let e = build_extractor(
@@ -1217,11 +1252,16 @@ mod extractor_construction_tests {
         )
         .await
         .unwrap();
-        assert_eq!(e.identifier(), "llm:llama3.2");
+        assert_eq!(e.identifier(), "llm:stub:llama3.2");
     }
 
     #[tokio::test]
     async fn model_only_override_uses_main_backend_type() {
+        // With `--extractor-model haiku` and main backend `ollama`,
+        // `build_backend("ollama", "haiku", ...)` constructs a real
+        // OllamaBackend, so the identifier carries the real backend
+        // name (unlike the `_reuses_main_model_id` test above which
+        // Arc::clones the stub harness).
         let e = build_extractor(
             stub_main_backend(),
             "ollama",
@@ -1231,7 +1271,7 @@ mod extractor_construction_tests {
         )
         .await
         .unwrap();
-        assert_eq!(e.identifier(), "llm:haiku");
+        assert_eq!(e.identifier(), "llm:ollama:haiku");
     }
 }
 

@@ -659,6 +659,94 @@ impl primer_core::storage::SessionStore for SqliteSessionStore {
             .map_err(|e| PrimerError::Storage(format!("update_turn_concepts commit: {e}")))?;
         Ok(())
     }
+
+    async fn update_exchange_concepts(
+        &self,
+        session_id: primer_core::conversation::SessionId,
+        child_turn_index: usize,
+        child_concepts: &[String],
+        primer_turn_index: usize,
+        primer_concepts: &[String],
+    ) -> Result<()> {
+        if child_concepts.is_empty() && primer_concepts.is_empty() {
+            return Ok(());
+        }
+
+        let mut conn = self.conn.lock().unwrap();
+        let tx = conn
+            .transaction()
+            .map_err(|e| PrimerError::Storage(format!("update_exchange_concepts begin tx: {e}")))?;
+
+        // Per-call concept-name cache so a concept appearing in both
+        // lists (or repeated in one list, though normalize_concepts
+        // already dedupes those) hits the DB once.
+        let mut concept_name_cache: std::collections::HashMap<String, i64> =
+            std::collections::HashMap::new();
+
+        {
+            let mut insert_concept = tx
+                .prepare("INSERT OR IGNORE INTO concepts (name) VALUES (?1)")
+                .map_err(|e| PrimerError::Storage(format!("prepare insert concept: {e}")))?;
+            let mut select_concept = tx
+                .prepare("SELECT id FROM concepts WHERE name = ?1")
+                .map_err(|e| PrimerError::Storage(format!("prepare select concept: {e}")))?;
+            let mut select_turn_id = tx
+                .prepare("SELECT id FROM turns WHERE session_id = ?1 AND turn_index = ?2")
+                .map_err(|e| PrimerError::Storage(format!("prepare select turn: {e}")))?;
+            let mut link_concept = tx
+                .prepare(
+                    "INSERT OR IGNORE INTO turn_concepts (turn_id, concept_id) VALUES (?1, ?2)",
+                )
+                .map_err(|e| PrimerError::Storage(format!("prepare link concept: {e}")))?;
+
+            // Closure capturing the prepared statements + cache.
+            let mut apply_one = |turn_index: usize, concepts: &[String]| -> Result<()> {
+                if concepts.is_empty() {
+                    return Ok(());
+                }
+                let turn_id: i64 = select_turn_id
+                    .query_row(
+                        rusqlite::params![session_id.to_string(), turn_index as i64],
+                        |r| r.get(0),
+                    )
+                    .map_err(|e| {
+                        PrimerError::Storage(format!(
+                            "resolve turn (session={session_id}, index={turn_index}): {e}"
+                        ))
+                    })?;
+                for name in concepts {
+                    let cid = match concept_name_cache.get(name).copied() {
+                        Some(id) => id,
+                        None => {
+                            insert_concept
+                                .execute(rusqlite::params![name])
+                                .map_err(|e| {
+                                    PrimerError::Storage(format!("upsert concept {name}: {e}"))
+                                })?;
+                            let id: i64 = select_concept
+                                .query_row(rusqlite::params![name], |r| r.get(0))
+                                .map_err(|e| {
+                                    PrimerError::Storage(format!("select concept {name}: {e}"))
+                                })?;
+                            concept_name_cache.insert(name.clone(), id);
+                            id
+                        }
+                    };
+                    link_concept
+                        .execute(rusqlite::params![turn_id, cid])
+                        .map_err(|e| PrimerError::Storage(format!("link concept {name}: {e}")))?;
+                }
+                Ok(())
+            };
+
+            apply_one(child_turn_index, child_concepts)?;
+            apply_one(primer_turn_index, primer_concepts)?;
+        }
+
+        tx.commit()
+            .map_err(|e| PrimerError::Storage(format!("update_exchange_concepts commit: {e}")))?;
+        Ok(())
+    }
 }
 
 #[async_trait]
@@ -2671,6 +2759,155 @@ mod tests {
             res.is_err(),
             "expected Err for unknown (session, turn_index)"
         );
+    }
+
+    // ─── update_exchange_concepts ─────────────────────────────────────
+
+    #[tokio::test]
+    async fn update_exchange_concepts_persists_both_turns_atomically() {
+        let store = open_memory();
+        let learner_id = Uuid::new_v4();
+        let mut session = primer_core::conversation::Session::new(learner_id);
+        session.add_turn(primer_core::conversation::Turn {
+            speaker: primer_core::conversation::Speaker::Child,
+            text: "what is photosynthesis?".into(),
+            timestamp: Utc::now(),
+            intent: None,
+            concepts: vec![],
+        });
+        session.add_turn(primer_core::conversation::Turn {
+            speaker: primer_core::conversation::Speaker::Primer,
+            text: "great question!".into(),
+            timestamp: Utc::now(),
+            intent: None,
+            concepts: vec![],
+        });
+        store.save_session(&session).await.unwrap();
+
+        store
+            .update_exchange_concepts(
+                session.id,
+                0,
+                &["photosynthesis".into()],
+                1,
+                &["chlorophyll".into(), "biology".into()],
+            )
+            .await
+            .unwrap();
+
+        let loaded = store.load_session(session.id).await.unwrap().unwrap();
+        assert_eq!(loaded.turns[0].concepts, vec!["photosynthesis".to_string()]);
+        let mut primer = loaded.turns[1].concepts.clone();
+        primer.sort();
+        assert_eq!(primer, vec!["biology".to_string(), "chlorophyll".into()]);
+    }
+
+    #[tokio::test]
+    async fn update_exchange_concepts_rolls_back_when_one_turn_missing() {
+        let store = open_memory();
+        let learner_id = Uuid::new_v4();
+        let mut session = primer_core::conversation::Session::new(learner_id);
+        session.add_turn(primer_core::conversation::Turn {
+            speaker: primer_core::conversation::Speaker::Child,
+            text: "hi".into(),
+            timestamp: Utc::now(),
+            intent: None,
+            concepts: vec![],
+        });
+        // Only ONE turn persisted: turn_index 1 (primer) doesn't exist.
+        store.save_session(&session).await.unwrap();
+
+        let res = store
+            .update_exchange_concepts(
+                session.id,
+                0,
+                &["should-not-persist".into()],
+                1,
+                &["also-no".into()],
+            )
+            .await;
+        assert!(res.is_err(), "expected Err when primer turn is missing");
+
+        // The child write must have been rolled back — no concepts on
+        // turn 0 even though the call had a valid child_turn_index.
+        let loaded = store.load_session(session.id).await.unwrap().unwrap();
+        assert!(
+            loaded.turns[0].concepts.is_empty(),
+            "child write must roll back when primer write fails"
+        );
+    }
+
+    #[tokio::test]
+    async fn update_exchange_concepts_skips_empty_slices() {
+        let store = open_memory();
+        let learner_id = Uuid::new_v4();
+        let mut session = primer_core::conversation::Session::new(learner_id);
+        session.add_turn(primer_core::conversation::Turn {
+            speaker: primer_core::conversation::Speaker::Child,
+            text: "x".into(),
+            timestamp: Utc::now(),
+            intent: None,
+            concepts: vec![],
+        });
+        session.add_turn(primer_core::conversation::Turn {
+            speaker: primer_core::conversation::Speaker::Primer,
+            text: "y".into(),
+            timestamp: Utc::now(),
+            intent: None,
+            concepts: vec![],
+        });
+        store.save_session(&session).await.unwrap();
+
+        // Both empty → no-op.
+        store
+            .update_exchange_concepts(session.id, 0, &[], 1, &[])
+            .await
+            .unwrap();
+
+        // One empty, other populated — populated side persists.
+        store
+            .update_exchange_concepts(session.id, 0, &["only-child".into()], 1, &[])
+            .await
+            .unwrap();
+
+        let loaded = store.load_session(session.id).await.unwrap().unwrap();
+        assert_eq!(loaded.turns[0].concepts, vec!["only-child".to_string()]);
+        assert!(loaded.turns[1].concepts.is_empty());
+    }
+
+    #[tokio::test]
+    async fn update_exchange_concepts_dedupes_concept_lookup_across_turns() {
+        // Same concept appears in BOTH child and primer concepts. The
+        // per-call cache should resolve it once; the DB should still
+        // link both turns. Asserting no duplicate `concepts` row exists
+        // is the canary for the cache working correctly.
+        let store = open_memory();
+        let learner_id = Uuid::new_v4();
+        let mut session = primer_core::conversation::Session::new(learner_id);
+        session.add_turn(primer_core::conversation::Turn {
+            speaker: primer_core::conversation::Speaker::Child,
+            text: "x".into(),
+            timestamp: Utc::now(),
+            intent: None,
+            concepts: vec![],
+        });
+        session.add_turn(primer_core::conversation::Turn {
+            speaker: primer_core::conversation::Speaker::Primer,
+            text: "y".into(),
+            timestamp: Utc::now(),
+            intent: None,
+            concepts: vec![],
+        });
+        store.save_session(&session).await.unwrap();
+
+        store
+            .update_exchange_concepts(session.id, 0, &["gravity".into()], 1, &["gravity".into()])
+            .await
+            .unwrap();
+
+        let loaded = store.load_session(session.id).await.unwrap().unwrap();
+        assert_eq!(loaded.turns[0].concepts, vec!["gravity".to_string()]);
+        assert_eq!(loaded.turns[1].concepts, vec!["gravity".to_string()]);
     }
 }
 
