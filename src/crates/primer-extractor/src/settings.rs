@@ -7,11 +7,13 @@ use crate::consts;
 #[derive(Debug, Clone)]
 pub struct ExtractorSettings {
     /// Maximum time to block awaiting the previous turn's extraction
-    /// before the next intent decision. Defaults to 1500ms — extraction
-    /// is allowed to be slower than classification because no in-turn
-    /// decision currently depends on extracted concepts. If the timeout
-    /// fires, the task is detached (extraction may still complete and
-    /// persist asynchronously); we just don't wait for it.
+    /// before the next intent decision. Defaults to 5000ms — empirically
+    /// even small models (gemma4:e4b, qwen3.5:4b) need >1500ms for the
+    /// extract-then-comprehend chain, and cloud sonnet-4-6 routinely
+    /// needs >3000ms combined. The natural inter-turn pause for a child
+    /// reading + thinking absorbs the longer wait without UX impact.
+    /// If the timeout fires, the task is detached (extraction may still
+    /// complete and persist asynchronously); we just don't wait for it.
     pub blocking_timeout: Duration,
     /// How many surrounding turns to include as context in the
     /// extractor prompt. Helps disambiguate pronouns ("it", "that").

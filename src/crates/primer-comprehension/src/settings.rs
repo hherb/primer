@@ -8,8 +8,10 @@ use crate::consts;
 pub struct ComprehensionSettings {
     /// Maximum time to block awaiting the previous turn's
     /// extractor→comprehension chain before the next intent decision.
-    /// On timeout, the task is detached so DB persistence still
-    /// completes; we just don't wait for it.
+    /// Defaults to 5000ms — combined with `extractor.blocking_timeout`
+    /// the chain has a 10s budget, comfortably covering even small-model
+    /// two-call latency. On timeout, the task is detached so DB
+    /// persistence still completes; we just don't wait for it.
     pub blocking_timeout: Duration,
     /// Hard cap on the LLM's raw output length before parsing.
     /// Char-boundary-safe.

@@ -2,7 +2,7 @@
 //! convention, every numeric used by the comprehension subsystem is
 //! defined here (or in a sibling settings struct field).
 
-pub const DEFAULT_BLOCKING_TIMEOUT_MS: u64 = 1500;
+pub const DEFAULT_BLOCKING_TIMEOUT_MS: u64 = 5000;
 
 /// Hard cap on the LLM's raw output length before parsing. Sized for
 /// comprehension's per-concept JSON output: ~10 entries × ~60 chars
