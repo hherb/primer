@@ -3,12 +3,13 @@
 //! defined here (or in a sibling settings struct field).
 
 pub const DEFAULT_BLOCKING_TIMEOUT_MS: u64 = 1500;
-pub const DEFAULT_RECENT_CONTEXT_TURNS: usize = 4;
 
-/// Hard cap on the LLM's raw output length before parsing. Larger than
-/// the extractor's cap because comprehension's output is per-concept
-/// (10 entries × ~60 chars structured ≈ ~600 chars before envelope,
-/// plus evidence text up to evidence_max_chars per assessment).
+/// Hard cap on the LLM's raw output length before parsing. Sized for
+/// comprehension's per-concept JSON output: ~10 entries × ~60 chars
+/// structured ≈ ~600 chars before envelope, plus evidence text up to
+/// evidence_max_chars per assessment. Currently equal to the extractor's
+/// cap (4096); independent constants kept so the two can diverge if
+/// future tuning calls for it.
 pub const DEFAULT_MAX_COMPREHENSION_OUTPUT_CHARS: usize = 4096;
 
 /// Hard cap on candidate concepts handed to one classifier call.

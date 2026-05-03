@@ -11,9 +11,6 @@ pub struct ComprehensionSettings {
     /// On timeout, the task is detached so DB persistence still
     /// completes; we just don't wait for it.
     pub blocking_timeout: Duration,
-    /// How many surrounding turns to include as context in the
-    /// classifier prompt. Helps disambiguate pronoun references.
-    pub recent_context_turns: usize,
     /// Hard cap on the LLM's raw output length before parsing.
     /// Char-boundary-safe.
     pub max_output_chars: usize,
@@ -37,7 +34,6 @@ impl Default for ComprehensionSettings {
     fn default() -> Self {
         Self {
             blocking_timeout: Duration::from_millis(consts::DEFAULT_BLOCKING_TIMEOUT_MS),
-            recent_context_turns: consts::DEFAULT_RECENT_CONTEXT_TURNS,
             max_output_chars: consts::DEFAULT_MAX_COMPREHENSION_OUTPUT_CHARS,
             max_concepts_per_call: consts::DEFAULT_MAX_CONCEPTS_PER_CALL,
             confidence_threshold: consts::DEFAULT_CONFIDENCE_THRESHOLD,
@@ -60,7 +56,6 @@ mod tests {
             s.blocking_timeout,
             Duration::from_millis(consts::DEFAULT_BLOCKING_TIMEOUT_MS)
         );
-        assert_eq!(s.recent_context_turns, consts::DEFAULT_RECENT_CONTEXT_TURNS);
         assert_eq!(
             s.max_output_chars,
             consts::DEFAULT_MAX_COMPREHENSION_OUTPUT_CHARS
