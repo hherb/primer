@@ -1864,6 +1864,20 @@ dependencies = [
 ]
 
 [[package]]
+name = "primer-comprehension"
+version = "0.1.0"
+dependencies = [
+ "async-trait",
+ "chrono",
+ "futures",
+ "primer-core",
+ "serde",
+ "serde_json",
+ "tokio",
+ "tracing",
+]
+
+[[package]]
 name = "primer-core"
 version = "0.1.0"
 dependencies = [
