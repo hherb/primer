@@ -153,10 +153,23 @@ struct Cli {
 
     /// Override silero's min_silence_ms for --speech mode. The default
     /// (300 ms) is too aggressive given the cancel-on-resume safety net;
-    /// 600 ms reduces false trips at no perceived-latency cost.
+    /// 600 ms reduces false trips at no perceived-latency cost. Bounded
+    /// to [50, 5000] ms — values below 50 ms make silero fire constantly,
+    /// above 5 s defeats the purpose.
     #[cfg(feature = "speech")]
-    #[arg(long, default_value_t = 600)]
+    #[arg(long, default_value_t = 600, value_parser = parse_mic_silence_ms)]
     mic_silence_ms: u32,
+}
+
+#[cfg(feature = "speech")]
+fn parse_mic_silence_ms(s: &str) -> std::result::Result<u32, String> {
+    let n: u32 = s.parse().map_err(|e| format!("not a u32: {e}"))?;
+    if !(50..=5000).contains(&n) {
+        return Err(format!(
+            "mic-silence-ms must be between 50 and 5000, got {n}"
+        ));
+    }
+    Ok(n)
 }
 
 /// Slugify a learner name into a filesystem-safe filename stem.
@@ -436,8 +449,45 @@ fn create_learner_with_id(id: Uuid, name: &str, age: u8) -> LearnerModel {
     }
 }
 
-#[tokio::main]
-async fn main() -> anyhow::Result<()> {
+/// Probe common system locations for an `espeak-ng-data` directory and
+/// set `PIPER_ESPEAKNG_DATA_DIRECTORY` to the parent of the first complete
+/// one found. `espeak-rs-sys` ships an incomplete subset (missing `phontab`
+/// and other core files); without a system install Piper's phonemizer
+/// fails. Skipped if the env var is already set externally.
+///
+/// MUST run before the tokio runtime is built — `set_var` is `unsafe`
+/// because concurrent `getenv` from any other thread is UB on Unix
+/// libc. By calling this from the synchronous `main()` before any
+/// runtime threads exist, we satisfy that precondition.
+#[cfg(feature = "speech")]
+fn probe_espeak_ng_data(verbose: bool) {
+    if std::env::var_os("PIPER_ESPEAKNG_DATA_DIRECTORY").is_some() {
+        return;
+    }
+    const ESPEAK_PARENT_CANDIDATES: &[&str] = &[
+        "/opt/homebrew/share", // macOS Apple Silicon (brew install espeak-ng)
+        "/usr/local/share",    // macOS Intel / generic
+        "/usr/share",          // Linux (apt/dnf install espeak-ng-data)
+    ];
+    for parent in ESPEAK_PARENT_CANDIDATES {
+        let probe = std::path::Path::new(parent).join("espeak-ng-data/phontab");
+        if probe.is_file() {
+            if verbose {
+                eprintln!("[tts] found espeak-ng-data under {parent}");
+            }
+            // SAFETY: we are running before the tokio runtime (and any
+            // worker threads, audio threads, or third-party library
+            // threads) have been started. No other thread can be
+            // calling getenv concurrently, so this `set_var` is sound.
+            unsafe {
+                std::env::set_var("PIPER_ESPEAKNG_DATA_DIRECTORY", parent);
+            }
+            return;
+        }
+    }
+}
+
+fn main() -> anyhow::Result<()> {
     // Load env files. Project-local `.env` first (searches cwd and ancestors),
     // then a user-global `~/.primer_env` for secrets that should live outside
     // any single repo. Earlier sources win — `from_path` does not override
@@ -448,6 +498,24 @@ async fn main() -> anyhow::Result<()> {
         let _ = dotenvy::from_path(&path);
     }
 
+    // Probe for system espeak-ng-data BEFORE the tokio runtime spawns
+    // worker threads — `set_var` requires a single-threaded context.
+    // Pre-parse `--verbose` so the probe can log its hit on stderr.
+    #[cfg(feature = "speech")]
+    {
+        let verbose = std::env::args().any(|a| a == "--verbose");
+        probe_espeak_ng_data(verbose);
+    }
+
+    // Build the tokio runtime explicitly (instead of `#[tokio::main]`)
+    // so the env probe above runs single-threaded.
+    let runtime = tokio::runtime::Builder::new_multi_thread()
+        .enable_all()
+        .build()?;
+    runtime.block_on(async_main())
+}
+
+async fn async_main() -> anyhow::Result<()> {
     // Initialise tracing (set RUST_LOG=debug for verbose output).
     tracing_subscriber::fmt()
         .with_env_filter(
@@ -955,6 +1023,31 @@ mod classifier_construction_tests {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[cfg(feature = "speech")]
+    #[test]
+    fn parse_mic_silence_ms_accepts_in_range_values() {
+        assert_eq!(parse_mic_silence_ms("50"), Ok(50));
+        assert_eq!(parse_mic_silence_ms("600"), Ok(600));
+        assert_eq!(parse_mic_silence_ms("5000"), Ok(5000));
+    }
+
+    #[cfg(feature = "speech")]
+    #[test]
+    fn parse_mic_silence_ms_rejects_out_of_range() {
+        assert!(parse_mic_silence_ms("0").is_err());
+        assert!(parse_mic_silence_ms("49").is_err());
+        assert!(parse_mic_silence_ms("5001").is_err());
+        assert!(parse_mic_silence_ms("100000").is_err());
+    }
+
+    #[cfg(feature = "speech")]
+    #[test]
+    fn parse_mic_silence_ms_rejects_non_numeric() {
+        assert!(parse_mic_silence_ms("abc").is_err());
+        assert!(parse_mic_silence_ms("").is_err());
+        assert!(parse_mic_silence_ms("-100").is_err());
+    }
 
     #[test]
     fn slug_lowercases_and_keeps_alphanumerics() {

@@ -54,6 +54,22 @@ use std::sync::Arc;
 
 use primer_core::speech::{StreamingSpeechToText, StreamingTextToSpeech, VoiceActivityDetector};
 
+/// Bound on the VAD event channel. At ~32 events/s (silero on 512-sample
+/// chunks at 16 kHz), 256 holds ~8 seconds of accumulated events. The
+/// audio thread sends via `blocking_send`, so saturation back-pressures
+/// the audio thread (it stops draining the mic ringbuf) rather than
+/// dropping events — drops would break SpeechStart/SpeechEnd pairing.
+/// The cap is sized large enough that this never triggers in steady
+/// state; if `run_loop` falls 8 s behind, the audio thread will block
+/// briefly until the consumer catches up.
+const VAD_EVENT_CHANNEL_CAPACITY: usize = 256;
+
+/// Shared receiver for the audio thread → run_loop transcript channel.
+/// `Arc<Mutex<...>>` only because the `StreamingSpeechToText` trait hands
+/// out sessions through `&self`; there is exactly one consumer.
+#[cfg(feature = "speech")]
+type TranscriptRx = Arc<std::sync::Mutex<std::sync::mpsc::Receiver<String>>>;
+
 /// Trait-injected backends consumed by `run_loop`. Production wires real
 /// silero / whisper / piper instances; tests wire mocks. Keeping the
 /// state machine generic over these means we exercise the full select!
@@ -108,7 +124,7 @@ pub trait Responder: Send {
 /// to drain to the speaker. Tests pass `None` (mocks have no audio thread).
 pub async fn run_loop<'r>(
     mut backends: LoopBackends,
-    mut events: tokio::sync::mpsc::UnboundedReceiver<primer_core::speech::VadEvent>,
+    mut events: tokio::sync::mpsc::Receiver<primer_core::speech::VadEvent>,
     mut responder: Box<dyn Responder + 'r>,
     mut on_committed_audio: Box<dyn FnMut(Vec<f32>) + Send>,
     verbose: bool,
@@ -164,9 +180,11 @@ pub async fn run_loop<'r>(
             // Drive the LLM. `respond` returns the full accumulated text
             // as Ok(String); the on_chunk callback is for live streaming
             // (e.g. terminal echo). For unit tests we ignore chunks and
-            // rely on the final Result.
-            let transcript_clone = transcript_so_far.clone();
-            let llm_fut = responder.respond(&transcript_clone, Box::new(|_chunk: &str| {}));
+            // rely on the final Result. The borrow on `transcript_so_far`
+            // ends when this select! resolves — earlier code cloned the
+            // string redundantly because `DialogueResponder` already
+            // copies the transcript into the future internally.
+            let llm_fut = responder.respond(&transcript_so_far, Box::new(|_chunk: &str| {}));
             tokio::pin!(llm_fut);
 
             // Wait for either: (a) llm done, (b) VAD SpeechStart (cancel).
@@ -185,7 +203,15 @@ pub async fn run_loop<'r>(
                 };
                 false
             } else {
+                // `biased` ensures the LLM future gets polled before
+                // events.recv() — without it, select!'s random order can
+                // resolve a queued SpeechStart-cancel before the LLM
+                // future is ever polled, leaving the LLM call's destructor
+                // un-run because it never started. Bias makes
+                // cancellation observable and testable: if cancel fires,
+                // the parking future has been polled at least once.
                 tokio::select! {
+                    biased;
                     res = &mut llm_fut => {
                         accumulated = match res {
                             Ok(text) => text,
@@ -314,6 +340,17 @@ pub async fn run_loop<'r>(
                 tokio::time::sleep(std::time::Duration::from_secs_f32(duration_secs)).await;
                 flag.store(false, std::sync::atomic::Ordering::SeqCst);
             }
+            // Drain any events the audio thread may have queued in the
+            // narrow window between un-gating and the next LISTEN read:
+            // the speaker→mic acoustic tail of the Primer's own voice
+            // can otherwise emit a stale SpeechStart/SpeechEnd that would
+            // be processed as a child utterance. Tradeoff: a child whose
+            // SpeechStart lands inside this same window (a few ms) loses
+            // that event — but their continuing speech immediately fires
+            // a fresh SpeechStart on the next VAD chunk, so the start is
+            // delayed by ~32 ms at worst. Acceptable for the no-barge-in
+            // model.
+            while events.try_recv().is_ok() {}
         }
     }
 
@@ -392,7 +429,7 @@ impl VoiceActivityDetector for NoopVad {
 /// `SpeechEnd`), the transcript is already buffered in the channel.
 #[cfg(feature = "speech")]
 struct ChannelStt {
-    rx: std::sync::Arc<std::sync::Mutex<std::sync::mpsc::Receiver<String>>>,
+    rx: TranscriptRx,
 }
 
 #[cfg(feature = "speech")]
@@ -409,14 +446,14 @@ impl StreamingSpeechToText for ChannelStt {
     }
     fn open_session(&self) -> Result<Box<dyn primer_core::speech::TranscriptionSession>> {
         Ok(Box::new(ChannelSttSession {
-            rx: std::sync::Arc::clone(&self.rx),
+            rx: Arc::clone(&self.rx),
         }))
     }
 }
 
 #[cfg(feature = "speech")]
 struct ChannelSttSession {
-    rx: std::sync::Arc<std::sync::Mutex<std::sync::mpsc::Receiver<String>>>,
+    rx: TranscriptRx,
 }
 
 #[cfg(feature = "speech")]
@@ -431,35 +468,41 @@ impl primer_core::speech::TranscriptionSession for ChannelSttSession {
         Ok(vec![])
     }
     fn finalize(self: Box<Self>) -> Result<Vec<primer_core::speech::TranscriptSegment>> {
-        // Try to receive a transcript. The audio thread sends BEFORE
-        // emitting SpeechEnd, so by the time run_loop calls us the
-        // transcript is normally already buffered. We use try_recv with
-        // a brief retry to tolerate any tiny scheduling jitter, then
-        // fall back to a blocking recv with a short timeout.
+        // The audio thread sends BEFORE emitting SpeechEnd, so by the
+        // time run_loop calls us the transcript is normally already
+        // buffered. Spin try_recv briefly to tolerate scheduling
+        // jitter — but fail loudly rather than blocking, so a contract
+        // violation surfaces as a quick "empty utterance" instead of a
+        // half-second stall in the async runtime.
         let rx = self.rx.lock().map_err(|_| {
             primer_core::error::PrimerError::Speech(
                 "ChannelSttSession: transcript receiver mutex poisoned".into(),
             )
         })?;
-        match rx.recv_timeout(std::time::Duration::from_millis(500)) {
-            Ok(text) => Ok(vec![primer_core::speech::TranscriptSegment {
-                text,
-                start_ms: 0,
-                end_ms: 0,
-            }]),
-            Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {
-                // No transcript was queued — treat as empty utterance
-                // (run_loop already short-circuits on empty).
-                Ok(vec![])
-            }
-            Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => {
-                // Audio thread is gone; surface an error so run_loop
-                // exits cleanly via `?`.
-                Err(primer_core::error::PrimerError::Speech(
-                    "audio thread disconnected before producing transcript".into(),
-                ))
+        const TRANSCRIPT_RECV_RETRIES: u32 = 5;
+        const TRANSCRIPT_RECV_BACKOFF: std::time::Duration = std::time::Duration::from_millis(2);
+        for _ in 0..TRANSCRIPT_RECV_RETRIES {
+            match rx.try_recv() {
+                Ok(text) => {
+                    return Ok(vec![primer_core::speech::TranscriptSegment {
+                        text,
+                        start_ms: 0,
+                        end_ms: 0,
+                    }]);
+                }
+                Err(std::sync::mpsc::TryRecvError::Empty) => {
+                    std::thread::sleep(TRANSCRIPT_RECV_BACKOFF);
+                }
+                Err(std::sync::mpsc::TryRecvError::Disconnected) => {
+                    return Err(primer_core::error::PrimerError::Speech(
+                        "audio thread disconnected before producing transcript".into(),
+                    ));
+                }
             }
         }
+        // Contract violation (no transcript queued before SpeechEnd) —
+        // empty utterance. run_loop short-circuits on empty.
+        Ok(vec![])
     }
 }
 
@@ -486,36 +529,10 @@ pub async fn run<'a>(
     //    the audio thread; run_loop sees a ChannelStt wrapper) ─────────
     let whisper = std::sync::Arc::new(WhisperStt::new(cfg.whisper_model)?);
 
-    // ── Locate espeak-ng-data for Piper's phonemizer ───────────────
-    // espeak-rs-sys ships an incomplete data set in OUT_DIR (only `lang/`
-    // and `voices/`, missing `phontab` and other core files). We probe
-    // common system locations and set PIPER_ESPEAKNG_DATA_DIRECTORY (the
-    // env var espeak-ng's loader checks) to the parent of a complete
-    // espeak-ng-data directory. Skipped if the env var is already set.
-    if std::env::var_os("PIPER_ESPEAKNG_DATA_DIRECTORY").is_none() {
-        const ESPEAK_PARENT_CANDIDATES: &[&str] = &[
-            "/opt/homebrew/share", // macOS Apple Silicon (brew install espeak-ng)
-            "/usr/local/share",    // macOS Intel / generic
-            "/usr/share",          // Linux (apt/dnf install espeak-ng-data)
-        ];
-        for parent in ESPEAK_PARENT_CANDIDATES {
-            let probe = std::path::Path::new(parent).join("espeak-ng-data/phontab");
-            if probe.is_file() {
-                if cfg.verbose {
-                    eprintln!("[tts] found espeak-ng-data under {}", parent);
-                }
-                // SAFETY: setting env vars in process is widely supported but
-                // is technically unsafe in multi-threaded contexts. We're
-                // single-threaded at this point (no audio threads spawned yet).
-                unsafe {
-                    std::env::set_var("PIPER_ESPEAKNG_DATA_DIRECTORY", parent);
-                }
-                break;
-            }
-        }
-    }
-
     // ── Build TTS (real piper) ─────────────────────────────────────
+    // PIPER_ESPEAKNG_DATA_DIRECTORY is probed and set by `main()` before
+    // the tokio runtime starts (see `probe_espeak_ng_data`). Doing it here
+    // would be unsound — the runtime worker threads already exist.
     let tts: std::sync::Arc<dyn StreamingTextToSpeech> =
         std::sync::Arc::new(PiperTts::new(cfg.voice_onnx, cfg.voice_config)?);
     let tts_sample_rate = tts.sample_rate();
@@ -569,7 +586,7 @@ pub async fn run<'a>(
     }));
 
     // ── Channels ───────────────────────────────────────────────────
-    let (event_tx, event_rx) = tokio::sync::mpsc::unbounded_channel::<VadEvent>();
+    let (event_tx, event_rx) = tokio::sync::mpsc::channel::<VadEvent>(VAD_EVENT_CHANNEL_CAPACITY);
     let (transcript_tx, transcript_rx) = std::sync::mpsc::channel::<String>();
     // Cancellation flag — set when run_loop exits to tell the audio
     // thread to stop.
@@ -611,8 +628,8 @@ pub async fn run<'a>(
     // ── Build LoopBackends with the channel STT wrapper ────────────
     let backends = LoopBackends {
         vad: Box::new(NoopVad),
-        stt: std::sync::Arc::new(ChannelStt {
-            rx: std::sync::Arc::new(std::sync::Mutex::new(transcript_rx)),
+        stt: Arc::new(ChannelStt {
+            rx: Arc::new(std::sync::Mutex::new(transcript_rx)),
         }),
         tts: std::sync::Arc::clone(&tts),
         voice: primer_core::speech::VoiceProfile {
@@ -782,7 +799,7 @@ fn run_audio_thread(
     vad_chunk_samples: usize,
     vad: &mut primer_speech::SileroVad,
     whisper: std::sync::Arc<primer_speech::WhisperStt>,
-    event_tx: tokio::sync::mpsc::UnboundedSender<primer_core::speech::VadEvent>,
+    event_tx: tokio::sync::mpsc::Sender<primer_core::speech::VadEvent>,
     transcript_tx: std::sync::mpsc::Sender<String>,
     stop_flag: std::sync::Arc<std::sync::atomic::AtomicBool>,
     is_speaking: std::sync::Arc<std::sync::atomic::AtomicBool>,
@@ -792,6 +809,9 @@ fn run_audio_thread(
 
     let mut raw_buf: Vec<f32> = Vec::with_capacity(in_chunk_samples * 2);
     let mut vad_in_buf: Vec<f32> = Vec::with_capacity(vad_chunk_samples * 2);
+    // Reusable scratch buffer for the per-iteration VAD chunk; avoids
+    // allocating ~32 Vecs/sec for the hot path.
+    let mut vad_chunk: Vec<f32> = Vec::with_capacity(vad_chunk_samples);
     // The active whisper session, if we're in speech.
     let mut active_session: Option<Box<dyn TranscriptionSession>> = None;
 
@@ -863,14 +883,15 @@ fn run_audio_thread(
 
         // Process VAD chunks while we have enough samples.
         while vad_in_buf.len() >= vad_chunk_samples {
-            let chunk: Vec<f32> = vad_in_buf.drain(..vad_chunk_samples).collect();
+            vad_chunk.clear();
+            vad_chunk.extend(vad_in_buf.drain(..vad_chunk_samples));
             // Push into whisper if we have an active session.
             if let Some(session) = active_session.as_mut() {
-                if let Err(e) = session.push_audio(&chunk) {
+                if let Err(e) = session.push_audio(&vad_chunk) {
                     tracing::warn!("whisper push_audio: {e}");
                 }
             }
-            let frame = match vad.process_chunk(&chunk) {
+            let frame = match vad.process_chunk(&vad_chunk) {
                 Ok(f) => f,
                 Err(e) => {
                     tracing::warn!("vad process_chunk: {e}");
@@ -888,7 +909,7 @@ fn run_audio_thread(
                             }
                         }
                     }
-                    if event_tx.send(VadEvent::SpeechStart).is_err() {
+                    if event_tx.blocking_send(VadEvent::SpeechStart).is_err() {
                         // run_loop has dropped; exit thread.
                         return Ok(());
                     }
@@ -915,7 +936,7 @@ fn run_audio_thread(
                     if transcript_tx.send(text).is_err() {
                         return Ok(());
                     }
-                    if event_tx.send(VadEvent::SpeechEnd).is_err() {
+                    if event_tx.blocking_send(VadEvent::SpeechEnd).is_err() {
                         return Ok(());
                     }
                 }
@@ -1128,9 +1149,9 @@ mod mocks {
             voice: primer_core::speech::VoiceProfile::default(),
         };
 
-        let (event_tx, event_rx) = tokio::sync::mpsc::unbounded_channel();
-        event_tx.send(VadEvent::SpeechStart).unwrap();
-        event_tx.send(VadEvent::SpeechEnd).unwrap();
+        let (event_tx, event_rx) = tokio::sync::mpsc::channel(64);
+        event_tx.try_send(VadEvent::SpeechStart).unwrap();
+        event_tx.try_send(VadEvent::SpeechEnd).unwrap();
         drop(event_tx);
 
         let captured_transcript = Arc::new(Mutex::new(String::new()));
@@ -1174,11 +1195,13 @@ mod mocks {
         assert!(!committed.lock().unwrap().is_empty(), "audio was committed");
     }
 
-    /// Test 4 — natural completion, no audio: LLM returns whitespace
-    /// only. Loop should not commit any audio and should return to
-    /// LISTEN cleanly.
+    /// Test 4 — quit phrase short-circuits SPEAK: child says "goodbye",
+    /// the responder returns an empty string. The loop pushes the
+    /// transcript, hits the quit-phrase branch, and exits before
+    /// reaching SPEAK — so no audio is committed regardless of the
+    /// (empty) responder output.
     #[tokio::test]
-    async fn natural_completion_no_audio_does_not_commit() {
+    async fn quit_phrase_short_circuits_speak() {
         use primer_core::speech::VadEvent;
 
         let backends = super::LoopBackends {
@@ -1191,13 +1214,13 @@ mod mocks {
             voice: primer_core::speech::VoiceProfile::default(),
         };
 
-        let (event_tx, event_rx) = tokio::sync::mpsc::unbounded_channel();
-        event_tx.send(VadEvent::SpeechStart).unwrap();
-        event_tx.send(VadEvent::SpeechEnd).unwrap();
+        let (event_tx, event_rx) = tokio::sync::mpsc::channel(64);
+        event_tx.try_send(VadEvent::SpeechStart).unwrap();
+        event_tx.try_send(VadEvent::SpeechEnd).unwrap();
         drop(event_tx);
 
-        struct WhitespaceResponder;
-        impl super::Responder for WhitespaceResponder {
+        struct EmptyResponder;
+        impl super::Responder for EmptyResponder {
             fn respond<'a>(
                 &'a mut self,
                 _transcript: &'a str,
@@ -1225,19 +1248,17 @@ mod mocks {
         let result = super::run_loop(
             backends,
             event_rx,
-            Box::new(WhitespaceResponder),
+            Box::new(EmptyResponder),
             on_audio,
             false,
             None,
         )
         .await;
-        // "goodbye" hits the quit-phrase check, so the loop exits with
-        // exactly one transcript and no audio committed.
         let transcripts = result.expect("loop ok");
         assert_eq!(transcripts, vec!["goodbye".to_string()]);
         assert!(
             committed.lock().unwrap().is_empty(),
-            "no audio for whitespace"
+            "quit phrase exits before SPEAK"
         );
     }
 
@@ -1261,20 +1282,37 @@ mod mocks {
             voice: primer_core::speech::VoiceProfile::default(),
         };
 
-        let (event_tx, event_rx) = tokio::sync::mpsc::unbounded_channel();
+        let (event_tx, event_rx) = tokio::sync::mpsc::channel(64);
         // First SpeechStart → SpeechEnd: triggers LATENT_THINK.
-        event_tx.send(VadEvent::SpeechStart).unwrap();
-        event_tx.send(VadEvent::SpeechEnd).unwrap();
+        event_tx.try_send(VadEvent::SpeechStart).unwrap();
+        event_tx.try_send(VadEvent::SpeechEnd).unwrap();
         // Then SpeechStart mid-LATENT_THINK: triggers cancel.
-        event_tx.send(VadEvent::SpeechStart).unwrap();
+        event_tx.try_send(VadEvent::SpeechStart).unwrap();
         // Then SpeechEnd: retry LATENT_THINK.
-        event_tx.send(VadEvent::SpeechEnd).unwrap();
+        event_tx.try_send(VadEvent::SpeechEnd).unwrap();
         drop(event_tx);
 
         let call_count = Arc::new(std::sync::atomic::AtomicUsize::new(0));
         let cc_clone = Arc::clone(&call_count);
+        // Cancel-drop counter — bumped only by the guard inside the
+        // PARKING branch. The succeeding future never enters that
+        // branch, so this counter discriminates "cancelled future was
+        // dropped" from "any future was dropped." `== 1` is the exact
+        // cancellation contract: the in-flight LLM call's destructor
+        // runs, releasing resources.
+        let cancel_drops = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let cd_clone = Arc::clone(&cancel_drops);
         struct CountingResponder {
             count: Arc<std::sync::atomic::AtomicUsize>,
+            cancel_drops: Arc<std::sync::atomic::AtomicUsize>,
+        }
+        struct CancelGuard {
+            drops: Arc<std::sync::atomic::AtomicUsize>,
+        }
+        impl Drop for CancelGuard {
+            fn drop(&mut self) {
+                self.drops.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            }
         }
         impl super::Responder for CountingResponder {
             fn respond<'a>(
@@ -1289,13 +1327,21 @@ mod mocks {
                 >,
             > {
                 let n = self.count.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                let cancel_drops = Arc::clone(&self.cancel_drops);
                 Box::pin(async move {
                     if n == 0 {
                         // First call: park forever so the cancel arm wins.
+                        // CancelGuard scoped to this branch only — its
+                        // Drop only runs when the parking future itself
+                        // is dropped (i.e. cancelled).
+                        let _guard = CancelGuard {
+                            drops: cancel_drops,
+                        };
                         std::future::pending::<()>().await;
                         unreachable!()
                     }
-                    // Second call: respond promptly.
+                    // Second call: respond promptly. No CancelGuard
+                    // here — only the cancellation path counts.
                     on_chunk("Because of Rayleigh scattering.");
                     Ok("Because of Rayleigh scattering.".to_string())
                 })
@@ -1313,7 +1359,10 @@ mod mocks {
             super::run_loop(
                 backends,
                 event_rx,
-                Box::new(CountingResponder { count: cc_clone }),
+                Box::new(CountingResponder {
+                    count: cc_clone,
+                    cancel_drops: cd_clone,
+                }),
                 on_audio,
                 false,
                 None,
@@ -1331,6 +1380,16 @@ mod mocks {
             call_count.load(std::sync::atomic::Ordering::SeqCst),
             2,
             "responder called twice"
+        );
+        // The cancelled (parking) future MUST have its destructor run —
+        // exactly once — that's the cancellation guarantee. CancelGuard
+        // is scoped to the parking branch only; the succeeding future
+        // doesn't construct one, so this asserts the leak-vs-drop
+        // contract precisely.
+        assert_eq!(
+            cancel_drops.load(std::sync::atomic::Ordering::SeqCst),
+            1,
+            "cancelled LLM future was dropped exactly once (not leaked)"
         );
         // Audio committed (from second responder call).
         assert!(
@@ -1354,9 +1413,9 @@ mod mocks {
             voice: primer_core::speech::VoiceProfile::default(),
         };
 
-        let (event_tx, event_rx) = tokio::sync::mpsc::unbounded_channel();
-        event_tx.send(VadEvent::SpeechStart).unwrap();
-        event_tx.send(VadEvent::SpeechEnd).unwrap();
+        let (event_tx, event_rx) = tokio::sync::mpsc::channel(64);
+        event_tx.try_send(VadEvent::SpeechStart).unwrap();
+        event_tx.try_send(VadEvent::SpeechEnd).unwrap();
         // Crucially: NO SpeechStart between SpeechEnd and the LLM future
         // resolving. Commit should proceed.
         drop(event_tx);
@@ -1400,6 +1459,196 @@ mod mocks {
 
         assert_eq!(result, vec!["hi primer".to_string()]);
         assert!(!committed.lock().unwrap().is_empty(), "audio committed");
+    }
+
+    /// Test 5 — is_speaking gate observed during SPEAK: when the loop
+    /// is given an `Arc<AtomicBool>` gate, the on_audio callback fires
+    /// while the gate is set true (proving the audio thread would discard
+    /// mic samples), and the gate clears to false before run_loop returns.
+    #[tokio::test]
+    async fn is_speaking_gate_flips_around_speak() {
+        use std::sync::atomic::{AtomicBool, Ordering};
+
+        use primer_core::speech::VadEvent;
+
+        let backends = super::LoopBackends {
+            vad: Box::new(MockVad::new(vec![])),
+            stt: Arc::new(MockStreamingStt::new("hi")),
+            tts: Arc::new(MockStreamingTts::new(64)),
+            voice: primer_core::speech::VoiceProfile::default(),
+        };
+
+        let (event_tx, event_rx) = tokio::sync::mpsc::channel(64);
+        event_tx.try_send(VadEvent::SpeechStart).unwrap();
+        event_tx.try_send(VadEvent::SpeechEnd).unwrap();
+        drop(event_tx);
+
+        struct PromptResponder;
+        impl super::Responder for PromptResponder {
+            fn respond<'a>(
+                &'a mut self,
+                _transcript: &'a str,
+                _on_chunk: Box<dyn FnMut(&str) + Send + 'a>,
+            ) -> std::pin::Pin<
+                Box<
+                    dyn std::future::Future<Output = primer_core::error::Result<String>>
+                        + Send
+                        + 'a,
+                >,
+            > {
+                Box::pin(async move { Ok("Hi back.".to_string()) })
+            }
+        }
+
+        let is_speaking = Arc::new(AtomicBool::new(false));
+        let observed_true = Arc::new(AtomicBool::new(false));
+        let observed_clone = Arc::clone(&observed_true);
+        let speaking_for_cb = Arc::clone(&is_speaking);
+        let on_audio: Box<dyn FnMut(Vec<f32>) + Send> = Box::new(move |_samples| {
+            if speaking_for_cb.load(Ordering::SeqCst) {
+                observed_clone.store(true, Ordering::SeqCst);
+            }
+        });
+
+        // 0.4 s + a few ms — slightly more than the SPEAK drain wait.
+        // 64 mock samples / 22 050 Hz ≈ 3 ms, plus a 200 ms inter-phrase
+        // silence and the 400 ms safety margin = ~603 ms total.
+        let result = tokio::time::timeout(
+            std::time::Duration::from_secs(2),
+            super::run_loop(
+                backends,
+                event_rx,
+                Box::new(PromptResponder),
+                on_audio,
+                false,
+                Some(Arc::clone(&is_speaking)),
+            ),
+        )
+        .await
+        .expect("did not deadlock")
+        .expect("loop ok");
+
+        assert_eq!(result, vec!["hi".to_string()]);
+        assert!(
+            observed_true.load(Ordering::SeqCst),
+            "is_speaking flag was true during SPEAK audio commit"
+        );
+        assert!(
+            !is_speaking.load(Ordering::SeqCst),
+            "is_speaking flag is cleared after SPEAK"
+        );
+    }
+
+    /// Test 6 — LLM error fallback: when the responder returns Err,
+    /// run_loop synthesises FALLBACK_LINE rather than propagating the
+    /// error. Asserts the loop returns Ok(child transcript) and that
+    /// the TTS received exactly the FALLBACK_LINE string (proving the
+    /// child hears the apology).
+    #[tokio::test]
+    async fn llm_error_synthesises_fallback_line() {
+        use std::sync::Mutex;
+
+        use primer_core::speech::{
+            AudioChunk, Named, StreamingTextToSpeech, SynthesisSession, VadEvent, VoiceProfile,
+        };
+
+        // TTS that records every text fed to its session.
+        struct CapturingTts {
+            captured: Arc<Mutex<Vec<String>>>,
+        }
+        impl Named for CapturingTts {
+            fn name(&self) -> &str {
+                "capturing-tts"
+            }
+        }
+        impl StreamingTextToSpeech for CapturingTts {
+            fn sample_rate(&self) -> u32 {
+                22_050
+            }
+            fn open_session(
+                &self,
+                _voice: &VoiceProfile,
+            ) -> primer_core::error::Result<Box<dyn SynthesisSession>> {
+                Ok(Box::new(CapturingSession {
+                    captured: Arc::clone(&self.captured),
+                }))
+            }
+        }
+        struct CapturingSession {
+            captured: Arc<Mutex<Vec<String>>>,
+        }
+        impl SynthesisSession for CapturingSession {
+            fn push_text(&mut self, text: &str) -> primer_core::error::Result<Vec<AudioChunk>> {
+                if text.is_empty() {
+                    return Ok(vec![]);
+                }
+                self.captured.lock().unwrap().push(text.to_string());
+                Ok(vec![AudioChunk {
+                    samples: vec![0.5; 64],
+                    sample_rate: 22_050,
+                }])
+            }
+            fn finalize(self: Box<Self>) -> primer_core::error::Result<Vec<AudioChunk>> {
+                Ok(vec![])
+            }
+        }
+
+        let captured = Arc::new(Mutex::new(Vec::<String>::new()));
+        let backends = super::LoopBackends {
+            vad: Box::new(MockVad::new(vec![])),
+            stt: Arc::new(MockStreamingStt::new("hello primer")),
+            tts: Arc::new(CapturingTts {
+                captured: Arc::clone(&captured),
+            }),
+            voice: VoiceProfile::default(),
+        };
+
+        let (event_tx, event_rx) = tokio::sync::mpsc::channel(64);
+        event_tx.try_send(VadEvent::SpeechStart).unwrap();
+        event_tx.try_send(VadEvent::SpeechEnd).unwrap();
+        drop(event_tx);
+
+        struct ErrResponder;
+        impl super::Responder for ErrResponder {
+            fn respond<'a>(
+                &'a mut self,
+                _transcript: &'a str,
+                _on_chunk: Box<dyn FnMut(&str) + Send + 'a>,
+            ) -> std::pin::Pin<
+                Box<
+                    dyn std::future::Future<Output = primer_core::error::Result<String>>
+                        + Send
+                        + 'a,
+                >,
+            > {
+                Box::pin(async move {
+                    Err(primer_core::error::PrimerError::Inference(
+                        "rate limit".into(),
+                    ))
+                })
+            }
+        }
+
+        let on_audio: Box<dyn FnMut(Vec<f32>) + Send> = Box::new(|_samples| {});
+        let result = super::run_loop(
+            backends,
+            event_rx,
+            Box::new(ErrResponder),
+            on_audio,
+            false,
+            None,
+        )
+        .await
+        .expect("loop returns Ok despite responder error");
+
+        assert_eq!(result, vec!["hello primer".to_string()]);
+        let texts = captured.lock().unwrap();
+        assert_eq!(texts.len(), 1, "TTS got exactly one push_text call");
+        assert_eq!(
+            texts[0],
+            super::FALLBACK_LINE,
+            "fallback line was synthesised after LLM error"
+        );
     }
 }
 
