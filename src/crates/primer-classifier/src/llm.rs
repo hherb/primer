@@ -10,6 +10,7 @@ use tracing::warn;
 use primer_core::classifier::{EngagementAssessment, EngagementContext};
 use primer_core::error::Result;
 use primer_core::inference::InferenceBackend;
+use primer_core::llm_util::{extract_first_json_object, truncate_to_chars};
 
 use crate::EngagementClassifier;
 use crate::settings::ClassifierSettings;
@@ -71,23 +72,6 @@ impl EngagementClassifier for LlmEngagementClassifier {
             }
         }
     }
-}
-
-// ── Helpers ───────────────────────────────────────────────────────────────────
-
-/// Return a prefix of `s` that is at most `max_chars` Unicode scalar values
-/// long. Unlike a raw byte-index slice, this never panics on multi-byte
-/// character boundaries.
-fn truncate_to_chars(s: &str, max_chars: usize) -> &str {
-    if s.chars().count() <= max_chars {
-        return s;
-    }
-    let end = s
-        .char_indices()
-        .nth(max_chars)
-        .map(|(i, _)| i)
-        .unwrap_or(s.len());
-    &s[..end]
 }
 
 // ── Prompt builder ────────────────────────────────────────────────────────────
@@ -181,43 +165,6 @@ fn parse_classification_output(raw: &str) -> std::result::Result<EngagementAsses
         confidence: parsed.confidence,
         reasoning: parsed.reasoning,
     })
-}
-
-/// Extract the first balanced JSON object from `raw`. Tolerates wrapper
-/// text before/after, and JSON containing nested braces. Returns the
-/// substring including the outer braces, or None if not found.
-fn extract_first_json_object(raw: &str) -> Option<&str> {
-    let start = raw.find('{')?;
-    let bytes = raw.as_bytes();
-    let mut depth = 0i32;
-    let mut in_string = false;
-    let mut escape = false;
-    for (i, &b) in bytes.iter().enumerate().skip(start) {
-        if escape {
-            escape = false;
-            continue;
-        }
-        if in_string {
-            match b {
-                b'\\' => escape = true,
-                b'"' => in_string = false,
-                _ => {}
-            }
-            continue;
-        }
-        match b {
-            b'"' => in_string = true,
-            b'{' => depth += 1,
-            b'}' => {
-                depth -= 1;
-                if depth == 0 {
-                    return Some(&raw[start..=i]);
-                }
-            }
-            _ => {}
-        }
-    }
-    None
 }
 
 // ── Tests ─────────────────────────────────────────────────────────────────────
