@@ -38,6 +38,11 @@ fn is_quit_phrase(transcript: &str) -> bool {
 /// treated as multiplication and replaced with " times " so `5*3=15`
 /// reads as "5 times 3=15" instead of "53=15". Underscore-emphasis is
 /// rare and ambiguous (shows up in identifiers too) — left alone.
+///
+/// Recursion: the function recurses into the inner content of paired
+/// markers (e.g. the `5*3=15` inside `**5*3=15**`). Each recursive call
+/// receives a strict substring, so depth is bounded by `input.len()/2`
+/// and stack overflow is impossible for any realistic Primer turn.
 fn strip_markdown_for_tts(text: &str) -> String {
     let chars: Vec<char> = text.chars().collect();
     let mut out = String::with_capacity(text.len());
@@ -83,6 +88,11 @@ fn strip_markdown_for_tts(text: &str) -> String {
 /// If `chars[i]` is the start of a digit-bounded run of `*` (e.g. `*`
 /// or `**` flanked by digits), return the index just past the run.
 /// Otherwise return `None`. The caller emits " times " in that case.
+///
+/// Only ASCII integer boundaries match: `1.5*2`, `1,000*5`, and any
+/// non-ASCII numeral won't trigger the rewrite. This is the right
+/// trade-off for a children's tutor (integer multiplication dominates),
+/// and keeps the heuristic narrow enough that it never fires on prose.
 fn consume_digit_times(chars: &[char], i: usize) -> Option<usize> {
     if i == 0 || !chars[i - 1].is_ascii_digit() {
         return None;
@@ -171,6 +181,26 @@ pub struct LoopBackends {
     pub voice: primer_core::speech::VoiceProfile,
 }
 
+/// Awaitable hook that blocks until the speaker has finished playing
+/// every queued sample. Production wires this to a `spawn_blocking`
+/// around [`primer_speech::wait_for_drain`]; tests pass `None`.
+///
+/// `FnMut` (not `FnOnce`) so it can be reused across SPEAK phases. The
+/// returned future is a `'static` boxed future so the hook does not
+/// borrow from `run_loop`'s call frame — captures live in the closure
+/// itself (typically `Arc`s to the speaker producer + errored flag).
+///
+/// Why a separate hook instead of doing the wait inside `on_audio`:
+/// `on_audio` is sync, called from `run_loop`'s async context. A
+/// `std::thread::sleep` inside it would block the tokio worker for the
+/// duration of the drain (up to 5 s in production), starving any other
+/// task scheduled on the same worker — and panicking on a single-threaded
+/// runtime. Going through `spawn_blocking` lets the runtime schedule
+/// other work onto a free worker while the drain spins on the blocking
+/// pool. See PR #12 review for the full discussion.
+pub type DrainHook =
+    Box<dyn FnMut() -> std::pin::Pin<Box<dyn std::future::Future<Output = ()> + Send>> + Send>;
+
 /// One commit cycle: receives transcripts on `transcript_rx`, runs the
 /// LLM, returns the full Primer reply (for the caller to print and feed
 /// into TTS). Production wires this through `DialogueManager`; tests
@@ -208,11 +238,17 @@ pub trait Responder: Send {
 /// process or discard mic samples. `run_loop` flips it true at the start
 /// of SPEAK and back to false after the synthesised audio has had time
 /// to drain to the speaker. Tests pass `None` (mocks have no audio thread).
+///
+/// `wait_for_speaker_drain` is awaited (in production) after the flush
+/// sentinel returns and before `is_speaking` is cleared. Production wires
+/// it to a `spawn_blocking` around [`primer_speech::wait_for_drain`]; tests
+/// pass `None` (mock speakers have no real ringbuf to drain).
 pub async fn run_loop<'r>(
     backends: LoopBackends,
     mut events: tokio::sync::mpsc::Receiver<primer_core::speech::VadEvent>,
     mut responder: Box<dyn Responder + 'r>,
     mut on_committed_audio: Box<dyn FnMut(Vec<f32>) + Send>,
+    mut wait_for_speaker_drain: Option<DrainHook>,
     verbose: bool,
     is_speaking: Option<std::sync::Arc<std::sync::atomic::AtomicBool>>,
 ) -> Result<Vec<String>> {
@@ -404,14 +440,19 @@ pub async fn run_loop<'r>(
                 on_committed_audio(vec![0.0_f32; inter_phrase_silence_samples]);
             }
             // Flush sentinel: empty Vec signals on_audio to drain any
-            // resampler-leftover tail AND (in production) wait for cpal
-            // to actually empty the ringbuf before returning. Mock
-            // callbacks no-op on empty input. Replaces the old
-            // `samples / tts_rate + 0.4s` heuristic sleep that lived
-            // here — the exact "speaker has played everything" signal
-            // now lives in the on_audio callback (where the producer
-            // is in scope to query `occupied_len`).
+            // resampler-leftover tail. Mock callbacks no-op on empty
+            // input.
             on_committed_audio(Vec::new());
+            // Wait for cpal to actually empty the speaker ringbuf
+            // before clearing the mic gate. Going through `spawn_blocking`
+            // (in the hook the caller wired) keeps this off the tokio
+            // worker so other async work isn't starved during the
+            // drain wait. Replaces the old `samples / tts_rate + 0.4s`
+            // heuristic sleep — exact instead of "fixed margin that's
+            // too short on slow hardware and too long on fast hardware".
+            if let Some(hook) = wait_for_speaker_drain.as_mut() {
+                hook().await;
+            }
             if let Some(flag) = is_speaking.as_ref() {
                 flag.store(false, std::sync::atomic::Ordering::SeqCst);
             }
@@ -591,13 +632,21 @@ pub async fn run<'a>(
     }
 
     // ── Open speaker ───────────────────────────────────────────────
-    let (spk, mut spk_prod) = SpeakerSink::start()?;
+    let (spk, spk_prod) = SpeakerSink::start()?;
     let spk_rate = spk.sample_rate;
     // Shared "stream errored" flag — set by cpal's err_callback if the
     // output device disappears mid-session. The on_audio retry loop
     // checks this so it bails instead of spinning forever on a dead
     // stream where push_slice will return 0 indefinitely.
     let spk_errored = spk.errored_flag();
+    // Wrap the producer in `Arc<Mutex<>>` so it can be observed both
+    // from the on_audio callback (push samples) and from the drain
+    // hook (read `occupied_len`). The mutex is uncontended in practice
+    // — on_audio runs synchronously from `run_loop`, and the drain
+    // hook is invoked only after on_audio's flush sentinel returns,
+    // so push and observe never overlap. Cost: one uncontended lock
+    // acquire per phrase, negligible at TTS rates.
+    let spk_prod = std::sync::Arc::new(std::sync::Mutex::new(spk_prod));
     if cfg.verbose {
         eprintln!(
             "[speech] speaker opened: {}Hz, {} channels",
@@ -699,6 +748,7 @@ pub async fn run<'a>(
     let output_resampler_for_cb = std::sync::Arc::clone(&output_resampler);
     let mut output_leftover: Vec<f32> = Vec::with_capacity(output_chunk_in);
     let spk_errored_for_cb = std::sync::Arc::clone(&spk_errored);
+    let spk_prod_for_cb = std::sync::Arc::clone(&spk_prod);
     let on_audio: Box<dyn FnMut(Vec<f32>) + Send> = Box::new(move |samples| {
         let is_flush = samples.is_empty();
         let mut samples = samples;
@@ -765,29 +815,20 @@ pub async fn run<'a>(
         // give up. The retry bails when `spk_errored` flips true (cpal
         // output stream errored, device removed, etc.) instead of
         // spinning forever on a dead stream.
+        //
+        // The drain wait that used to sit here on the flush sentinel
+        // has moved to the `wait_for_speaker_drain` hook in `run_loop`
+        // — see [`DrainHook`]. Putting it through `spawn_blocking`
+        // keeps the synchronous wait off the tokio worker.
         if !samples.is_empty() {
+            let mut prod = spk_prod_for_cb
+                .lock()
+                .expect("speaker producer mutex poisoned");
             primer_speech::push_all_with_bail(
-                &mut spk_prod,
+                &mut prod,
                 &samples,
                 &spk_errored_for_cb,
                 std::time::Duration::from_millis(5),
-            );
-        }
-        // End-of-turn (flush sentinel): wait for cpal to actually drain
-        // the ringbuf before returning, so the mic gate in run_loop
-        // stays closed until the speaker is silent. Replaces the old
-        // heuristic `samples / tts_rate + 0.4s` sleep — exact instead
-        // of "fixed margin that's too short on slow hardware and too
-        // long on fast hardware". Bails on errored stream; capped at 5 s
-        // sanity timeout so a stuck buffer can't hang the REPL.
-        if is_flush {
-            let _ = primer_speech::wait_for_drain(
-                &spk_prod,
-                &spk_errored_for_cb,
-                std::time::Duration::from_millis(10),
-                3,
-                std::time::Duration::from_millis(80),
-                std::time::Duration::from_secs(5),
             );
         }
     });
@@ -795,12 +836,42 @@ pub async fn run<'a>(
     // ── Wire DialogueManager via the Responder adapter ─────────────
     let responder: Box<dyn Responder + '_> = Box::new(DialogueResponder { dialogue });
 
+    // ── Build the drain hook ───────────────────────────────────────
+    // Each invocation spawns a blocking task that polls the speaker
+    // ringbuf until cpal has drained it, then awaits the JoinHandle.
+    // The closures capture Arc clones so the hook is `'static + Send`
+    // (required by `spawn_blocking`). FnMut so `run_loop` can call it
+    // once per turn.
+    let spk_prod_for_drain = std::sync::Arc::clone(&spk_prod);
+    let spk_errored_for_drain = std::sync::Arc::clone(&spk_errored);
+    let drain_hook: DrainHook = Box::new(move || {
+        let prod = std::sync::Arc::clone(&spk_prod_for_drain);
+        let errored = std::sync::Arc::clone(&spk_errored_for_drain);
+        Box::pin(async move {
+            let join = tokio::task::spawn_blocking(move || {
+                let prod_guard = prod.lock().expect("speaker producer mutex poisoned");
+                let _ = primer_speech::wait_for_drain(
+                    &prod_guard,
+                    &errored,
+                    std::time::Duration::from_millis(10),
+                    3,
+                    std::time::Duration::from_millis(80),
+                    std::time::Duration::from_secs(5),
+                );
+            });
+            if let Err(e) = join.await {
+                tracing::warn!("speaker drain task did not complete: {e:?}");
+            }
+        })
+    });
+
     // ── Drive the loop ─────────────────────────────────────────────
     let result = run_loop(
         backends,
         event_rx,
         responder,
         on_audio,
+        Some(drain_hook),
         cfg.verbose,
         Some(std::sync::Arc::clone(&is_speaking)),
     )
@@ -1181,7 +1252,8 @@ mod mocks {
             committed_clone.lock().unwrap().extend(samples);
         });
 
-        let result = super::run_loop(backends, event_rx, responder, on_audio, false, None).await;
+        let result =
+            super::run_loop(backends, event_rx, responder, on_audio, None, false, None).await;
         let transcripts = result.expect("loop ok");
         assert_eq!(transcripts, vec!["hello primer".to_string()]);
         assert_eq!(*captured_transcript.lock().unwrap(), "hello primer");
@@ -1239,6 +1311,7 @@ mod mocks {
             event_rx,
             Box::new(EmptyResponder),
             on_audio,
+            None,
             false,
             None,
         )
@@ -1352,6 +1425,7 @@ mod mocks {
                     cancel_drops: cd_clone,
                 }),
                 on_audio,
+                None,
                 false,
                 None,
             ),
@@ -1438,6 +1512,7 @@ mod mocks {
             event_rx,
             Box::new(PromptResponder),
             on_audio,
+            None,
             false,
             None,
         )
@@ -1507,6 +1582,7 @@ mod mocks {
                 event_rx,
                 Box::new(PromptResponder),
                 on_audio,
+                None,
                 false,
                 Some(Arc::clone(&is_speaking)),
             ),
@@ -1621,6 +1697,7 @@ mod mocks {
             event_rx,
             Box::new(ErrResponder),
             on_audio,
+            None,
             false,
             None,
         )
@@ -1698,6 +1775,18 @@ mod markdown_tests {
     #[test]
     fn empty_input_returns_empty() {
         assert_eq!(strip_markdown_for_tts(""), "");
+    }
+
+    /// Triple-`*` runs (bold-italic markdown) are not currently
+    /// recognised — the inner closer is rejected by the
+    /// "not adjacent to another marker" guard and the outer pair
+    /// finds no match. Pinned here so a future refactor doesn't
+    /// silently break the current behaviour. If this assertion
+    /// ever needs updating, re-derive the right output from first
+    /// principles rather than tweaking the test.
+    #[test]
+    fn triple_star_passes_through_unchanged_for_now() {
+        assert_eq!(strip_markdown_for_tts("***foo***"), "***foo***");
     }
 }
 

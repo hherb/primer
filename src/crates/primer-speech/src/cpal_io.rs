@@ -253,11 +253,14 @@ impl SpeakerSink {
 
         let errored = Arc::new(AtomicBool::new(false));
 
+        // Release on the producer side pairs with Acquire on the consumer
+        // (push_all_with_bail / wait_for_drain). SeqCst would also work
+        // but is stricter than this single-flag handshake needs.
         let make_err_callback = || {
             let flag = Arc::clone(&errored);
             move |err| {
                 tracing::error!("cpal output stream error: {err}");
-                flag.store(true, Ordering::SeqCst);
+                flag.store(true, Ordering::Release);
             }
         };
 
@@ -324,6 +327,8 @@ impl SpeakerSink {
 /// `retry_sleep` is parameterised so tests can pass `Duration::ZERO`. The
 /// production caller should pass ~5 ms — long enough to yield CPU between
 /// drain cycles, short enough to keep produce-side latency negligible.
+///
+/// Acquire on the load pairs with the Release store in cpal's err_callback.
 pub fn push_all_with_bail(
     prod: &mut HeapProd<f32>,
     samples: &[f32],
@@ -332,7 +337,7 @@ pub fn push_all_with_bail(
 ) -> usize {
     let mut written = 0;
     while written < samples.len() {
-        if errored.load(Ordering::SeqCst) {
+        if errored.load(Ordering::Acquire) {
             let dropped = samples.len() - written;
             tracing::warn!(
                 "cpal output stream errored; discarding {dropped} samples (of {} total)",
@@ -365,7 +370,14 @@ pub fn push_all_with_bail(
 /// `consecutive_zero_checks` requires that many sequential polls observe
 /// an empty buffer before declaring drain complete; this defends against
 /// a transient zero between two cpal callbacks. `grace` covers the cpal
-/// output device's own internal buffering (typically ~10–30 ms).
+/// output device's own internal buffering (typically ~10–30 ms) and is
+/// included in `max_wait` — total wallclock spent in this call is at
+/// most `max_wait`, so callers can trust it as a true upper bound. If
+/// `grace >= max_wait` the observation window is zero and the call
+/// times out without observing.
+///
+/// Acquire on the errored load pairs with the Release store in cpal's
+/// err_callback.
 pub fn wait_for_drain(
     prod: &HeapProd<f32>,
     errored: &AtomicBool,
@@ -375,9 +387,10 @@ pub fn wait_for_drain(
     max_wait: Duration,
 ) -> bool {
     let start = std::time::Instant::now();
+    let observation_budget = max_wait.saturating_sub(grace);
     let mut zero_streak: u32 = 0;
-    while start.elapsed() < max_wait {
-        if errored.load(Ordering::SeqCst) {
+    while start.elapsed() < observation_budget {
+        if errored.load(Ordering::Acquire) {
             tracing::warn!("wait_for_drain: cpal output errored mid-drain; bailing");
             return false;
         }
@@ -542,7 +555,7 @@ mod tests {
         let flag = Arc::clone(&errored);
         let flipper = std::thread::spawn(move || {
             std::thread::sleep(Duration::from_millis(20));
-            flag.store(true, Ordering::SeqCst);
+            flag.store(true, Ordering::Release);
         });
 
         // Use a small non-zero retry sleep so the produce loop yields
@@ -550,8 +563,15 @@ mod tests {
         let written = push_all_with_bail(&mut prod, &samples, &errored, Duration::from_millis(2));
         flipper.join().unwrap();
 
-        // Filled the buffer, then bailed once the flag flipped.
-        assert_eq!(written, 4, "expected to write exactly the buffer capacity");
+        // Wrote at least one sample, then bailed once the flag flipped —
+        // could not have written everything because the consumer never
+        // drained. Range-bounded rather than `== 4` so we don't pin to
+        // ringbuf bulk-push semantics.
+        assert!(
+            (1..samples.len()).contains(&written),
+            "expected partial write (1..{}); got {written}",
+            samples.len()
+        );
     }
 
     #[test]
@@ -618,7 +638,7 @@ mod tests {
         let flag = Arc::clone(&errored);
         let flipper = std::thread::spawn(move || {
             std::thread::sleep(Duration::from_millis(20));
-            flag.store(true, Ordering::SeqCst);
+            flag.store(true, Ordering::Release);
         });
 
         let drained = wait_for_drain(
