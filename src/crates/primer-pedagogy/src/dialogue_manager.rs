@@ -99,7 +99,6 @@ pub struct DialogueManager<'a> {
     extractor_settings: ExtractorSettings,
     /// Handle to the in-flight extractor task spawned after the previous
     /// turn. `None` when no task is running.
-    #[allow(dead_code)] // wired by Task 9 (spawn site) + Task 11 (close drain)
     extract_task: Option<JoinHandle<Option<ConceptExtraction>>>,
     /// Pedagogical configuration.
     config: PedagogyConfig,
@@ -139,6 +138,54 @@ pub(crate) fn apply_assessment(
     }
     // Low-confidence assessments are still recorded in history (signal for
     // trajectory) but current_engagement stays unchanged.
+}
+
+/// Merge a `ConceptExtraction` into the in-memory `LearnerModel.concepts`.
+///
+/// Adds new `ConceptState` rows (depth = `Aware`, confidence = 0.5) for
+/// concepts not yet seen; for concepts already in the learner model,
+/// increments `encounter_count` and refreshes `last_encountered`. The
+/// updated state is what `LearnerStore::save_learner` will persist on
+/// the next save (idempotent upsert into `learner_concepts` — monotonic
+/// across the child's lifetime).
+///
+/// Both `child_concepts` and `primer_concepts` feed into the same
+/// `learner.concepts` store. Today the model doesn't distinguish "a
+/// concept the child surfaced" from "a concept the Primer introduced";
+/// future work could add a per-side `encounter_count_by_speaker`.
+pub(crate) fn apply_extraction(
+    learner: &mut primer_core::learner::LearnerModel,
+    extraction: &primer_core::extractor::ConceptExtraction,
+) -> bool {
+    use primer_core::learner::{ConceptState, UnderstandingDepth};
+    let now = Utc::now();
+    let mut changed = false;
+    let combined = extraction
+        .child_concepts
+        .iter()
+        .chain(extraction.primer_concepts.iter());
+    for name in combined {
+        if let Some(existing) = learner
+            .concepts
+            .iter_mut()
+            .find(|c| c.concept_id == *name)
+        {
+            existing.encounter_count = existing.encounter_count.saturating_add(1);
+            existing.last_encountered = Some(now);
+            changed = true;
+        } else {
+            learner.concepts.push(ConceptState {
+                concept_id: name.clone(),
+                depth: UnderstandingDepth::Aware,
+                confidence: 0.5,
+                encounter_count: 1,
+                last_encountered: Some(now),
+                notes: vec![],
+            });
+            changed = true;
+        }
+    }
+    changed
 }
 
 impl<'a> DialogueManager<'a> {
@@ -298,10 +345,12 @@ impl<'a> DialogueManager<'a> {
     where
         F: FnMut(&str),
     {
-        // 0. Wait for the previous turn's classification (if any) to complete
-        //    with a bounded timeout, then apply it so decide_intent sees the
-        //    updated engagement state.
+        // 0. Wait for the previous turn's classification + extraction (if any)
+        //    to complete with bounded timeouts, then apply their results so
+        //    decide_intent sees the updated engagement state and the system
+        //    prompt sees freshly-extracted learner concepts.
         self.await_pending_classification().await;
+        self.await_pending_extraction().await;
 
         // 1. Record the child's turn.
         let child_turn = Turn {
@@ -645,6 +694,40 @@ impl<'a> DialogueManager<'a> {
         }
     }
 
+    /// Wait (up to `extractor_settings.blocking_timeout`) for the extractor
+    /// task spawned after the previous turn, then apply its result to
+    /// `self.learner.concepts`.
+    ///
+    /// On timeout the task is detached (so the DB-persistence side effect
+    /// can still complete), but the in-memory learner update for THIS
+    /// turn is skipped — preferable to blocking the conversation. The
+    /// pending concepts will be visible from `load_learner` on next
+    /// resume regardless.
+    async fn await_pending_extraction(&mut self) {
+        let Some(task) = self.extract_task.take() else {
+            return;
+        };
+        let abort = task.abort_handle();
+        let timeout = self.extractor_settings.blocking_timeout;
+        match tokio::time::timeout(timeout, task).await {
+            Ok(Ok(Some(extraction))) => {
+                if apply_extraction(&mut self.learner, &extraction) {
+                    self.learner_dirty = true;
+                }
+            }
+            Ok(Ok(None)) => { /* soft failure; nothing to apply */ }
+            Ok(Err(e)) => tracing::warn!(error = ?e, "extractor task panicked"),
+            Err(_) => {
+                // Detach (don't abort) so the DB persistence side effect
+                // can still complete; we just skip the in-memory apply.
+                let _ = abort;
+                tracing::debug!(
+                    "extractor exceeded blocking timeout — proceeding without applied concepts"
+                );
+            }
+        }
+    }
+
     // ─── Private helpers ─────────────────────────────────────────────
 
     /// Retrieve knowledge passages relevant to the child's input.
@@ -825,6 +908,9 @@ mod tests {
         }
         fn summary_call_count(&self) -> u32 {
             *self.summarize_calls.lock().unwrap()
+        }
+        fn set_script(&self, items: Vec<Result<TokenChunk>>) {
+            *self.script.lock().unwrap() = Some(items);
         }
     }
 
@@ -2574,5 +2660,65 @@ mod tests {
         // Give the runtime a chance to run any spuriously-spawned task.
         tokio::time::sleep(std::time::Duration::from_millis(50)).await;
         assert!(store.captured().is_empty(), "extractor must not run on inference error");
+    }
+
+    #[tokio::test]
+    async fn pending_extraction_applied_to_learner_at_next_turn() {
+        let backend = ScriptedBackend::new(vec![
+            Ok(chunk("Hi turn 1!", true)),
+        ]);
+        // Two turns of extraction scripted: turn 1 surfaces "gravity" + "physics",
+        // turn 2 surfaces "mass". Only the first one matters for this test —
+        // we want to assert that after respond_to(turn 2), the learner has
+        // gravity from turn 1's extraction.
+        let extractor = Arc::new(primer_extractor::StubConceptExtractor::with_script(vec![
+            ConceptExtraction {
+                child_concepts: vec!["gravity".into()],
+                primer_concepts: vec!["physics".into()],
+            },
+            ConceptExtraction {
+                child_concepts: vec!["mass".into()],
+                primer_concepts: vec![],
+            },
+        ]));
+
+        let mut dm = DialogueManager::new(
+            test_learner(),
+            &backend as &dyn InferenceBackend,
+            &EmptyKnowledge as &dyn KnowledgeBase,
+            DialogueManagerStores::default(),
+            stub_classifier(),
+            ClassifierSettings::default(),
+            extractor as Arc<dyn ConceptExtractor>,
+            ExtractorSettings::default(),
+            PedagogyConfig::default(),
+        );
+
+        dm.respond_to("turn 1").await.unwrap();
+
+        // Refill the backend script for turn 2.
+        backend.set_script(vec![Ok(chunk("Hi turn 2!", true))]);
+
+        // Allow the previous-turn extractor task to complete before turn 2 starts.
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+
+        dm.respond_to("turn 2").await.unwrap();
+
+        let names: std::collections::HashSet<&str> = dm
+            .learner
+            .concepts
+            .iter()
+            .map(|c| c.concept_id.as_str())
+            .collect();
+        assert!(
+            names.contains("gravity"),
+            "child concept 'gravity' should be applied to learner; got: {:?}",
+            names
+        );
+        assert!(
+            names.contains("physics"),
+            "primer concept 'physics' should be applied to learner; got: {:?}",
+            names
+        );
     }
 }
