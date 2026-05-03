@@ -81,6 +81,11 @@ impl SqliteSessionStore {
         // existing-session learner_id is the CLI's job).
         schema::apply_v4_migrations(&conn)?;
 
+        // v5 migrations: idempotent on every open. Adds
+        // comprehension_classifiers and turn_comprehensions tables for
+        // per-concept comprehension assessments.
+        schema::apply_v5_migrations(&conn)?;
+
         if existing_version != schema::USER_VERSION {
             conn.execute_batch(&format!("PRAGMA user_version = {};", schema::USER_VERSION))
                 .map_err(|e| PrimerError::Storage(format!("set user_version failed: {e}")))?;
@@ -2330,8 +2335,8 @@ mod tests {
     }
 
     #[test]
-    fn user_version_is_four() {
-        assert_eq!(schema::USER_VERSION, 4);
+    fn user_version_is_five() {
+        assert_eq!(schema::USER_VERSION, 5);
     }
 
     // ─── save_classification / load_recent_assessments ───────────────

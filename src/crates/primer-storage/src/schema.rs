@@ -22,7 +22,11 @@ use rusqlite::Connection;
 /// plus `learners` and `learner_concepts` tables that back learner-model
 /// SQLite persistence (Phase 0.3). Schema-only — adoption of an existing
 /// session's `learner_id` happens at the CLI layer, not in this migration.
-pub const USER_VERSION: i64 = 4;
+///
+/// Bumped to 5 when we added the `comprehension_classifiers` and
+/// `turn_comprehensions` tables that back the per-concept
+/// comprehension-classifier feature (Phase 0.3).
+pub const USER_VERSION: i64 = 5;
 
 /// Idempotent CREATE statements for the base (v1) schema. Run on every
 /// `open()`. v2-specific objects are added by `apply_v2_migrations`.
@@ -307,6 +311,80 @@ pub(crate) fn apply_v4_migrations(conn: &Connection) -> Result<()> {
     Ok(())
 }
 
+// ─── v5 schema strings ──────────────────────────────────────────────────────
+//
+// v5 adds per-concept comprehension assessments alongside the existing
+// per-turn engagement classifications (v3). One row per (turn, concept,
+// classifier_id) — re-classification by a different classifier id lands
+// as a parallel row, preserving historical labels.
+
+const CREATE_COMPREHENSION_CLASSIFIERS_TABLE: &str = "
+    CREATE TABLE IF NOT EXISTS comprehension_classifiers (
+        id         INTEGER PRIMARY KEY AUTOINCREMENT,
+        identifier TEXT NOT NULL UNIQUE
+    )
+";
+
+const CREATE_TURN_COMPREHENSIONS_TABLE: &str = "
+    CREATE TABLE IF NOT EXISTS turn_comprehensions (
+        id              INTEGER PRIMARY KEY AUTOINCREMENT,
+        session_id      TEXT NOT NULL REFERENCES sessions(id) ON DELETE CASCADE,
+        turn_id         INTEGER NOT NULL REFERENCES turns(id),
+        concept_id      INTEGER NOT NULL REFERENCES concepts(id),
+        depth_id        INTEGER NOT NULL REFERENCES understanding_depths(id),
+        confidence      REAL NOT NULL,
+        classifier_id   INTEGER NOT NULL REFERENCES comprehension_classifiers(id),
+        evidence        TEXT,
+        created_at      TIMESTAMP NOT NULL,
+        UNIQUE(turn_id, concept_id, classifier_id)
+    )
+";
+
+const CREATE_TURN_COMPREHENSIONS_TURN_INDEX: &str = "
+    CREATE INDEX IF NOT EXISTS idx_turn_comprehensions_turn
+        ON turn_comprehensions(turn_id)
+";
+
+const CREATE_TURN_COMPREHENSIONS_CONCEPT_INDEX: &str = "
+    CREATE INDEX IF NOT EXISTS idx_turn_comprehensions_concept
+        ON turn_comprehensions(concept_id)
+";
+
+/// Apply v5 migrations idempotently. Safe to run on a fresh DB (after
+/// v4 objects exist), on a v4 DB being upgraded, and on a v5 DB being
+/// re-opened.
+///
+/// All steps run inside a single transaction so a partial failure rolls
+/// back to the pre-migration state.
+///
+/// v5 adds:
+/// - `comprehension_classifiers` lookup table (lazy population, mirrors
+///   the v3 `classifiers` table).
+/// - `turn_comprehensions` table — one row per (turn, concept, classifier)
+///   recording an `UnderstandingDepth` label with confidence and optional
+///   evidence text. FKs into `turns`, `concepts`, `understanding_depths`,
+///   and `comprehension_classifiers`.
+/// - Two helper indices: by turn (to load all assessments for a turn) and
+///   by concept (to trace a concept's depth trajectory across sessions).
+pub(crate) fn apply_v5_migrations(conn: &Connection) -> Result<()> {
+    let tx = conn
+        .unchecked_transaction()
+        .map_err(|e| PrimerError::Storage(format!("v5 migration: failed to begin tx: {e}")))?;
+    tx.execute(CREATE_COMPREHENSION_CLASSIFIERS_TABLE, [])
+        .map_err(|e| {
+            PrimerError::Storage(format!("v5 migration: comprehension_classifiers: {e}"))
+        })?;
+    tx.execute(CREATE_TURN_COMPREHENSIONS_TABLE, [])
+        .map_err(|e| PrimerError::Storage(format!("v5 migration: turn_comprehensions: {e}")))?;
+    tx.execute(CREATE_TURN_COMPREHENSIONS_TURN_INDEX, [])
+        .map_err(|e| PrimerError::Storage(format!("v5 migration: turn-index: {e}")))?;
+    tx.execute(CREATE_TURN_COMPREHENSIONS_CONCEPT_INDEX, [])
+        .map_err(|e| PrimerError::Storage(format!("v5 migration: concept-index: {e}")))?;
+    tx.commit()
+        .map_err(|e| PrimerError::Storage(format!("v5 migration: commit: {e}")))?;
+    Ok(())
+}
+
 fn column_exists(conn: &Connection, table: &str, column: &str) -> Result<bool> {
     let sql = format!("SELECT COUNT(*) FROM pragma_table_info('{table}') WHERE name = ?1");
     let count: i64 = conn
@@ -473,8 +551,8 @@ mod v4_tests {
     }
 
     #[test]
-    fn user_version_constant_is_four() {
-        assert_eq!(USER_VERSION, 4);
+    fn user_version_constant_is_five() {
+        assert_eq!(USER_VERSION, 5);
     }
 
     #[test]
@@ -498,5 +576,41 @@ mod v4_tests {
         assert!(!table_exists(&conn, "learners"));
         assert!(!table_exists(&conn, "learner_concepts"));
         assert!(!table_exists(&conn, "understanding_depths"));
+    }
+
+    #[test]
+    fn v5_migration_creates_tables_and_indices() {
+        let conn = Connection::open_in_memory().unwrap();
+        // v1
+        conn.execute_batch(SCHEMA_SQL).unwrap();
+        // v2..v5 in order so the FKs (e.g. understanding_depths from v4) exist
+        apply_v2_migrations(&conn).unwrap();
+        apply_v3_migrations(&conn).unwrap();
+        apply_v4_migrations(&conn).unwrap();
+        apply_v5_migrations(&conn).unwrap();
+        assert!(table_exists(&conn, "comprehension_classifiers"));
+        assert!(table_exists(&conn, "turn_comprehensions"));
+        // Indices exist (queryable through sqlite_master with type='index').
+        let idx_count: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM sqlite_master WHERE type='index' AND name LIKE 'idx_turn_comprehensions_%'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(idx_count, 2);
+    }
+
+    #[test]
+    fn v5_migration_is_idempotent_on_re_run() {
+        let conn = Connection::open_in_memory().unwrap();
+        conn.execute_batch(SCHEMA_SQL).unwrap();
+        apply_v2_migrations(&conn).unwrap();
+        apply_v3_migrations(&conn).unwrap();
+        apply_v4_migrations(&conn).unwrap();
+        apply_v5_migrations(&conn).unwrap();
+        // Running again must not error.
+        apply_v5_migrations(&conn).unwrap();
+        assert!(table_exists(&conn, "turn_comprehensions"));
     }
 }
