@@ -600,6 +600,67 @@ impl primer_core::storage::SessionStore for SqliteSessionStore {
             }
         }
     }
+
+    async fn update_turn_concepts(
+        &self,
+        session_id: primer_core::conversation::SessionId,
+        turn_index: usize,
+        concepts: &[String],
+    ) -> Result<()> {
+        if concepts.is_empty() {
+            return Ok(());
+        }
+
+        let mut conn = self.conn.lock().unwrap();
+        let tx = conn
+            .transaction()
+            .map_err(|e| PrimerError::Storage(format!("update_turn_concepts begin tx: {e}")))?;
+
+        // Resolve (session_id, turn_index) → turn_id.
+        let turn_id: i64 = tx
+            .query_row(
+                "SELECT id FROM turns WHERE session_id = ?1 AND turn_index = ?2",
+                rusqlite::params![session_id.to_string(), turn_index as i64],
+                |r| r.get(0),
+            )
+            .map_err(|e| {
+                PrimerError::Storage(format!(
+                    "resolve turn (session={session_id}, index={turn_index}): {e}"
+                ))
+            })?;
+
+        let mut insert_concept = tx
+            .prepare("INSERT OR IGNORE INTO concepts (name) VALUES (?1)")
+            .map_err(|e| PrimerError::Storage(format!("prepare insert concept: {e}")))?;
+        let mut select_concept = tx
+            .prepare("SELECT id FROM concepts WHERE name = ?1")
+            .map_err(|e| PrimerError::Storage(format!("prepare select concept: {e}")))?;
+        let mut link_concept = tx
+            .prepare(
+                "INSERT OR IGNORE INTO turn_concepts (turn_id, concept_id) VALUES (?1, ?2)",
+            )
+            .map_err(|e| PrimerError::Storage(format!("prepare link concept: {e}")))?;
+
+        for name in concepts {
+            insert_concept
+                .execute(rusqlite::params![name])
+                .map_err(|e| PrimerError::Storage(format!("upsert concept {name}: {e}")))?;
+            let cid: i64 = select_concept
+                .query_row(rusqlite::params![name], |r| r.get(0))
+                .map_err(|e| PrimerError::Storage(format!("select concept {name}: {e}")))?;
+            link_concept
+                .execute(rusqlite::params![turn_id, cid])
+                .map_err(|e| PrimerError::Storage(format!("link concept {name}: {e}")))?;
+        }
+
+        drop(link_concept);
+        drop(select_concept);
+        drop(insert_concept);
+
+        tx.commit()
+            .map_err(|e| PrimerError::Storage(format!("update_turn_concepts commit: {e}")))?;
+        Ok(())
+    }
 }
 
 #[async_trait]
@@ -2518,6 +2579,94 @@ mod tests {
 
         let result = store.most_recent_session_learner_id().await.unwrap();
         assert_eq!(result, Some(newer_learner));
+    }
+
+    // ─── update_turn_concepts ─────────────────────────────────────────
+
+    #[tokio::test]
+    async fn update_turn_concepts_appends_to_persisted_turn() {
+        let store = open_memory();
+        let learner_id = Uuid::new_v4();
+        let mut session = primer_core::conversation::Session::new(learner_id);
+        session.add_turn(primer_core::conversation::Turn {
+            speaker: primer_core::conversation::Speaker::Child,
+            text: "what is photosynthesis?".into(),
+            timestamp: Utc::now(),
+            intent: None,
+            concepts: vec![],
+        });
+        store.save_session(&session).await.unwrap();
+
+        store
+            .update_turn_concepts(session.id, 0, &["photosynthesis".into(), "biology".into()])
+            .await
+            .unwrap();
+
+        let loaded = store.load_session(session.id).await.unwrap().unwrap();
+        let mut concepts = loaded.turns[0].concepts.clone();
+        concepts.sort();
+        assert_eq!(concepts, vec!["biology".to_string(), "photosynthesis".into()]);
+    }
+
+    #[tokio::test]
+    async fn update_turn_concepts_is_idempotent() {
+        let store = open_memory();
+        let learner_id = Uuid::new_v4();
+        let mut session = primer_core::conversation::Session::new(learner_id);
+        session.add_turn(primer_core::conversation::Turn {
+            speaker: primer_core::conversation::Speaker::Child,
+            text: "what is photosynthesis?".into(),
+            timestamp: Utc::now(),
+            intent: None,
+            concepts: vec![],
+        });
+        store.save_session(&session).await.unwrap();
+
+        // Run twice with overlapping concepts — should not duplicate rows.
+        store
+            .update_turn_concepts(session.id, 0, &["photosynthesis".into()])
+            .await
+            .unwrap();
+        store
+            .update_turn_concepts(session.id, 0, &["photosynthesis".into(), "biology".into()])
+            .await
+            .unwrap();
+
+        let loaded = store.load_session(session.id).await.unwrap().unwrap();
+        assert_eq!(loaded.turns[0].concepts.len(), 2);
+    }
+
+    #[tokio::test]
+    async fn update_turn_concepts_empty_slice_is_noop() {
+        let store = open_memory();
+        let learner_id = Uuid::new_v4();
+        let mut session = primer_core::conversation::Session::new(learner_id);
+        session.add_turn(primer_core::conversation::Turn {
+            speaker: primer_core::conversation::Speaker::Child,
+            text: "hi".into(),
+            timestamp: Utc::now(),
+            intent: None,
+            concepts: vec![],
+        });
+        store.save_session(&session).await.unwrap();
+
+        store
+            .update_turn_concepts(session.id, 0, &[])
+            .await
+            .unwrap();
+
+        let loaded = store.load_session(session.id).await.unwrap().unwrap();
+        assert!(loaded.turns[0].concepts.is_empty());
+    }
+
+    #[tokio::test]
+    async fn update_turn_concepts_errors_on_missing_turn() {
+        let store = open_memory();
+        let unknown_session = Uuid::new_v4();
+        let res = store
+            .update_turn_concepts(unknown_session, 0, &["x".into()])
+            .await;
+        assert!(res.is_err(), "expected Err for unknown (session, turn_index)");
     }
 }
 
