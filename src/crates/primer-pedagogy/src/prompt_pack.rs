@@ -471,11 +471,7 @@ mod tests {
         // Pick a unique German marker per band.
         assert!(pack.render_base("X", 5).contains("Kindergarten"));
         assert!(pack.render_base("X", 8).contains("Grundschule"));
-        assert!(
-            pack.render_base("X", 11)
-                .contains("Mittlere Satzlängen sind in Ordnung")
-                || pack.render_base("X", 11).contains("mittlere Satzlängen")
-        );
+        assert!(pack.render_base("X", 11).contains("mittlere Satzlängen"));
         assert!(pack.render_base("X", 15).contains("Erwachsenenwortschatz"));
     }
 
