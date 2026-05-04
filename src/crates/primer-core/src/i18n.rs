@@ -18,6 +18,16 @@
 //!   - The `Other` variant is dev-facing — its inner string is NEVER
 //!     rendered to users. We surface a generic localized message and
 //!     route the inner string to `tracing::warn!` at the call site.
+//!
+//! **Producer contract:**
+//!   - Each variant of `InferenceError` has a documented producer (cloud
+//!     backend, Ollama backend, transport layer, etc.) — see the variant
+//!     doc-comments in `error.rs`. The English messages here are tuned
+//!     to those producers (e.g. `ModelNotFound`'s message recommends
+//!     `ollama pull X` because Ollama is the only producer today). If a
+//!     future change adds a NEW producer for an existing variant,
+//!     update the corresponding message here so the suggestion still
+//!     makes sense.
 
 use crate::error::InferenceError;
 
@@ -45,10 +55,14 @@ fn render_english(err: &InferenceError) -> String {
         }
         RateLimited {
             retry_after: Some(d),
-        } => format!(
-            "The service is busy right now. Please try again in {} seconds.",
-            d.as_secs()
-        ),
+        } => {
+            let secs = d.as_secs();
+            if secs == 1 {
+                "The service is busy right now. Please try again in 1 second.".into()
+            } else {
+                format!("The service is busy right now. Please try again in {secs} seconds.")
+            }
+        }
         RateLimited { retry_after: None } => {
             "The service is busy right now. Please try again in a moment.".into()
         }
@@ -95,6 +109,20 @@ mod tests {
         assert!(
             s.contains("7"),
             "rendered string should mention the seconds: {s}"
+        );
+    }
+
+    #[test]
+    fn rate_limited_with_one_second_retry_after_uses_singular() {
+        let s = render_inference_error(
+            &InferenceError::RateLimited {
+                retry_after: Some(Duration::from_secs(1)),
+            },
+            &Locale::English,
+        );
+        assert!(
+            s.contains("1 second.") && !s.contains("1 seconds"),
+            "expected singular 'second' for 1-second retry-after; got: {s}"
         );
     }
 
