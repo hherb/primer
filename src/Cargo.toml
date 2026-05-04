@@ -70,6 +70,10 @@ dotenvy = "0.15"
 # stable filenames regardless of NFC/NFD encoding).
 unicode-normalization = "0.1"
 
+# Test-only: scratch files / dirs that auto-clean on Drop, so tests
+# stay safe under `cargo test --test-threads=N` and panic recovery.
+tempfile = "3"
+
 # Workspace crates
 primer-core = { path = "crates/primer-core" }
 primer-inference = { path = "crates/primer-inference" }
