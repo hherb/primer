@@ -12,11 +12,62 @@ use primer_core::error::{PrimerError, Result};
 use primer_core::inference::*;
 use serde::{Deserialize, Serialize};
 
+/// Translate a non-success Anthropic HTTP response into an
+/// `InferenceError`. Pure — no I/O, no `Self` reference.
+///
+/// `body` is the response body text used only as the dev-facing payload
+/// of `InferenceError::Other`; users never see it (the i18n render layer
+/// substitutes a generic message for `Other`).
+pub(crate) fn classify_anthropic_status(
+    status: reqwest::StatusCode,
+    headers: &reqwest::header::HeaderMap,
+    body: &str,
+) -> primer_core::error::InferenceError {
+    use primer_core::error::InferenceError::*;
+    match status.as_u16() {
+        401 | 403 => Auth,
+        429 => RateLimited {
+            retry_after: parse_retry_after(headers),
+        },
+        500..=599 => ServiceUnavailable,
+        _ => Other(format!("Anthropic returned {status}: {body}")),
+    }
+}
+
+/// Parse a `Retry-After` header in integer-seconds form. The
+/// HTTP-date form is silently dropped (returns `None`) — Anthropic
+/// uses the integer-seconds form in practice and parsing the date
+/// form would cost a `chrono`/`httpdate` dep for a rare case.
+pub(crate) fn parse_retry_after(
+    headers: &reqwest::header::HeaderMap,
+) -> Option<std::time::Duration> {
+    headers
+        .get("retry-after")
+        .and_then(|v| v.to_str().ok())
+        .and_then(|s| s.parse::<u64>().ok())
+        .map(std::time::Duration::from_secs)
+}
+
+/// Translate a transport-level `reqwest::Error` (no HTTP response yet)
+/// into an `InferenceError`. Connect / timeout / request-build failures
+/// map to `NetworkUnavailable`; everything else falls through to
+/// `Other`. Used by both backend modules — kept in this file because
+/// it has no Anthropic-specific knowledge but is small enough that
+/// a dedicated shared module is overkill.
+pub(crate) fn classify_reqwest_error(e: &reqwest::Error) -> primer_core::error::InferenceError {
+    if e.is_connect() || e.is_timeout() || e.is_request() {
+        primer_core::error::InferenceError::NetworkUnavailable
+    } else {
+        primer_core::error::InferenceError::Other(format!("reqwest: {e}"))
+    }
+}
+
 pub struct CloudBackend {
     client: reqwest::Client,
     api_endpoint: String,
     api_key: String,
     model: String,
+    retry_settings: primer_core::retry::RetrySettings,
 }
 
 impl CloudBackend {
@@ -26,6 +77,7 @@ impl CloudBackend {
             api_endpoint,
             api_key,
             model,
+            retry_settings: primer_core::retry::RetrySettings::default(),
         }
     }
 }
@@ -235,25 +287,32 @@ impl InferenceBackend for CloudBackend {
             stream: true,
         };
 
-        let response = self
-            .client
-            .post(format!("{}/v1/messages", self.api_endpoint))
-            .header("x-api-key", &self.api_key)
-            .header("anthropic-version", "2023-06-01")
-            .header("content-type", "application/json")
-            .header("accept", "text/event-stream")
-            .json(&request)
-            .send()
-            .await
-            .map_err(|e| PrimerError::Inference(format!("API request failed: {e}").into()))?;
-
-        let status = response.status();
-        if !status.is_success() {
-            let body = response.text().await.unwrap_or_default();
-            return Err(PrimerError::Inference(
-                format!("Anthropic API returned {status}: {body}").into(),
-            ));
-        }
+        // Retry the send + status-check phase only. Once we have a 2xx
+        // response and start consuming the byte stream, mid-stream errors
+        // propagate as before (the partial Primer turn is dropped at a
+        // higher layer).
+        let response = primer_core::retry::retry_with_backoff(&self.retry_settings, || async {
+            let resp = self
+                .client
+                .post(format!("{}/v1/messages", self.api_endpoint))
+                .header("x-api-key", &self.api_key)
+                .header("anthropic-version", "2023-06-01")
+                .header("content-type", "application/json")
+                .header("accept", "text/event-stream")
+                .json(&request)
+                .send()
+                .await
+                .map_err(|e| classify_reqwest_error(&e))?;
+            let status = resp.status();
+            if !status.is_success() {
+                let headers = resp.headers().clone();
+                let body = resp.text().await.unwrap_or_default();
+                return Err(classify_anthropic_status(status, &headers, &body));
+            }
+            Ok(resp)
+        })
+        .await
+        .map_err(PrimerError::Inference)?;
 
         let (mut tx, rx) = mpsc::unbounded::<Result<TokenChunk>>();
         let mut bytes_stream = response.bytes_stream();
@@ -446,5 +505,106 @@ mod tests {
             msg.contains("slow down"),
             "expected error message to mention 'slow down', got: {msg}"
         );
+    }
+}
+
+#[cfg(test)]
+mod classify_tests {
+    use super::*;
+    use primer_core::error::InferenceError;
+    use reqwest::StatusCode;
+    use reqwest::header::{HeaderMap, HeaderValue};
+    use std::time::Duration;
+
+    fn empty_headers() -> HeaderMap {
+        HeaderMap::new()
+    }
+
+    fn headers_with_retry_after(seconds: u64) -> HeaderMap {
+        let mut h = HeaderMap::new();
+        h.insert("retry-after", HeaderValue::from(seconds));
+        h
+    }
+
+    #[test]
+    fn classifies_401_as_auth() {
+        let e = classify_anthropic_status(StatusCode::UNAUTHORIZED, &empty_headers(), "");
+        assert!(matches!(e, InferenceError::Auth));
+    }
+
+    #[test]
+    fn classifies_403_as_auth() {
+        let e = classify_anthropic_status(StatusCode::FORBIDDEN, &empty_headers(), "");
+        assert!(matches!(e, InferenceError::Auth));
+    }
+
+    #[test]
+    fn classifies_429_with_retry_after_header() {
+        let e = classify_anthropic_status(
+            StatusCode::TOO_MANY_REQUESTS,
+            &headers_with_retry_after(7),
+            "rate limited",
+        );
+        match e {
+            InferenceError::RateLimited {
+                retry_after: Some(d),
+            } => assert_eq!(d, Duration::from_secs(7)),
+            other => panic!("expected RateLimited(Some(7s)), got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn classifies_429_without_retry_after_header() {
+        let e = classify_anthropic_status(StatusCode::TOO_MANY_REQUESTS, &empty_headers(), "");
+        assert!(matches!(
+            e,
+            InferenceError::RateLimited { retry_after: None }
+        ));
+    }
+
+    #[test]
+    fn classifies_500_as_service_unavailable() {
+        let e = classify_anthropic_status(StatusCode::INTERNAL_SERVER_ERROR, &empty_headers(), "");
+        assert!(matches!(e, InferenceError::ServiceUnavailable));
+    }
+
+    #[test]
+    fn classifies_503_as_service_unavailable() {
+        let e = classify_anthropic_status(StatusCode::SERVICE_UNAVAILABLE, &empty_headers(), "");
+        assert!(matches!(e, InferenceError::ServiceUnavailable));
+    }
+
+    #[test]
+    fn classifies_unknown_4xx_as_other_with_status_in_body() {
+        let e = classify_anthropic_status(StatusCode::IM_A_TEAPOT, &empty_headers(), "tea");
+        match e {
+            InferenceError::Other(s) => {
+                assert!(s.contains("418") && s.contains("tea"), "got: {s}")
+            }
+            other => panic!("expected Other, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn parse_retry_after_handles_integer_seconds() {
+        let h = headers_with_retry_after(42);
+        assert_eq!(parse_retry_after(&h), Some(Duration::from_secs(42)));
+    }
+
+    #[test]
+    fn parse_retry_after_handles_missing_header() {
+        assert_eq!(parse_retry_after(&empty_headers()), None);
+    }
+
+    #[test]
+    fn parse_retry_after_drops_http_date_form() {
+        // HTTP-date form is silently dropped (returns None) rather than
+        // attempting to parse the date — see spec §Retry helper.
+        let mut h = HeaderMap::new();
+        h.insert(
+            "retry-after",
+            HeaderValue::from_static("Wed, 21 Oct 2026 07:28:00 GMT"),
+        );
+        assert_eq!(parse_retry_after(&h), None);
     }
 }
