@@ -251,30 +251,21 @@ fn migrate_or_create(conn: &Connection, pack: &str) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::path::PathBuf;
+    use tempfile::NamedTempFile;
 
-    fn tmp_db_path() -> PathBuf {
-        // Two parallel `tokio::test`s can call this helper inside the
-        // same nanosecond on fast machines and collide on filename, which
-        // surfaces as `SQLITE_READONLY_DBMOVED` mid-test. The atomic
-        // counter guarantees per-process uniqueness regardless of clock
-        // resolution.
-        use std::sync::atomic::{AtomicU64, Ordering};
-        static SEQ: AtomicU64 = AtomicU64::new(0);
-        let dir = std::env::temp_dir();
-        let pid = std::process::id();
-        let nanos = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .unwrap()
-            .as_nanos();
-        let seq = SEQ.fetch_add(1, Ordering::Relaxed);
-        dir.join(format!("primer-knowledge-test-{pid}-{nanos}-{seq}.sqlite"))
+    /// Allocate a fresh sqlite path inside a `tempfile::NamedTempFile`. The
+    /// returned guard owns the file and removes it on drop — including the
+    /// drop that runs when a test panics — so test runs cannot leak files
+    /// or collide on path even under aggressive `--test-threads`. SQLite is
+    /// happy to open the 0-byte file as a fresh DB.
+    fn tmp_db() -> NamedTempFile {
+        NamedTempFile::new().expect("create temp DB file")
     }
 
     #[tokio::test]
     async fn open_for_english_creates_per_locale_tables() {
-        let path = tmp_db_path();
-        let kb = SqliteKnowledgeBase::open_for_locale(&path, Locale::English).unwrap();
+        let db = tmp_db();
+        let kb = SqliteKnowledgeBase::open_for_locale(db.path(), Locale::English).unwrap();
         assert_eq!(kb.locale(), Locale::English);
         // Insert + retrieve round-trip.
         kb.insert_passage("p1", "test:source", "the quick brown fox jumps")
@@ -292,25 +283,23 @@ mod tests {
             .unwrap();
         assert_eq!(got.len(), 1);
         assert_eq!(got[0].id, "p1");
-        let _ = std::fs::remove_file(&path);
     }
 
     #[tokio::test]
     async fn open_back_compat_shim_uses_default_locale() {
-        let path = tmp_db_path();
-        let kb = SqliteKnowledgeBase::open(&path).unwrap();
+        let db = tmp_db();
+        let kb = SqliteKnowledgeBase::open(db.path()).unwrap();
         assert_eq!(kb.locale(), Locale::default());
-        let _ = std::fs::remove_file(&path);
     }
 
     #[tokio::test]
     async fn reopen_existing_db_is_a_no_op() {
-        let path = tmp_db_path();
+        let db = tmp_db();
         {
-            let kb = SqliteKnowledgeBase::open_for_locale(&path, Locale::English).unwrap();
+            let kb = SqliteKnowledgeBase::open_for_locale(db.path(), Locale::English).unwrap();
             kb.insert_passage("p1", "src", "hello world").unwrap();
         }
-        let kb = SqliteKnowledgeBase::open_for_locale(&path, Locale::English).unwrap();
+        let kb = SqliteKnowledgeBase::open_for_locale(db.path(), Locale::English).unwrap();
         let got = kb
             .retrieve(
                 "hello",
@@ -323,16 +312,16 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(got.len(), 1);
-        let _ = std::fs::remove_file(&path);
     }
 
     #[tokio::test]
     async fn legacy_db_migrates_into_per_locale_tables_with_data_preserved() {
-        let path = tmp_db_path();
+        let db = tmp_db();
+        let path = db.path();
         // Hand-roll a legacy schema (the pre-PR-2 layout) and pre-seed
         // a row, then open under the new API and verify migration.
         {
-            let conn = Connection::open(&path).unwrap();
+            let conn = Connection::open(path).unwrap();
             conn.execute_batch(
                 "CREATE VIRTUAL TABLE passages USING fts5(
                     id, source, text,
@@ -360,7 +349,7 @@ mod tests {
             .unwrap();
         }
 
-        let kb = SqliteKnowledgeBase::open_for_locale(&path, Locale::English).unwrap();
+        let kb = SqliteKnowledgeBase::open_for_locale(path, Locale::English).unwrap();
         let got = kb
             .retrieve(
                 "photosynthesis",
@@ -383,8 +372,6 @@ mod tests {
             assert!(table_exists(&conn, "passages_en").unwrap());
             assert!(table_exists(&conn, "passages_en_content").unwrap());
         }
-
-        let _ = std::fs::remove_file(&path);
     }
 
     #[tokio::test]
@@ -393,10 +380,11 @@ mod tests {
         // their FTS5 indices stay isolated. This is the structural
         // guarantee that BM25 stays locale-pure: each locale only ever
         // queries its own `passages_<pack_id>` table.
-        let path = tmp_db_path();
+        let db = tmp_db();
+        let path = db.path();
         // Insert a German passage.
         {
-            let kb = SqliteKnowledgeBase::open_for_locale(&path, Locale::German).unwrap();
+            let kb = SqliteKnowledgeBase::open_for_locale(path, Locale::German).unwrap();
             kb.insert_passage(
                 "de-1",
                 "wikipedia:de:Photosynthese",
@@ -406,7 +394,7 @@ mod tests {
         }
         // Insert an English passage.
         {
-            let kb = SqliteKnowledgeBase::open_for_locale(&path, Locale::English).unwrap();
+            let kb = SqliteKnowledgeBase::open_for_locale(path, Locale::English).unwrap();
             kb.insert_passage(
                 "en-1",
                 "wikipedia:en:Photosynthesis",
@@ -416,7 +404,7 @@ mod tests {
         }
         // Query under English — only English row should come back.
         {
-            let kb = SqliteKnowledgeBase::open_for_locale(&path, Locale::English).unwrap();
+            let kb = SqliteKnowledgeBase::open_for_locale(path, Locale::English).unwrap();
             let got = kb
                 .retrieve(
                     "photosynthesis",
@@ -436,7 +424,7 @@ mod tests {
         // index isolation is what's being verified here, not query
         // tokenisation.
         {
-            let kb = SqliteKnowledgeBase::open_for_locale(&path, Locale::German).unwrap();
+            let kb = SqliteKnowledgeBase::open_for_locale(path, Locale::German).unwrap();
             let got = kb
                 .retrieve(
                     "photosynthese",
@@ -451,8 +439,6 @@ mod tests {
             assert_eq!(got.len(), 1, "German KB must not return English rows");
             assert_eq!(got[0].id, "de-1");
         }
-
-        let _ = std::fs::remove_file(&path);
     }
 
     #[tokio::test]
@@ -464,9 +450,10 @@ mod tests {
         // covers DBs that were previously (partially or fully) opened
         // under the new locale-aware API and still carry the legacy
         // tables from a pre-PR-2 build.
-        let path = tmp_db_path();
+        let db = tmp_db();
+        let path = db.path();
         {
-            let conn = Connection::open(&path).unwrap();
+            let conn = Connection::open(path).unwrap();
             conn.execute_batch(
                 "CREATE VIRTUAL TABLE passages USING fts5(
                     id, source, text,
@@ -492,15 +479,13 @@ mod tests {
             .unwrap();
         }
 
-        let _kb = SqliteKnowledgeBase::open_for_locale(&path, Locale::English).unwrap();
-        let conn = Connection::open(&path).unwrap();
+        let _kb = SqliteKnowledgeBase::open_for_locale(path, Locale::English).unwrap();
+        let conn = Connection::open(path).unwrap();
         // Both legacy and locale-suffixed tables still present.
         assert!(table_exists(&conn, "passages").unwrap());
         assert!(table_exists(&conn, "passages_content").unwrap());
         assert!(table_exists(&conn, "passages_en").unwrap());
         assert!(table_exists(&conn, "passages_en_content").unwrap());
-
-        let _ = std::fs::remove_file(&path);
     }
 
     #[tokio::test]
@@ -513,9 +498,10 @@ mod tests {
         // it created earlier in the same transaction must also roll
         // back — leaving the legacy tables intact and `passages_en`
         // absent.
-        let path = tmp_db_path();
+        let db = tmp_db();
+        let path = db.path();
         {
-            let conn = Connection::open(&path).unwrap();
+            let conn = Connection::open(path).unwrap();
             conn.execute_batch(
                 "CREATE VIRTUAL TABLE passages USING fts5(
                     id, source,
@@ -534,7 +520,7 @@ mod tests {
             .unwrap();
         }
 
-        let result = SqliteKnowledgeBase::open_for_locale(&path, Locale::English);
+        let result = SqliteKnowledgeBase::open_for_locale(path, Locale::English);
         let err = match result {
             Ok(_) => panic!("malformed legacy schema must surface as an error"),
             Err(e) => e,
@@ -544,7 +530,7 @@ mod tests {
             "expected Knowledge error, got: {err:?}"
         );
 
-        let conn = Connection::open(&path).unwrap();
+        let conn = Connection::open(path).unwrap();
         // Legacy tables intact.
         assert!(table_exists(&conn, "passages").unwrap());
         assert!(table_exists(&conn, "passages_content").unwrap());
@@ -557,7 +543,5 @@ mod tests {
             !table_exists(&conn, "passages_en_content").unwrap(),
             "passages_en_content must roll back when migration fails"
         );
-
-        let _ = std::fs::remove_file(&path);
     }
 }
