@@ -40,6 +40,13 @@ use std::sync::Mutex;
 pub struct SqliteKnowledgeBase {
     conn: Mutex<Connection>,
     locale: Locale,
+    /// `passages_<pack_id>` — the FTS5 virtual table name. Cached at
+    /// `open_for_locale` so the per-call `format!` allocation in the
+    /// insert/retrieve hot paths is gone.
+    passages_table: String,
+    /// `passages_<pack_id>_content` — the external-content storage
+    /// table name. Same caching rationale as `passages_table`.
+    content_table: String,
 }
 
 impl SqliteKnowledgeBase {
@@ -58,11 +65,14 @@ impl SqliteKnowledgeBase {
         let conn = Connection::open(path)
             .map_err(|e| PrimerError::Knowledge(format!("Failed to open DB: {e}")))?;
 
-        migrate_or_create(&conn, locale.pack_id())?;
+        let pack = locale.pack_id();
+        migrate_or_create(&conn, pack)?;
 
         Ok(Self {
             conn: Mutex::new(conn),
             locale,
+            passages_table: format!("passages_{pack}"),
+            content_table: format!("passages_{pack}_content"),
         })
     }
 
@@ -73,19 +83,11 @@ impl SqliteKnowledgeBase {
         self.locale
     }
 
-    fn passages_table(&self) -> String {
-        format!("passages_{}", self.locale.pack_id())
-    }
-
-    fn content_table(&self) -> String {
-        format!("passages_{}_content", self.locale.pack_id())
-    }
-
     /// Insert a passage into the knowledge base.
     pub fn insert_passage(&self, id: &str, source: &str, text: &str) -> Result<()> {
         let conn = self.conn.lock().unwrap();
-        let content_table = self.content_table();
-        let passages_table = self.passages_table();
+        let content_table = &self.content_table;
+        let passages_table = &self.passages_table;
 
         conn.execute(
             &format!("INSERT INTO {content_table}(id, source, text) VALUES (?1, ?2, ?3)"),
@@ -110,7 +112,7 @@ impl SqliteKnowledgeBase {
 impl KnowledgeBase for SqliteKnowledgeBase {
     async fn retrieve(&self, query: &str, params: &RetrievalParams) -> Result<Vec<Passage>> {
         let conn = self.conn.lock().unwrap();
-        let passages_table = self.passages_table();
+        let passages_table = &self.passages_table;
 
         // FTS5 match query with BM25 ranking. Table name is interpolated
         // (NOT user input — comes from `Locale::pack_id()`, a closed
@@ -454,11 +456,14 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn legacy_migration_rolls_back_on_partial_failure() {
-        // If a `passages_en` row pre-exists (manual user intervention,
-        // partial prior migration crash, etc.) such that the migration
-        // INSERT would conflict, the transaction rolls back and the
-        // legacy tables stay intact rather than leaving a mangled DB.
+    async fn legacy_migration_skipped_when_target_already_exists() {
+        // If both `passages` and `passages_<pack>` exist, the
+        // `legacy_exists && !new_exists` guard in `migrate_or_create`
+        // skips the migration branch entirely. Documented behaviour:
+        // no-op, no data movement, both table sets stay intact. This
+        // covers DBs that were previously (partially or fully) opened
+        // under the new locale-aware API and still carry the legacy
+        // tables from a pre-PR-2 build.
         let path = tmp_db_path();
         {
             let conn = Connection::open(&path).unwrap();
@@ -472,20 +477,8 @@ mod tests {
                     id TEXT NOT NULL,
                     source TEXT NOT NULL,
                     text TEXT NOT NULL
-                );",
-            )
-            .unwrap();
-            conn.execute(
-                "INSERT INTO passages_content(rowid, id, source, text)
-                 VALUES (1, 'a', 's', 't')",
-                [],
-            )
-            .unwrap();
-            // Pre-seed a passages_en_content row that will collide on
-            // INSERT (rowid 1). This forces the migration's INSERT-SELECT
-            // to fail, exercising the rollback path.
-            conn.execute_batch(
-                "CREATE VIRTUAL TABLE passages_en USING fts5(
+                );
+                CREATE VIRTUAL TABLE passages_en USING fts5(
                     id, source, text,
                     content='passages_en_content', content_rowid='rowid'
                 );
@@ -494,21 +487,76 @@ mod tests {
                     id TEXT NOT NULL,
                     source TEXT NOT NULL,
                     text TEXT NOT NULL
-                );
-                INSERT INTO passages_en_content(rowid, id, source, text)
-                    VALUES (1, 'pre-existing', 's', 't');",
+                );",
             )
             .unwrap();
         }
-        // `passages_en` already exists → migrate_or_create skips the
-        // legacy migration branch entirely (no conflict, no rollback).
-        // This test instead documents that case is benign: nothing
-        // moves when both tables already exist.
+
         let _kb = SqliteKnowledgeBase::open_for_locale(&path, Locale::English).unwrap();
         let conn = Connection::open(&path).unwrap();
-        // Both tables still present.
+        // Both legacy and locale-suffixed tables still present.
         assert!(table_exists(&conn, "passages").unwrap());
+        assert!(table_exists(&conn, "passages_content").unwrap());
         assert!(table_exists(&conn, "passages_en").unwrap());
+        assert!(table_exists(&conn, "passages_en_content").unwrap());
+
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[tokio::test]
+    async fn legacy_migration_rolls_back_on_partial_failure() {
+        // Real rollback test: hand-roll a malformed legacy schema
+        // missing the `text` column. The migration's INSERT-SELECT
+        // (which references `text`) fails at SQL-prepare time, and
+        // since `migrate_or_create` runs the whole sequence inside a
+        // single `unchecked_transaction()`, the locale-suffixed tables
+        // it created earlier in the same transaction must also roll
+        // back — leaving the legacy tables intact and `passages_en`
+        // absent.
+        let path = tmp_db_path();
+        {
+            let conn = Connection::open(&path).unwrap();
+            conn.execute_batch(
+                "CREATE VIRTUAL TABLE passages USING fts5(
+                    id, source,
+                    content='passages_content', content_rowid='rowid'
+                );
+                CREATE TABLE passages_content(
+                    rowid INTEGER PRIMARY KEY,
+                    id TEXT NOT NULL,
+                    source TEXT NOT NULL
+                    -- no `text` column: forces migration INSERT-SELECT
+                    -- to fail with `no such column: text`.
+                );
+                INSERT INTO passages_content(rowid, id, source)
+                    VALUES (1, 'a', 's');",
+            )
+            .unwrap();
+        }
+
+        let result = SqliteKnowledgeBase::open_for_locale(&path, Locale::English);
+        let err = match result {
+            Ok(_) => panic!("malformed legacy schema must surface as an error"),
+            Err(e) => e,
+        };
+        assert!(
+            matches!(err, PrimerError::Knowledge(_)),
+            "expected Knowledge error, got: {err:?}"
+        );
+
+        let conn = Connection::open(&path).unwrap();
+        // Legacy tables intact.
+        assert!(table_exists(&conn, "passages").unwrap());
+        assert!(table_exists(&conn, "passages_content").unwrap());
+        // Locale-suffixed tables rolled back.
+        assert!(
+            !table_exists(&conn, "passages_en").unwrap(),
+            "passages_en must roll back when migration fails"
+        );
+        assert!(
+            !table_exists(&conn, "passages_en_content").unwrap(),
+            "passages_en_content must roll back when migration fails"
+        );
 
         let _ = std::fs::remove_file(&path);
     }

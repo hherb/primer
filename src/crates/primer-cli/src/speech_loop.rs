@@ -140,10 +140,6 @@ pub struct SpeechLoopConfig<'a> {
     pub voice_id: &'a str,
     pub mic_silence_ms: u32,
     pub verbose: bool,
-    /// Active locale for TTS dispatch. Today's CLI binds this to the
-    /// resolved `--language` once and uses the same locale for the
-    /// whole session.
-    pub locale: primer_core::i18n::Locale,
 }
 
 use std::sync::Arc;
@@ -175,58 +171,14 @@ type TranscriptRx = Arc<std::sync::Mutex<std::sync::mpsc::Receiver<String>>>;
 /// whisper / piper instances; tests wire mocks. The VAD lives on the
 /// audio capture thread (production) or is stubbed out via direct VAD
 /// events on the channel (tests), so it's not part of this struct.
-///
-/// ## Per-locale TTS / voice
-///
-/// `tts_by_locale` and `voice_by_locale` are keyed maps: each entry is
-/// the TTS engine + voice profile to use when synthesising for that
-/// locale. `active_locale` is the dispatch key the SPEAK phase reads
-/// at each turn — bound for the lifetime of the loop in v1, but the
-/// shape leaves room for future code-switching scenarios (a locale
-/// switch mid-session for language-teaching) without further
-/// restructuring.
-///
-/// Today's CLI populates exactly one entry — the active locale —
-/// constructed via `LoopBackends::single_locale`. The state machine
-/// and dispatch logic are untouched by this refactor.
 pub struct LoopBackends {
     pub stt: Arc<dyn StreamingSpeechToText>,
-    pub tts_by_locale:
-        std::collections::HashMap<primer_core::i18n::Locale, Arc<dyn StreamingTextToSpeech>>,
-    /// Voice profile keyed by locale. Production wires the `model_id`
-    /// from `--voice` (e.g. `en_GB-alba-medium`); tests use
-    /// `VoiceProfile::default()`. Piper rejects model-id mismatches,
-    /// so each entry must align with the loaded voice ONNX file stem
-    /// for that locale.
-    pub voice_by_locale:
-        std::collections::HashMap<primer_core::i18n::Locale, primer_core::speech::VoiceProfile>,
-    /// Locale the SPEAK phase looks up in the maps above. v1 binds it
-    /// for the lifetime of the loop.
-    pub active_locale: primer_core::i18n::Locale,
-}
-
-impl LoopBackends {
-    /// Convenience constructor for the single-locale case (production
-    /// today, every existing test). Takes ownership of one TTS + voice
-    /// pair, wraps them in single-entry maps keyed by `locale`, and
-    /// sets `active_locale = locale`.
-    pub fn single_locale(
-        stt: Arc<dyn StreamingSpeechToText>,
-        tts: Arc<dyn StreamingTextToSpeech>,
-        voice: primer_core::speech::VoiceProfile,
-        locale: primer_core::i18n::Locale,
-    ) -> Self {
-        let mut tts_by_locale = std::collections::HashMap::new();
-        tts_by_locale.insert(locale, tts);
-        let mut voice_by_locale = std::collections::HashMap::new();
-        voice_by_locale.insert(locale, voice);
-        Self {
-            stt,
-            tts_by_locale,
-            voice_by_locale,
-            active_locale: locale,
-        }
-    }
+    pub tts: Arc<dyn StreamingTextToSpeech>,
+    /// Voice profile passed to `tts.open_session(...)`. Production wires
+    /// the model_id from `--voice` (e.g. `en_GB-alba-medium`); tests can
+    /// use `VoiceProfile::default()`. Piper rejects mismatches, so this
+    /// must align with the loaded voice ONNX file stem.
+    pub voice: primer_core::speech::VoiceProfile,
 }
 
 /// Awaitable hook that blocks until the speaker has finished playing
@@ -471,31 +423,8 @@ pub async fn run_loop<'r>(
             if let Some(flag) = is_speaking.as_ref() {
                 flag.store(true, std::sync::atomic::Ordering::SeqCst);
             }
-            // Dispatch on `active_locale`. v1 has a single entry so
-            // these lookups can't miss in practice; we treat a miss as
-            // a Speech error (rather than a panic) because LoopBackends
-            // is a public-ish struct that future code might construct
-            // without the convenience helper.
-            let active_tts = backends
-                .tts_by_locale
-                .get(&backends.active_locale)
-                .ok_or_else(|| {
-                    primer_core::error::PrimerError::Speech(format!(
-                        "no TTS configured for active locale {}",
-                        backends.active_locale.pack_id()
-                    ))
-                })?;
-            let active_voice = backends
-                .voice_by_locale
-                .get(&backends.active_locale)
-                .ok_or_else(|| {
-                    primer_core::error::PrimerError::Speech(format!(
-                        "no voice profile configured for active locale {}",
-                        backends.active_locale.pack_id()
-                    ))
-                })?;
-            let mut session = active_tts.open_session(active_voice)?;
-            let tts_rate = active_tts.sample_rate();
+            let mut session = backends.tts.open_session(&backends.voice)?;
+            let tts_rate = backends.tts.sample_rate();
             // ~200 ms of silence inserted between AudioChunks (each
             // chunk is one phrase). Gives the listener a perceptible
             // pause at sentence boundaries without adding much to
@@ -794,25 +723,20 @@ pub async fn run<'a>(
         .map_err(|e| primer_core::error::PrimerError::Speech(format!("spawn audio thread: {e}")))?;
 
     // ── Build LoopBackends with the channel STT wrapper ────────────
-    // Single-locale v1: the CLI's resolved locale is the active locale,
-    // and that's the only entry in the maps. PR 4 will populate
-    // additional locales when a second voice ships.
-    let voice = primer_core::speech::VoiceProfile {
-        model_id: cfg.voice_id.to_string(),
-        // Slow Piper slightly: length_scale = 1.0 / rate, so
-        // rate < 1.0 stretches each phoneme. 0.9 is barely
-        // perceptible but easier for younger children to follow.
-        rate: 0.9,
-        ..primer_core::speech::VoiceProfile::default()
-    };
-    let backends = LoopBackends::single_locale(
-        Arc::new(ChannelStt {
+    let backends = LoopBackends {
+        stt: Arc::new(ChannelStt {
             rx: Arc::new(std::sync::Mutex::new(transcript_rx)),
         }),
-        std::sync::Arc::clone(&tts),
-        voice,
-        cfg.locale,
-    );
+        tts: std::sync::Arc::clone(&tts),
+        voice: primer_core::speech::VoiceProfile {
+            model_id: cfg.voice_id.to_string(),
+            // Slow Piper slightly: length_scale = 1.0 / rate, so
+            // rate < 1.0 stretches each phoneme. 0.9 is barely
+            // perceptible but easier for younger children to follow.
+            rate: 0.9,
+            ..primer_core::speech::VoiceProfile::default()
+        },
+    };
 
     // ── on_audio callback: push synth chunks to the speaker ─────────
     // Uses a leftover buffer carried across calls so partial tails of
@@ -1283,12 +1207,11 @@ mod mocks {
 
         use primer_core::speech::VadEvent;
 
-        let backends = super::LoopBackends::single_locale(
-            Arc::new(MockStreamingStt::new("hello primer")),
-            Arc::new(MockStreamingTts::new(64)),
-            primer_core::speech::VoiceProfile::default(),
-            primer_core::i18n::Locale::English,
-        );
+        let backends = super::LoopBackends {
+            stt: Arc::new(MockStreamingStt::new("hello primer")),
+            tts: Arc::new(MockStreamingTts::new(64)),
+            voice: primer_core::speech::VoiceProfile::default(),
+        };
 
         let (event_tx, event_rx) = tokio::sync::mpsc::channel(64);
         event_tx.try_send(VadEvent::SpeechStart).unwrap();
@@ -1346,12 +1269,11 @@ mod mocks {
     async fn quit_phrase_short_circuits_speak() {
         use primer_core::speech::VadEvent;
 
-        let backends = super::LoopBackends::single_locale(
-            Arc::new(MockStreamingStt::new("goodbye")),
-            Arc::new(MockStreamingTts::new(64)),
-            primer_core::speech::VoiceProfile::default(),
-            primer_core::i18n::Locale::English,
-        );
+        let backends = super::LoopBackends {
+            stt: Arc::new(MockStreamingStt::new("goodbye")),
+            tts: Arc::new(MockStreamingTts::new(64)),
+            voice: primer_core::speech::VoiceProfile::default(),
+        };
 
         let (event_tx, event_rx) = tokio::sync::mpsc::channel(64);
         event_tx.try_send(VadEvent::SpeechStart).unwrap();
@@ -1415,12 +1337,11 @@ mod mocks {
         // look blue'", we need a smarter mock — but for the unit test
         // we accept that both attempts return the same canned text. The
         // assertion is about cancellation, not transcript stitching.
-        let backends = super::LoopBackends::single_locale(
-            Arc::new(MockStreamingStt::new("why does the sky look blue")),
-            Arc::new(MockStreamingTts::new(64)),
-            primer_core::speech::VoiceProfile::default(),
-            primer_core::i18n::Locale::English,
-        );
+        let backends = super::LoopBackends {
+            stt: Arc::new(MockStreamingStt::new("why does the sky look blue")),
+            tts: Arc::new(MockStreamingTts::new(64)),
+            voice: primer_core::speech::VoiceProfile::default(),
+        };
 
         let (event_tx, event_rx) = tokio::sync::mpsc::channel(64);
         // First SpeechStart → SpeechEnd: triggers LATENT_THINK.
@@ -1547,12 +1468,11 @@ mod mocks {
     async fn commit_on_first_chunk_proceeds_to_speak() {
         use primer_core::speech::VadEvent;
 
-        let backends = super::LoopBackends::single_locale(
-            Arc::new(MockStreamingStt::new("hi primer")),
-            Arc::new(MockStreamingTts::new(64)),
-            primer_core::speech::VoiceProfile::default(),
-            primer_core::i18n::Locale::English,
-        );
+        let backends = super::LoopBackends {
+            stt: Arc::new(MockStreamingStt::new("hi primer")),
+            tts: Arc::new(MockStreamingTts::new(64)),
+            voice: primer_core::speech::VoiceProfile::default(),
+        };
 
         let (event_tx, event_rx) = tokio::sync::mpsc::channel(64);
         event_tx.try_send(VadEvent::SpeechStart).unwrap();
@@ -1613,12 +1533,11 @@ mod mocks {
 
         use primer_core::speech::VadEvent;
 
-        let backends = super::LoopBackends::single_locale(
-            Arc::new(MockStreamingStt::new("hi")),
-            Arc::new(MockStreamingTts::new(64)),
-            primer_core::speech::VoiceProfile::default(),
-            primer_core::i18n::Locale::English,
-        );
+        let backends = super::LoopBackends {
+            stt: Arc::new(MockStreamingStt::new("hi")),
+            tts: Arc::new(MockStreamingTts::new(64)),
+            voice: primer_core::speech::VoiceProfile::default(),
+        };
 
         let (event_tx, event_rx) = tokio::sync::mpsc::channel(64);
         event_tx.try_send(VadEvent::SpeechStart).unwrap();
@@ -1738,14 +1657,13 @@ mod mocks {
         }
 
         let captured = Arc::new(Mutex::new(Vec::<String>::new()));
-        let backends = super::LoopBackends::single_locale(
-            Arc::new(MockStreamingStt::new("hello primer")),
-            Arc::new(CapturingTts {
+        let backends = super::LoopBackends {
+            stt: Arc::new(MockStreamingStt::new("hello primer")),
+            tts: Arc::new(CapturingTts {
                 captured: Arc::clone(&captured),
             }),
-            VoiceProfile::default(),
-            primer_core::i18n::Locale::English,
-        );
+            voice: VoiceProfile::default(),
+        };
 
         let (event_tx, event_rx) = tokio::sync::mpsc::channel(64);
         event_tx.try_send(VadEvent::SpeechStart).unwrap();

@@ -1058,7 +1058,6 @@ async fn async_main() -> anyhow::Result<()> {
             voice_id: &cli.voice,
             mic_silence_ms: cli.mic_silence_ms,
             verbose: cli.verbose,
-            locale: cli_locale,
         };
         // run() builds backends from cfg, wires DialogueManager via a
         // Responder adapter, drives the state machine.
