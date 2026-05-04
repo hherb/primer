@@ -40,10 +40,16 @@ impl Default for RetrySettings {
 }
 
 /// Compute the delay before the (attempt+1)-th try, given the previous
-/// attempt index (0-based). Pure — no I/O, no time.
+/// attempt index (0-based). Pure — no I/O, no time. The `jitter_seed`
+/// parameter is the source of randomness; tests pin it to 0.0 for
+/// deterministic delays.
 ///
 /// `delay = base_delay * backoff_factor^attempt * (1 + jitter * uniform(-1, 1))`.
-/// `jitter_seed` lets tests pin the random component.
+///
+/// f32 jitter math is exact for the default-scale delays (sub-second ×
+/// small factor); above ~16M ms (~4.5 hours) f32 loses integer
+/// precision, so don't tune `base_delay` or `backoff_factor` past that
+/// without revisiting the arithmetic.
 fn compute_delay(
     settings: &RetrySettings,
     attempt: u32,
@@ -57,10 +63,12 @@ fn compute_delay(
 }
 
 /// Cheap deterministic-ish jitter source. Returns a value in `[-1, 1]`
-/// derived from the attempt index — sufficient for spreading retries
-/// without inviting a `rand` workspace dep for a single helper.
+/// derived from the attempt index plus a time-derived nibble so
+/// concurrent sessions don't lock-step their backoffs. Reads
+/// `SystemTime::now()` — not pure; tests pin jitter via
+/// `RetrySettings.jitter_fraction = 0.0` rather than seeding this
+/// directly. Avoids a `rand` workspace dep for a single helper.
 fn jitter_seed_for(attempt: u32) -> f32 {
-    // Take a time-derived nibble so different sessions don't lock-step.
     let now_ns = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .map(|d| d.subsec_nanos())
