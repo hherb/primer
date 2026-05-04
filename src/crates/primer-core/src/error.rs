@@ -7,7 +7,10 @@ use thiserror::Error;
 /// data (durations, model names, status data) — never embed user-facing
 /// English here. The `Display` impl produces *dev-facing* strings used
 /// by `tracing::warn!`, panic messages, and test output. End-user
-/// rendering routes through `primer_core::i18n::render_inference_error`.
+/// rendering will route through a separate i18n module added in a
+/// follow-up commit.
+// `Clone` is required by the retry helper (lands in a follow-up commit)
+// for tracing event payloads that outlive the original Result.
 #[derive(Debug, Clone, Error)]
 pub enum InferenceError {
     /// 401 / 403 from a cloud API or other auth-shape failure.
@@ -152,5 +155,18 @@ mod inference_error_tests {
             "model not found: llama3.2"
         );
         assert_eq!(format!("{}", InferenceError::Other("raw".into())), "raw");
+        assert_eq!(
+            format!("{}", InferenceError::RateLimited { retry_after: None }),
+            "rate limited (retry_after=None)"
+        );
+        assert_eq!(
+            format!(
+                "{}",
+                InferenceError::RateLimited {
+                    retry_after: Some(Duration::from_secs(2))
+                }
+            ),
+            "rate limited (retry_after=Some(2s))"
+        );
     }
 }
