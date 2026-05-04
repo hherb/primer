@@ -266,9 +266,7 @@ mod tests {
             .unwrap()
             .as_nanos();
         let seq = SEQ.fetch_add(1, Ordering::Relaxed);
-        dir.join(format!(
-            "primer-knowledge-test-{pid}-{nanos}-{seq}.sqlite"
-        ))
+        dir.join(format!("primer-knowledge-test-{pid}-{nanos}-{seq}.sqlite"))
     }
 
     #[tokio::test]
