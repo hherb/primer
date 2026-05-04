@@ -1227,6 +1227,53 @@ factual_prefixes = []
         }
     }
 
+    // ─── German locale: prompt rendering smoke + locale-dispatch ──────
+
+    #[test]
+    fn snapshot_german_pack_renders_native_german_prompt() {
+        // Build a system prompt under Locale::German and assert the
+        // markers that pin native-German rendering. Not a byte-exact
+        // snapshot — translators may iterate on the wording — but it
+        // catches: (a) accidental English fragments from a pack-dispatch
+        // bug, (b) placeholder substitution failures, (c) section-intro
+        // dispatch errors.
+        use crate::prompt_pack;
+        let pack = prompt_pack::load(primer_core::i18n::Locale::German).expect("german pack loads");
+        let learner = snapshot_learner(8, EngagementState::FrustratedStuck);
+        let prompt = super::build_system_prompt_with_pack(
+            &*pack,
+            &learner,
+            PedagogicalIntent::Scaffolding,
+            &[snapshot_passage()],
+            "Wir haben über die Schwerkraft gesprochen.",
+            &[child_turn("über Blitze geredet", vec![])],
+        );
+        // Base block markers.
+        assert!(prompt.starts_with("Du bist der Primer"));
+        assert!(prompt.contains("namens Tester"));
+        assert!(prompt.contains("8 Jahre alt"));
+        // Age-7-9 band marker.
+        assert!(prompt.contains("Grundschule"));
+        // Intent: Scaffolding instruction in German.
+        assert!(prompt.contains("Schwierigkeiten"));
+        assert!(prompt.contains("Verringere die Abstraktion"));
+        // Engagement note (FrustratedStuck → frustrated note).
+        assert!(prompt.contains("WICHTIG"));
+        assert!(prompt.contains("frustriert"));
+        // Knowledge intro (with {age} substituted).
+        assert!(prompt.contains("8-jähriges Kind umformulieren"));
+        // Summary intro.
+        assert!(prompt.contains("Früher in diesem Gespräch"));
+        // Retrieved-moments intro.
+        assert!(prompt.contains("Relevante frühere Momente"));
+        assert!(prompt.contains("[Kind]"));
+        // No accidental English fragments.
+        assert!(!prompt.contains("You are the Primer"));
+        assert!(!prompt.contains("Your next response"));
+        assert!(!prompt.contains("Earlier in this conversation"));
+        assert!(!prompt.contains("Relevant prior moments"));
+    }
+
     #[test]
     fn build_prompt_includes_engagement_note_for_frustrated_trying() {
         let learner = learner_with(EngagementState::FrustratedTrying, vec![]);

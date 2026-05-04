@@ -63,14 +63,16 @@ pub trait PromptPack: Send + Sync {
     fn factual_prefixes(&self) -> &[String];
 }
 
-/// English pack embedded at compile time so a binary can ship without
-/// any data files alongside it. Override at runtime via
+/// Per-locale packs embedded at compile time so a binary can ship
+/// without any data files alongside it. Override at runtime via
 /// `PRIMER_PROMPTS_DIR`.
 const EN_TOML: &str = include_str!("../prompts/en.toml");
+const DE_TOML: &str = include_str!("../prompts/de.toml");
 
 fn embedded_pack(locale: Locale) -> &'static str {
     match locale {
         Locale::English => EN_TOML,
+        Locale::German => DE_TOML,
     }
 }
 
@@ -501,6 +503,156 @@ mod tests {
 
     fn english_pack() -> Arc<dyn PromptPack> {
         load(Locale::English).expect("english pack loads")
+    }
+
+    fn german_pack() -> Arc<dyn PromptPack> {
+        load(Locale::German).expect("german pack loads")
+    }
+
+    #[test]
+    fn german_pack_loads_from_embedded_toml() {
+        let pack = german_pack();
+        assert_eq!(pack.locale(), Locale::German);
+        assert_eq!(pack.child_label(), "Kind");
+        assert_eq!(pack.primer_label(), "Primer");
+    }
+
+    #[test]
+    fn german_pack_renders_base_with_name_and_age() {
+        let pack = german_pack();
+        let s = pack.render_base("Lieschen", 8);
+        assert!(s.contains("namens Lieschen"), "got: {s}");
+        assert!(s.contains("8 Jahre alt"), "got: {s}");
+        assert!(
+            !s.contains("{name}") && !s.contains("{age}") && !s.contains("{language_guidance}"),
+            "all placeholders substituted: {s}"
+        );
+        // Sanity: a few key German phrases that should appear in the
+        // rendered base — guards against accidental English fragments.
+        assert!(s.contains("sokratischer"), "expected German ‘sokratischer’");
+        assert!(s.contains("geduldiger"), "expected German ‘geduldiger’");
+        assert!(!s.contains("Socratic learning"), "no English fragments");
+    }
+
+    #[test]
+    fn german_pack_age_band_selection() {
+        let pack = german_pack();
+        // Pick a unique German marker per band.
+        assert!(pack.render_base("X", 5).contains("Kindergarten"));
+        assert!(pack.render_base("X", 8).contains("Grundschule"));
+        assert!(
+            pack.render_base("X", 11)
+                .contains("Mittlere Satzlängen sind in Ordnung")
+                || pack.render_base("X", 11).contains("mittlere Satzlängen")
+        );
+        assert!(pack.render_base("X", 15).contains("Erwachsenenwortschatz"));
+    }
+
+    #[test]
+    fn german_pack_intent_lookups_all_populated() {
+        let pack = german_pack();
+        for &intent in ALL_INTENTS {
+            let s = pack.intent_instruction(intent);
+            assert!(!s.is_empty(), "missing instruction for {intent:?}");
+            // Every intent message should be in German — assert the
+            // absence of the English-pack signature phrase as a smoke
+            // test against accidental copy-paste from en.toml.
+            assert!(
+                !s.contains("Your next response"),
+                "english fragment leaked into intent {intent:?}: {s}"
+            );
+        }
+    }
+
+    #[test]
+    fn german_pack_engagement_notes_in_german() {
+        let pack = german_pack();
+        let frustrated = pack.engagement_note(EngagementState::FrustratedStuck);
+        assert!(frustrated.contains("WICHTIG"), "got: {frustrated}");
+        assert!(frustrated.contains("frustriert"), "got: {frustrated}");
+        let disengaging = pack.engagement_note(EngagementState::Disengaging);
+        assert!(disengaging.contains("HINWEIS"), "got: {disengaging}");
+        assert!(disengaging.contains("Interesse"), "got: {disengaging}");
+    }
+
+    #[test]
+    fn german_pack_factual_prefixes_are_german() {
+        let pack = german_pack();
+        let prefixes: Vec<&str> = pack.factual_prefixes().iter().map(String::as_str).collect();
+        assert!(
+            !prefixes.is_empty(),
+            "german factual_prefixes must not be empty"
+        );
+        assert!(
+            prefixes.contains(&"was ist "),
+            "expected ‘was ist ’: {prefixes:?}"
+        );
+        assert!(
+            prefixes.contains(&"wie funktioniert "),
+            "expected ‘wie funktioniert ’: {prefixes:?}"
+        );
+        // Negative: no English prefixes should leak in.
+        assert!(
+            !prefixes.contains(&"what is "),
+            "english prefix leaked into german pack: {prefixes:?}"
+        );
+    }
+
+    #[test]
+    fn german_pack_knowledge_intro_substitutes_age() {
+        let pack = german_pack();
+        let s = pack.knowledge_intro(8);
+        assert!(s.contains("8-jähriges"), "got: {s}");
+        assert!(!s.contains("{age}"));
+    }
+
+    #[test]
+    #[should_panic(expected = "unknown placeholder")]
+    fn corrupted_german_pack_with_unknown_placeholder_panics_at_load() {
+        // Deliberately corrupt the language_guidance field of an
+        // otherwise-valid German pack with a `{nme}` typo. Validates
+        // that the per-field placeholder allowlist fires for German
+        // exactly as it does for English (same code path; this is a
+        // sanity test that the locale-dispatch wiring doesn't somehow
+        // bypass validation).
+        let body = format!(
+            r#"
+[meta]
+language = "de"
+language_name = "Deutsch"
+bcp47 = "de-DE"
+
+[system_prompt]
+base = "Hallo {{name}}, {{age}} Jahre alt.\n{{language_guidance}}"
+
+[language_guidance]
+ages_0_6 = "Hallo {{nme}}"
+ages_7_9 = ""
+ages_10_12 = ""
+ages_13_plus = ""
+
+[intent]
+{INTENT_KEYS}
+
+[engagement]
+frustrated = ""
+disengaging = ""
+
+[sections]
+knowledge_intro = ""
+summary_intro = ""
+retrieved_intro = ""
+
+[labels]
+child = "Kind"
+primer = "Primer"
+
+[question_detection]
+factual_prefixes = []
+"#,
+            INTENT_KEYS = all_intents_zeroed_toml(),
+        );
+        let _ = TomlPromptPack::from_toml_str(Locale::German, &body);
     }
 
     #[test]
