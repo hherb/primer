@@ -616,8 +616,7 @@ mod tests {
     }
 
     #[test]
-    #[should_panic(expected = "unknown placeholder")]
-    fn corrupted_german_pack_with_unknown_placeholder_panics_at_load() {
+    fn corrupted_german_pack_with_unknown_placeholder_returns_err() {
         // Deliberately corrupt the language_guidance field of an
         // otherwise-valid German pack with a `{nme}` typo. Validates
         // that the per-field placeholder allowlist fires for German
@@ -628,7 +627,7 @@ mod tests {
             r#"
 [meta]
 language = "de"
-language_name = "Deutsch"
+language_name = "German"
 bcp47 = "de-DE"
 
 [system_prompt]
@@ -661,7 +660,11 @@ factual_prefixes = []
 "#,
             INTENT_KEYS = all_intents_zeroed_toml(),
         );
-        let _ = TomlPromptPack::from_toml_str(Locale::German, &body);
+        let result = TomlPromptPack::from_toml_str(Locale::German, &body);
+        let err = result.err().expect("expected unknown-placeholder error");
+        let s = format!("{err}");
+        assert!(s.contains("unknown placeholder"), "got: {s}");
+        assert!(s.contains("nme"), "got: {s}");
     }
 
     #[test]

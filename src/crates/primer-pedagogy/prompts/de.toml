@@ -24,7 +24,11 @@
 
 [meta]
 language = "de"
-language_name = "Deutsch"
+# `language_name` is an internal identity check against
+# `Locale::name()` and must be the English name of the locale, not
+# the native one. The native form ("Deutsch") would break the meta
+# consistency validator that PR #17 added.
+language_name = "German"
 bcp47 = "de-DE"
 
 # --- BASIS-SYSTEMPROMPT ---
