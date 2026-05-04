@@ -252,13 +252,23 @@ mod tests {
     use std::path::PathBuf;
 
     fn tmp_db_path() -> PathBuf {
+        // Two parallel `tokio::test`s can call this helper inside the
+        // same nanosecond on fast machines and collide on filename, which
+        // surfaces as `SQLITE_READONLY_DBMOVED` mid-test. The atomic
+        // counter guarantees per-process uniqueness regardless of clock
+        // resolution.
+        use std::sync::atomic::{AtomicU64, Ordering};
+        static SEQ: AtomicU64 = AtomicU64::new(0);
         let dir = std::env::temp_dir();
         let pid = std::process::id();
         let nanos = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .unwrap()
             .as_nanos();
-        dir.join(format!("primer-knowledge-test-{pid}-{nanos}.sqlite"))
+        let seq = SEQ.fetch_add(1, Ordering::Relaxed);
+        dir.join(format!(
+            "primer-knowledge-test-{pid}-{nanos}-{seq}.sqlite"
+        ))
     }
 
     #[tokio::test]
