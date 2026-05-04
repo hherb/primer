@@ -21,6 +21,8 @@ If a child wants to stop, the Primer says "That's enough for today" without guil
 
 - **Comprehension is verified, not assumed.** The Primer probes understanding through transfer questions ("Can you explain it to someone who's never heard of it?"), application challenges ("What would happen if gravity were twice as strong?"), and contradiction probing ("Someone told me plants eat soil — what would you say to them?").
 
+- **Voice-first is a pedagogical choice, not a hardware constraint.** The Primer treats voice interaction as its primary interface. A screen is available for text, diagrams, and code — but it is never required, and for younger children (roughly under 8) it is actively undesirable. The research basis is strong: children who gesture while explaining concepts are significantly more likely to transfer learning to novel problems (Goldin-Meadow, 2009), and a voice-only device frees the child's body to move, gesture, and manipulate objects while thinking. Conversational speech also demands active construction — you cannot skim a conversation the way you can skim text — which produces exactly the kind of effortful cognitive processing that drives deep learning. Screen-based interaction, by contrast, pins attention to a visual surface and displaces the parent-child interaction that remains the most powerful learning environment available. The Primer should feel like a conversation with a thoughtful adult, not like an app.
+
 - **All data is local.** 
 The learner model (what the child knows, how deeply they understand it, what topics sustain their attention) never leaves the device without explicit parental consent. Cloud inference sends conversation turns per-request; nothing is stored server-side.
 
