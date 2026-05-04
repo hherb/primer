@@ -1615,6 +1615,42 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn respond_to_streaming_preserves_typed_inference_error_variant() {
+        // Regression test for the dialogue_manager.rs:534 fix (commit c1578251).
+        // Before the fix, a .map_err wrap re-wrapped typed InferenceError
+        // variants from the backend back into InferenceError::Other via
+        // format!(...).into(). That destroyed the typed dispatch the i18n
+        // render layer relies on — a 401 from Anthropic landed as
+        // Other("Generation failed: ...") and the user saw "Something
+        // unexpected went wrong" instead of the friendly Auth message.
+        //
+        // This test asserts that a typed Auth variant from the backend
+        // survives the dialogue_manager round-trip with its variant intact.
+        let backend = ScriptedBackend::new(vec![Err(PrimerError::Inference(
+            primer_core::error::InferenceError::Auth,
+        ))]);
+        let knowledge = EmptyKnowledge;
+        let mut dm = DialogueManager::new(
+            test_learner(),
+            &backend,
+            &knowledge,
+            DialogueManagerStores::default(),
+            default_subsystems(),
+            PedagogyConfig::default(),
+        );
+        let result = dm.respond_to_streaming("question", |_| {}).await;
+        assert!(
+            matches!(
+                result,
+                Err(PrimerError::Inference(
+                    primer_core::error::InferenceError::Auth
+                ))
+            ),
+            "expected typed Auth variant to survive round-trip, got: {result:?}"
+        );
+    }
+
+    #[tokio::test]
     async fn respond_to_streaming_returns_empty_string_when_stream_yields_no_text() {
         // Backend completes cleanly with only an empty done-chunk. The call
         // should succeed with an empty accumulated string and still record
