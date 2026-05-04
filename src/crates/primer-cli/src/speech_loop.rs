@@ -227,6 +227,38 @@ impl LoopBackends {
             active_locale: locale,
         }
     }
+
+    /// Pre-flight: verify the dispatch maps cover `active_locale` BEFORE
+    /// the SPEAK phase ever fires. v1's `single_locale` constructor
+    /// satisfies this trivially; this guard exists so a future caller
+    /// that builds the maps directly (e.g. from a voice-pack directory
+    /// scan) cannot silently leave a hole that would surface only on
+    /// the child's first sentence as a `PrimerError::Speech`.
+    ///
+    /// Pure (no I/O), so the CLI can call it at startup as a
+    /// fail-fast check.
+    pub fn ensure_active_locale_coverage(
+        &self,
+    ) -> std::result::Result<(), primer_core::error::PrimerError> {
+        if !self.tts_by_locale.contains_key(&self.active_locale) {
+            return Err(primer_core::error::PrimerError::Speech(format!(
+                "no TTS configured for active locale '{locale}'. \
+                 Pass --voice-onnx, --voice-config, and --voice for this \
+                 locale (the model_id should match the .onnx file stem). \
+                 Suggested Piper voices: 'en' \u{2192} en_US-amy-medium, \
+                 'de' \u{2192} de_DE-thorsten-medium \
+                 (https://huggingface.co/rhasspy/piper-voices).",
+                locale = self.active_locale.pack_id(),
+            )));
+        }
+        if !self.voice_by_locale.contains_key(&self.active_locale) {
+            return Err(primer_core::error::PrimerError::Speech(format!(
+                "no voice profile configured for active locale '{}'.",
+                self.active_locale.pack_id(),
+            )));
+        }
+        Ok(())
+    }
 }
 
 /// Awaitable hook that blocks until the speaker has finished playing
@@ -813,6 +845,12 @@ pub async fn run<'a>(
         voice,
         cfg.locale,
     );
+
+    // Pre-flight: a missing voice for `active_locale` would otherwise
+    // surface as a `PrimerError::Speech` on the child's first sentence.
+    // `single_locale` above can't fail this check; the guard is here
+    // for any future construction path that builds the maps directly.
+    backends.ensure_active_locale_coverage()?;
 
     // ── on_audio callback: push synth chunks to the speaker ─────────
     // Uses a leftover buffer carried across calls so partial tails of
@@ -1794,6 +1832,72 @@ mod mocks {
             super::FALLBACK_LINE,
             "fallback line was synthesised after LLM error"
         );
+    }
+
+    #[test]
+    fn ensure_active_locale_coverage_ok_after_single_locale_constructor() {
+        let backends = super::LoopBackends::single_locale(
+            Arc::new(MockStreamingStt::new("")),
+            Arc::new(MockStreamingTts::new(64)),
+            primer_core::speech::VoiceProfile::default(),
+            primer_core::i18n::Locale::German,
+        );
+        backends
+            .ensure_active_locale_coverage()
+            .expect("single_locale must satisfy the coverage invariant");
+    }
+
+    #[test]
+    fn ensure_active_locale_coverage_errors_when_tts_missing() {
+        // Hand-roll the maps to simulate a future caller that builds
+        // them directly (e.g. from a voice-pack scan) and forgot to
+        // include the active locale's voice. v1's `single_locale`
+        // can't reach this state.
+        let backends = super::LoopBackends {
+            stt: Arc::new(MockStreamingStt::new("")),
+            tts_by_locale: std::collections::HashMap::new(),
+            voice_by_locale: std::collections::HashMap::new(),
+            active_locale: primer_core::i18n::Locale::German,
+        };
+        let err = backends.ensure_active_locale_coverage().unwrap_err();
+        let msg = format!("{err}");
+        assert!(
+            msg.contains("'de'"),
+            "must name the missing locale by pack id: {msg}"
+        );
+        assert!(
+            msg.contains("--voice-onnx"),
+            "must point the user at the corrective flags: {msg}"
+        );
+        assert!(
+            msg.contains("piper-voices"),
+            "must point the user at where to find a voice: {msg}"
+        );
+    }
+
+    #[test]
+    fn ensure_active_locale_coverage_errors_when_only_voice_missing() {
+        let mut tts_by_locale: std::collections::HashMap<
+            primer_core::i18n::Locale,
+            Arc<dyn primer_core::speech::StreamingTextToSpeech>,
+        > = std::collections::HashMap::new();
+        tts_by_locale.insert(
+            primer_core::i18n::Locale::English,
+            Arc::new(MockStreamingTts::new(64)),
+        );
+        let backends = super::LoopBackends {
+            stt: Arc::new(MockStreamingStt::new("")),
+            tts_by_locale,
+            voice_by_locale: std::collections::HashMap::new(),
+            active_locale: primer_core::i18n::Locale::English,
+        };
+        let err = backends.ensure_active_locale_coverage().unwrap_err();
+        let msg = format!("{err}");
+        assert!(
+            msg.contains("voice profile"),
+            "must distinguish voice-profile miss from TTS miss: {msg}"
+        );
+        assert!(msg.contains("'en'"), "must name the missing locale: {msg}");
     }
 }
 
