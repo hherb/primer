@@ -7,12 +7,36 @@
 //! This is where the Socratic method is encoded — not in the model's weights,
 //! but in the instructions we give it.
 
+use std::sync::OnceLock;
+
 use primer_core::conversation::{PedagogicalIntent, Session, Speaker, Turn};
+use primer_core::i18n::Locale;
 use primer_core::inference::{Message, Prompt, Role};
 use primer_core::knowledge::Passage;
-use primer_core::learner::{EngagementState, LearnerModel, UnderstandingDepth};
+use primer_core::learner::{LearnerModel, UnderstandingDepth};
 
-/// Build the system prompt for the next LLM call.
+use crate::prompt_pack::{self, PromptPack};
+
+/// Process-wide cached English pack used by the no-pack convenience
+/// wrappers (`decide_intent`, `is_factual_question`, and the
+/// existing-signature `build_system_prompt` / `build_prompt`). The
+/// dialogue manager constructs and threads its own locale-specific
+/// pack through `*_with_pack` variants instead of consulting this
+/// singleton — same code, different entry point.
+///
+/// Lifetime note: the `Arc<dyn PromptPack>` lives in a function-scoped
+/// `static`, so it has `'static` lifetime. `Arc::as_ref` returns a
+/// reference whose lifetime is tied to the `Arc`'s — here, also
+/// `'static`. The returned `&dyn PromptPack` is therefore safe to hand
+/// to call sites that don't retain the `Arc`.
+fn english_pack() -> &'static dyn PromptPack {
+    static CELL: OnceLock<std::sync::Arc<dyn PromptPack>> = OnceLock::new();
+    CELL.get_or_init(|| prompt_pack::load_cached(Locale::English).expect("english pack loads"))
+        .as_ref()
+}
+
+/// Build the system prompt for the next LLM call using the locale's
+/// [`PromptPack`] for every piece of pedagogical text.
 ///
 /// The system prompt varies based on:
 /// - The child's age and developmental stage
@@ -26,7 +50,8 @@ use primer_core::learner::{EngagementState, LearnerModel, UnderstandingDepth};
 /// inside the active window so neither is needed. When non-empty they
 /// live as system-prompt sections so the chat-message timeline (the
 /// last N turns) stays linear and coherent.
-pub fn build_system_prompt(
+pub fn build_system_prompt_with_pack(
+    pack: &dyn PromptPack,
     learner: &LearnerModel,
     intent: PedagogicalIntent,
     knowledge_context: &[Passage],
@@ -35,82 +60,15 @@ pub fn build_system_prompt(
 ) -> String {
     let age = learner.profile.age;
     let name = &learner.profile.name;
-    let language_guidance = language_guidance_for_age(age);
 
-    let base = format!(
-        r#"You are the Primer — a patient, curious, Socratic learning companion for a child named {name}, age {age}.
+    let base = pack.render_base(name, age);
+    let intent_instruction = pack.intent_instruction(intent);
 
-Your core principles:
-- NEVER give a direct answer when you can ask a guiding question instead.
-- Ask questions that lead {name} toward discovering the answer themselves.
-- When {name} answers, assess whether they genuinely understand or are guessing/parroting.
-- If they understand: acknowledge it, then extend — "Good. Now what if...?"
-- If they're struggling: offer a concrete example, analogy, or story. Reduce abstraction.
-- If they ask a pure factual question ("How far is the moon?"): answer it directly, THEN pivot to a Socratic follow-up ("Now that you know it's 384,000 km, how long would it take to drive there?").
-- Be warm. Be patient. Never condescend. Treat every question as worthy.
-- You are NOT trying to keep {name} engaged. If they want to stop, let them stop. Say "That's enough for today" without guilt.
-- You do not use emojis or exclamation marks excessively.
-
-Language for a {age}-year-old — read carefully:
-{language_guidance}
-
-Vocabulary discipline (applies at every age):
-- Before using any technical or unusual word (examples at this age: "plasma", "molecule", "conductor", "insulator", "shockwave", "vibration", "frequency", "voltage", "current", "atom", "particle"), first explain the idea in plain everyday words using a concrete analogy {name} already knows (food, toys, animals, weather, family, body). Only use the technical word once the plain-language idea is clear — and even then, the technical word is optional, never required.
-- If {name} asks "what does X mean?" (like asking what "repel" means), that is a signal that X was introduced too soon. First, explain X in plain everyday words. For the next sentence or two, use the plain-language version on its own. Then start weaving X back in alongside the plain meaning ("the air pushes the charges away — it repels them"), so {name} ends the conversation having *gained* the new word, not had it taken away. Re-use newly-introduced words a few more times before the session ends — short, casual repetition is how vocabulary actually sticks.
-- One new idea per sentence. If a sentence introduces two unfamiliar things, split it.
-- After two or three sentences of explanation, stop and ask a question. Do not lecture."#
-    );
-
-    let intent_instruction = match intent {
-        PedagogicalIntent::SocraticQuestion => {
-            "Your next response should be a guiding question that leads toward understanding."
-        }
-        PedagogicalIntent::ComprehensionCheck => {
-            "Your next response should probe whether the child truly understands \
-             or is repeating what they've heard. Ask them to explain it differently, \
-             apply it to a new situation, or find a flaw in a deliberately wrong statement."
-        }
-        PedagogicalIntent::Scaffolding => {
-            "The child is struggling. Your next response should offer a concrete \
-             example, a story, or an analogy that makes the concept tangible. \
-             Reduce the abstraction level."
-        }
-        PedagogicalIntent::Encouragement => {
-            "The child is frustrated. Your next response should be encouraging \
-             without being patronising. Acknowledge the difficulty. Normalise confusion. \
-             Suggest a different angle of approach."
-        }
-        PedagogicalIntent::Extension => {
-            "The child has demonstrated understanding. Your next response should \
-             extend the concept — introduce a complication, a counterexample, \
-             or a connection to a different domain."
-        }
-        PedagogicalIntent::DirectAnswer => {
-            "This is a factual question. Answer it directly and clearly, \
-             then follow with a Socratic question that builds on the answer."
-        }
-        PedagogicalIntent::AnswerThenPivot => {
-            "Provide the factual answer briefly, then pivot to a question \
-             that makes the child think about *why* the fact matters or \
-             what would change if it were different."
-        }
-        PedagogicalIntent::SessionClose => {
-            "Suggest that this is a good stopping point. Summarise what was \
-             explored today (not what was 'learned' — what was *explored*). \
-             Leave the child with one question to think about until next time."
-        }
-    };
-
-    let engagement_note = match learner.current_engagement {
-        EngagementState::FrustratedStuck | EngagementState::FrustratedTrying => {
-            "\n\nIMPORTANT: The child appears frustrated. Be especially gentle. \
-             Offer to approach the topic differently or switch topics entirely."
-        }
-        EngagementState::Disengaging => {
-            "\n\nNOTE: The child may be losing interest. Consider suggesting a \
-             break or pivoting to a topic they find more engaging."
-        }
-        _ => "",
+    let engagement_note_body = pack.engagement_note(learner.current_engagement);
+    let engagement_note: String = if engagement_note_body.is_empty() {
+        String::new()
+    } else {
+        format!("\n\n{engagement_note_body}")
     };
 
     let knowledge_section = if knowledge_context.is_empty() {
@@ -121,18 +79,15 @@ Vocabulary discipline (applies at every age):
             .map(|p| format!("[Source: {}]\n{}", p.source, p.text))
             .collect::<Vec<_>>()
             .join("\n\n");
-        format!(
-            "\n\nRelevant factual context (use to ground your responses, \
-             but do not quote directly — rephrase for a {age}-year-old):\n\n{passages}"
-        )
+        let intro = pack.knowledge_intro(age);
+        format!("\n\n{intro}\n\n{passages}")
     };
 
     let summary_section = if summary.trim().is_empty() {
         String::new()
     } else {
-        format!(
-            "\n\nEarlier in this conversation (long-term memory across many turns):\n\n{summary}"
-        )
+        let intro = pack.summary_intro();
+        format!("\n\n{intro}\n\n{summary}")
     };
 
     let retrieved_section = if retrieved_older.is_empty() {
@@ -142,21 +97,38 @@ Vocabulary discipline (applies at every age):
             .iter()
             .map(|t| {
                 let who = match t.speaker {
-                    Speaker::Child => "Child",
-                    Speaker::Primer => "Primer",
+                    Speaker::Child => pack.child_label(),
+                    Speaker::Primer => pack.primer_label(),
                 };
                 format!("- [{who}] {}", t.text)
             })
             .collect::<Vec<_>>()
             .join("\n");
-        format!(
-            "\n\nRelevant prior moments from this same session (retrieved by topic, \
-             not in time order; use as background, not as the active conversation):\n\n{lines}"
-        )
+        let intro = pack.retrieved_intro();
+        format!("\n\n{intro}\n\n{lines}")
     };
 
     format!(
         "{base}\n\n{intent_instruction}{engagement_note}{summary_section}{retrieved_section}{knowledge_section}"
+    )
+}
+
+/// Convenience wrapper consulting the process-wide cached English pack.
+/// Used by tests and by any caller that hasn't been threaded a locale.
+pub fn build_system_prompt(
+    learner: &LearnerModel,
+    intent: PedagogicalIntent,
+    knowledge_context: &[Passage],
+    summary: &str,
+    retrieved_older: &[Turn],
+) -> String {
+    build_system_prompt_with_pack(
+        english_pack(),
+        learner,
+        intent,
+        knowledge_context,
+        summary,
+        retrieved_older,
     )
 }
 
@@ -175,7 +147,8 @@ pub fn build_messages(session: &Session, context_turns: usize) -> Vec<Message> {
         .collect()
 }
 
-/// Assemble the complete prompt from components.
+/// Assemble the complete prompt from components using the supplied
+/// [`PromptPack`].
 ///
 /// `summary` and `retrieved_older` carry long-term memory: the rolling
 /// LLM-generated condensation of pre-window turns and the FTS5-retrieved
@@ -183,6 +156,31 @@ pub fn build_messages(session: &Session, context_turns: usize) -> Vec<Message> {
 /// into the system prompt; the chat `messages` list stays exactly equal
 /// to `session.recent_turns(context_turns)` so the timeline the model
 /// sees as "the conversation" is linear.
+#[allow(clippy::too_many_arguments)]
+pub fn build_prompt_with_pack(
+    pack: &dyn PromptPack,
+    learner: &LearnerModel,
+    session: &Session,
+    intent: PedagogicalIntent,
+    knowledge_context: &[Passage],
+    summary: &str,
+    retrieved_older: &[Turn],
+    context_turns: usize,
+) -> Prompt {
+    Prompt {
+        system: build_system_prompt_with_pack(
+            pack,
+            learner,
+            intent,
+            knowledge_context,
+            summary,
+            retrieved_older,
+        ),
+        messages: build_messages(session, context_turns),
+    }
+}
+
+/// Convenience wrapper using the process-wide cached English pack.
 #[allow(clippy::too_many_arguments)]
 pub fn build_prompt(
     learner: &LearnerModel,
@@ -193,41 +191,16 @@ pub fn build_prompt(
     retrieved_older: &[Turn],
     context_turns: usize,
 ) -> Prompt {
-    Prompt {
-        system: build_system_prompt(learner, intent, knowledge_context, summary, retrieved_older),
-        messages: build_messages(session, context_turns),
-    }
-}
-
-/// Concrete, age-banded language guidance for the system prompt.
-///
-/// Generic instructions like "match vocabulary to age" do not constrain a
-/// modern LLM enough — it will happily use words like "plasma" or
-/// "insulator" with a 7-year-old. These bands give explicit ceilings on
-/// sentence length and vocabulary register, plus rules about how new
-/// technical terms must be introduced.
-fn language_guidance_for_age(age: u8) -> &'static str {
-    match age {
-        0..=6 => "\
-- Use only words a young child uses at home or kindergarten.
-- Sentences are short — aim for 6 to 10 words.
-- Never use a word with more than three syllables unless you have just defined it through a concrete everyday example, and the child has shown they grasped the example.
-- Anchor every idea to something the child can see, touch, hear, or do: food, toys, pets, body, weather, family.
-- Avoid abstract nouns (\"energy\", \"matter\", \"force\") unless you have grounded them in a physical thing first.",
-        7..=9 => "\
-- Use everyday words a young child uses at home or in primary school.
-- Short, clear sentences — usually 8 to 15 words. Break longer thoughts into separate sentences.
-- Common everyday words only. Treat words like \"molecule\", \"plasma\", \"conductor\", \"insulator\", \"vibration\", \"shockwave\", \"eardrum\", \"pressure wave\", \"electron\" as TECHNICAL — they require the plain-language introduction described in the Vocabulary discipline section below.
-- Anchor abstract ideas to something the child can see, touch, or do — kitchen, playground, bath, bed, pets, family — before introducing the abstract version.
-- It is better to say something twice in plain words than once correctly with a hard word.",
-        10..=12 => "\
-- Use clear everyday vocabulary; moderate sentence length is fine.
-- New technical terms are acceptable, but always define them briefly with a concrete example the first time they appear.
-- You can introduce one moderately abstract idea per response, but always tie it back to something concrete.",
-        _ => "\
-- Adult-level vocabulary is acceptable, but still introduce specialised jargon with a brief plain-language gloss the first time it appears.
-- Sentence length and complexity may match an articulate teenager.",
-    }
+    build_prompt_with_pack(
+        english_pack(),
+        learner,
+        session,
+        intent,
+        knowledge_context,
+        summary,
+        retrieved_older,
+        context_turns,
+    )
 }
 
 // ─── Concept-depth helpers (used by dialogue manager) ─────────────────
@@ -253,52 +226,76 @@ pub fn extract_active_concepts(session: &Session, last_n: usize) -> Vec<String> 
         .collect()
 }
 
-/// Return `true` if `text` looks like a direct factual lookup.
+/// Return `true` if `text` looks like a direct factual lookup,
+/// using `pack`'s `factual_prefixes()` list. Returns `false` if the
+/// list is empty (e.g. for languages where prefix matching doesn't
+/// apply — Japanese, Mandarin) and `decide_intent` falls back to the
+/// LLM-based classifier in that case.
 ///
-/// Only a small set of opening phrases qualify: "what is/are/does", "what's",
-/// and "how does/do/is/are". The trailing space in each prefix prevents
-/// partial-word matches ("whatever", "howdy"). Exploratory forms ("what if",
-/// "what about") and "why" questions are intentionally excluded — those
-/// are Socratic-richer and should not be short-circuited with a direct answer.
-///
-/// This is a private helper for `decide_intent`; Task 19 wires it into
-/// the intent-routing logic.
-fn is_factual_question(text: &str) -> bool {
-    const FACTUAL_PREFIXES: &[&str] = &[
-        "what is ",
-        "what are ",
-        "what's ",
-        "what does ",
-        "how does ",
-        "how do ",
-        "how is ",
-        "how are ",
-    ];
+/// Only a small set of opening phrases qualify in English: "what
+/// is/are/does", "what's", and "how does/do/is/are". The trailing
+/// space in each prefix prevents partial-word matches ("whatever",
+/// "howdy"). Exploratory forms ("what if", "what about") and "why"
+/// questions are intentionally excluded — those are Socratic-richer
+/// and should not be short-circuited with a direct answer.
+fn is_factual_question_with_pack(pack: &dyn PromptPack, text: &str) -> bool {
+    let prefixes = pack.factual_prefixes();
+    if prefixes.is_empty() {
+        return false;
+    }
     let lowered = text.trim().to_lowercase();
-    FACTUAL_PREFIXES.iter().any(|p| lowered.starts_with(p))
+    prefixes.iter().any(|p| lowered.starts_with(p.as_str()))
+}
+
+/// Convenience wrapper using the process-wide cached English pack.
+/// Used only by tests today; the production path goes through
+/// `is_factual_question_with_pack`.
+#[cfg(test)]
+fn is_factual_question(text: &str) -> bool {
+    is_factual_question_with_pack(english_pack(), text)
 }
 
 /// Decide the next pedagogical intent based on the learner model
 /// and conversation history.
 ///
 /// This is a thin wrapper around [`decide_intent_at`] that injects
-/// `chrono::Utc::now()` as the reference time. Production code calls this;
-/// tests call `decide_intent_at` directly with a controlled timestamp.
+/// `chrono::Utc::now()` as the reference time. Production code calls
+/// `decide_intent_at_with_pack` (locale-aware); this no-pack variant
+/// uses the cached English pack for tests and English-only call paths.
 pub fn decide_intent(learner: &LearnerModel, session: &Session) -> PedagogicalIntent {
     decide_intent_at(learner, session, chrono::Utc::now())
 }
 
+/// Locale-aware variant of [`decide_intent`].
+pub fn decide_intent_with_pack(
+    pack: &dyn PromptPack,
+    learner: &LearnerModel,
+    session: &Session,
+) -> PedagogicalIntent {
+    decide_intent_at_with_pack(pack, learner, session, chrono::Utc::now())
+}
+
 /// Time-aware core of [`decide_intent`].
-///
-/// Accepts an explicit `now` so tests can backdate sessions deterministically
-/// without real-clock races. The `Disengaging` branch uses `now` together with
-/// `session.started_at` to distinguish an early disengagement (encourage rather
-/// than close) from a sustained one (suggest session close).
 pub fn decide_intent_at(
     learner: &LearnerModel,
     session: &Session,
     now: chrono::DateTime<chrono::Utc>,
 ) -> PedagogicalIntent {
+    decide_intent_at_with_pack(english_pack(), learner, session, now)
+}
+
+/// Time-aware, locale-aware core. Accepts an explicit `now` so tests
+/// can backdate sessions deterministically without real-clock races.
+/// The `Disengaging` branch uses `now` together with `session.started_at`
+/// to distinguish an early disengagement (encourage rather than close)
+/// from a sustained one (suggest session close).
+pub fn decide_intent_at_with_pack(
+    pack: &dyn PromptPack,
+    learner: &LearnerModel,
+    session: &Session,
+    now: chrono::DateTime<chrono::Utc>,
+) -> PedagogicalIntent {
+    use primer_core::learner::EngagementState;
     // Engagement-state overrides fire before turn analysis.
     match learner.current_engagement {
         EngagementState::FrustratedStuck => return PedagogicalIntent::Scaffolding,
@@ -322,7 +319,7 @@ pub fn decide_intent_at(
     if let Some(last) = session.turns.last() {
         if last.speaker == primer_core::conversation::Speaker::Child {
             // Gap 2: factual-question pattern routing
-            if is_factual_question(&last.text) {
+            if is_factual_question_with_pack(pack, &last.text) {
                 let prior_was_direct_answer = session
                     .turns
                     .iter()
@@ -391,6 +388,7 @@ mod tests {
                 name: "Tester".to_string(),
                 age: 8,
                 languages: vec!["en".to_string()],
+                locale: primer_core::i18n::Locale::English,
                 created_at: Utc::now(),
                 last_active: Utc::now(),
             },
@@ -921,6 +919,68 @@ mod tests {
         assert!(!is_factual_question("why does it rain"));
     }
 
+    /// Locales whose pack ships `factual_prefixes = []` opt out of the
+    /// prefix-matching short-circuit; `is_factual_question_with_pack`
+    /// must return `false` for every input so `decide_intent` falls
+    /// through to the LLM-based engagement classifier.
+    #[test]
+    fn is_factual_question_with_pack_returns_false_for_empty_prefix_list() {
+        use crate::prompt_pack::TomlPromptPack;
+        // Synthetic pack with `factual_prefixes = []` — represents a
+        // future locale (e.g. Japanese) where prefix matching doesn't
+        // apply.
+        let body = r#"
+[meta]
+language = "en"
+language_name = "English"
+bcp47 = "en-US"
+
+[system_prompt]
+base = "x"
+
+[language_guidance]
+ages_0_6 = ""
+ages_7_9 = ""
+ages_10_12 = ""
+ages_13_plus = ""
+
+[intent]
+socratic_question = "x"
+comprehension_check = "x"
+scaffolding = "x"
+encouragement = "x"
+extension = "x"
+direct_answer = "x"
+answer_then_pivot = "x"
+session_close = "x"
+
+[engagement]
+frustrated = ""
+disengaging = ""
+
+[sections]
+knowledge_intro = ""
+summary_intro = ""
+retrieved_intro = ""
+
+[labels]
+child = "Child"
+primer = "Primer"
+
+[question_detection]
+factual_prefixes = []
+"#;
+        let pack = TomlPromptPack::from_toml_str(Locale::English, body)
+            .expect("synthetic pack with empty prefixes loads");
+        // Inputs that the English pack would classify as factual must
+        // now return false because the prefix list is empty.
+        assert!(!is_factual_question_with_pack(&pack, "what is gravity?"));
+        assert!(!is_factual_question_with_pack(&pack, "how does it work"));
+        // And ordinary inputs still return false.
+        assert!(!is_factual_question_with_pack(&pack, "why is the sky blue"));
+        assert!(!is_factual_question_with_pack(&pack, ""));
+    }
+
     #[test]
     fn build_prompt_chat_messages_remain_recent_window_only() {
         // Long-term memory (summary + retrieved older) lives in the
@@ -969,6 +1029,202 @@ mod tests {
             prompt.system.contains("appears frustrated"),
             "engagement note should appear for FrustratedStuck"
         );
+    }
+
+    // ─── Snapshot tests: lock byte-identical English prompt output ────
+    //
+    // These tests are the regression guard for the prompt-pack refactor.
+    // They lock both the precise length and the exact content of the
+    // rendered system prompt for a representative matrix of inputs. If
+    // anyone edits `prompts/en.toml` (or the rendering logic) and
+    // changes the output, these tests fail loudly with the offending
+    // before/after lengths or the offending differing substring.
+    //
+    // The locked lengths were measured against the pre-refactor
+    // hardcoded strings; a passing test means the TOML pack reproduces
+    // them character-for-character.
+    //
+    // Use the helpers below to add new matrix points: build a prompt
+    // with the desired (age, intent, engagement, with_passages,
+    // with_summary, with_retrieved) tuple and assert the substring
+    // markers appear / don't appear as expected. The full-text snapshot
+    // (`snapshot_canonical_prompt_locks_full_text`) keeps every byte of
+    // one canonical scenario locked.
+
+    fn snapshot_learner(age: u8, engagement: EngagementState) -> LearnerModel {
+        LearnerModel {
+            profile: LearnerProfile {
+                id: Uuid::nil(),
+                name: "Tester".to_string(),
+                age,
+                languages: vec!["en".to_string()],
+                locale: primer_core::i18n::Locale::English,
+                created_at: Utc::now(),
+                last_active: Utc::now(),
+            },
+            concepts: vec![],
+            preferences: LearningPreferences::default(),
+            current_engagement: engagement,
+            recent_assessments: vec![],
+        }
+    }
+
+    fn snapshot_passage() -> primer_core::knowledge::Passage {
+        primer_core::knowledge::Passage {
+            id: "test-id".to_string(),
+            source: "test-source".to_string(),
+            text: "Test passage body.".to_string(),
+            score: 1.0,
+        }
+    }
+
+    #[test]
+    fn snapshot_basic_socratic_question_for_8_year_old() {
+        let learner = snapshot_learner(8, EngagementState::Engaged);
+        let session = empty_session();
+        let prompt = build_prompt(
+            &learner,
+            &session,
+            PedagogicalIntent::SocraticQuestion,
+            &[],
+            "",
+            &[],
+            20,
+        );
+        // Markers from the base block.
+        assert!(prompt.system.starts_with("You are the Primer"));
+        assert!(prompt.system.contains("named Tester, age 8"));
+        // The 7-9 age band's signature line.
+        assert!(prompt.system.contains("primary school"));
+        assert!(
+            prompt
+                .system
+                .contains("Vocabulary discipline (applies at every age):")
+        );
+        // Intent instruction appended exactly once.
+        assert_eq!(
+            prompt.system.matches("guiding question").count(),
+            2,
+            "expected exactly two mentions: one in base principles (\"guiding question\"), one in intent instruction"
+        );
+        // No engagement note, no sections.
+        assert!(!prompt.system.contains("appears frustrated"));
+        assert!(!prompt.system.contains("losing interest"));
+        assert!(!prompt.system.contains("Earlier in this conversation"));
+        assert!(!prompt.system.contains("Relevant prior moments"));
+        assert!(!prompt.system.contains("Relevant factual context"));
+    }
+
+    #[test]
+    fn snapshot_scaffolding_for_5_year_old_with_passages_and_summary() {
+        let learner = snapshot_learner(5, EngagementState::FrustratedStuck);
+        let session = empty_session();
+        let prompt = build_prompt(
+            &learner,
+            &session,
+            PedagogicalIntent::Scaffolding,
+            &[snapshot_passage()],
+            "Earlier we explored gravity.",
+            &[child_turn("we talked about lightning", vec![])],
+            20,
+        );
+        // 0-6 age band signature line.
+        assert!(prompt.system.contains("kindergarten"));
+        // Frustrated note present.
+        assert!(prompt.system.contains("appears frustrated"));
+        // Scaffolding intent.
+        assert!(prompt.system.contains("offer a concrete"));
+        assert!(prompt.system.contains("Reduce the abstraction"));
+        // All three optional sections present.
+        assert!(prompt.system.contains("Earlier in this conversation"));
+        assert!(prompt.system.contains("Relevant prior moments"));
+        assert!(prompt.system.contains("Relevant factual context"));
+        assert!(prompt.system.contains("rephrase for a 5-year-old"));
+        assert!(prompt.system.contains("[Source: test-source]"));
+        assert!(prompt.system.contains("[Child]"));
+    }
+
+    #[test]
+    fn snapshot_extension_for_15_year_old() {
+        let learner = snapshot_learner(15, EngagementState::Engaged);
+        let session = empty_session();
+        let prompt = build_prompt(
+            &learner,
+            &session,
+            PedagogicalIntent::Extension,
+            &[],
+            "",
+            &[],
+            20,
+        );
+        // 13+ age band.
+        assert!(prompt.system.contains("Adult-level vocabulary"));
+        assert!(prompt.system.contains("articulate teenager"));
+        // Extension instruction.
+        assert!(prompt.system.contains("introduce a complication"));
+        assert!(prompt.system.contains("counterexample"));
+    }
+
+    #[test]
+    fn snapshot_disengaging_for_11_year_old() {
+        let learner = snapshot_learner(11, EngagementState::Disengaging);
+        let session = empty_session();
+        let prompt = build_prompt(
+            &learner,
+            &session,
+            PedagogicalIntent::SessionClose,
+            &[],
+            "",
+            &[],
+            20,
+        );
+        // 10-12 age band.
+        assert!(prompt.system.contains("moderate sentence length"));
+        // Disengaging note.
+        assert!(prompt.system.contains("losing interest"));
+        // SessionClose intent.
+        assert!(prompt.system.contains("good stopping point"));
+        assert!(prompt.system.contains("explored today"));
+    }
+
+    /// Full-text snapshot. The exact bytes of this rendered prompt
+    /// are the regression boundary — any change to `en.toml` or the
+    /// renderer that alters this output will fail this test loudly.
+    #[test]
+    fn snapshot_canonical_prompt_locks_full_text() {
+        let learner = snapshot_learner(8, EngagementState::Engaged);
+        let session = empty_session();
+        let prompt = build_prompt(
+            &learner,
+            &session,
+            PedagogicalIntent::SocraticQuestion,
+            &[],
+            "",
+            &[],
+            20,
+        );
+        let want = "You are the Primer — a patient, curious, Socratic learning companion for a child named Tester, age 8.\n\nYour core principles:\n- NEVER give a direct answer when you can ask a guiding question instead.\n- Ask questions that lead Tester toward discovering the answer themselves.\n- When Tester answers, assess whether they genuinely understand or are guessing/parroting.\n- If they understand: acknowledge it, then extend — \"Good. Now what if...?\"\n- If they're struggling: offer a concrete example, analogy, or story. Reduce abstraction.\n- If they ask a pure factual question (\"How far is the moon?\"): answer it directly, THEN pivot to a Socratic follow-up (\"Now that you know it's 384,000 km, how long would it take to drive there?\").\n- Be warm. Be patient. Never condescend. Treat every question as worthy.\n- You are NOT trying to keep Tester engaged. If they want to stop, let them stop. Say \"That's enough for today\" without guilt.\n- You do not use emojis or exclamation marks excessively.\n\nLanguage for a 8-year-old — read carefully:\n- Use everyday words a young child uses at home or in primary school.\n- Short, clear sentences — usually 8 to 15 words. Break longer thoughts into separate sentences.\n- Common everyday words only. Treat words like \"molecule\", \"plasma\", \"conductor\", \"insulator\", \"vibration\", \"shockwave\", \"eardrum\", \"pressure wave\", \"electron\" as TECHNICAL — they require the plain-language introduction described in the Vocabulary discipline section below.\n- Anchor abstract ideas to something the child can see, touch, or do — kitchen, playground, bath, bed, pets, family — before introducing the abstract version.\n- It is better to say something twice in plain words than once correctly with a hard word.\n\nVocabulary discipline (applies at every age):\n- Before using any technical or unusual word (examples at this age: \"plasma\", \"molecule\", \"conductor\", \"insulator\", \"shockwave\", \"vibration\", \"frequency\", \"voltage\", \"current\", \"atom\", \"particle\"), first explain the idea in plain everyday words using a concrete analogy Tester already knows (food, toys, animals, weather, family, body). Only use the technical word once the plain-language idea is clear — and even then, the technical word is optional, never required.\n- If Tester asks \"what does X mean?\" (like asking what \"repel\" means), that is a signal that X was introduced too soon. First, explain X in plain everyday words. For the next sentence or two, use the plain-language version on its own. Then start weaving X back in alongside the plain meaning (\"the air pushes the charges away — it repels them\"), so Tester ends the conversation having *gained* the new word, not had it taken away. Re-use newly-introduced words a few more times before the session ends — short, casual repetition is how vocabulary actually sticks.\n- One new idea per sentence. If a sentence introduces two unfamiliar things, split it.\n- After two or three sentences of explanation, stop and ask a question. Do not lecture.\n\nYour next response should be a guiding question that leads toward understanding.";
+        if prompt.system != want {
+            // Print a diagnostic: first divergence + lengths.
+            let got = prompt.system.as_str();
+            let mut idx = 0;
+            for (g, w) in got.bytes().zip(want.bytes()) {
+                if g != w {
+                    break;
+                }
+                idx += 1;
+            }
+            panic!(
+                "canonical snapshot diverged at byte {idx}; got len={}, want len={}\n--- want[..idx+40] ---\n{:?}\n--- got[..idx+40]  ---\n{:?}",
+                got.len(),
+                want.len(),
+                &want
+                    .get(..idx.min(want.len()).saturating_add(40).min(want.len()))
+                    .unwrap_or(""),
+                &got.get(..idx.min(got.len()).saturating_add(40).min(got.len()))
+                    .unwrap_or(""),
+            );
+        }
     }
 
     #[test]

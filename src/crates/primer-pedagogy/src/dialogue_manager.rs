@@ -38,6 +38,7 @@ use primer_extractor::{ConceptExtractor, ExtractorSettings};
 use tokio::task::JoinHandle;
 
 use crate::prompt_builder;
+use crate::prompt_pack::{self, PromptPack};
 
 /// Optional persistence stores for a `DialogueManager`.
 ///
@@ -147,6 +148,12 @@ pub struct DialogueManager<'a> {
     /// extraction lands and starts populating `learner.concepts` per-turn,
     /// it just sets the flag — no save-site changes needed.
     learner_dirty: bool,
+    /// Locale-specific prompt pack used to render every system-prompt
+    /// section, intent instruction, engagement note, and section intro.
+    /// Selected from `learner.profile.locale` at construction time —
+    /// the locale is bound for the lifetime of this manager (no
+    /// in-session locale switching today).
+    prompt_pack: Arc<dyn PromptPack>,
 }
 
 /// Output of the spawned post-response task: the extracted concepts
@@ -353,6 +360,13 @@ impl<'a> DialogueManager<'a> {
         config: PedagogyConfig,
     ) -> Self {
         let session = Session::new(learner.profile.id);
+        // `load_cached` returns a process-wide shared `Arc<dyn PromptPack>`
+        // so successive `DialogueManager::new` calls in the same process
+        // (tests, future multi-session flows) don't re-parse the embedded
+        // TOML. PRIMER_PROMPTS_DIR bypasses the cache for translator
+        // iteration.
+        let prompt_pack = prompt_pack::load_cached(learner.profile.locale)
+            .expect("prompt pack load failed; this should be impossible at runtime");
         Self {
             learner,
             session,
@@ -372,6 +386,7 @@ impl<'a> DialogueManager<'a> {
             config,
             last_extraction: None,
             learner_dirty: false,
+            prompt_pack,
         }
     }
 
@@ -509,10 +524,15 @@ impl<'a> DialogueManager<'a> {
         // 2. Decide intent, retrieve knowledge, retrieve relevant older
         //    turns from the FTS index (when there are turns outside the
         //    active window), build prompt.
-        let intent = prompt_builder::decide_intent(&self.learner, &self.session);
+        let intent = prompt_builder::decide_intent_with_pack(
+            &*self.prompt_pack,
+            &self.learner,
+            &self.session,
+        );
         let knowledge_context = self.retrieve_knowledge(child_input).await;
         let (summary, retrieved_older) = self.retrieve_long_term_memory(child_input).await;
-        let prompt = prompt_builder::build_prompt(
+        let prompt = prompt_builder::build_prompt_with_pack(
+            &*self.prompt_pack,
             &self.learner,
             &self.session,
             intent,
@@ -1498,6 +1518,7 @@ mod tests {
                 name: "Tester".to_string(),
                 age: 8,
                 languages: vec!["en".to_string()],
+                locale: primer_core::i18n::Locale::English,
                 created_at: Utc::now(),
                 last_active: Utc::now(),
             },

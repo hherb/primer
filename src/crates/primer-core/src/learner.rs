@@ -17,6 +17,7 @@ use std::time::Duration;
 use uuid::Uuid;
 
 use crate::classifier::EngagementAssessment;
+use crate::i18n::Locale;
 
 /// Default threshold for the session-length-aware Disengaging branch.
 /// Below this, Disengaging routes to Encouragement; at or above, SessionClose.
@@ -34,7 +35,17 @@ pub struct LearnerProfile {
     /// Age in years (used for developmental-stage adaptation).
     pub age: u8,
     /// Preferred language(s) — ISO 639-1 codes, ordered by preference.
+    /// Open-vocabulary preference list, distinct from the closed-enum
+    /// `locale` below which is the bound dispatch key for prompt packs,
+    /// speech-pipeline routing, and per-locale knowledge-base lookups.
     pub languages: Vec<String>,
+    /// Bound locale used to dispatch the prompt pack and (eventually)
+    /// the speech pipeline + per-locale knowledge index. Persists with
+    /// the learner so a returning child does not re-specify it each
+    /// session. `#[serde(default)]` so existing serialised profiles
+    /// without this field deserialise as `Locale::English`.
+    #[serde(default)]
+    pub locale: Locale,
     /// When the profile was created.
     pub created_at: DateTime<Utc>,
     /// When the profile was last active.

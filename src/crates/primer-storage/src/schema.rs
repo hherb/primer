@@ -26,7 +26,13 @@ use rusqlite::Connection;
 /// Bumped to 5 when we added the `comprehension_classifiers` and
 /// `turn_comprehensions` tables that back the per-concept
 /// comprehension-classifier feature (Phase 0.3).
-pub const USER_VERSION: i64 = 5;
+///
+/// Bumped to 6 when we added the `learners.locale` column (BCP-47 short
+/// pack id, default `'en'`) and the `concepts.concept_language_tag`
+/// column (default `'en'`) that back the i18n / multi-locale prompt-pack
+/// architecture (Phase 0.1 i18n). Schema-only — adopting a non-default
+/// locale for an existing learner is the CLI's responsibility.
+pub const USER_VERSION: i64 = 6;
 
 /// Idempotent CREATE statements for the base (v1) schema. Run on every
 /// `open()`. v2-specific objects are added by `apply_v2_migrations`.
@@ -403,6 +409,54 @@ pub(crate) fn apply_v5_migrations(conn: &Connection) -> Result<()> {
     Ok(())
 }
 
+// ─── v6 schema strings ──────────────────────────────────────────────────────
+//
+// v6 wires the `Locale` enum into persistence. Two narrowly-scoped
+// column adds:
+//   - `learners.locale` — BCP-47 short pack id (e.g. `'en'`, `'de'`).
+//     Bound dispatch key for the prompt pack and the speech pipeline.
+//   - `concepts.concept_language_tag` — language the concept was
+//     extracted in. Schema-only landing in v6; per-concept linkage
+//     across locales is a follow-up.
+//
+// Both columns default to `'en'` so pre-v6 rows upgrade cleanly without
+// a backfill pass. The application maps the short id back to a `Locale`
+// variant via `Locale::from_pack_id` at the boundary.
+
+/// Apply v6 migrations idempotently. Safe to run on a fresh DB (after
+/// v5 objects exist), on a v5 DB being upgraded, and on a v6 DB being
+/// re-opened.
+///
+/// All steps run inside a single transaction so a partial failure rolls
+/// back to the pre-migration state.
+pub(crate) fn apply_v6_migrations(conn: &Connection) -> Result<()> {
+    let tx = conn
+        .unchecked_transaction()
+        .map_err(|e| PrimerError::Storage(format!("v6 migration: failed to begin tx: {e}")))?;
+
+    if !column_exists(&tx, "learners", "locale")? {
+        tx.execute_batch("ALTER TABLE learners ADD COLUMN locale TEXT NOT NULL DEFAULT 'en';")
+            .map_err(|e| {
+                PrimerError::Storage(format!("v6 migration: ALTER learners ADD locale: {e}"))
+            })?;
+    }
+
+    if !column_exists(&tx, "concepts", "concept_language_tag")? {
+        tx.execute_batch(
+            "ALTER TABLE concepts ADD COLUMN concept_language_tag TEXT NOT NULL DEFAULT 'en';",
+        )
+        .map_err(|e| {
+            PrimerError::Storage(format!(
+                "v6 migration: ALTER concepts ADD concept_language_tag: {e}"
+            ))
+        })?;
+    }
+
+    tx.commit()
+        .map_err(|e| PrimerError::Storage(format!("v6 migration: commit: {e}")))?;
+    Ok(())
+}
+
 fn column_exists(conn: &Connection, table: &str, column: &str) -> Result<bool> {
     let sql = format!("SELECT COUNT(*) FROM pragma_table_info('{table}') WHERE name = ?1");
     let count: i64 = conn
@@ -569,8 +623,8 @@ mod v4_tests {
     }
 
     #[test]
-    fn user_version_constant_is_five() {
-        assert_eq!(USER_VERSION, 5);
+    fn user_version_constant_is_six() {
+        assert_eq!(USER_VERSION, 6);
     }
 
     #[test]
@@ -630,5 +684,104 @@ mod v4_tests {
         // Running again must not error.
         apply_v5_migrations(&conn).unwrap();
         assert!(table_exists(&conn, "turn_comprehensions"));
+    }
+
+    fn fresh_v5_conn() -> Connection {
+        let conn = Connection::open_in_memory().unwrap();
+        conn.execute_batch("PRAGMA foreign_keys = ON;").unwrap();
+        conn.execute_batch(SCHEMA_SQL).unwrap();
+        apply_v2_migrations(&conn).unwrap();
+        apply_v3_migrations(&conn).unwrap();
+        apply_v4_migrations(&conn).unwrap();
+        apply_v5_migrations(&conn).unwrap();
+        conn
+    }
+
+    fn column_exists_in_test(conn: &Connection, table: &str, column: &str) -> bool {
+        let sql = format!("SELECT COUNT(*) FROM pragma_table_info('{table}') WHERE name = ?1");
+        let count: i64 = conn
+            .query_row(&sql, rusqlite::params![column], |r| r.get(0))
+            .unwrap();
+        count > 0
+    }
+
+    #[test]
+    fn v6_migration_adds_learners_locale_column() {
+        let conn = fresh_v5_conn();
+        assert!(!column_exists_in_test(&conn, "learners", "locale"));
+        apply_v6_migrations(&conn).unwrap();
+        assert!(column_exists_in_test(&conn, "learners", "locale"));
+    }
+
+    #[test]
+    fn v6_migration_adds_concepts_language_tag_column() {
+        let conn = fresh_v5_conn();
+        assert!(!column_exists_in_test(
+            &conn,
+            "concepts",
+            "concept_language_tag",
+        ));
+        apply_v6_migrations(&conn).unwrap();
+        assert!(column_exists_in_test(
+            &conn,
+            "concepts",
+            "concept_language_tag",
+        ));
+    }
+
+    #[test]
+    fn v6_migration_defaults_existing_rows_to_en() {
+        let conn = fresh_v5_conn();
+        // Pre-seed a learners row and a concepts row prior to v6 migration.
+        // engagement_states is empty (no validate-and-seed has run on this
+        // bare connection) so insert the row we need first.
+        conn.execute(
+            "INSERT INTO engagement_states (id, name) VALUES (1, 'Engaged')",
+            [],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO learners (
+                 id, name, age, languages, created_at, last_active,
+                 pref_narrative, pref_socratic, pref_visual, pref_kinesthetic,
+                 typical_session_minutes, high_engagement_topics,
+                 early_disengagement_secs, current_engagement_state_id
+             ) VALUES (?1, 'Tester', 8, '[]', '2026-01-01T00:00:00Z',
+                      '2026-01-01T00:00:00Z', 0.5, 0.5, 0.5, 0.5, 20.0,
+                      '[]', 300, 1)",
+            rusqlite::params![uuid::Uuid::new_v4().to_string()],
+        )
+        .unwrap();
+        conn.execute("INSERT INTO concepts (name) VALUES ('photosynthesis')", [])
+            .unwrap();
+
+        apply_v6_migrations(&conn).unwrap();
+
+        let learner_locale: String = conn
+            .query_row("SELECT locale FROM learners LIMIT 1", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(learner_locale, "en");
+
+        let concept_lang: String = conn
+            .query_row(
+                "SELECT concept_language_tag FROM concepts WHERE name = 'photosynthesis'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(concept_lang, "en");
+    }
+
+    #[test]
+    fn v6_migration_is_idempotent() {
+        let conn = fresh_v5_conn();
+        apply_v6_migrations(&conn).unwrap();
+        apply_v6_migrations(&conn).unwrap(); // re-run must be a no-op
+        assert!(column_exists_in_test(&conn, "learners", "locale"));
+        assert!(column_exists_in_test(
+            &conn,
+            "concepts",
+            "concept_language_tag",
+        ));
     }
 }
