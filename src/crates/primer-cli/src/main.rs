@@ -1115,7 +1115,7 @@ async fn async_main() -> anyhow::Result<()> {
                 if prefix_printed {
                     println!();
                 }
-                eprintln!("Error: {other}\n");
+                eprintln!("Error generating response: {other}\n");
             }
         }
 
