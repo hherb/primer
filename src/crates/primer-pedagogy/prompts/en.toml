@@ -171,12 +171,16 @@ primer = "Primer"
 # For languages where prefix-matching doesn't work (Japanese particles,
 # Mandarin tone-disambiguation, etc.) set this to an empty array; the
 # routing falls back to the LLM-based engagement classifier.
+#
+# "what does " is intentionally excluded — "what does X mean?" is
+# handled by the system prompt's vocabulary-discipline block (signal
+# that X was introduced too soon; teach it back in plain language).
+# Routing it to DirectAnswer here would short-circuit that pedagogy.
 [question_detection]
 factual_prefixes = [
     "what is ",
     "what are ",
     "what's ",
-    "what does ",
     "how does ",
     "how do ",
     "how is ",

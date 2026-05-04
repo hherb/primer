@@ -745,7 +745,6 @@ factual_prefixes = []
             "what is ",
             "what are ",
             "what's ",
-            "what does ",
             "how does ",
             "how do ",
             "how is ",
@@ -753,6 +752,17 @@ factual_prefixes = []
         ];
         let got: Vec<&str> = pack.factual_prefixes().iter().map(String::as_str).collect();
         assert_eq!(got, want);
+    }
+
+    #[test]
+    fn english_pack_excludes_what_does_to_preserve_vocab_discipline() {
+        let pack = english_pack();
+        assert!(
+            !pack.factual_prefixes().iter().any(|p| p == "what does "),
+            "\"what does \" must NOT be in en.toml factual_prefixes — \
+             it would short-circuit the vocabulary-discipline pedagogy \
+             (\"what does X mean?\" should reach the LLM, not DirectAnswer)"
+        );
     }
 
     #[test]
