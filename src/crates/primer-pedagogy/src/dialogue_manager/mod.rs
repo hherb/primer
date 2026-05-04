@@ -31,7 +31,7 @@ use primer_core::conversation::{PedagogicalIntent, Session, Speaker, Turn};
 use primer_core::error::Result;
 use primer_core::extractor::ConceptExtraction;
 use primer_core::inference::{GenerationParams, InferenceBackend};
-use primer_core::knowledge::{KnowledgeBase, RetrievalParams};
+use primer_core::knowledge::KnowledgeBase;
 use primer_core::learner::LearnerModel;
 use primer_core::storage::{LearnerStore, SessionStore};
 use primer_extractor::{ConceptExtractor, ExtractorSettings};
@@ -41,6 +41,9 @@ use crate::prompt_builder;
 use crate::prompt_pack::{self, PromptPack};
 
 mod apply;
+mod learner_update;
+mod retrieval;
+mod summary;
 use apply::{apply_assessment, apply_comprehension, apply_extraction, merge_concepts_into_turn};
 
 #[cfg(test)]
@@ -969,140 +972,6 @@ impl<'a> DialogueManager<'a> {
                 // task is dropped here, but tokio::spawn'd futures
                 // continue to run to completion in the background.
             }
-        }
-    }
-
-    // ─── Private helpers ─────────────────────────────────────────────
-
-    /// Retrieve knowledge passages relevant to the child's input.
-    /// Falls back gracefully if the knowledge base is empty or errors.
-    async fn retrieve_knowledge(&self, query: &str) -> Vec<primer_core::knowledge::Passage> {
-        let params = RetrievalParams {
-            top_k: 3,
-            min_score: 0.5,
-            source_filter: vec![],
-        };
-
-        self.knowledge
-            .retrieve(query, &params)
-            .await
-            .unwrap_or_default()
-    }
-
-    /// Pull long-term memory for the current turn: the rolling summary
-    /// of pre-window turns plus the top-K older turns that the FTS index
-    /// considers relevant to `child_input`.
-    ///
-    /// Both pieces are empty when the session is still inside its first
-    /// context window, when no store is configured, or when the FTS
-    /// index returns no matches. Errors from the store are logged and
-    /// treated as "no retrieved turns" — long-term memory is best-effort.
-    async fn retrieve_long_term_memory(&self, child_input: &str) -> (String, Vec<Turn>) {
-        let total = self.session.turns.len();
-        let window = self.config.context_window_turns;
-        if total <= window {
-            return (String::new(), vec![]);
-        }
-        let exclude_at_or_after = total - window;
-        let retrieved = match self.storage.as_deref() {
-            None => vec![],
-            Some(store) => store
-                .retrieve_session_turns(self.session.id, child_input, 3, exclude_at_or_after)
-                .await
-                .unwrap_or_else(|e| {
-                    tracing::warn!("session-turn retrieval failed: {e}");
-                    vec![]
-                }),
-        };
-        (self.session.summary.clone(), retrieved)
-    }
-
-    /// Active-conversation cadence. Refresh the rolling summary when at
-    /// least `context_window_turns` turns have fallen out of the window
-    /// since `summary_through_turn_index` was last set, so per-turn
-    /// dialogue doesn't trigger an LLM call every time the boundary
-    /// advances. At the default K=20, a summary is built each time 20
-    /// new turns have rolled past the boundary.
-    async fn refresh_summary_if_due(&mut self) {
-        let window = self.config.context_window_turns;
-        let total = self.session.turns.len();
-        if total <= window {
-            return;
-        }
-        let pre_window_end = total - window;
-        let already_covered = self.session.summary_through_turn_index;
-        if pre_window_end < already_covered.saturating_add(window) {
-            return;
-        }
-        self.regenerate_summary_through(pre_window_end).await;
-    }
-
-    /// Resume cadence. Refresh the rolling summary when the loaded
-    /// session has pre-window content the existing summary doesn't
-    /// yet cover. A summary that's already current is preserved
-    /// verbatim — there is no value in regenerating identical work.
-    async fn refresh_summary_if_stale(&mut self) {
-        let window = self.config.context_window_turns;
-        let total = self.session.turns.len();
-        if total <= window {
-            return;
-        }
-        let pre_window_end = total - window;
-        if self.session.summary_through_turn_index >= pre_window_end {
-            return;
-        }
-        self.regenerate_summary_through(pre_window_end).await;
-    }
-
-    /// Common body: re-summarize `turns[..pre_window_end]` from scratch
-    /// and stamp the new boundary. Replacing rather than incrementally
-    /// extending keeps the summary coherent; the simplicity is fine at
-    /// Phase-0 cost. Best-effort: a summary failure is logged and the
-    /// previous state stays in place.
-    async fn regenerate_summary_through(&mut self, pre_window_end: usize) {
-        let to_summarize = &self.session.turns[..pre_window_end];
-        match self.inference.summarize(to_summarize, 1500).await {
-            Ok(summary) => {
-                self.session.summary = summary;
-                self.session.summary_through_turn_index = pre_window_end;
-            }
-            Err(e) => tracing::warn!("summary refresh failed: {e}"),
-        }
-    }
-
-    /// Update the learner model based on the conversation evidence.
-    ///
-    /// This is deliberately minimal for the scaffold. A production version
-    /// would:
-    /// - Parse the child's response for comprehension signals
-    /// - Use the LLM to classify understanding depth
-    /// - Update concept graph confidence scores
-    /// - Detect engagement state from response patterns
-    fn update_learner_model(&mut self, child_input: &str, _intent: &PedagogicalIntent) {
-        // Simple engagement heuristic: very short responses may indicate
-        // frustration or disengagement.
-        let word_count = child_input.split_whitespace().count();
-
-        use primer_core::learner::EngagementState;
-        let new_engagement = if word_count == 0 {
-            EngagementState::Disengaging
-        } else if word_count < 3 {
-            // Could be frustration ("I don't know") or just a short answer.
-            // Don't over-interpret — keep previous state unless it was Engaged.
-            match self.learner.current_engagement {
-                EngagementState::Engaged => EngagementState::Reflecting,
-                other => other,
-            }
-        } else {
-            EngagementState::Engaged
-        };
-        // Only mark dirty if the persisted field actually changed —
-        // assigning the same value back is a no-op for the on-disk row,
-        // and the per-turn save site uses the dirty flag to decide whether
-        // to issue a write transaction.
-        if self.learner.current_engagement != new_engagement {
-            self.learner.current_engagement = new_engagement;
-            self.learner_dirty = true;
         }
     }
 }
