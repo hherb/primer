@@ -593,6 +593,35 @@ fn reconcile_persisted_learner(
     existing
 }
 
+/// Verify that a `--resume`'d session's stored locale matches the one
+/// requested at the CLI. Mismatches are a hard error: the session store
+/// has already opened with `cli_locale`, so any new concept inserts in
+/// the resumed session would be tagged with the wrong
+/// `concept_language_tag` — silent corruption of the longitudinal
+/// learner data, the kind of drift the project treats as a fail-fast
+/// condition for categorical state.
+///
+/// Returns `Ok(())` on match (or when the locales are equal) and
+/// `Err(message)` with a user-facing actionable string on mismatch.
+/// Pure for testability.
+fn verify_resume_locale_match(
+    cli_locale: Locale,
+    learner_locale: Locale,
+    resume_id: Uuid,
+) -> std::result::Result<(), String> {
+    if cli_locale == learner_locale {
+        return Ok(());
+    }
+    Err(format!(
+        "--resume {resume_id} was created in locale '{learner}', but \
+         --language '{cli}' was specified.\n  \
+         Drop --language to use the session's locale, or pass \
+         --language {learner}.",
+        learner = learner_locale.pack_id(),
+        cli = cli_locale.pack_id(),
+    ))
+}
+
 #[cfg(feature = "speech")]
 fn validate_speech_assets(
     whisper_model: &Path,
@@ -942,6 +971,17 @@ async fn async_main() -> anyhow::Result<()> {
             return Err(anyhow::anyhow!("load_learner failed on startup: {e}"));
         }
     };
+
+    // Locale guard for --resume: error before any new turn could insert a
+    // mistagged concept. Done HERE rather than at session-store open time
+    // so the check sees the actual learner row that --resume will hydrate.
+    if let Some(resume_id) = cli.resume {
+        if let Err(msg) = verify_resume_locale_match(cli_locale, learner.profile.locale, resume_id)
+        {
+            eprintln!("Error: {msg}");
+            std::process::exit(1);
+        }
+    }
 
     // Pedagogy config.
     let pedagogy_config = PedagogyConfig::default();
@@ -1634,6 +1674,37 @@ mod tests {
     fn slug_empty_input_falls_back_to_default() {
         assert_eq!(slug(""), "default");
         assert_eq!(slug("!!!"), "default");
+    }
+
+    #[test]
+    fn verify_resume_locale_match_ok_when_locales_equal() {
+        let id = Uuid::new_v4();
+        assert!(verify_resume_locale_match(Locale::English, Locale::English, id).is_ok());
+        assert!(verify_resume_locale_match(Locale::German, Locale::German, id).is_ok());
+    }
+
+    #[test]
+    fn verify_resume_locale_match_errors_on_mismatch_with_actionable_message() {
+        let id = Uuid::new_v4();
+        let err = verify_resume_locale_match(Locale::English, Locale::German, id).unwrap_err();
+        assert!(err.contains("'de'"), "must name the learner's locale: {err}");
+        assert!(err.contains("'en'"), "must name the cli locale: {err}");
+        assert!(
+            err.contains("--language de"),
+            "must show the corrective flag value: {err}"
+        );
+        assert!(
+            err.contains(&id.to_string()),
+            "must include the resume id so the user knows which session: {err}"
+        );
+    }
+
+    #[test]
+    fn verify_resume_locale_match_symmetric_de_to_en() {
+        let id = Uuid::new_v4();
+        let err = verify_resume_locale_match(Locale::German, Locale::English, id).unwrap_err();
+        assert!(err.contains("'en'"), "must name the learner's locale: {err}");
+        assert!(err.contains("--language en"), "corrective flag: {err}");
     }
 
     #[test]
