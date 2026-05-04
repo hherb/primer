@@ -19,6 +19,7 @@ pub mod consts;
 pub mod conversation;
 pub mod error;
 pub mod extractor;
+pub mod i18n;
 pub mod inference;
 pub mod knowledge;
 pub mod learner;
