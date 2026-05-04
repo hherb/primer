@@ -3340,7 +3340,7 @@ mod learner_store_tests {
         l.concepts.clear();
         for d in UnderstandingDepth::ALL {
             l.concepts.push(ConceptState {
-                concept_id: format!("test:{}", crate::catalog::understanding_depth_name(*d)),
+                concept_id: format!("test:{}", d.name()),
                 depth: *d,
                 confidence: 0.5,
                 encounter_count: 1,

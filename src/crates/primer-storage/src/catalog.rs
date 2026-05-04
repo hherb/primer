@@ -102,19 +102,6 @@ pub fn engagement_state_id(state: EngagementState) -> i64 {
     }
 }
 
-/// Human-readable name stored alongside the ID in the `engagement_states`
-/// lookup table.
-pub fn engagement_state_name(state: EngagementState) -> &'static str {
-    match state {
-        EngagementState::Engaged => "Engaged",
-        EngagementState::Reflecting => "Reflecting",
-        EngagementState::FrustratedStuck => "FrustratedStuck",
-        EngagementState::FrustratedTrying => "FrustratedTrying",
-        EngagementState::Disengaging => "Disengaging",
-        EngagementState::Unknown => "Unknown",
-    }
-}
-
 /// Reverse lookup: integer ID → `EngagementState`. Returns `None` for
 /// IDs the current build doesn't know about.
 pub fn engagement_state_from_id(id: i64) -> Option<EngagementState> {
@@ -126,10 +113,12 @@ pub fn engagement_state_from_id(id: i64) -> Option<EngagementState> {
 
 /// All `(id, name)` pairs the storage layer expects to see in the
 /// `engagement_states` lookup table. Used by the validate-and-seed pass.
+/// Names come from `EngagementState::name()` — the enum is the single
+/// source of truth.
 pub fn expected_engagement_states() -> Vec<(i64, &'static str)> {
     EngagementState::ALL
         .iter()
-        .map(|s| (engagement_state_id(*s), engagement_state_name(*s)))
+        .map(|s| (engagement_state_id(*s), s.name()))
         .collect()
 }
 
@@ -148,18 +137,6 @@ pub fn understanding_depth_id(depth: UnderstandingDepth) -> i64 {
     }
 }
 
-/// Canonical name string for an `UnderstandingDepth` variant.
-///
-/// Delegates to the enum's `name()` method (defined in
-/// `primer_core::learner`). Kept as a free function here for parity
-/// with `engagement_state_name`/`speaker_name`/`pedagogical_intent_name`
-/// — call-sites in this crate read more uniformly that way. The two
-/// must agree byte-for-byte; the v4 lookup-validate-and-seed pass
-/// would fail loudly if they ever diverged.
-pub fn understanding_depth_name(depth: UnderstandingDepth) -> &'static str {
-    depth.name()
-}
-
 /// Reverse lookup: integer ID → `UnderstandingDepth`. Returns `None`
 /// for IDs the current build doesn't know about.
 pub fn understanding_depth_from_id(id: i64) -> Option<UnderstandingDepth> {
@@ -171,10 +148,12 @@ pub fn understanding_depth_from_id(id: i64) -> Option<UnderstandingDepth> {
 
 /// All `(id, name)` pairs the storage layer expects to see in the
 /// `understanding_depths` lookup table. Used by the validate-and-seed pass.
+/// Names come from `UnderstandingDepth::name()` — the enum is the single
+/// source of truth.
 pub fn expected_understanding_depths() -> Vec<(i64, &'static str)> {
     UnderstandingDepth::ALL
         .iter()
-        .map(|d| (understanding_depth_id(*d), understanding_depth_name(*d)))
+        .map(|d| (understanding_depth_id(*d), d.name()))
         .collect()
 }
 
