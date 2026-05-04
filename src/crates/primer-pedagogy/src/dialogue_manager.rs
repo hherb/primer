@@ -2297,7 +2297,7 @@ mod tests {
         use primer_storage::SqliteSessionStore;
 
         let storage: Arc<dyn SessionStore> =
-            Arc::new(SqliteSessionStore::open(std::path::Path::new(":memory:")).unwrap());
+            Arc::new(SqliteSessionStore::open_for_locale(std::path::Path::new(":memory:"), primer_core::i18n::Locale::default()).unwrap());
         let classifier: Arc<dyn EngagementClassifier> = Arc::new(StubEngagementClassifier::new());
 
         // Pre-seed: save a session with one child turn and one classification.
@@ -2391,7 +2391,7 @@ mod tests {
         );
 
         let storage: Arc<dyn SessionStore> =
-            Arc::new(SqliteSessionStore::open(std::path::Path::new(":memory:")).unwrap());
+            Arc::new(SqliteSessionStore::open_for_locale(std::path::Path::new(":memory:"), primer_core::i18n::Locale::default()).unwrap());
 
         let backend = ScriptedBackend::new(vec![
             Ok(chunk("Great question!", false)),
@@ -2599,7 +2599,7 @@ mod tests {
             ]));
 
         let storage: Arc<dyn SessionStore> =
-            Arc::new(SqliteSessionStore::open(std::path::Path::new(":memory:")).unwrap());
+            Arc::new(SqliteSessionStore::open_for_locale(std::path::Path::new(":memory:"), primer_core::i18n::Locale::default()).unwrap());
 
         let backend = RepeatingBackend;
         let knowledge = EmptyKnowledge;
@@ -2726,7 +2726,7 @@ mod tests {
         use primer_core::storage::LearnerStore;
         use primer_storage::SqliteSessionStore;
 
-        let store = Arc::new(SqliteSessionStore::open(std::path::Path::new(":memory:")).unwrap());
+        let store = Arc::new(SqliteSessionStore::open_for_locale(std::path::Path::new(":memory:"), primer_core::i18n::Locale::default()).unwrap());
 
         // Pre-save the learner so the DB has a row to UPDATE rather than INSERT.
         let learner = test_learner();
@@ -2775,7 +2775,7 @@ mod tests {
         use primer_core::storage::{LearnerStore, SessionStore};
         use primer_storage::SqliteSessionStore;
 
-        let store = Arc::new(SqliteSessionStore::open(std::path::Path::new(":memory:")).unwrap());
+        let store = Arc::new(SqliteSessionStore::open_for_locale(std::path::Path::new(":memory:"), primer_core::i18n::Locale::default()).unwrap());
         let u1 = uuid::Uuid::new_v4();
         let s = ConversationSession::new(u1);
         store.save_session(&s).await.unwrap();

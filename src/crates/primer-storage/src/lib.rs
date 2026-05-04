@@ -47,6 +47,10 @@ impl SqliteSessionStore {
     /// Open (or create) a session store at `path`, defaulting to the
     /// English locale. Back-compat shim for callers that pre-date the
     /// locale-aware API.
+    #[deprecated(
+        since = "0.1.0",
+        note = "use open_for_locale to make the locale explicit; the shim defaults to English and would silently mis-tag concepts inserted into a non-English DB"
+    )]
     pub fn open(path: &Path) -> Result<Self> {
         Self::open_for_locale(path, primer_core::i18n::Locale::default())
     }
@@ -1310,7 +1314,7 @@ mod tests {
     use uuid::Uuid;
 
     fn open_memory() -> SqliteSessionStore {
-        SqliteSessionStore::open(&PathBuf::from(":memory:")).expect("open :memory:")
+        SqliteSessionStore::open_for_locale(&PathBuf::from(":memory:"), primer_core::i18n::Locale::default()).expect("open :memory:")
     }
 
     fn make_turn(
@@ -1383,7 +1387,7 @@ mod tests {
             let conn = Connection::open(&tmp).unwrap();
             conn.execute_batch("PRAGMA user_version = 99;").unwrap();
         }
-        let err = SqliteSessionStore::open(&tmp).unwrap_err();
+        let err = SqliteSessionStore::open_for_locale(&tmp, primer_core::i18n::Locale::default()).unwrap_err();
         let msg = format!("{err}");
         assert!(
             msg.contains("99"),
@@ -1401,10 +1405,10 @@ mod tests {
         // First open creates the schema and stamps the current user_version.
         let tmp = tempfile_path();
         {
-            let _store = SqliteSessionStore::open(&tmp).unwrap();
+            let _store = SqliteSessionStore::open_for_locale(&tmp, primer_core::i18n::Locale::default()).unwrap();
         }
         // Second open should succeed cleanly. user_version stays put.
-        let store = SqliteSessionStore::open(&tmp).unwrap();
+        let store = SqliteSessionStore::open_for_locale(&tmp, primer_core::i18n::Locale::default()).unwrap();
         let conn = store.conn.lock().unwrap();
         let v: i64 = conn
             .query_row("PRAGMA user_version", [], |r| r.get(0))
@@ -1487,7 +1491,7 @@ mod tests {
             )
             .unwrap();
         }
-        let err = SqliteSessionStore::open(&tmp).unwrap_err();
+        let err = SqliteSessionStore::open_for_locale(&tmp, primer_core::i18n::Locale::default()).unwrap_err();
         let msg = format!("{err}");
         assert!(
             msg.contains("WRONG_NAME") || msg.contains("Engaged"),
@@ -1500,9 +1504,9 @@ mod tests {
     fn reopen_is_a_no_op_on_seeded_tables() {
         let tmp = tempfile_path();
         {
-            let _store = SqliteSessionStore::open(&tmp).unwrap();
+            let _store = SqliteSessionStore::open_for_locale(&tmp, primer_core::i18n::Locale::default()).unwrap();
         }
-        let store = SqliteSessionStore::open(&tmp).unwrap();
+        let store = SqliteSessionStore::open_for_locale(&tmp, primer_core::i18n::Locale::default()).unwrap();
         let conn = store.conn.lock().unwrap();
         let speaker_count: i64 = conn
             .query_row("SELECT COUNT(*) FROM speakers", [], |r| r.get(0))
@@ -1531,7 +1535,7 @@ mod tests {
             )
             .unwrap();
         }
-        let err = SqliteSessionStore::open(&tmp).unwrap_err();
+        let err = SqliteSessionStore::open_for_locale(&tmp, primer_core::i18n::Locale::default()).unwrap_err();
         let msg = format!("{err}");
         assert!(
             msg.contains("WrongName") || msg.contains("SocraticQuestion"),
@@ -1555,7 +1559,7 @@ mod tests {
             )
             .unwrap();
         }
-        let err = SqliteSessionStore::open(&tmp).unwrap_err();
+        let err = SqliteSessionStore::open_for_locale(&tmp, primer_core::i18n::Locale::default()).unwrap_err();
         let msg = format!("{err}");
         assert!(
             msg.contains("99") || msg.contains("unknown"),
@@ -1580,7 +1584,7 @@ mod tests {
             )
             .unwrap();
         }
-        let store = SqliteSessionStore::open(&tmp).unwrap();
+        let store = SqliteSessionStore::open_for_locale(&tmp, primer_core::i18n::Locale::default()).unwrap();
         let conn = store.conn.lock().unwrap();
         let count: i64 = conn
             .query_row("SELECT COUNT(*) FROM pedagogical_intents", [], |r| r.get(0))
@@ -2107,7 +2111,7 @@ mod tests {
         }
 
         // Now open via the store. v2 migration runs in place.
-        let store = SqliteSessionStore::open(&tmp).unwrap();
+        let store = SqliteSessionStore::open_for_locale(&tmp, primer_core::i18n::Locale::default()).unwrap();
         let conn = store.conn.lock().unwrap();
 
         let v: i64 = conn
@@ -2716,7 +2720,7 @@ mod tests {
     #[tokio::test]
     async fn open_fresh_db_creates_v4_schema_with_understanding_depths_seeded() {
         let path = tempfile_path();
-        let _store = SqliteSessionStore::open(&path).unwrap();
+        let _store = SqliteSessionStore::open_for_locale(&path, primer_core::i18n::Locale::default()).unwrap();
 
         // Inspect the file directly via a raw rusqlite connection.
         let conn = Connection::open(&path).unwrap();
@@ -2749,7 +2753,7 @@ mod tests {
         // We cannot exercise this through save_learner (which only ever uses
         // valid depth_ids from the catalog), so reach for the underlying
         // connection and try to insert a row with depth_id = 99.
-        let store = SqliteSessionStore::open(std::path::Path::new(":memory:")).unwrap();
+        let store = SqliteSessionStore::open_for_locale(std::path::Path::new(":memory:"), primer_core::i18n::Locale::default()).unwrap();
 
         // Pre-seed: a learners row + a concepts row, so the only FK that can
         // fail is depth_id.
@@ -2787,7 +2791,7 @@ mod tests {
 
     #[tokio::test]
     async fn most_recent_session_learner_id_returns_none_on_empty_db() {
-        let store = SqliteSessionStore::open(std::path::Path::new(":memory:")).unwrap();
+        let store = SqliteSessionStore::open_for_locale(std::path::Path::new(":memory:"), primer_core::i18n::Locale::default()).unwrap();
         let result = store.most_recent_session_learner_id().await.unwrap();
         assert_eq!(result, None);
     }
@@ -2796,7 +2800,7 @@ mod tests {
     async fn most_recent_session_learner_id_returns_single_existing_learner_id() {
         use primer_core::conversation::Session;
 
-        let store = SqliteSessionStore::open(std::path::Path::new(":memory:")).unwrap();
+        let store = SqliteSessionStore::open_for_locale(std::path::Path::new(":memory:"), primer_core::i18n::Locale::default()).unwrap();
         let learner_id = uuid::Uuid::new_v4();
         let session = Session::new(learner_id);
         store.save_session(&session).await.unwrap();
@@ -2810,7 +2814,7 @@ mod tests {
         use chrono::{Duration, Utc};
         use primer_core::conversation::Session;
 
-        let store = SqliteSessionStore::open(std::path::Path::new(":memory:")).unwrap();
+        let store = SqliteSessionStore::open_for_locale(std::path::Path::new(":memory:"), primer_core::i18n::Locale::default()).unwrap();
         let older_learner = uuid::Uuid::new_v4();
         let newer_learner = uuid::Uuid::new_v4();
 
@@ -3386,7 +3390,7 @@ mod learner_store_tests {
     use uuid::Uuid;
 
     fn open_in_mem() -> SqliteSessionStore {
-        SqliteSessionStore::open(std::path::Path::new(":memory:")).unwrap()
+        SqliteSessionStore::open_for_locale(std::path::Path::new(":memory:"), primer_core::i18n::Locale::default()).unwrap()
     }
 
     fn sample_learner() -> LearnerModel {

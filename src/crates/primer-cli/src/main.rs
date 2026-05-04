@@ -1729,7 +1729,7 @@ mod tests {
         use primer_storage::SqliteSessionStore;
         use std::sync::Arc;
 
-        let store = Arc::new(SqliteSessionStore::open(std::path::Path::new(":memory:")).unwrap());
+        let store = Arc::new(SqliteSessionStore::open_for_locale(std::path::Path::new(":memory:"), primer_core::i18n::Locale::default()).unwrap());
         let original_id = Uuid::new_v4();
         let original_created = Utc::now() - chrono::Duration::days(365);
         let mut original =
@@ -1767,7 +1767,7 @@ mod tests {
         use primer_storage::SqliteSessionStore;
         use std::sync::Arc;
 
-        let store = Arc::new(SqliteSessionStore::open(std::path::Path::new(":memory:")).unwrap());
+        let store = Arc::new(SqliteSessionStore::open_for_locale(std::path::Path::new(":memory:"), primer_core::i18n::Locale::default()).unwrap());
         let original = create_learner_with_id(
             Uuid::new_v4(),
             "Binti",
