@@ -819,8 +819,10 @@ async fn async_main() -> anyhow::Result<()> {
     };
 
     // Knowledge base — in-memory by default (empty, but functional).
+    // Locale-scoped: passages are indexed in the locale's own FTS5 table
+    // so BM25 statistics stay locale-pure.
     let knowledge_path = cli.knowledge_db.unwrap_or_else(|| PathBuf::from(IN_MEMORY));
-    let knowledge = SqliteKnowledgeBase::open(&knowledge_path)?;
+    let knowledge = SqliteKnowledgeBase::open_for_locale(&knowledge_path, cli_locale)?;
 
     // Session store — defaults to a per-learner file under `~/.primer/`.
     // We look up HOME here (rather than inside `resolve_session_db_path`)
