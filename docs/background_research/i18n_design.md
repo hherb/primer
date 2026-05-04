@@ -5,6 +5,8 @@
 
 ---
 
+ADDENDUM BY HORST 2026-05-04: consider dual voice models for voice context switching between languages, instead of forcing the same model to do both
+
 ## The Problem
 
 The Primer is currently English-only. Every system prompt, every child-facing message, every age-band language guidance, and several pieces of classification logic contain hardcoded English. The codebase has approximately 70+ English strings/blocks and 3 areas of English-specific logic.
