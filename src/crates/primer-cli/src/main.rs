@@ -324,7 +324,9 @@ async fn build_backend(
             params.ollama_url.clone(),
             model,
         ))),
-        other => Err(PrimerError::Inference(format!("unknown backend: {other}"))),
+        other => Err(PrimerError::Inference(
+            format!("unknown backend: {other}").into(),
+        )),
     }
 }
 

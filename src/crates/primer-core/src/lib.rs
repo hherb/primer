@@ -15,6 +15,7 @@
 pub mod classifier;
 pub mod comprehension;
 pub mod config;
+pub mod consts;
 pub mod conversation;
 pub mod error;
 pub mod extractor;

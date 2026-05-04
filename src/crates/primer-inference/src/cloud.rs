@@ -161,10 +161,13 @@ fn parse_anthropic_event(ev: &SseEvent) -> Result<Option<TokenChunk>> {
     match ev.event.as_str() {
         "content_block_delta" => {
             let parsed: ContentBlockDelta = serde_json::from_str(&ev.data).map_err(|e| {
-                PrimerError::Inference(format!(
-                    "Anthropic content_block_delta parse error: {e}; data: {}",
-                    ev.data
-                ))
+                PrimerError::Inference(
+                    format!(
+                        "Anthropic content_block_delta parse error: {e}; data: {}",
+                        ev.data
+                    )
+                    .into(),
+                )
             })?;
             Ok(Some(TokenChunk {
                 text: parsed.delta.text,
@@ -177,12 +180,11 @@ fn parse_anthropic_event(ev: &SseEvent) -> Result<Option<TokenChunk>> {
         })),
         "error" => {
             let parsed: ErrorPayload = serde_json::from_str(&ev.data).map_err(|e| {
-                PrimerError::Inference(format!(
-                    "Anthropic error event parse failed: {e}; data: {}",
-                    ev.data
-                ))
+                PrimerError::Inference(
+                    format!("Anthropic error event parse failed: {e}; data: {}", ev.data).into(),
+                )
             })?;
-            Err(PrimerError::Inference(parsed.error.message))
+            Err(PrimerError::Inference(parsed.error.message.into()))
         }
         // ping, message_start, content_block_start, content_block_stop, message_delta.
         // Note: `message_delta` carries `stop_reason` which can flag mid-stream
@@ -243,14 +245,14 @@ impl InferenceBackend for CloudBackend {
             .json(&request)
             .send()
             .await
-            .map_err(|e| PrimerError::Inference(format!("API request failed: {e}")))?;
+            .map_err(|e| PrimerError::Inference(format!("API request failed: {e}").into()))?;
 
         let status = response.status();
         if !status.is_success() {
             let body = response.text().await.unwrap_or_default();
-            return Err(PrimerError::Inference(format!(
-                "Anthropic API returned {status}: {body}"
-            )));
+            return Err(PrimerError::Inference(
+                format!("Anthropic API returned {status}: {body}").into(),
+            ));
         }
 
         let (mut tx, rx) = mpsc::unbounded::<Result<TokenChunk>>();
@@ -286,9 +288,9 @@ impl InferenceBackend for CloudBackend {
                     }
                     Some(Err(e)) => {
                         let _ = tx
-                            .send(Err(PrimerError::Inference(format!(
-                                "Anthropic byte stream error: {e}"
-                            ))))
+                            .send(Err(PrimerError::Inference(
+                                format!("Anthropic byte stream error: {e}").into(),
+                            )))
                             .await;
                         break 'outer;
                     }

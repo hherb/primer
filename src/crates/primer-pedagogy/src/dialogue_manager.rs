@@ -531,7 +531,7 @@ impl<'a> DialogueManager<'a> {
                 .inference
                 .generate_stream(&prompt, &params)
                 .await
-                .map_err(|e| PrimerError::Inference(format!("Generation failed: {e}")))?;
+                .map_err(|e| PrimerError::Inference(format!("Generation failed: {e}").into()))?;
 
             let mut accumulated = String::new();
             while let Some(item) = stream.next().await {

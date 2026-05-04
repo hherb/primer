@@ -95,7 +95,7 @@ impl NdjsonBuffer {
 
 fn parse_ollama_line(line: &str) -> Result<TokenChunk> {
     let chunk: ChatChunk = serde_json::from_str(line).map_err(|e| {
-        PrimerError::Inference(format!("Ollama NDJSON parse error: {e}; line: {line}"))
+        PrimerError::Inference(format!("Ollama NDJSON parse error: {e}; line: {line}").into())
     })?;
     Ok(TokenChunk {
         text: chunk.message.content,
@@ -161,14 +161,14 @@ impl InferenceBackend for OllamaBackend {
             .json(&request)
             .send()
             .await
-            .map_err(|e| PrimerError::Inference(format!("Ollama request failed: {e}")))?;
+            .map_err(|e| PrimerError::Inference(format!("Ollama request failed: {e}").into()))?;
 
         let status = response.status();
         if !status.is_success() {
             let body = response.text().await.unwrap_or_default();
-            return Err(PrimerError::Inference(format!(
-                "Ollama returned {status}: {body}"
-            )));
+            return Err(PrimerError::Inference(
+                format!("Ollama returned {status}: {body}").into(),
+            ));
         }
 
         let (mut tx, rx) = mpsc::unbounded::<Result<TokenChunk>>();
@@ -207,9 +207,9 @@ impl InferenceBackend for OllamaBackend {
                     }
                     Some(Err(e)) => {
                         let _ = tx
-                            .send(Err(PrimerError::Inference(format!(
-                                "Ollama byte stream error: {e}"
-                            ))))
+                            .send(Err(PrimerError::Inference(
+                                format!("Ollama byte stream error: {e}").into(),
+                            )))
                             .await;
                         break 'outer;
                     }
