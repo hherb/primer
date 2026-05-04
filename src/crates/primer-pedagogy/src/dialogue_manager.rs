@@ -28,7 +28,7 @@ use primer_classifier::{ClassifierSettings, EngagementClassifier};
 use primer_core::classifier::EngagementAssessment;
 use primer_core::config::PedagogyConfig;
 use primer_core::conversation::{PedagogicalIntent, Session, Speaker, Turn};
-use primer_core::error::{PrimerError, Result};
+use primer_core::error::Result;
 use primer_core::extractor::ConceptExtraction;
 use primer_core::inference::{GenerationParams, InferenceBackend};
 use primer_core::knowledge::{KnowledgeBase, RetrievalParams};
@@ -527,11 +527,7 @@ impl<'a> DialogueManager<'a> {
         // exactly once afterwards, regardless of which path we took.
         let params = GenerationParams::default();
         let result: Result<String> = async {
-            let mut stream = self
-                .inference
-                .generate_stream(&prompt, &params)
-                .await
-                .map_err(|e| PrimerError::Inference(format!("Generation failed: {e}").into()))?;
+            let mut stream = self.inference.generate_stream(&prompt, &params).await?;
 
             let mut accumulated = String::new();
             while let Some(item) = stream.next().await {
@@ -1240,6 +1236,7 @@ mod tests {
     use futures::stream;
     use primer_classifier::StubEngagementClassifier;
     use primer_core::config::PedagogyConfig;
+    use primer_core::error::PrimerError;
     use primer_core::inference::{
         GenerationParams, InferenceBackend, Prompt, TokenChunk, TokenStream,
     };
