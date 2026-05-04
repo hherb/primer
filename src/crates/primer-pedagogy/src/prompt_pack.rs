@@ -19,11 +19,14 @@
 //! iteration without recompilation.
 //!
 //! Validation: every field is scanned at load time for unknown
-//! `{placeholder}` tokens. A typo (`{nme}` instead of `{name}`) is a
-//! loud panic at startup, never a silent malformed prompt at runtime.
+//! `{placeholder}` tokens. A typo (`{nme}` instead of `{name}`) returns
+//! a `PrimerError::Config` from `load`, surfacing as a loud startup
+//! failure rather than a silent malformed prompt at runtime. The same
+//! treatment applies to missing-intent and meta-inconsistency errors —
+//! every pack-shape problem is a single error variant.
 
 use std::collections::BTreeMap;
-use std::sync::Arc;
+use std::sync::{Arc, OnceLock};
 
 use primer_core::conversation::PedagogicalIntent;
 use primer_core::error::{PrimerError, Result};
@@ -71,14 +74,19 @@ fn embedded_pack(locale: Locale) -> &'static str {
     }
 }
 
-/// Load the prompt pack for `locale`.
+/// Load the prompt pack for `locale`, freshly parsing every call.
 ///
 /// Lookup order:
 /// 1. If `PRIMER_PROMPTS_DIR` is set, read `<dir>/<pack_id>.toml`.
 /// 2. Otherwise, parse the compile-time-embedded pack.
 ///
-/// Panics on placeholder validation failure (loud-at-startup); returns
-/// `Err` on I/O or TOML-parse failures.
+/// Returns `Err` on I/O failure, TOML-parse failure, placeholder
+/// validation failure, missing-intent variants, or meta-inconsistency
+/// against `Locale`'s projections. All pack-shape errors are surfaced as
+/// `PrimerError::Config` so a broken pack fails loudly at startup.
+///
+/// Use [`load_cached`] for the production hot path; reserve `load` for
+/// tests and PRIMER_PROMPTS_DIR-driven translator iteration.
 pub fn load(locale: Locale) -> Result<Arc<dyn PromptPack>> {
     let raw = match std::env::var("PRIMER_PROMPTS_DIR") {
         Ok(dir) => {
@@ -94,6 +102,34 @@ pub fn load(locale: Locale) -> Result<Arc<dyn PromptPack>> {
     };
     let pack = TomlPromptPack::from_toml_str(locale, &raw)?;
     Ok(Arc::new(pack))
+}
+
+/// Load the prompt pack for `locale`, returning a process-wide cached
+/// instance after the first successful load.
+///
+/// When `PRIMER_PROMPTS_DIR` is set the cache is bypassed so translator
+/// iteration sees fresh content on every call. Otherwise every caller
+/// shares the same `Arc<dyn PromptPack>`, sidestepping a per-session
+/// re-parse of the embedded TOML for callers like `DialogueManager::new`
+/// that construct the pack but never need to mutate it.
+pub fn load_cached(locale: Locale) -> Result<Arc<dyn PromptPack>> {
+    // PRIMER_PROMPTS_DIR is the translator-iteration escape hatch; honour
+    // it by bypassing the cache so a re-saved TOML file is reflected on
+    // the next `load_cached` call.
+    if std::env::var_os("PRIMER_PROMPTS_DIR").is_some() {
+        return load(locale);
+    }
+    static EN_PACK: OnceLock<Arc<dyn PromptPack>> = OnceLock::new();
+    match locale {
+        Locale::English => {
+            if let Some(p) = EN_PACK.get() {
+                return Ok(Arc::clone(p));
+            }
+            let p = load(locale)?;
+            let _ = EN_PACK.set(Arc::clone(&p));
+            Ok(p)
+        }
+    }
 }
 
 /// `TomlPromptPack` is the only `PromptPack` impl shipped today; the
@@ -124,52 +160,84 @@ impl TomlPromptPack {
         let raw: PackFile = toml::from_str(body)
             .map_err(|e| PrimerError::Config(format!("prompt pack: parse failed: {e}")))?;
 
-        // Per-field placeholder allowlists. A typo here panics with the
-        // field name and offending token so a broken pack fails loudly
-        // at startup rather than producing malformed prompts at runtime.
+        // Cross-check the file's metadata against the Rust enum's
+        // projections. The `Locale` enum is the single source of truth
+        // for language id, display name, and BCP-47 tag; the TOML file
+        // duplicates them as documentation for translators. A mismatch
+        // is a structural pack error — fail loudly at load time rather
+        // than letting a stale `[meta]` block drift silently.
+        if raw.meta.language != locale.pack_id() {
+            return Err(PrimerError::Config(format!(
+                "prompt pack: meta.language {:?} does not match Locale::{:?}.pack_id() {:?}",
+                raw.meta.language,
+                locale,
+                locale.pack_id()
+            )));
+        }
+        if raw.meta.language_name != locale.name() {
+            return Err(PrimerError::Config(format!(
+                "prompt pack: meta.language_name {:?} does not match Locale::{:?}.name() {:?}",
+                raw.meta.language_name,
+                locale,
+                locale.name()
+            )));
+        }
+        if raw.meta.bcp47 != locale.bcp47() {
+            return Err(PrimerError::Config(format!(
+                "prompt pack: meta.bcp47 {:?} does not match Locale::{:?}.bcp47() {:?}",
+                raw.meta.bcp47,
+                locale,
+                locale.bcp47()
+            )));
+        }
+
+        // Per-field placeholder allowlists. A typo here returns Err
+        // with the field name and offending token so a broken pack
+        // fails loudly at startup rather than producing malformed
+        // prompts at runtime.
         validate_placeholders(
             "system_prompt.base",
             &raw.system_prompt.base,
             &["name", "age", "language_guidance"],
-        );
+        )?;
         validate_placeholders(
             "language_guidance.ages_0_6",
             &raw.language_guidance.ages_0_6,
             &[],
-        );
+        )?;
         validate_placeholders(
             "language_guidance.ages_7_9",
             &raw.language_guidance.ages_7_9,
             &[],
-        );
+        )?;
         validate_placeholders(
             "language_guidance.ages_10_12",
             &raw.language_guidance.ages_10_12,
             &[],
-        );
+        )?;
         validate_placeholders(
             "language_guidance.ages_13_plus",
             &raw.language_guidance.ages_13_plus,
             &[],
-        );
+        )?;
         for (key, value) in &raw.intent {
-            validate_placeholders(&format!("intent.{key}"), value, &[]);
+            validate_placeholders(&format!("intent.{key}"), value, &[])?;
         }
-        validate_placeholders("engagement.frustrated", &raw.engagement.frustrated, &[]);
-        validate_placeholders("engagement.disengaging", &raw.engagement.disengaging, &[]);
+        validate_placeholders("engagement.frustrated", &raw.engagement.frustrated, &[])?;
+        validate_placeholders("engagement.disengaging", &raw.engagement.disengaging, &[])?;
         validate_placeholders(
             "sections.knowledge_intro",
             &raw.sections.knowledge_intro,
             &["age"],
-        );
-        validate_placeholders("sections.summary_intro", &raw.sections.summary_intro, &[]);
+        )?;
+        validate_placeholders("sections.summary_intro", &raw.sections.summary_intro, &[])?;
         validate_placeholders(
             "sections.retrieved_intro",
             &raw.sections.retrieved_intro,
             &[],
-        );
-        validate_placeholders("labels.child", &raw.labels.child, &[]);
-        validate_placeholders("labels.primer", &raw.labels.primer, &[]);
+        )?;
+        validate_placeholders("labels.child", &raw.labels.child, &[])?;
+        validate_placeholders("labels.primer", &raw.labels.primer, &[])?;
 
         // Stage the parsed intent strings keyed by canonical name so we
         // can validate completeness before materialising the indexed
@@ -284,7 +352,6 @@ impl PromptPack for TomlPromptPack {
 
 #[derive(Deserialize)]
 struct PackFile {
-    #[allow(dead_code)]
     meta: MetaSection,
     system_prompt: SystemPromptSection,
     language_guidance: LanguageGuidanceBands,
@@ -295,13 +362,14 @@ struct PackFile {
     question_detection: QuestionDetectionSection,
 }
 
+/// File-level documentation for translators. Cross-checked at load time
+/// against `Locale`'s projections — a mismatch is a load error so
+/// translators can't silently let the file's metadata drift away from
+/// the enum.
 #[derive(Deserialize)]
 struct MetaSection {
-    #[allow(dead_code)]
     language: String,
-    #[allow(dead_code)]
     language_name: String,
-    #[allow(dead_code)]
     bcp47: String,
 }
 
@@ -383,12 +451,12 @@ fn parse_intent_key(s: &str) -> Option<PedagogicalIntent> {
 
 // ─── Placeholder validation ─────────────────────────────────────────────────
 
-/// Scan `content` for `{ident}` placeholders and panic if any token is
-/// not in `allowed`. Identifier rule: ASCII alpha or `_` first char,
-/// then ASCII alphanumeric or `_`. Anything else inside `{...}`
+/// Scan `content` for `{ident}` placeholders and return Err if any
+/// token is not in `allowed`. Identifier rule: ASCII alpha or `_` first
+/// char, then ASCII alphanumeric or `_`. Anything else inside `{...}`
 /// (e.g. `{Hello, world}`) is left alone — translators can use brace
 /// characters in narrative text without false positives.
-fn validate_placeholders(field: &str, content: &str, allowed: &[&str]) {
+fn validate_placeholders(field: &str, content: &str, allowed: &[&str]) -> Result<()> {
     let bytes = content.as_bytes();
     let mut i = 0;
     while i < bytes.len() {
@@ -401,9 +469,9 @@ fn validate_placeholders(field: &str, content: &str, allowed: &[&str]) {
             if end < bytes.len() {
                 let token = &content[start..end];
                 if is_placeholder_ident(token) && !allowed.contains(&token) {
-                    panic!(
+                    return Err(PrimerError::Config(format!(
                         "prompt pack: field {field} contains unknown placeholder {{{token}}}; allowed: {allowed:?}"
-                    );
+                    )));
                 }
                 i = end + 1;
             } else {
@@ -413,6 +481,7 @@ fn validate_placeholders(field: &str, content: &str, allowed: &[&str]) {
             i += 1;
         }
     }
+    Ok(())
 }
 
 fn is_placeholder_ident(s: &str) -> bool {
@@ -523,8 +592,7 @@ mod tests {
     }
 
     #[test]
-    #[should_panic(expected = "unknown placeholder")]
-    fn unknown_placeholder_in_base_is_a_loud_panic() {
+    fn unknown_placeholder_in_base_returns_err() {
         let body = format!(
             r#"
 [meta]
@@ -562,7 +630,12 @@ factual_prefixes = []
 "#,
             INTENT_KEYS = all_intents_zeroed_toml(),
         );
-        let _ = TomlPromptPack::from_toml_str(Locale::English, &body);
+        let result = TomlPromptPack::from_toml_str(Locale::English, &body);
+        let err = result.err().expect("expected unknown-placeholder error");
+        let s = format!("{err}");
+        assert!(s.contains("unknown placeholder"), "got: {s}");
+        assert!(s.contains("system_prompt.base"), "got: {s}");
+        assert!(s.contains("nme"), "got: {s}");
     }
 
     #[test]
@@ -613,5 +686,134 @@ factual_prefixes = []
             out.push_str(&format!("{} = \"x\"\n", intent_key(i)));
         }
         out
+    }
+
+    /// Build a minimal but structurally-valid pack body with overridable
+    /// `[meta]` and `[question_detection]` blocks. Used by the meta-
+    /// consistency and factual-prefix tests.
+    fn synthetic_pack_body(
+        meta_language: &str,
+        meta_language_name: &str,
+        meta_bcp47: &str,
+        factual_prefixes_array: &str,
+    ) -> String {
+        format!(
+            r#"
+[meta]
+language = "{meta_language}"
+language_name = "{meta_language_name}"
+bcp47 = "{meta_bcp47}"
+
+[system_prompt]
+base = "x"
+
+[language_guidance]
+ages_0_6 = ""
+ages_7_9 = ""
+ages_10_12 = ""
+ages_13_plus = ""
+
+[intent]
+{INTENT_KEYS}
+
+[engagement]
+frustrated = ""
+disengaging = ""
+
+[sections]
+knowledge_intro = ""
+summary_intro = ""
+retrieved_intro = ""
+
+[labels]
+child = "Child"
+primer = "Primer"
+
+[question_detection]
+factual_prefixes = {factual_prefixes_array}
+"#,
+            INTENT_KEYS = all_intents_zeroed_toml(),
+        )
+    }
+
+    /// The English pack's `[meta]` block must agree with `Locale::English`
+    /// across all three projections — language id, display name, and
+    /// BCP-47 tag. This is what the meta-consistency check inside
+    /// `from_toml_str` enforces; the test guards the en.toml file in
+    /// the tree against drift.
+    #[test]
+    fn english_pack_meta_matches_locale_projections() {
+        // The successful load is itself the strongest assertion the
+        // file's meta block matches the enum (a mismatch would Err).
+        let pack = english_pack();
+        assert_eq!(pack.locale(), Locale::English);
+        // Spot-check the projections against the canonical values so a
+        // future refactor that drops the load-time check still trips this
+        // test.
+        assert_eq!(Locale::English.pack_id(), "en");
+        assert_eq!(Locale::English.name(), "English");
+        assert_eq!(Locale::English.bcp47(), "en-US");
+    }
+
+    #[test]
+    fn meta_language_mismatch_returns_err() {
+        let body = synthetic_pack_body("zz", "English", "en-US", "[]");
+        let err = TomlPromptPack::from_toml_str(Locale::English, &body)
+            .err()
+            .expect("expected meta.language mismatch error");
+        let s = format!("{err}");
+        assert!(s.contains("meta.language"), "got: {s}");
+    }
+
+    #[test]
+    fn meta_language_name_mismatch_returns_err() {
+        let body = synthetic_pack_body("en", "Englsih", "en-US", "[]");
+        let err = TomlPromptPack::from_toml_str(Locale::English, &body)
+            .err()
+            .expect("expected meta.language_name mismatch error");
+        let s = format!("{err}");
+        assert!(s.contains("meta.language_name"), "got: {s}");
+    }
+
+    #[test]
+    fn meta_bcp47_mismatch_returns_err() {
+        let body = synthetic_pack_body("en", "English", "en-GB", "[]");
+        let err = TomlPromptPack::from_toml_str(Locale::English, &body)
+            .err()
+            .expect("expected meta.bcp47 mismatch error");
+        let s = format!("{err}");
+        assert!(s.contains("meta.bcp47"), "got: {s}");
+    }
+
+    /// Empty `factual_prefixes` round-trips through the loader — locales
+    /// where prefix matching doesn't apply (Japanese particles, Mandarin
+    /// tone-disambiguation) are expected to ship with `factual_prefixes = []`.
+    #[test]
+    fn empty_factual_prefixes_loads_and_disables_prefix_matching() {
+        let body = synthetic_pack_body("en", "English", "en-US", "[]");
+        let pack =
+            TomlPromptPack::from_toml_str(Locale::English, &body).expect("synthetic pack loads");
+        assert!(pack.factual_prefixes().is_empty());
+    }
+
+    /// `load_cached` returns the same `Arc` on repeated calls. PRIMER_
+    /// PROMPTS_DIR-driven test isolation is achieved by NOT setting that
+    /// env var here, so the cache path is exercised.
+    #[test]
+    fn load_cached_returns_same_arc_on_repeated_calls() {
+        // SAFETY: the cache only short-circuits when PRIMER_PROMPTS_DIR
+        // is unset; this test inherits the parent process env and must
+        // not have it set. cargo test inherits a clean env in CI; locally
+        // a developer who has set it is exercising the bypass path on
+        // purpose, so we skip the strict-equality check there.
+        if std::env::var_os("PRIMER_PROMPTS_DIR").is_some() {
+            return;
+        }
+        let a = load_cached(Locale::English).expect("first load_cached");
+        let b = load_cached(Locale::English).expect("second load_cached");
+        assert!(
+            Arc::ptr_eq(&a, &b),
+            "load_cached should return the same Arc on repeat calls"
+        );
     }
 }

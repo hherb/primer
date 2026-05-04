@@ -23,9 +23,15 @@ use crate::prompt_pack::{self, PromptPack};
 /// dialogue manager constructs and threads its own locale-specific
 /// pack through `*_with_pack` variants instead of consulting this
 /// singleton — same code, different entry point.
+///
+/// Lifetime note: the `Arc<dyn PromptPack>` lives in a function-scoped
+/// `static`, so it has `'static` lifetime. `Arc::as_ref` returns a
+/// reference whose lifetime is tied to the `Arc`'s — here, also
+/// `'static`. The returned `&dyn PromptPack` is therefore safe to hand
+/// to call sites that don't retain the `Arc`.
 fn english_pack() -> &'static dyn PromptPack {
     static CELL: OnceLock<std::sync::Arc<dyn PromptPack>> = OnceLock::new();
-    CELL.get_or_init(|| prompt_pack::load(Locale::English).expect("english pack loads"))
+    CELL.get_or_init(|| prompt_pack::load_cached(Locale::English).expect("english pack loads"))
         .as_ref()
 }
 
@@ -911,6 +917,68 @@ mod tests {
         // "why" forms are deliberately left out — Socratic-richer.
         assert!(!is_factual_question("why is the sky blue"));
         assert!(!is_factual_question("why does it rain"));
+    }
+
+    /// Locales whose pack ships `factual_prefixes = []` opt out of the
+    /// prefix-matching short-circuit; `is_factual_question_with_pack`
+    /// must return `false` for every input so `decide_intent` falls
+    /// through to the LLM-based engagement classifier.
+    #[test]
+    fn is_factual_question_with_pack_returns_false_for_empty_prefix_list() {
+        use crate::prompt_pack::TomlPromptPack;
+        // Synthetic pack with `factual_prefixes = []` — represents a
+        // future locale (e.g. Japanese) where prefix matching doesn't
+        // apply.
+        let body = r#"
+[meta]
+language = "en"
+language_name = "English"
+bcp47 = "en-US"
+
+[system_prompt]
+base = "x"
+
+[language_guidance]
+ages_0_6 = ""
+ages_7_9 = ""
+ages_10_12 = ""
+ages_13_plus = ""
+
+[intent]
+socratic_question = "x"
+comprehension_check = "x"
+scaffolding = "x"
+encouragement = "x"
+extension = "x"
+direct_answer = "x"
+answer_then_pivot = "x"
+session_close = "x"
+
+[engagement]
+frustrated = ""
+disengaging = ""
+
+[sections]
+knowledge_intro = ""
+summary_intro = ""
+retrieved_intro = ""
+
+[labels]
+child = "Child"
+primer = "Primer"
+
+[question_detection]
+factual_prefixes = []
+"#;
+        let pack = TomlPromptPack::from_toml_str(Locale::English, body)
+            .expect("synthetic pack with empty prefixes loads");
+        // Inputs that the English pack would classify as factual must
+        // now return false because the prefix list is empty.
+        assert!(!is_factual_question_with_pack(&pack, "what is gravity?"));
+        assert!(!is_factual_question_with_pack(&pack, "how does it work"));
+        // And ordinary inputs still return false.
+        assert!(!is_factual_question_with_pack(&pack, "why is the sky blue"));
+        assert!(!is_factual_question_with_pack(&pack, ""));
     }
 
     #[test]

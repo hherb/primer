@@ -360,7 +360,12 @@ impl<'a> DialogueManager<'a> {
         config: PedagogyConfig,
     ) -> Self {
         let session = Session::new(learner.profile.id);
-        let prompt_pack = prompt_pack::load(learner.profile.locale)
+        // `load_cached` returns a process-wide shared `Arc<dyn PromptPack>`
+        // so successive `DialogueManager::new` calls in the same process
+        // (tests, future multi-session flows) don't re-parse the embedded
+        // TOML. PRIMER_PROMPTS_DIR bypasses the cache for translator
+        // iteration.
+        let prompt_pack = prompt_pack::load_cached(learner.profile.locale)
             .expect("prompt pack load failed; this should be impossible at runtime");
         Self {
             learner,

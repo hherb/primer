@@ -3515,6 +3515,44 @@ mod learner_store_tests {
         assert!(format!("{err}").contains("age"));
     }
 
+    /// `load_learner` defensively falls back to `Locale::default()` when
+    /// the on-disk `learners.locale` value isn't a known pack id (the
+    /// expected source: a third-party tool, a hand-edited DB, or a
+    /// bit-flip). The intent is that a corrupted locale never locks a
+    /// child out of their session — the load succeeds and the warn
+    /// surfaces in `tracing` for observability.
+    #[tokio::test]
+    async fn load_learner_with_unknown_locale_falls_back_to_default() {
+        let store = open_in_mem();
+        {
+            let conn = store.conn.lock().unwrap();
+            // Insert a learner row with an unknown locale pack id. The
+            // schema column is TEXT NOT NULL DEFAULT 'en' but accepts
+            // any string — soft-fail at read time is the contract.
+            conn.execute(
+                "INSERT INTO learners (
+                     id, name, age, languages, created_at, last_active,
+                     pref_narrative, pref_socratic, pref_visual, pref_kinesthetic,
+                     typical_session_minutes, high_engagement_topics,
+                     early_disengagement_secs, current_engagement_state_id, locale
+                 ) VALUES (?1, 'Test', 8, '[]', '2026-01-01T00:00:00Z', '2026-01-01T00:00:00Z',
+                           0.5, 0.5, 0.5, 0.5, 20.0, '[]', 300, 1, 'zz')",
+                rusqlite::params!["00000000-0000-0000-0000-00000000007a"],
+            )
+            .unwrap();
+        }
+        let learner = store
+            .load_learner()
+            .await
+            .expect("load_learner must not error on unknown locale")
+            .expect("row should be returned");
+        assert_eq!(
+            learner.profile.locale,
+            primer_core::i18n::Locale::default(),
+            "unknown locale must fall back to Locale::default()"
+        );
+    }
+
     #[tokio::test]
     async fn load_learner_rejects_negative_encounter_count() {
         let store = open_in_mem();
