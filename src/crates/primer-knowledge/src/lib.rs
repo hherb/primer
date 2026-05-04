@@ -52,6 +52,10 @@ pub struct SqliteKnowledgeBase {
 impl SqliteKnowledgeBase {
     /// Open the knowledge base for the default locale (English).
     /// Back-compat shim for callers that pre-date the locale-aware API.
+    #[deprecated(
+        since = "0.1.0",
+        note = "use open_for_locale to make the locale explicit; the shim defaults to English and would silently route a non-English corpus through the English-default migration path"
+    )]
     pub fn open(path: &Path) -> Result<Self> {
         Self::open_for_locale(path, Locale::default())
     }
@@ -286,6 +290,7 @@ mod tests {
     }
 
     #[tokio::test]
+    #[allow(deprecated)] // intentionally exercises the back-compat shim
     async fn open_back_compat_shim_uses_default_locale() {
         let db = tmp_db();
         let kb = SqliteKnowledgeBase::open(db.path()).unwrap();
