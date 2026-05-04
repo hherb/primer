@@ -48,6 +48,32 @@ pub(crate) fn parse_retry_after(
         .map(std::time::Duration::from_secs)
 }
 
+/// Translate the `error.type` from a mid-stream Anthropic SSE `error`
+/// event into an `InferenceError`. Pure — no I/O, no `Self` reference.
+///
+/// Mid-stream errors fire after a 2xx handshake, so the retry helper
+/// has already exited; this classification exists purely so the
+/// user-facing i18n layer surfaces the right message instead of the
+/// generic `Other` fallback. Mapped from Anthropic's documented error
+/// taxonomy: `overloaded_error`/`api_error` → ServiceUnavailable,
+/// `rate_limit_error` → RateLimited (no Retry-After in JSON form),
+/// `authentication_error`/`permission_error` → Auth.
+///
+/// `message` is dev-facing; users never see it (the i18n render layer
+/// substitutes a generic message for `Other`).
+pub(crate) fn classify_anthropic_error_event(
+    error_type: &str,
+    message: &str,
+) -> primer_core::error::InferenceError {
+    use primer_core::error::InferenceError::*;
+    match error_type {
+        "overloaded_error" | "api_error" => ServiceUnavailable,
+        "rate_limit_error" => RateLimited { retry_after: None },
+        "authentication_error" | "permission_error" => Auth,
+        _ => Other(format!("Anthropic {error_type}: {message}")),
+    }
+}
+
 /// Translate a transport-level `reqwest::Error` (no HTTP response yet)
 /// into an `InferenceError`. Connect / timeout / request-build failures
 /// map to `NetworkUnavailable`; everything else falls through to
@@ -204,6 +230,9 @@ struct ErrorPayload {
 
 #[derive(Debug, Deserialize)]
 struct ErrorDetail {
+    #[serde(rename = "type", default)]
+    error_type: String,
+    #[serde(default)]
     message: String,
 }
 
@@ -236,7 +265,10 @@ fn parse_anthropic_event(ev: &SseEvent) -> Result<Option<TokenChunk>> {
                     format!("Anthropic error event parse failed: {e}; data: {}", ev.data).into(),
                 )
             })?;
-            Err(PrimerError::Inference(parsed.error.message.into()))
+            Err(PrimerError::Inference(classify_anthropic_error_event(
+                &parsed.error.error_type,
+                &parsed.error.message,
+            )))
         }
         // ping, message_start, content_block_start, content_block_stop, message_delta.
         // Note: `message_delta` carries `stop_reason` which can flag mid-stream
@@ -493,18 +525,55 @@ mod tests {
     }
 
     #[test]
-    fn parse_anthropic_event_returns_err_on_error_event() {
+    fn parse_anthropic_event_overloaded_error_is_typed_service_unavailable() {
+        // Mid-stream `overloaded_error` events must surface as the typed
+        // ServiceUnavailable variant so the i18n layer renders the right
+        // friendly message (otherwise users see the generic Other fallback
+        // even though Anthropic told us exactly what went wrong).
         let ev = SseEvent {
             event: "error".to_string(),
             data: r#"{"type":"error","error":{"type":"overloaded_error","message":"slow down"}}"#
                 .to_string(),
         };
         let err = parse_anthropic_event(&ev).unwrap_err();
-        let msg = format!("{err}");
-        assert!(
-            msg.contains("slow down"),
-            "expected error message to mention 'slow down', got: {msg}"
-        );
+        match err {
+            primer_core::error::PrimerError::Inference(
+                primer_core::error::InferenceError::ServiceUnavailable,
+            ) => {}
+            other => panic!("expected typed ServiceUnavailable, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn parse_anthropic_event_rate_limit_error_is_typed_rate_limited() {
+        let ev = SseEvent {
+            event: "error".to_string(),
+            data: r#"{"type":"error","error":{"type":"rate_limit_error","message":"too many"}}"#
+                .to_string(),
+        };
+        let err = parse_anthropic_event(&ev).unwrap_err();
+        match err {
+            primer_core::error::PrimerError::Inference(
+                primer_core::error::InferenceError::RateLimited { retry_after: None },
+            ) => {}
+            other => panic!("expected typed RateLimited{{None}}, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn parse_anthropic_event_authentication_error_is_typed_auth() {
+        let ev = SseEvent {
+            event: "error".to_string(),
+            data: r#"{"type":"error","error":{"type":"authentication_error","message":"bad key"}}"#
+                .to_string(),
+        };
+        let err = parse_anthropic_event(&ev).unwrap_err();
+        match err {
+            primer_core::error::PrimerError::Inference(
+                primer_core::error::InferenceError::Auth,
+            ) => {}
+            other => panic!("expected typed Auth, got {other:?}"),
+        }
     }
 }
 
@@ -606,5 +675,54 @@ mod classify_tests {
             HeaderValue::from_static("Wed, 21 Oct 2026 07:28:00 GMT"),
         );
         assert_eq!(parse_retry_after(&h), None);
+    }
+
+    #[test]
+    fn classify_error_event_overloaded_is_service_unavailable() {
+        let e = classify_anthropic_error_event("overloaded_error", "slow down");
+        assert!(matches!(e, InferenceError::ServiceUnavailable));
+    }
+
+    #[test]
+    fn classify_error_event_api_error_is_service_unavailable() {
+        let e = classify_anthropic_error_event("api_error", "internal blip");
+        assert!(matches!(e, InferenceError::ServiceUnavailable));
+    }
+
+    #[test]
+    fn classify_error_event_rate_limit_is_rate_limited_no_retry_after() {
+        // Mid-stream JSON error events have no Retry-After header
+        // available; surface RateLimited with retry_after=None.
+        let e = classify_anthropic_error_event("rate_limit_error", "too many");
+        assert!(matches!(
+            e,
+            InferenceError::RateLimited { retry_after: None }
+        ));
+    }
+
+    #[test]
+    fn classify_error_event_authentication_is_auth() {
+        let e = classify_anthropic_error_event("authentication_error", "bad key");
+        assert!(matches!(e, InferenceError::Auth));
+    }
+
+    #[test]
+    fn classify_error_event_permission_is_auth() {
+        let e = classify_anthropic_error_event("permission_error", "no access");
+        assert!(matches!(e, InferenceError::Auth));
+    }
+
+    #[test]
+    fn classify_error_event_unknown_type_falls_through_to_other() {
+        let e = classify_anthropic_error_event("invalid_request_error", "bad json");
+        match e {
+            InferenceError::Other(s) => {
+                assert!(
+                    s.contains("invalid_request_error") && s.contains("bad json"),
+                    "Other should surface both type and message for diagnostics, got: {s}"
+                );
+            }
+            other => panic!("expected Other for unmapped type, got {other:?}"),
+        }
     }
 }
