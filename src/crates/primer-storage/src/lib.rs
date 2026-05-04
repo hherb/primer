@@ -30,22 +30,37 @@ use rusqlite::{Connection, OptionalExtension};
 use uuid::Uuid;
 
 /// SQLite-backed session store.
+///
+/// Each store is scoped to a single `Locale`. The application invariant
+/// is one learner per DB file, and one learner has one locale, so the
+/// store's locale matches the learner's. The locale is used as the
+/// `concept_language_tag` value when concepts are first inserted into
+/// the shared `concepts` table — `INSERT OR IGNORE` semantics mean the
+/// first locale to introduce a concept name owns the tag forever.
 #[derive(Debug)]
 pub struct SqliteSessionStore {
     conn: Mutex<Connection>,
+    locale: primer_core::i18n::Locale,
 }
 
 impl SqliteSessionStore {
-    /// Open (or create) a session store at `path`. Use `:memory:` for
-    /// an in-memory database.
+    /// Open (or create) a session store at `path`, defaulting to the
+    /// English locale. Back-compat shim for callers that pre-date the
+    /// locale-aware API.
+    pub fn open(path: &Path) -> Result<Self> {
+        Self::open_for_locale(path, primer_core::i18n::Locale::default())
+    }
+
+    /// Open (or create) a session store at `path` scoped to `locale`.
+    /// Use `:memory:` for an in-memory database.
     ///
     /// Creates the schema if missing, sets `PRAGMA foreign_keys = ON`,
-    /// asserts/sets `PRAGMA user_version`, and applies v2 through v5
+    /// asserts/sets `PRAGMA user_version`, and applies v2 through v6
     /// migrations to bring older DBs up to date. The migrations are
-    /// idempotent — safe to run on a fresh DB or any pre-v5 DB. A version
+    /// idempotent — safe to run on a fresh DB or any pre-v6 DB. A version
     /// newer than this build understands is a hard error rather than a
     /// silent downgrade.
-    pub fn open(path: &Path) -> Result<Self> {
+    pub fn open_for_locale(path: &Path, locale: primer_core::i18n::Locale) -> Result<Self> {
         let conn = Connection::open(path)
             .map_err(|e| PrimerError::Storage(format!("open failed: {e}")))?;
 
@@ -110,7 +125,14 @@ impl SqliteSessionStore {
 
         Ok(Self {
             conn: Mutex::new(conn),
+            locale,
         })
+    }
+
+    /// Locale this store is scoped to. Used as the
+    /// `concept_language_tag` value when concepts are first inserted.
+    pub fn locale(&self) -> primer_core::i18n::Locale {
+        self.locale
     }
 }
 
@@ -179,7 +201,9 @@ impl primer_core::storage::SessionStore for SqliteSessionStore {
                 )
                 .map_err(|e| PrimerError::Storage(format!("prepare insert turn: {e}")))?;
             let mut insert_concept = tx
-                .prepare("INSERT OR IGNORE INTO concepts (name) VALUES (?1)")
+                .prepare(
+                    "INSERT OR IGNORE INTO concepts (name, concept_language_tag) VALUES (?1, ?2)",
+                )
                 .map_err(|e| PrimerError::Storage(format!("prepare insert concept: {e}")))?;
             let mut select_concept = tx
                 .prepare("SELECT id FROM concepts WHERE name = ?1")
@@ -194,6 +218,7 @@ impl primer_core::storage::SessionStore for SqliteSessionStore {
             // doesn't hit the DB twice.
             let mut concept_name_cache: std::collections::HashMap<String, i64> =
                 std::collections::HashMap::new();
+            let locale_tag = self.locale.pack_id();
 
             for (idx, turn) in session.turns.iter().enumerate().skip(persisted_count) {
                 let speaker_id = catalog::speaker_id(turn.speaker);
@@ -217,7 +242,7 @@ impl primer_core::storage::SessionStore for SqliteSessionStore {
                         Some(id) => id,
                         None => {
                             insert_concept
-                                .execute(rusqlite::params![name])
+                                .execute(rusqlite::params![name, locale_tag])
                                 .map_err(|e| {
                                     PrimerError::Storage(format!("upsert concept {name}: {e}"))
                                 })?;
@@ -640,7 +665,7 @@ impl primer_core::storage::SessionStore for SqliteSessionStore {
             })?;
 
         let mut insert_concept = tx
-            .prepare("INSERT OR IGNORE INTO concepts (name) VALUES (?1)")
+            .prepare("INSERT OR IGNORE INTO concepts (name, concept_language_tag) VALUES (?1, ?2)")
             .map_err(|e| PrimerError::Storage(format!("prepare insert concept: {e}")))?;
         let mut select_concept = tx
             .prepare("SELECT id FROM concepts WHERE name = ?1")
@@ -648,10 +673,11 @@ impl primer_core::storage::SessionStore for SqliteSessionStore {
         let mut link_concept = tx
             .prepare("INSERT OR IGNORE INTO turn_concepts (turn_id, concept_id) VALUES (?1, ?2)")
             .map_err(|e| PrimerError::Storage(format!("prepare link concept: {e}")))?;
+        let locale_tag = self.locale.pack_id();
 
         for name in concepts {
             insert_concept
-                .execute(rusqlite::params![name])
+                .execute(rusqlite::params![name, locale_tag])
                 .map_err(|e| PrimerError::Storage(format!("upsert concept {name}: {e}")))?;
             let cid: i64 = select_concept
                 .query_row(rusqlite::params![name], |r| r.get(0))
@@ -694,8 +720,11 @@ impl primer_core::storage::SessionStore for SqliteSessionStore {
             std::collections::HashMap::new();
 
         {
+            let locale_tag = self.locale.pack_id();
             let mut insert_concept = tx
-                .prepare("INSERT OR IGNORE INTO concepts (name) VALUES (?1)")
+                .prepare(
+                    "INSERT OR IGNORE INTO concepts (name, concept_language_tag) VALUES (?1, ?2)",
+                )
                 .map_err(|e| PrimerError::Storage(format!("prepare insert concept: {e}")))?;
             let mut select_concept = tx
                 .prepare("SELECT id FROM concepts WHERE name = ?1")
@@ -729,7 +758,7 @@ impl primer_core::storage::SessionStore for SqliteSessionStore {
                         Some(id) => id,
                         None => {
                             insert_concept
-                                .execute(rusqlite::params![name])
+                                .execute(rusqlite::params![name, locale_tag])
                                 .map_err(|e| {
                                     PrimerError::Storage(format!("upsert concept {name}: {e}"))
                                 })?;
@@ -797,14 +826,15 @@ impl primer_core::storage::SessionStore for SqliteSessionStore {
         // update_exchange_concepts.
         let mut concept_id_cache: std::collections::HashMap<String, i64> =
             std::collections::HashMap::new();
+        let locale_tag = self.locale.pack_id();
 
         for a in assessments {
             let concept_id = if let Some(&id) = concept_id_cache.get(&a.concept) {
                 id
             } else {
                 tx.execute(
-                    "INSERT OR IGNORE INTO concepts (name) VALUES (?1)",
-                    rusqlite::params![a.concept],
+                    "INSERT OR IGNORE INTO concepts (name, concept_language_tag) VALUES (?1, ?2)",
+                    rusqlite::params![a.concept, locale_tag],
                 )
                 .map_err(|e| {
                     PrimerError::Storage(format!("save_comprehensions: upsert concept: {e}"))
@@ -911,7 +941,9 @@ impl primer_core::storage::LearnerStore for SqliteSessionStore {
         //    learner_concepts.
         if !learner.concepts.is_empty() {
             let mut insert_concept = tx
-                .prepare("INSERT OR IGNORE INTO concepts (name) VALUES (?1)")
+                .prepare(
+                    "INSERT OR IGNORE INTO concepts (name, concept_language_tag) VALUES (?1, ?2)",
+                )
                 .map_err(|e| PrimerError::Storage(format!("prepare insert concept: {e}")))?;
             let mut select_concept = tx
                 .prepare("SELECT id FROM concepts WHERE name = ?1")
@@ -934,13 +966,14 @@ impl primer_core::storage::LearnerStore for SqliteSessionStore {
             // Per-call cache to skip re-querying concepts within one save.
             let mut concept_id_cache: std::collections::HashMap<String, i64> =
                 std::collections::HashMap::new();
+            let locale_tag = self.locale.pack_id();
 
             for concept in &learner.concepts {
                 let cid = match concept_id_cache.get(&concept.concept_id).copied() {
                     Some(id) => id,
                     None => {
                         insert_concept
-                            .execute(rusqlite::params![concept.concept_id])
+                            .execute(rusqlite::params![concept.concept_id, locale_tag])
                             .map_err(|e| {
                                 PrimerError::Storage(format!(
                                     "upsert concept {}: {e}",
@@ -3206,6 +3239,138 @@ mod tests {
             .unwrap();
         assert_eq!(count, 1);
     }
+
+    // ─── i18n: concept_language_tag across INSERT sites (PR 5) ──────────
+    //
+    // Companion tests for the per-site coverage gap noted in the PR review.
+    // `save_learner` is already covered in `learner_store_tests`. The four
+    // tests below pin the same behaviour for the other INSERT paths so a
+    // regression introducing a sixth INSERT site without the tag would be
+    // caught locally rather than only via the cross-store precedence test.
+
+    fn open_memory_for_locale(locale: primer_core::i18n::Locale) -> SqliteSessionStore {
+        SqliteSessionStore::open_for_locale(std::path::Path::new(":memory:"), locale)
+            .expect("open :memory: for locale")
+    }
+
+    fn collect_concept_tags(store: &SqliteSessionStore) -> Vec<String> {
+        let conn = store.conn.lock().unwrap();
+        let mut stmt = conn
+            .prepare("SELECT concept_language_tag FROM concepts ORDER BY id")
+            .unwrap();
+        stmt.query_map([], |r| r.get::<_, String>(0))
+            .unwrap()
+            .map(|r| r.unwrap())
+            .collect()
+    }
+
+    #[tokio::test]
+    async fn save_session_tags_concepts_with_store_locale() {
+        use primer_core::conversation::Speaker;
+
+        let store = open_memory_for_locale(primer_core::i18n::Locale::German);
+        let mut session = Session::new(Uuid::new_v4());
+        session.add_turn(make_turn(
+            Speaker::Child,
+            "warum ist der Himmel blau",
+            None,
+            vec!["Himmel".into(), "Licht".into()],
+        ));
+        store.save_session(&session).await.unwrap();
+
+        let tags = collect_concept_tags(&store);
+        assert_eq!(tags.len(), 2, "expected two concept rows: {tags:?}");
+        for t in &tags {
+            assert_eq!(t, "de", "save_session must tag with store locale: {tags:?}");
+        }
+    }
+
+    #[tokio::test]
+    async fn update_turn_concepts_tags_concepts_with_store_locale() {
+        let store = open_memory_for_locale(primer_core::i18n::Locale::German);
+        let mut session = primer_core::conversation::Session::new(Uuid::new_v4());
+        session.add_turn(primer_core::conversation::Turn {
+            speaker: primer_core::conversation::Speaker::Child,
+            text: "was ist Photosynthese?".into(),
+            timestamp: Utc::now(),
+            intent: None,
+            concepts: vec![],
+        });
+        store.save_session(&session).await.unwrap();
+
+        store
+            .update_turn_concepts(session.id, 0, &["Photosynthese".into(), "Biologie".into()])
+            .await
+            .unwrap();
+
+        let tags = collect_concept_tags(&store);
+        assert_eq!(tags.len(), 2, "expected two concept rows: {tags:?}");
+        for t in &tags {
+            assert_eq!(
+                t, "de",
+                "update_turn_concepts must tag with store locale: {tags:?}"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn update_exchange_concepts_tags_concepts_with_store_locale() {
+        let store = open_memory_for_locale(primer_core::i18n::Locale::German);
+        let session = make_two_turn_session();
+        store.save_session(&session).await.unwrap();
+
+        store
+            .update_exchange_concepts(session.id, 0, &["Schwerkraft".into()], 1, &["Masse".into()])
+            .await
+            .unwrap();
+
+        let tags = collect_concept_tags(&store);
+        assert_eq!(tags.len(), 2, "expected two concept rows: {tags:?}");
+        for t in &tags {
+            assert_eq!(
+                t, "de",
+                "update_exchange_concepts must tag with store locale: {tags:?}"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn save_comprehensions_tags_concepts_with_store_locale() {
+        use primer_core::comprehension::ComprehensionAssessment;
+        use primer_core::learner::UnderstandingDepth;
+
+        let store = open_memory_for_locale(primer_core::i18n::Locale::German);
+        let session = make_two_turn_session();
+        store.save_session(&session).await.unwrap();
+
+        let assessments = vec![
+            ComprehensionAssessment {
+                concept: "Photosynthese".into(),
+                depth: UnderstandingDepth::Comprehension,
+                confidence: 0.85,
+                evidence: None,
+            },
+            ComprehensionAssessment {
+                concept: "Chlorophyll".into(),
+                depth: UnderstandingDepth::Aware,
+                confidence: 0.6,
+                evidence: None,
+            },
+        ];
+        store
+            .save_comprehensions(session.id, 1, &assessments, "llm:test:model")
+            .await
+            .unwrap();
+
+        let tags = collect_concept_tags(&store);
+        assert_eq!(tags.len(), 2, "expected two concept rows: {tags:?}");
+        for t in &tags {
+            assert_eq!(
+                t, "de",
+                "save_comprehensions must tag with store locale: {tags:?}"
+            );
+        }
+    }
 }
 
 #[cfg(test)]
@@ -3277,6 +3442,78 @@ mod learner_store_tests {
             .query_row("SELECT COUNT(*) FROM learners", [], |r| r.get(0))
             .unwrap();
         assert_eq!(count, 1);
+    }
+
+    // ─── concept_language_tag (PR 5: i18n cross-locale tagging) ──────
+
+    #[tokio::test]
+    async fn save_learner_tags_concepts_with_store_locale() {
+        // German-locale store; first-time concept inserts should land
+        // with concept_language_tag = 'de'.
+        let store = SqliteSessionStore::open_for_locale(
+            std::path::Path::new(":memory:"),
+            primer_core::i18n::Locale::German,
+        )
+        .unwrap();
+        store.save_learner(&sample_learner()).await.unwrap();
+        let conn = store.conn.lock().unwrap();
+        let tags: Vec<String> = conn
+            .prepare("SELECT concept_language_tag FROM concepts ORDER BY id")
+            .unwrap()
+            .query_map([], |r| r.get::<_, String>(0))
+            .unwrap()
+            .map(|r| r.unwrap())
+            .collect();
+        assert!(!tags.is_empty(), "expected concepts inserted");
+        for t in &tags {
+            assert_eq!(t, "de", "every concept should be tagged 'de': {tags:?}");
+        }
+    }
+
+    #[tokio::test]
+    async fn first_locale_to_introduce_concept_owns_the_tag() {
+        // INSERT OR IGNORE semantics: once a concept name exists, the
+        // tag stays put even if a different-locale store later "inserts"
+        // the same name. This is the documented behaviour — first
+        // introduction wins. Cross-locale concept linkage is a follow-up
+        // PR; for now we just verify the documented behaviour.
+        let path = std::env::temp_dir().join(format!(
+            "primer-storage-locale-precedence-{}-{}.db",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        // Open once as English, save a learner whose concepts include
+        // "physics:gravity".
+        {
+            let en_store =
+                SqliteSessionStore::open_for_locale(&path, primer_core::i18n::Locale::English)
+                    .unwrap();
+            en_store.save_learner(&sample_learner()).await.unwrap();
+        }
+        // Reopen the same DB as German and save the SAME learner again
+        // (same concept names). The concept rows already exist; their
+        // tag should stay 'en' because of INSERT OR IGNORE.
+        {
+            let de_store =
+                SqliteSessionStore::open_for_locale(&path, primer_core::i18n::Locale::German)
+                    .unwrap();
+            de_store.save_learner(&sample_learner()).await.unwrap();
+            let conn = de_store.conn.lock().unwrap();
+            let tags: Vec<String> = conn
+                .prepare("SELECT concept_language_tag FROM concepts ORDER BY id")
+                .unwrap()
+                .query_map([], |r| r.get::<_, String>(0))
+                .unwrap()
+                .map(|r| r.unwrap())
+                .collect();
+            for t in &tags {
+                assert_eq!(t, "en", "first-introducer wins: {tags:?}");
+            }
+        }
+        let _ = std::fs::remove_file(&path);
     }
 
     #[tokio::test]
