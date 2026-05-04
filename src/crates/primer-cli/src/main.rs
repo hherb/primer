@@ -877,7 +877,7 @@ async fn async_main() -> anyhow::Result<()> {
     }
 
     let session_store: Arc<primer_storage::SqliteSessionStore> = Arc::new(
-        match primer_storage::SqliteSessionStore::open(&session_path) {
+        match primer_storage::SqliteSessionStore::open_for_locale(&session_path, cli_locale) {
             Ok(s) => s,
             Err(e) => {
                 eprintln!(
