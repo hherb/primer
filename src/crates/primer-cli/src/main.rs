@@ -1688,7 +1688,10 @@ mod tests {
     fn verify_resume_locale_match_errors_on_mismatch_with_actionable_message() {
         let id = Uuid::new_v4();
         let err = verify_resume_locale_match(Locale::English, Locale::German, id).unwrap_err();
-        assert!(err.contains("'de'"), "must name the learner's locale: {err}");
+        assert!(
+            err.contains("'de'"),
+            "must name the learner's locale: {err}"
+        );
         assert!(err.contains("'en'"), "must name the cli locale: {err}");
         assert!(
             err.contains("--language de"),
@@ -1704,7 +1707,10 @@ mod tests {
     fn verify_resume_locale_match_symmetric_de_to_en() {
         let id = Uuid::new_v4();
         let err = verify_resume_locale_match(Locale::German, Locale::English, id).unwrap_err();
-        assert!(err.contains("'en'"), "must name the learner's locale: {err}");
+        assert!(
+            err.contains("'en'"),
+            "must name the learner's locale: {err}"
+        );
         assert!(err.contains("--language en"), "corrective flag: {err}");
     }
 
@@ -1801,7 +1807,13 @@ mod tests {
         use primer_storage::SqliteSessionStore;
         use std::sync::Arc;
 
-        let store = Arc::new(SqliteSessionStore::open_for_locale(std::path::Path::new(":memory:"), primer_core::i18n::Locale::default()).unwrap());
+        let store = Arc::new(
+            SqliteSessionStore::open_for_locale(
+                std::path::Path::new(":memory:"),
+                primer_core::i18n::Locale::default(),
+            )
+            .unwrap(),
+        );
         let original_id = Uuid::new_v4();
         let original_created = Utc::now() - chrono::Duration::days(365);
         let mut original =
@@ -1839,7 +1851,13 @@ mod tests {
         use primer_storage::SqliteSessionStore;
         use std::sync::Arc;
 
-        let store = Arc::new(SqliteSessionStore::open_for_locale(std::path::Path::new(":memory:"), primer_core::i18n::Locale::default()).unwrap());
+        let store = Arc::new(
+            SqliteSessionStore::open_for_locale(
+                std::path::Path::new(":memory:"),
+                primer_core::i18n::Locale::default(),
+            )
+            .unwrap(),
+        );
         let original = create_learner_with_id(
             Uuid::new_v4(),
             "Binti",
