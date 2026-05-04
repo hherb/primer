@@ -8,6 +8,7 @@ edition.workspace = true
 primer-core.workspace = true
 primer-classifier.workspace = true
 primer-extractor.workspace = true
+primer-comprehension.workspace = true
 async-trait.workspace = true
 tokio.workspace = true
 futures.workspace = true

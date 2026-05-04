@@ -13,6 +13,7 @@
 //! the pedagogical engine.
 
 pub mod classifier;
+pub mod comprehension;
 pub mod config;
 pub mod conversation;
 pub mod error;
@@ -20,5 +21,6 @@ pub mod extractor;
 pub mod inference;
 pub mod knowledge;
 pub mod learner;
+pub mod llm_util;
 pub mod speech;
 pub mod storage;

@@ -2,7 +2,7 @@
 //! convention, every numeric used by the extractor subsystem is
 //! defined here (or in a sibling settings struct field).
 
-pub const DEFAULT_BLOCKING_TIMEOUT_MS: u64 = 1500;
+pub const DEFAULT_BLOCKING_TIMEOUT_MS: u64 = 5000;
 pub const DEFAULT_RECENT_CONTEXT_TURNS: usize = 4;
 
 /// Hard cap on the LLM's raw output length before parsing. Generous

@@ -102,19 +102,6 @@ pub fn engagement_state_id(state: EngagementState) -> i64 {
     }
 }
 
-/// Human-readable name stored alongside the ID in the `engagement_states`
-/// lookup table.
-pub fn engagement_state_name(state: EngagementState) -> &'static str {
-    match state {
-        EngagementState::Engaged => "Engaged",
-        EngagementState::Reflecting => "Reflecting",
-        EngagementState::FrustratedStuck => "FrustratedStuck",
-        EngagementState::FrustratedTrying => "FrustratedTrying",
-        EngagementState::Disengaging => "Disengaging",
-        EngagementState::Unknown => "Unknown",
-    }
-}
-
 /// Reverse lookup: integer ID → `EngagementState`. Returns `None` for
 /// IDs the current build doesn't know about.
 pub fn engagement_state_from_id(id: i64) -> Option<EngagementState> {
@@ -126,10 +113,12 @@ pub fn engagement_state_from_id(id: i64) -> Option<EngagementState> {
 
 /// All `(id, name)` pairs the storage layer expects to see in the
 /// `engagement_states` lookup table. Used by the validate-and-seed pass.
+/// Names come from `EngagementState::name()` — the enum is the single
+/// source of truth.
 pub fn expected_engagement_states() -> Vec<(i64, &'static str)> {
     EngagementState::ALL
         .iter()
-        .map(|s| (engagement_state_id(*s), engagement_state_name(*s)))
+        .map(|s| (engagement_state_id(*s), s.name()))
         .collect()
 }
 
@@ -148,19 +137,6 @@ pub fn understanding_depth_id(depth: UnderstandingDepth) -> i64 {
     }
 }
 
-/// Human-readable name stored alongside the ID in the
-/// `understanding_depths` lookup table.
-pub fn understanding_depth_name(depth: UnderstandingDepth) -> &'static str {
-    match depth {
-        UnderstandingDepth::Unknown => "Unknown",
-        UnderstandingDepth::Aware => "Aware",
-        UnderstandingDepth::Recall => "Recall",
-        UnderstandingDepth::Comprehension => "Comprehension",
-        UnderstandingDepth::Application => "Application",
-        UnderstandingDepth::Analysis => "Analysis",
-    }
-}
-
 /// Reverse lookup: integer ID → `UnderstandingDepth`. Returns `None`
 /// for IDs the current build doesn't know about.
 pub fn understanding_depth_from_id(id: i64) -> Option<UnderstandingDepth> {
@@ -172,10 +148,12 @@ pub fn understanding_depth_from_id(id: i64) -> Option<UnderstandingDepth> {
 
 /// All `(id, name)` pairs the storage layer expects to see in the
 /// `understanding_depths` lookup table. Used by the validate-and-seed pass.
+/// Names come from `UnderstandingDepth::name()` — the enum is the single
+/// source of truth.
 pub fn expected_understanding_depths() -> Vec<(i64, &'static str)> {
     UnderstandingDepth::ALL
         .iter()
-        .map(|d| (understanding_depth_id(*d), understanding_depth_name(*d)))
+        .map(|d| (understanding_depth_id(*d), d.name()))
         .collect()
 }
 
@@ -203,6 +181,33 @@ pub(crate) fn get_or_create_classifier_id(conn: &Connection, identifier: &str) -
         params![identifier],
     )
     .map_err(|e| PrimerError::Storage(format!("classifier insert: {e}")))?;
+    Ok(conn.last_insert_rowid())
+}
+
+/// Resolve a comprehension-classifier identifier string to its
+/// integer id, inserting into `comprehension_classifiers` lazily on
+/// first observation. Mirrors `get_or_create_classifier_id` exactly,
+/// just against the v5 lookup table.
+pub(crate) fn get_or_create_comprehension_classifier_id(
+    conn: &Connection,
+    identifier: &str,
+) -> Result<i64> {
+    if let Some(id) = conn
+        .query_row(
+            "SELECT id FROM comprehension_classifiers WHERE identifier = ?1",
+            params![identifier],
+            |r| r.get::<_, i64>(0),
+        )
+        .optional()
+        .map_err(|e| PrimerError::Storage(format!("comprehension_classifier_id lookup: {e}")))?
+    {
+        return Ok(id);
+    }
+    conn.execute(
+        "INSERT INTO comprehension_classifiers (identifier) VALUES (?1)",
+        params![identifier],
+    )
+    .map_err(|e| PrimerError::Storage(format!("comprehension_classifier_id insert: {e}")))?;
     Ok(conn.last_insert_rowid())
 }
 

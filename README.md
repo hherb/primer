@@ -27,7 +27,7 @@ The learner model (what the child knows, how deeply they understand it, what top
 
 ## Status
 
-**Phase 0.1 done; Phase 0.3 progressing.** The trait architecture and module boundaries are in place, and the text REPL holds real Socratic conversations against either the Anthropic Claude API or a local Ollama model.
+**Phase 0.1 done; Phase 0.3 substantially progressed.** The trait architecture and module boundaries are in place, and the text REPL holds real Socratic conversations against either the Anthropic Claude API or a local Ollama model.
 
 **What works today:**
 
@@ -37,14 +37,15 @@ The learner model (what the child knows, how deeply they understand it, what top
 - **Long-term memory** — once a conversation grows past the active context window, a rolling LLM-generated summary plus FTS5 retrieval over older turns are injected into the system prompt, so the chat-message timeline stays bounded but the model has access to the whole history.
 - **Engagement classifier** — runs one model behind the chat (configurable via `--classifier-backend` / `--classifier-model`), persisting per-turn assessments to `turn_classifications` for cross-session analysis.
 - **Concept extractor** — runs after each completed exchange (configurable via `--extractor-backend` / `--extractor-model`), extracts the topics the child surfaced and the topics the Primer introduced, and writes them atomically to `turn_concepts` while updating the in-memory learner model.
+- **Comprehension classifier** — chained after the concept extractor (configurable via `--comprehension-backend` / `--comprehension-model`), assesses the depth of the child's understanding for each concept the exchange touched. Per-concept `{depth, confidence, evidence}` rows persist to `turn_comprehensions`; the in-memory `LearnerModel.concepts.depth` is promoted via monotonic max (threshold-gated, never demoted by a single weak exchange).
 - **Learner-model persistence** — profile, concept-mastery state, learning preferences, and latest engagement snapshot persist across sessions via a `LearnerStore` trait + schema v4. A returning child carries forward their identity and progress.
 - **Voice round-trip POC** (`--speech`, behind a Cargo feature) — full LISTEN → THINK → SPEAK → LISTEN loop wired end-to-end: Silero VAD opens the mic, Whisper transcribes, the dialogue manager generates the response, Piper synthesises it phrase-by-phrase. No barge-in by design (the Primer never speaks over the child and the child never speaks over the Primer); cancel-on-resume preserves Socratic etiquette without freezing the loop.
 
-**Still ahead** (see [ROADMAP.md](ROADMAP.md)): knowledge-base bootstrapping (Phase 0.2), comprehension classification + spaced-repetition vocabulary (rest of Phase 0.3), local llama.cpp inference, hardening of the speech loop, hardware integration.
+**Still ahead** (see [ROADMAP.md](ROADMAP.md)): knowledge-base bootstrapping (Phase 0.2), spaced-repetition vocabulary tracking + session-time-based break suggestions (rest of Phase 0.3), graceful API-error handling (Phase 0.1 leftover), local llama.cpp inference, hardening of the speech loop, hardware integration.
 
 ## Architecture
 
-The codebase is a Rust workspace under `src/`, organised into nine crates. The core design principle is **trait-based hardware abstraction**: the pedagogical engine doesn't know or care whether it's talking to a local 7B model on a phone's NPU, llama.cpp on a laptop, or Claude over the network. Backend selection is a runtime config choice, not a code change.
+The codebase is a Rust workspace under `src/`, organised into ten crates. The core design principle is **trait-based hardware abstraction**: the pedagogical engine doesn't know or care whether it's talking to a local 7B model on a phone's NPU, llama.cpp on a laptop, or Claude over the network. Backend selection is a runtime config choice, not a code change.
 
 ```
 src/
@@ -57,6 +58,7 @@ src/
     ├── primer-storage/         # SQLite session + learner-model persistence
     ├── primer-classifier/      # per-turn engagement classifier (LLM-backed + stub)
     ├── primer-extractor/       # per-exchange concept extractor (LLM-backed + stub)
+    ├── primer-comprehension/   # per-exchange comprehension classifier (LLM-backed + stub)
     ├── primer-pedagogy/        # Socratic dialogue engine (prompt builder + dialogue manager)
     └── primer-cli/             # text-mode REPL binary
 ```
@@ -107,6 +109,10 @@ Per-turn engagement classifier. The `EngagementClassifier` trait has two impleme
 ### primer-extractor
 
 Per-exchange concept extractor. The `ConceptExtractor` trait mirrors `EngagementClassifier`: an LLM-backed implementation (`LlmConceptExtractor`) plus a stub. One LLM call per completed (child, primer) exchange returns the topics the child surfaced and the topics the Primer introduced as separate lists; both are persisted atomically into `turn_concepts` and merged into the in-memory `LearnerModel.concepts`. Same soft-fail policy as the classifier.
+
+### primer-comprehension
+
+Per-concept comprehension classifier. The `ComprehensionClassifier` trait mirrors `EngagementClassifier` and `ConceptExtractor`: an LLM-backed implementation (`LlmComprehensionClassifier`) plus a stub. After each completed exchange, the dialogue manager chains the comprehension classifier behind the concept extractor: the deduped union of `child_concepts ∪ primer_concepts` (capped at `max_concepts_per_call`) becomes the candidate set the comprehension classifier assesses. The classifier returns a JSON array of per-concept `{depth, confidence, evidence}` rows (depth values from the existing `UnderstandingDepth` enum: `Aware | Recall | Comprehension | Application | Analysis`), persisted atomically to schema-v5 `turn_comprehensions`. Above-threshold assessments promote the corresponding `LearnerModel.concepts.depth` via monotonic max — never demoted by a single weak exchange. Same soft-fail policy as the classifier and extractor.
 
 ### primer-speech
 

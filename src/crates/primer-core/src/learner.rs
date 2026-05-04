@@ -70,6 +70,28 @@ impl UnderstandingDepth {
         Self::Application,
         Self::Analysis,
     ];
+
+    /// Canonical machine-readable name. Stable identifier used by the
+    /// comprehension-classifier JSON schema and the storage
+    /// `understanding_depths` lookup table. Don't rename — depth IDs in
+    /// the v4 schema are derived from these names and existing DBs
+    /// validate against them.
+    pub fn name(self) -> &'static str {
+        match self {
+            Self::Unknown => "Unknown",
+            Self::Aware => "Aware",
+            Self::Recall => "Recall",
+            Self::Comprehension => "Comprehension",
+            Self::Application => "Application",
+            Self::Analysis => "Analysis",
+        }
+    }
+}
+
+impl std::fmt::Display for UnderstandingDepth {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.name())
+    }
 }
 
 /// A node in the learner's concept graph.
@@ -215,6 +237,24 @@ mod tests {
         assert!(UnderstandingDepth::ALL.contains(&UnderstandingDepth::Comprehension));
         assert!(UnderstandingDepth::ALL.contains(&UnderstandingDepth::Application));
         assert!(UnderstandingDepth::ALL.contains(&UnderstandingDepth::Analysis));
+    }
+
+    #[test]
+    fn understanding_depth_name_matches_canonical_strings() {
+        assert_eq!(UnderstandingDepth::Unknown.name(), "Unknown");
+        assert_eq!(UnderstandingDepth::Aware.name(), "Aware");
+        assert_eq!(UnderstandingDepth::Recall.name(), "Recall");
+        assert_eq!(UnderstandingDepth::Comprehension.name(), "Comprehension");
+        assert_eq!(UnderstandingDepth::Application.name(), "Application");
+        assert_eq!(UnderstandingDepth::Analysis.name(), "Analysis");
+    }
+
+    #[test]
+    fn understanding_depth_display_uses_name() {
+        assert_eq!(
+            format!("{}", UnderstandingDepth::Comprehension),
+            "Comprehension"
+        );
     }
 }
 

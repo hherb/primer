@@ -11,6 +11,7 @@ use primer_core::conversation::Speaker;
 use primer_core::error::Result;
 use primer_core::extractor::{ConceptExtraction, ExtractionContext};
 use primer_core::inference::{InferenceBackend, Message, Prompt, Role};
+use primer_core::llm_util::{extract_first_json_object, truncate_to_chars};
 
 use crate::ConceptExtractor;
 use crate::consts;
@@ -86,18 +87,6 @@ impl ConceptExtractor for LlmConceptExtractor {
 }
 
 // ── Helpers ───────────────────────────────────────────────────────────────────
-
-fn truncate_to_chars(s: &str, max_chars: usize) -> &str {
-    if s.chars().count() <= max_chars {
-        return s;
-    }
-    let end = s
-        .char_indices()
-        .nth(max_chars)
-        .map(|(i, _)| i)
-        .unwrap_or(s.len());
-    &s[..end]
-}
 
 fn truncate_concept_lists(e: &mut ConceptExtraction, max_per_speaker: usize) {
     if e.child_concepts.len() > max_per_speaker {
@@ -203,42 +192,6 @@ fn normalize_concepts(input: Vec<String>, per_concept_chars: usize) -> Vec<Strin
         }
     }
     out
-}
-
-/// Extract the first balanced JSON object from `raw`. Tolerates wrapper
-/// text before/after, and JSON containing nested braces.
-fn extract_first_json_object(raw: &str) -> Option<&str> {
-    let start = raw.find('{')?;
-    let bytes = raw.as_bytes();
-    let mut depth = 0i32;
-    let mut in_string = false;
-    let mut escape = false;
-    for (i, &b) in bytes.iter().enumerate().skip(start) {
-        if escape {
-            escape = false;
-            continue;
-        }
-        if in_string {
-            match b {
-                b'\\' => escape = true,
-                b'"' => in_string = false,
-                _ => {}
-            }
-            continue;
-        }
-        match b {
-            b'"' => in_string = true,
-            b'{' => depth += 1,
-            b'}' => {
-                depth -= 1;
-                if depth == 0 {
-                    return Some(&raw[start..=i]);
-                }
-            }
-            _ => {}
-        }
-    }
-    None
 }
 
 // ── Tests ─────────────────────────────────────────────────────────────────────

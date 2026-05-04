@@ -40,9 +40,9 @@ impl SqliteSessionStore {
     /// an in-memory database.
     ///
     /// Creates the schema if missing, sets `PRAGMA foreign_keys = ON`,
-    /// asserts/sets `PRAGMA user_version`, and applies v2 and v3
+    /// asserts/sets `PRAGMA user_version`, and applies v2 through v5
     /// migrations to bring older DBs up to date. The migrations are
-    /// idempotent — safe to run on fresh, v1, v2, or v3 DBs. A version
+    /// idempotent — safe to run on a fresh DB or any pre-v5 DB. A version
     /// newer than this build understands is a hard error rather than a
     /// silent downgrade.
     pub fn open(path: &Path) -> Result<Self> {
@@ -80,6 +80,11 @@ impl SqliteSessionStore {
         // learners, and learner_concepts tables (schema-only — adoption of
         // existing-session learner_id is the CLI's job).
         schema::apply_v4_migrations(&conn)?;
+
+        // v5 migrations: idempotent on every open. Adds
+        // comprehension_classifiers and turn_comprehensions tables for
+        // per-concept comprehension assessments.
+        schema::apply_v5_migrations(&conn)?;
 
         if existing_version != schema::USER_VERSION {
             conn.execute_batch(&format!("PRAGMA user_version = {};", schema::USER_VERSION))
@@ -747,6 +752,94 @@ impl primer_core::storage::SessionStore for SqliteSessionStore {
             .map_err(|e| PrimerError::Storage(format!("update_exchange_concepts commit: {e}")))?;
         Ok(())
     }
+
+    async fn save_comprehensions(
+        &self,
+        session_id: primer_core::conversation::SessionId,
+        primer_turn_index: usize,
+        assessments: &[primer_core::comprehension::ComprehensionAssessment],
+        classifier_identifier: &str,
+    ) -> Result<()> {
+        if assessments.is_empty() {
+            return Ok(());
+        }
+
+        let conn = self.conn.lock().unwrap();
+        let tx = conn
+            .unchecked_transaction()
+            .map_err(|e| PrimerError::Storage(format!("save_comprehensions begin tx: {e}")))?;
+
+        // Resolve (session_id, primer_turn_index) → turn.id
+        let turn_id: i64 = tx
+            .query_row(
+                "SELECT id FROM turns WHERE session_id = ?1 AND turn_index = ?2",
+                rusqlite::params![session_id.to_string(), primer_turn_index as i64],
+                |r| r.get(0),
+            )
+            .map_err(|e| {
+                PrimerError::Storage(format!(
+                    "save_comprehensions: turn_id lookup ({session_id}, {primer_turn_index}): {e}"
+                ))
+            })?;
+
+        let classifier_id =
+            catalog::get_or_create_comprehension_classifier_id(&tx, classifier_identifier)?;
+
+        let now = Utc::now().to_rfc3339();
+        // Per-call cache of concept names → ids so a concept appearing
+        // in multiple assessments resolves to the same row without
+        // hitting the DB twice. Aligns with the cache pattern used in
+        // update_exchange_concepts.
+        let mut concept_id_cache: std::collections::HashMap<String, i64> =
+            std::collections::HashMap::new();
+
+        for a in assessments {
+            let concept_id = if let Some(&id) = concept_id_cache.get(&a.concept) {
+                id
+            } else {
+                tx.execute(
+                    "INSERT OR IGNORE INTO concepts (name) VALUES (?1)",
+                    rusqlite::params![a.concept],
+                )
+                .map_err(|e| {
+                    PrimerError::Storage(format!("save_comprehensions: upsert concept: {e}"))
+                })?;
+                let id: i64 = tx
+                    .query_row(
+                        "SELECT id FROM concepts WHERE name = ?1",
+                        rusqlite::params![a.concept],
+                        |r| r.get(0),
+                    )
+                    .map_err(|e| {
+                        PrimerError::Storage(format!("save_comprehensions: select concept: {e}"))
+                    })?;
+                concept_id_cache.insert(a.concept.clone(), id);
+                id
+            };
+            let depth_id = catalog::understanding_depth_id(a.depth);
+
+            tx.execute(
+                "INSERT OR IGNORE INTO turn_comprehensions \
+                     (session_id, turn_id, concept_id, depth_id, confidence, classifier_id, evidence, created_at) \
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
+                rusqlite::params![
+                    session_id.to_string(),
+                    turn_id,
+                    concept_id,
+                    depth_id,
+                    a.confidence,
+                    classifier_id,
+                    a.evidence.as_deref(),
+                    now,
+                ],
+            )
+            .map_err(|e| PrimerError::Storage(format!("save_comprehensions: insert: {e}")))?;
+        }
+
+        tx.commit()
+            .map_err(|e| PrimerError::Storage(format!("save_comprehensions commit: {e}")))?;
+        Ok(())
+    }
 }
 
 #[async_trait]
@@ -1192,7 +1285,8 @@ mod tests {
             .unwrap();
         assert_eq!(fk, 1);
 
-        // All base tables exist, plus the v2 FTS index and the v3 tables.
+        // All base tables exist, plus the v2 FTS index, v3 tables, v4
+        // tables, and v5 tables.
         for table in &[
             "speakers",
             "pedagogical_intents",
@@ -1204,6 +1298,11 @@ mod tests {
             "engagement_states",
             "classifiers",
             "turn_classifications",
+            "understanding_depths",
+            "learners",
+            "learner_concepts",
+            "comprehension_classifiers",
+            "turn_comprehensions",
         ] {
             let count: i64 = conn
                 .query_row(
@@ -2330,8 +2429,8 @@ mod tests {
     }
 
     #[test]
-    fn user_version_is_four() {
-        assert_eq!(schema::USER_VERSION, 4);
+    fn user_version_is_five() {
+        assert_eq!(schema::USER_VERSION, 5);
     }
 
     // ─── save_classification / load_recent_assessments ───────────────
@@ -2909,6 +3008,177 @@ mod tests {
         assert_eq!(loaded.turns[0].concepts, vec!["gravity".to_string()]);
         assert_eq!(loaded.turns[1].concepts, vec!["gravity".to_string()]);
     }
+
+    // ─── save_comprehensions ────────────────────────────────────────────
+
+    /// Helper used by the `save_comprehensions_*` tests: persists a
+    /// session with one Child turn at index 0 and one Primer turn at
+    /// index 1. Mirrors the inline pattern used by the
+    /// `update_exchange_concepts_*` tests.
+    fn make_two_turn_session() -> primer_core::conversation::Session {
+        let mut session = primer_core::conversation::Session::new(Uuid::new_v4());
+        session.add_turn(primer_core::conversation::Turn {
+            speaker: primer_core::conversation::Speaker::Child,
+            text: "what is photosynthesis?".into(),
+            timestamp: Utc::now(),
+            intent: None,
+            concepts: vec![],
+        });
+        session.add_turn(primer_core::conversation::Turn {
+            speaker: primer_core::conversation::Speaker::Primer,
+            text: "great question!".into(),
+            timestamp: Utc::now(),
+            intent: None,
+            concepts: vec![],
+        });
+        session
+    }
+
+    #[tokio::test]
+    async fn save_comprehensions_persists_one_row_per_concept() {
+        use primer_core::comprehension::ComprehensionAssessment;
+        use primer_core::learner::UnderstandingDepth;
+
+        let store = open_memory();
+        let session = make_two_turn_session();
+        store.save_session(&session).await.unwrap();
+
+        let assessments = vec![
+            ComprehensionAssessment {
+                concept: "photosynthesis".into(),
+                depth: UnderstandingDepth::Comprehension,
+                confidence: 0.85,
+                evidence: Some("explained in own words".into()),
+            },
+            ComprehensionAssessment {
+                concept: "chlorophyll".into(),
+                depth: UnderstandingDepth::Aware,
+                confidence: 0.6,
+                evidence: None,
+            },
+        ];
+        store
+            .save_comprehensions(session.id, 1, &assessments, "llm:test:model")
+            .await
+            .unwrap();
+
+        let count: i64 = store
+            .conn
+            .lock()
+            .unwrap()
+            .query_row("SELECT COUNT(*) FROM turn_comprehensions", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(count, 2);
+    }
+
+    #[tokio::test]
+    async fn save_comprehensions_unique_constraint_makes_resave_a_noop() {
+        use primer_core::comprehension::ComprehensionAssessment;
+        use primer_core::learner::UnderstandingDepth;
+
+        let store = open_memory();
+        let session = make_two_turn_session();
+        store.save_session(&session).await.unwrap();
+
+        let a = vec![ComprehensionAssessment {
+            concept: "gravity".into(),
+            depth: UnderstandingDepth::Recall,
+            confidence: 0.7,
+            evidence: None,
+        }];
+        store
+            .save_comprehensions(session.id, 1, &a, "llm:test:model")
+            .await
+            .unwrap();
+        // Same classifier + same turn + same concept → INSERT OR IGNORE
+        // makes this a no-op.
+        store
+            .save_comprehensions(session.id, 1, &a, "llm:test:model")
+            .await
+            .unwrap();
+
+        let count: i64 = store
+            .conn
+            .lock()
+            .unwrap()
+            .query_row("SELECT COUNT(*) FROM turn_comprehensions", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(count, 1);
+    }
+
+    #[tokio::test]
+    async fn save_comprehensions_empty_slice_is_noop() {
+        let store = open_memory();
+        let session = make_two_turn_session();
+        store.save_session(&session).await.unwrap();
+
+        store
+            .save_comprehensions(session.id, 1, &[], "llm:test:model")
+            .await
+            .unwrap();
+
+        let count: i64 = store
+            .conn
+            .lock()
+            .unwrap()
+            .query_row("SELECT COUNT(*) FROM turn_comprehensions", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(count, 0);
+    }
+
+    #[tokio::test]
+    async fn save_comprehensions_missing_turn_returns_err() {
+        use primer_core::comprehension::ComprehensionAssessment;
+        use primer_core::learner::UnderstandingDepth;
+
+        let store = open_memory();
+        let session = make_two_turn_session();
+        store.save_session(&session).await.unwrap();
+
+        let a = vec![ComprehensionAssessment {
+            concept: "x".into(),
+            depth: UnderstandingDepth::Aware,
+            confidence: 0.5,
+            evidence: None,
+        }];
+        let result = store
+            .save_comprehensions(session.id, 99, &a, "llm:test:model")
+            .await;
+        assert!(result.is_err());
+    }
+
+    #[tokio::test]
+    async fn save_comprehensions_classifier_lookup_populated_lazily() {
+        use primer_core::comprehension::ComprehensionAssessment;
+        use primer_core::learner::UnderstandingDepth;
+
+        let store = open_memory();
+        let session = make_two_turn_session();
+        store.save_session(&session).await.unwrap();
+
+        let a = vec![ComprehensionAssessment {
+            concept: "x".into(),
+            depth: UnderstandingDepth::Aware,
+            confidence: 0.5,
+            evidence: None,
+        }];
+        store
+            .save_comprehensions(session.id, 1, &a, "llm:newmodel")
+            .await
+            .unwrap();
+
+        let count: i64 = store
+            .conn
+            .lock()
+            .unwrap()
+            .query_row(
+                "SELECT COUNT(*) FROM comprehension_classifiers WHERE identifier = 'llm:newmodel'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(count, 1);
+    }
 }
 
 #[cfg(test)]
@@ -3070,7 +3340,7 @@ mod learner_store_tests {
         l.concepts.clear();
         for d in UnderstandingDepth::ALL {
             l.concepts.push(ConceptState {
-                concept_id: format!("test:{}", crate::catalog::understanding_depth_name(*d)),
+                concept_id: format!("test:{}", d.name()),
                 depth: *d,
                 confidence: 0.5,
                 encounter_count: 1,

@@ -10,6 +10,7 @@ members = [
     "crates/primer-storage",
     "crates/primer-classifier",
     "crates/primer-extractor",
+    "crates/primer-comprehension",
 ]
 exclude = ["vendor/piper-rs", "vendor/silero-vad-rust"]
 
@@ -78,6 +79,7 @@ primer-pedagogy = { path = "crates/primer-pedagogy" }
 primer-storage = { path = "crates/primer-storage" }
 primer-classifier = { path = "crates/primer-classifier" }
 primer-extractor = { path = "crates/primer-extractor" }
+primer-comprehension = { path = "crates/primer-comprehension" }
 
 [patch.crates-io]
 # Vendored piper-rs patched for ort 2.0.0-rc.10 API compatibility.
