@@ -143,12 +143,14 @@ pub struct SpeechLoopConfig<'a> {
     /// Active locale for TTS dispatch. Today's CLI binds this to the
     /// resolved `--language` once and uses the same locale for the
     /// whole session.
-    pub locale: primer_core::i18n::Locale,
+    pub locale: Locale,
 }
 
+use std::collections::HashMap;
 use std::sync::Arc;
 
-use primer_core::speech::{StreamingSpeechToText, StreamingTextToSpeech};
+use primer_core::i18n::Locale;
+use primer_core::speech::{StreamingSpeechToText, StreamingTextToSpeech, VoiceProfile};
 // Production audio-thread paths call methods on `SileroVad` via the
 // `VoiceActivityDetector` trait. Imported only when the speech feature
 // is enabled — the trait is otherwise unused in this module.
@@ -176,54 +178,50 @@ type TranscriptRx = Arc<std::sync::Mutex<std::sync::mpsc::Receiver<String>>>;
 /// audio capture thread (production) or is stubbed out via direct VAD
 /// events on the channel (tests), so it's not part of this struct.
 ///
-/// ## Per-locale TTS / voice
+/// ## Per-locale voice
 ///
-/// `tts_by_locale` and `voice_by_locale` are keyed maps: each entry is
-/// the TTS engine + voice profile to use when synthesising for that
-/// locale. `active_locale` is the dispatch key the SPEAK phase reads
-/// at each turn — bound for the lifetime of the loop in v1, but the
-/// shape leaves room for future code-switching scenarios (a locale
-/// switch mid-session for language-teaching) without further
-/// restructuring.
+/// `voices_by_locale` is a keyed map from locale to a `(TTS engine,
+/// voice profile)` pair — the unit needed to synthesise a Primer turn
+/// in that language. Pairing the engine with its profile in a single
+/// entry makes mismatches structurally impossible: a locale either has
+/// a complete voice or it has no entry at all. `active_locale` is the
+/// dispatch key the SPEAK phase reads at each turn — bound for the
+/// lifetime of the loop in v1, but the shape leaves room for future
+/// code-switching scenarios (a locale switch mid-session for
+/// language-teaching) without further restructuring.
+///
+/// Voice profiles wire the `model_id` from `--voice` (e.g.
+/// `en_GB-alba-medium`); tests use `VoiceProfile::default()`. Piper
+/// rejects model-id mismatches, so each entry must align with the
+/// loaded voice ONNX file stem for that locale.
 ///
 /// Today's CLI populates exactly one entry — the active locale —
 /// constructed via `LoopBackends::single_locale`. The state machine
 /// and dispatch logic are untouched by this refactor.
 pub struct LoopBackends {
     pub stt: Arc<dyn StreamingSpeechToText>,
-    pub tts_by_locale:
-        std::collections::HashMap<primer_core::i18n::Locale, Arc<dyn StreamingTextToSpeech>>,
-    /// Voice profile keyed by locale. Production wires the `model_id`
-    /// from `--voice` (e.g. `en_GB-alba-medium`); tests use
-    /// `VoiceProfile::default()`. Piper rejects model-id mismatches,
-    /// so each entry must align with the loaded voice ONNX file stem
-    /// for that locale.
-    pub voice_by_locale:
-        std::collections::HashMap<primer_core::i18n::Locale, primer_core::speech::VoiceProfile>,
-    /// Locale the SPEAK phase looks up in the maps above. v1 binds it
-    /// for the lifetime of the loop.
-    pub active_locale: primer_core::i18n::Locale,
+    pub voices_by_locale: HashMap<Locale, (Arc<dyn StreamingTextToSpeech>, VoiceProfile)>,
+    /// Locale the SPEAK phase looks up in `voices_by_locale`. v1 binds
+    /// it for the lifetime of the loop.
+    pub active_locale: Locale,
 }
 
 impl LoopBackends {
     /// Convenience constructor for the single-locale case (production
     /// today, every existing test). Takes ownership of one TTS + voice
-    /// pair, wraps them in single-entry maps keyed by `locale`, and
+    /// pair, wraps them in a single-entry map keyed by `locale`, and
     /// sets `active_locale = locale`.
     pub fn single_locale(
         stt: Arc<dyn StreamingSpeechToText>,
         tts: Arc<dyn StreamingTextToSpeech>,
-        voice: primer_core::speech::VoiceProfile,
-        locale: primer_core::i18n::Locale,
+        voice: VoiceProfile,
+        locale: Locale,
     ) -> Self {
-        let mut tts_by_locale = std::collections::HashMap::new();
-        tts_by_locale.insert(locale, tts);
-        let mut voice_by_locale = std::collections::HashMap::new();
-        voice_by_locale.insert(locale, voice);
+        let mut voices_by_locale = HashMap::new();
+        voices_by_locale.insert(locale, (tts, voice));
         Self {
             stt,
-            tts_by_locale,
-            voice_by_locale,
+            voices_by_locale,
             active_locale: locale,
         }
     }
@@ -472,25 +470,17 @@ pub async fn run_loop<'r>(
                 flag.store(true, std::sync::atomic::Ordering::SeqCst);
             }
             // Dispatch on `active_locale`. v1 has a single entry so
-            // these lookups can't miss in practice; we treat a miss as
-            // a Speech error (rather than a panic) because LoopBackends
+            // this lookup can't miss in practice; we treat a miss as a
+            // Speech error (rather than a panic) because LoopBackends
             // is a public-ish struct that future code might construct
-            // without the convenience helper.
-            let active_tts = backends
-                .tts_by_locale
+            // without the convenience helper. The pair is atomic — a
+            // locale has both an engine and a profile or neither.
+            let (active_tts, active_voice) = backends
+                .voices_by_locale
                 .get(&backends.active_locale)
                 .ok_or_else(|| {
                     primer_core::error::PrimerError::Speech(format!(
-                        "no TTS configured for active locale {}",
-                        backends.active_locale.pack_id()
-                    ))
-                })?;
-            let active_voice = backends
-                .voice_by_locale
-                .get(&backends.active_locale)
-                .ok_or_else(|| {
-                    primer_core::error::PrimerError::Speech(format!(
-                        "no voice profile configured for active locale {}",
+                        "no voice configured for active locale {}",
                         backends.active_locale.pack_id()
                     ))
                 })?;
@@ -795,15 +785,15 @@ pub async fn run<'a>(
 
     // ── Build LoopBackends with the channel STT wrapper ────────────
     // Single-locale v1: the CLI's resolved locale is the active locale,
-    // and that's the only entry in the maps. PR 4 will populate
+    // and that's the only entry in the map. PR 4 will populate
     // additional locales when a second voice ships.
-    let voice = primer_core::speech::VoiceProfile {
+    let voice = VoiceProfile {
         model_id: cfg.voice_id.to_string(),
         // Slow Piper slightly: length_scale = 1.0 / rate, so
         // rate < 1.0 stretches each phoneme. 0.9 is barely
         // perceptible but easier for younger children to follow.
         rate: 0.9,
-        ..primer_core::speech::VoiceProfile::default()
+        ..VoiceProfile::default()
     };
     let backends = LoopBackends::single_locale(
         Arc::new(ChannelStt {
@@ -1794,6 +1784,82 @@ mod mocks {
             super::FALLBACK_LINE,
             "fallback line was synthesised after LLM error"
         );
+    }
+
+    /// Negative test for the SPEAK dispatch — when `active_locale` does
+    /// not appear in `voices_by_locale`, the dispatch returns
+    /// `PrimerError::Speech` rather than panicking. The convenience
+    /// constructor `single_locale` makes this state unreachable, but
+    /// `LoopBackends` has public fields and external code (or PR 4's
+    /// future multi-locale path) might construct an inconsistent
+    /// instance, so the soft-fail contract is worth locking down.
+    #[tokio::test]
+    async fn speak_returns_speech_error_when_active_locale_missing() {
+        use primer_core::speech::VadEvent;
+
+        let mut backends = super::LoopBackends::single_locale(
+            Arc::new(MockStreamingStt::new("hi primer")),
+            Arc::new(MockStreamingTts::new(64)),
+            primer_core::speech::VoiceProfile::default(),
+            primer_core::i18n::Locale::English,
+        );
+        // Strip the entry — `active_locale` (English) now points at a
+        // missing key, the precise inconsistency the dispatch's
+        // `ok_or_else` is meant to catch.
+        backends.voices_by_locale.clear();
+
+        let (event_tx, event_rx) = tokio::sync::mpsc::channel(64);
+        event_tx.try_send(VadEvent::SpeechStart).unwrap();
+        event_tx.try_send(VadEvent::SpeechEnd).unwrap();
+        drop(event_tx);
+
+        struct PromptResponder;
+        impl super::Responder for PromptResponder {
+            fn respond<'a>(
+                &'a mut self,
+                _transcript: &'a str,
+                mut on_chunk: Box<dyn FnMut(&str) + Send + 'a>,
+            ) -> std::pin::Pin<
+                Box<
+                    dyn std::future::Future<Output = primer_core::error::Result<String>>
+                        + Send
+                        + 'a,
+                >,
+            > {
+                Box::pin(async move {
+                    on_chunk("Hello!");
+                    Ok("Hello!".to_string())
+                })
+            }
+        }
+
+        let on_audio: Box<dyn FnMut(Vec<f32>) + Send> = Box::new(|_samples| {});
+
+        let result = super::run_loop(
+            backends,
+            event_rx,
+            Box::new(PromptResponder),
+            on_audio,
+            None,
+            false,
+            None,
+        )
+        .await;
+
+        let err = result.expect_err("dispatch must fail when active_locale missing");
+        match err {
+            primer_core::error::PrimerError::Speech(msg) => {
+                assert!(
+                    msg.contains("no voice configured"),
+                    "expected dispatch-miss message, got: {msg}"
+                );
+                assert!(
+                    msg.contains("en"),
+                    "expected pack_id 'en' in message, got: {msg}"
+                );
+            }
+            other => panic!("expected PrimerError::Speech, got {other:?}"),
+        }
     }
 }
 
