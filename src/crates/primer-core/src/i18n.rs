@@ -30,12 +30,64 @@
 //!     makes sense.
 
 use crate::error::InferenceError;
+use serde::{Deserialize, Serialize};
 
 /// User-facing locale.
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+///
+/// Closed enum: a new variant is the single source of truth for that
+/// language, and corresponding additions cascade to the prompt-pack
+/// dispatch (`primer-pedagogy::prompt_pack`), the `render_inference_error`
+/// match below, and `Locale::ALL` / `from_pack_id`. The lookup tables in
+/// SQLite (`learners.locale` etc.) round-trip via `pack_id()` —
+/// retired pack ids never get reused.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub enum Locale {
     #[default]
     English,
+}
+
+impl Locale {
+    /// Every variant, in declaration order. Used by tests and by any
+    /// startup path that needs to enumerate available locales.
+    pub const ALL: &'static [Self] = &[Self::English];
+
+    /// Canonical machine-readable name. Stable identifier — do not
+    /// rename. Mirrors the `name()` pattern on `EngagementState` and
+    /// `UnderstandingDepth`.
+    pub fn name(self) -> &'static str {
+        match self {
+            Self::English => "English",
+        }
+    }
+
+    /// BCP 47 language tag for downstream services (Whisper, Piper,
+    /// future TTS backends). Region-suffixed because most speech
+    /// models accept region codes for accent selection.
+    pub fn bcp47(self) -> &'static str {
+        match self {
+            Self::English => "en-US",
+        }
+    }
+
+    /// Short pack id used for prompt-pack lookup and as the SQLite
+    /// `learners.locale` / `concepts.concept_language_tag` column value.
+    /// Stable identifier — never renamed, never reused for a different
+    /// language.
+    pub fn pack_id(self) -> &'static str {
+        match self {
+            Self::English => "en",
+        }
+    }
+
+    /// Parse a short pack id back to a `Locale`. Returns `None` for
+    /// unknown ids (caller decides whether that's a hard error or a
+    /// fall-back to `Locale::default()`).
+    pub fn from_pack_id(s: &str) -> Option<Self> {
+        match s {
+            "en" => Some(Self::English),
+            _ => None,
+        }
+    }
 }
 
 /// Translate an `InferenceError` into a user-facing message in the
@@ -90,6 +142,30 @@ mod tests {
     #[test]
     fn locale_default_is_english() {
         assert_eq!(Locale::default(), Locale::English);
+    }
+
+    #[test]
+    fn locale_all_lists_every_variant() {
+        assert_eq!(Locale::ALL.len(), 1);
+        assert!(Locale::ALL.contains(&Locale::English));
+    }
+
+    #[test]
+    fn locale_pack_id_round_trips_via_from_pack_id() {
+        for &l in Locale::ALL {
+            assert_eq!(Locale::from_pack_id(l.pack_id()), Some(l));
+        }
+    }
+
+    #[test]
+    fn locale_from_pack_id_unknown_returns_none() {
+        assert_eq!(Locale::from_pack_id("zz"), None);
+        assert_eq!(Locale::from_pack_id(""), None);
+    }
+
+    #[test]
+    fn locale_bcp47_includes_region() {
+        assert_eq!(Locale::English.bcp47(), "en-US");
     }
 
     #[test]

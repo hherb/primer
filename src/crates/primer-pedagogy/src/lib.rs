@@ -17,5 +17,7 @@
 pub mod consts;
 pub mod dialogue_manager;
 pub mod prompt_builder;
+pub mod prompt_pack;
 
 pub use dialogue_manager::{DialogueManager, DialogueManagerStores, DialogueManagerSubsystems};
+pub use prompt_pack::{PromptPack, TomlPromptPack};

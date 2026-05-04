@@ -86,6 +86,11 @@ impl SqliteSessionStore {
         // per-concept comprehension assessments.
         schema::apply_v5_migrations(&conn)?;
 
+        // v6 migrations: idempotent on every open. Adds
+        // learners.locale and concepts.concept_language_tag columns
+        // (default 'en' for pre-v6 rows) for the i18n architecture.
+        schema::apply_v6_migrations(&conn)?;
+
         if existing_version != schema::USER_VERSION {
             conn.execute_batch(&format!("PRAGMA user_version = {};", schema::USER_VERSION))
                 .map_err(|e| PrimerError::Storage(format!("set user_version failed: {e}")))?;
@@ -866,8 +871,8 @@ impl primer_core::storage::LearnerStore for SqliteSessionStore {
                  id, name, age, languages, created_at, last_active,
                  pref_narrative, pref_socratic, pref_visual, pref_kinesthetic,
                  typical_session_minutes, high_engagement_topics,
-                 early_disengagement_secs, current_engagement_state_id
-             ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14)
+                 early_disengagement_secs, current_engagement_state_id, locale
+             ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15)
              ON CONFLICT(id) DO UPDATE SET
                  name = excluded.name,
                  age = excluded.age,
@@ -880,7 +885,8 @@ impl primer_core::storage::LearnerStore for SqliteSessionStore {
                  typical_session_minutes = excluded.typical_session_minutes,
                  high_engagement_topics = excluded.high_engagement_topics,
                  early_disengagement_secs = excluded.early_disengagement_secs,
-                 current_engagement_state_id = excluded.current_engagement_state_id",
+                 current_engagement_state_id = excluded.current_engagement_state_id,
+                 locale = excluded.locale",
             rusqlite::params![
                 learner.profile.id.to_string(),
                 learner.profile.name,
@@ -896,6 +902,7 @@ impl primer_core::storage::LearnerStore for SqliteSessionStore {
                 topics_json,
                 early_secs,
                 engagement_state_id,
+                learner.profile.locale.pack_id(),
             ],
         )
         .map_err(|e| PrimerError::Storage(format!("upsert learner: {e}")))?;
@@ -1004,6 +1011,7 @@ impl primer_core::storage::LearnerStore for SqliteSessionStore {
             String,
             i64,
             i64,
+            String,
         );
         // The application invariant is one learner per DB file (the file
         // path is the identity boundary), so any row here is THE learner.
@@ -1015,7 +1023,8 @@ impl primer_core::storage::LearnerStore for SqliteSessionStore {
                 "SELECT id, name, age, languages, created_at, last_active,
                         pref_narrative, pref_socratic, pref_visual, pref_kinesthetic,
                         typical_session_minutes, high_engagement_topics,
-                        early_disengagement_secs, current_engagement_state_id
+                        early_disengagement_secs, current_engagement_state_id,
+                        locale
                  FROM learners ORDER BY id LIMIT 1",
                 [],
                 |r| {
@@ -1034,6 +1043,7 @@ impl primer_core::storage::LearnerStore for SqliteSessionStore {
                         r.get(11)?,
                         r.get(12)?,
                         r.get(13)?,
+                        r.get(14)?,
                     ))
                 },
             )
@@ -1055,6 +1065,7 @@ impl primer_core::storage::LearnerStore for SqliteSessionStore {
             topics_json,
             early_secs,
             engagement_state_id,
+            locale_str,
         )) = row
         else {
             return Ok(None);
@@ -1082,11 +1093,27 @@ impl primer_core::storage::LearnerStore for SqliteSessionStore {
         // sqlite3 edits, a third-party tool writing the file, or a
         // hardware-level bit flip. The `as` cast on i64 → u8/u32 wraps
         // mod 2^N — that's the wrong failure mode here.
+        // Decode the locale pack id. Unknown ids on disk shouldn't happen
+        // in normal operation (the column is constrained at write time to
+        // pack ids `Locale::pack_id()` produced) but defensively fall
+        // back to `Locale::default()` and log a warning rather than
+        // erroring — a corrupted locale shouldn't make a child unable
+        // to resume their session.
+        let locale = primer_core::i18n::Locale::from_pack_id(&locale_str).unwrap_or_else(|| {
+            tracing::warn!(
+                "unknown learners.locale {:?} in DB; defaulting to {}",
+                locale_str,
+                primer_core::i18n::Locale::default().pack_id()
+            );
+            primer_core::i18n::Locale::default()
+        });
+
         let profile = LearnerProfile {
             id,
             name,
             age: i64_to_u8(age, "learners.age")?,
             languages,
+            locale,
             created_at,
             last_active,
         };
@@ -2429,8 +2456,8 @@ mod tests {
     }
 
     #[test]
-    fn user_version_is_five() {
-        assert_eq!(schema::USER_VERSION, 5);
+    fn user_version_is_six() {
+        assert_eq!(schema::USER_VERSION, 6);
     }
 
     // ─── save_classification / load_recent_assessments ───────────────
@@ -3204,6 +3231,7 @@ mod learner_store_tests {
                 name: "Binti".into(),
                 age: 8,
                 languages: vec!["en".into(), "fr".into()],
+                locale: primer_core::i18n::Locale::English,
                 created_at: Utc::now(),
                 last_active: Utc::now(),
             },

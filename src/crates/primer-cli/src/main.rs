@@ -70,6 +70,14 @@ struct Cli {
     #[arg(long, default_value_t = 8)]
     age: u8,
 
+    /// Locale (BCP-47 short pack id, e.g. "en"). Selects the prompt
+    /// pack and (in future) the speech pipeline + per-locale knowledge
+    /// index. Phase 0.1 ships only "en"; passing an unknown id is a
+    /// hard error at startup. Persisted with the learner — a returning
+    /// child does not re-specify their locale each session.
+    #[arg(long, default_value = "en")]
+    language: String,
+
     /// Path to knowledge base SQLite file.
     /// If omitted, uses an in-memory database.
     #[arg(long)]
@@ -631,13 +639,19 @@ fn validate_speech_assets(
     Ok(())
 }
 
-fn create_learner_with_id(id: Uuid, name: &str, age: u8) -> LearnerModel {
+fn create_learner_with_id(
+    id: Uuid,
+    name: &str,
+    age: u8,
+    locale: primer_core::i18n::Locale,
+) -> LearnerModel {
     LearnerModel {
         profile: LearnerProfile {
             id,
             name: name.to_string(),
             age,
-            languages: vec!["en".to_string()],
+            languages: vec![locale.pack_id().to_string()],
+            locale,
             created_at: Utc::now(),
             last_active: Utc::now(),
         },
@@ -789,9 +803,20 @@ async fn async_main() -> anyhow::Result<()> {
         }
     }
 
-    // Single locale-loading site for the future i18n PR to extend.
-    // Phase 0.1 ships only English; Locale::default() == Locale::English.
-    let cli_locale: Locale = Locale::default();
+    // Resolve the requested locale. An unknown pack id (e.g. a typo or
+    // a build that doesn't include the requested language yet) is a
+    // hard error at startup rather than a silent fall-back to English.
+    let cli_locale: Locale = match Locale::from_pack_id(&cli.language) {
+        Some(l) => l,
+        None => {
+            let known: Vec<&str> = Locale::ALL.iter().map(|l| l.pack_id()).collect();
+            eprintln!(
+                "Error: --language {:?} is not supported. Known locales: {:?}",
+                cli.language, known
+            );
+            std::process::exit(1);
+        }
+    };
 
     // Knowledge base — in-memory by default (empty, but functional).
     let knowledge_path = cli.knowledge_db.unwrap_or_else(|| PathBuf::from(IN_MEMORY));
@@ -903,7 +928,7 @@ async fn async_main() -> anyhow::Result<()> {
                     Uuid::new_v4()
                 }
             };
-            let fresh = create_learner_with_id(id, &cli.name, cli.age);
+            let fresh = create_learner_with_id(id, &cli.name, cli.age, cli_locale);
             if let Err(e) = session_store.save_learner(&fresh).await {
                 tracing::warn!("save_learner on startup failed: {e}");
             }
@@ -1705,7 +1730,8 @@ mod tests {
         let store = Arc::new(SqliteSessionStore::open(std::path::Path::new(":memory:")).unwrap());
         let original_id = Uuid::new_v4();
         let original_created = Utc::now() - chrono::Duration::days(365);
-        let mut original = create_learner_with_id(original_id, "Binti", 8);
+        let mut original =
+            create_learner_with_id(original_id, "Binti", 8, primer_core::i18n::Locale::English);
         original.profile.created_at = original_created;
         store.save_learner(&original).await.unwrap();
 
@@ -1740,7 +1766,12 @@ mod tests {
         use std::sync::Arc;
 
         let store = Arc::new(SqliteSessionStore::open(std::path::Path::new(":memory:")).unwrap());
-        let original = create_learner_with_id(Uuid::new_v4(), "Binti", 8);
+        let original = create_learner_with_id(
+            Uuid::new_v4(),
+            "Binti",
+            8,
+            primer_core::i18n::Locale::English,
+        );
         store.save_learner(&original).await.unwrap();
 
         let existing = store.load_learner().await.unwrap().expect("learner row");
@@ -1764,7 +1795,8 @@ mod tests {
         // The non-mismatch path: same name should be a pure age/last_active
         // refresh with no warn (covered by absence of stderr in this test).
         let original_id = Uuid::new_v4();
-        let original = create_learner_with_id(original_id, "Binti", 8);
+        let original =
+            create_learner_with_id(original_id, "Binti", 8, primer_core::i18n::Locale::English);
         let result = reconcile_persisted_learner(original, "Binti", 9);
         assert_eq!(result.profile.name, "Binti");
         assert_eq!(result.profile.id, original_id);
