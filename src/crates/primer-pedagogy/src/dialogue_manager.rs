@@ -119,7 +119,7 @@ pub struct DialogueManager<'a> {
     /// comprehension) spawned after the previous turn. `None` when no
     /// task is running. The result carries the (child, primer) turn
     /// indices and both extraction + comprehension outputs so
-    /// `await_pending_post_response` can sync state back into
+    /// `apply_post_response_outcome` can sync state back into
     /// in-memory `Session.turns` and `LearnerModel`.
     post_response_task: Option<JoinHandle<Option<PostResponseResult>>>,
     /// Comprehension classifier — invoked at the tail of each
@@ -152,8 +152,8 @@ pub struct DialogueManager<'a> {
 /// Output of the spawned post-response task: the extracted concepts
 /// (and their turn indices for syncing back into in-memory
 /// `Session.turns`) plus the comprehension assessments. Returned
-/// through the `JoinHandle` so `await_pending_post_response` can
-/// apply both to in-memory state at the next-turn boundary.
+/// through the `JoinHandle` so `apply_post_response_outcome` can apply
+/// both to in-memory state at the next-turn boundary.
 struct PostResponseResult {
     extraction: ExtractionPart,
     comprehension: primer_core::comprehension::ComprehensionResult,
@@ -165,6 +165,29 @@ struct ExtractionPart {
     primer_turn_index: usize,
     extraction: ConceptExtraction,
 }
+
+/// Outcome of `drain_classification`. `Some((abort, result))` when a task
+/// was pending; `None` when not. The abort handle lets the apply step
+/// abort on timeout. Aliased so the parallel-await path can name the
+/// cross-future result type without spelling out the full nested Result.
+type ClassificationOutcome = Option<(
+    tokio::task::AbortHandle,
+    std::result::Result<
+        std::result::Result<Option<EngagementAssessment>, tokio::task::JoinError>,
+        tokio::time::error::Elapsed,
+    >,
+)>;
+
+/// Outcome of `drain_post_response`. `Some(result)` when a task was
+/// pending; `None` when not. No abort handle — post-response tasks are
+/// detached on timeout (the spawned DB writes still complete in the
+/// background) rather than aborted.
+type PostResponseOutcome = Option<
+    std::result::Result<
+        std::result::Result<Option<PostResponseResult>, tokio::task::JoinError>,
+        tokio::time::error::Elapsed,
+    >,
+>;
 
 /// Push an `EngagementAssessment` into the learner's history buffer and,
 /// when confidence is high enough, update `current_engagement`.
@@ -282,6 +305,10 @@ pub(crate) fn apply_comprehension(
         {
             if a.depth > c.depth {
                 c.depth = a.depth;
+                // Confidence reflects belief in the *current* depth label.
+                // When depth promotes, adopt this turn's confidence rather
+                // than max'ing with the prior — the prior measured belief
+                // in a different (lower) depth and is no longer applicable.
                 c.confidence = a.confidence;
                 changed = true;
             }
@@ -291,7 +318,7 @@ pub(crate) fn apply_comprehension(
 }
 
 /// Append `new_concepts` to `turns[index].concepts`, preserving order
-/// and skipping names already present. Used by `await_pending_post_response`
+/// and skipping names already present. Used by `apply_post_response_outcome`
 /// to keep the in-memory `Session.turns` in sync with what the spawned
 /// extractor task wrote to disk via `update_exchange_concepts`. A
 /// silently-out-of-bounds index is treated as a no-op since the
@@ -464,9 +491,10 @@ impl<'a> DialogueManager<'a> {
         // 0. Wait for the previous turn's classification + extraction (if any)
         //    to complete with bounded timeouts, then apply their results so
         //    decide_intent sees the updated engagement state and the system
-        //    prompt sees freshly-extracted learner concepts.
-        self.await_pending_classification().await;
-        self.await_pending_post_response().await;
+        //    prompt sees freshly-extracted learner concepts. Awaited in
+        //    parallel — the two tasks are independent and write to disjoint
+        //    fields of self.learner.
+        self.await_pending_background().await;
 
         // 1. Record the child's turn.
         let child_turn = Turn {
@@ -602,12 +630,22 @@ impl<'a> DialogueManager<'a> {
                 let prior_assessments: Vec<EngagementAssessment> =
                     self.learner.recent_assessments.clone();
 
+                // Latency instrumentation (Phase 1, see
+                // docs/TODO/OPTIMIZING_LLM_REQUEST_ORDER.md). Owned identifier
+                // string and pre-spawn instant captured before tokio::spawn so
+                // the closure can compute queued_ms without borrowing self.
+                let classifier_id = classifier.identifier().to_string();
+                let classifier_pre_spawn = std::time::Instant::now();
+
                 let task = tokio::spawn(async move {
+                    let task_start = std::time::Instant::now();
+                    let queued_ms =
+                        task_start.duration_since(classifier_pre_spawn).as_millis() as u64;
                     let ctx = primer_core::classifier::EngagementContext {
                         recent_child_turns: &recent_child_turns,
                         prior_assessments: &prior_assessments,
                     };
-                    match classifier.classify(ctx).await {
+                    let outcome = match classifier.classify(ctx).await {
                         Ok(a) => {
                             if let Some(store) = store {
                                 if let Err(e) = store
@@ -628,7 +666,17 @@ impl<'a> DialogueManager<'a> {
                             tracing::warn!(error = ?e, "classifier returned error");
                             None
                         }
-                    }
+                    };
+                    let work_ms = task_start.elapsed().as_millis() as u64;
+                    tracing::info!(
+                        target: "primer::latency",
+                        task = "classifier",
+                        identifier = %classifier_id,
+                        queued_ms,
+                        work_ms,
+                        succeeded = outcome.is_some(),
+                    );
+                    outcome
                 });
                 self.classify_task = Some(task);
             }
@@ -637,8 +685,8 @@ impl<'a> DialogueManager<'a> {
             //    Same skip-on-error policy as the classifier. The task
             //    self-persists `turn_concepts` for both turns atomically
             //    via `update_exchange_concepts`; the JoinHandle output is
-            //    consumed by `await_pending_post_response` at the start of
-            //    the next turn so the in-memory `learner.concepts` AND
+            //    drained by `await_pending_background` at the start of the
+            //    next turn so the in-memory `learner.concepts` AND
             //    `session.turns[child/primer].concepts` can be updated.
             let total_turns = self.session.turns.len();
             if total_turns >= 2
@@ -668,8 +716,18 @@ impl<'a> DialogueManager<'a> {
                 let session_id = self.session.id;
                 let comp_classifier_id = comprehension.identifier().to_string();
 
+                // Latency instrumentation (Phase 1, see
+                // docs/TODO/OPTIMIZING_LLM_REQUEST_ORDER.md). Owned identifier
+                // string and pre-spawn instant captured before tokio::spawn.
+                let extractor_id = extractor.identifier().to_string();
+                let chain_pre_spawn = std::time::Instant::now();
+
                 let task = tokio::spawn(async move {
+                    let task_start = std::time::Instant::now();
+                    let queued_ms = task_start.duration_since(chain_pre_spawn).as_millis() as u64;
+
                     // ── Step 1: Extract concepts ──
+                    let extract_start = std::time::Instant::now();
                     let extraction_ctx = primer_core::extractor::ExtractionContext {
                         child_turn: &child_turn,
                         primer_turn: &primer_turn,
@@ -679,9 +737,21 @@ impl<'a> DialogueManager<'a> {
                         Ok(e) => e,
                         Err(e) => {
                             tracing::warn!(error = ?e, "extractor returned error");
+                            tracing::info!(
+                                target: "primer::latency",
+                                task = "chain",
+                                extractor_id = %extractor_id,
+                                comprehension_id = %comp_classifier_id,
+                                queued_ms,
+                                extract_ms = extract_start.elapsed().as_millis() as u64,
+                                comprehension_ms = 0u64,
+                                work_ms = task_start.elapsed().as_millis() as u64,
+                                outcome_label = "extractor_error",
+                            );
                             return None;
                         }
                     };
+                    let extract_ms = extract_start.elapsed().as_millis() as u64;
 
                     // ── Step 2: Persist concepts ──
                     if let Some(ref store) = store {
@@ -718,8 +788,13 @@ impl<'a> DialogueManager<'a> {
                     }
 
                     // ── Step 4: Run comprehension ──
-                    let comp_result = if candidates.is_empty() {
-                        primer_core::comprehension::ComprehensionResult::empty()
+                    // `comprehension_ms = 0` when candidates is empty — the
+                    // classifier was never invoked, not a "0ms call".
+                    let (comp_result, comprehension_ms) = if candidates.is_empty() {
+                        (
+                            primer_core::comprehension::ComprehensionResult::empty(),
+                            0u64,
+                        )
                     } else {
                         let comp_ctx = primer_core::comprehension::ComprehensionContext {
                             child_turn: &child_turn,
@@ -727,13 +802,15 @@ impl<'a> DialogueManager<'a> {
                             recent_turns: &recent_turns,
                             candidate_concepts: &candidates,
                         };
-                        match comprehension.classify(comp_ctx).await {
+                        let comp_start = std::time::Instant::now();
+                        let r = match comprehension.classify(comp_ctx).await {
                             Ok(r) => r,
                             Err(e) => {
                                 tracing::warn!(error = ?e, "comprehension returned error");
                                 primer_core::comprehension::ComprehensionResult::empty()
                             }
-                        }
+                        };
+                        (r, comp_start.elapsed().as_millis() as u64)
                     };
 
                     // ── Step 5: Persist comprehensions ──
@@ -752,6 +829,19 @@ impl<'a> DialogueManager<'a> {
                             }
                         }
                     }
+
+                    let work_ms = task_start.elapsed().as_millis() as u64;
+                    tracing::info!(
+                        target: "primer::latency",
+                        task = "chain",
+                        extractor_id = %extractor_id,
+                        comprehension_id = %comp_classifier_id,
+                        queued_ms,
+                        extract_ms,
+                        comprehension_ms,
+                        work_ms,
+                        outcome_label = "ok",
+                    );
 
                     Some(PostResponseResult {
                         extraction: ExtractionPart {
@@ -834,9 +924,9 @@ impl<'a> DialogueManager<'a> {
         // after the most recent turn. Without this, a quick exit
         // ("respond_to_streaming" immediately followed by "close_session")
         // races the runtime shutdown and the last turn_classifications /
-        // turn_concepts rows may never be persisted.
-        self.await_pending_classification().await;
-        self.await_pending_post_response().await;
+        // turn_concepts rows may never be persisted. Drained in parallel
+        // — see await_pending_background for the wallclock argument.
+        self.await_pending_background().await;
 
         self.session.ended_at = Some(Utc::now());
         if let Some(ref store) = self.storage {
@@ -857,20 +947,76 @@ impl<'a> DialogueManager<'a> {
 
     // ─── Classifier helpers ───────────────────────────────────────────
 
-    /// Wait (up to `blocking_timeout`) for the classifier task spawned after
-    /// the previous turn, then apply its result to `self.learner`.
+    /// Drain only the classifier task and apply its outcome.
     ///
-    /// Called at the start of each new turn so the prior turn's assessment
-    /// is consumed before intent is decided. On timeout the task is aborted
-    /// and we proceed with the existing (stale) engagement state — better
-    /// than blocking the conversation indefinitely.
+    /// Production paths use `await_pending_background` (which drains both
+    /// background tasks in parallel); this focused variant exists for unit
+    /// tests that exercise classifier behaviour in isolation without
+    /// setting up a post-response chain.
+    #[cfg(test)]
     async fn await_pending_classification(&mut self) {
-        let Some(task) = self.classify_task.take() else {
+        let outcome = self.drain_classification().await;
+        self.apply_classification_outcome(outcome);
+    }
+
+    /// Drain both the classifier task and the post-response chain
+    /// concurrently, then apply both outcomes to `self`.
+    ///
+    /// The two tasks were spawned independently after the previous turn
+    /// and write to disjoint fields of `self.learner` (engagement vs
+    /// concepts/comprehension). Awaiting them with `tokio::join!` caps
+    /// wallclock at `max(classifier_timeout, extractor_timeout +
+    /// comprehension_timeout)` — at default settings, 5s instead of
+    /// `3 + 5 + 5 = 13s` on a worst-case full-timeout exchange.
+    async fn await_pending_background(&mut self) {
+        let post_response_timeout =
+            self.extractor_settings.blocking_timeout + self.comprehension_settings.blocking_timeout;
+        let classify_fut = self.drain_classification();
+        let post_response_fut = self.drain_post_response();
+        let (classify_outcome, post_response_outcome) =
+            tokio::join!(classify_fut, post_response_fut);
+        self.apply_classification_outcome(classify_outcome);
+        self.apply_post_response_outcome(post_response_outcome, post_response_timeout);
+    }
+
+    /// Take the classifier handle out of `self` and return a `'static`
+    /// future that awaits it with timeout. Captures the abort handle so
+    /// the apply step can abort on timeout. Returns `None` immediately
+    /// if no task is pending.
+    fn drain_classification(
+        &mut self,
+    ) -> impl std::future::Future<Output = ClassificationOutcome> + use<> {
+        let task = self.classify_task.take();
+        let timeout = self.classifier_settings.blocking_timeout;
+        async move {
+            let task = task?;
+            let abort = task.abort_handle();
+            let result = tokio::time::timeout(timeout, task).await;
+            Some((abort, result))
+        }
+    }
+
+    /// Take the post-response handle out of `self` and return a `'static`
+    /// future that awaits it with the combined extractor + comprehension
+    /// timeout. Returns `None` immediately if no task is pending.
+    fn drain_post_response(
+        &mut self,
+    ) -> impl std::future::Future<Output = PostResponseOutcome> + use<> {
+        let task = self.post_response_task.take();
+        let timeout =
+            self.extractor_settings.blocking_timeout + self.comprehension_settings.blocking_timeout;
+        async move {
+            let task = task?;
+            Some(tokio::time::timeout(timeout, task).await)
+        }
+    }
+
+    /// Apply a classifier outcome (from `drain_classification`) to `self`.
+    fn apply_classification_outcome(&mut self, outcome: ClassificationOutcome) {
+        let Some((abort, result)) = outcome else {
             return;
         };
-        let abort = task.abort_handle();
-        let timeout = self.classifier_settings.blocking_timeout;
-        match tokio::time::timeout(timeout, task).await {
+        match result {
             Ok(Ok(Some(assessment))) => {
                 // Capture the persisted-field state, apply, and dirty
                 // only if the persisted field actually changed.
@@ -894,28 +1040,17 @@ impl<'a> DialogueManager<'a> {
         }
     }
 
-    /// Wait (up to `extractor_settings.blocking_timeout +
-    /// comprehension_settings.blocking_timeout`) for the post-response
-    /// chained task (extraction → comprehension) to complete.
-    ///
-    /// On success: applies extraction to in-memory state via
-    /// `apply_extraction` (inserts new concepts at `Aware`, increments
-    /// encounter counts) THEN applies comprehension via
-    /// `apply_comprehension` (monotonic-max promotion of depths, gated
-    /// on `confidence_threshold`).
-    ///
-    /// On timeout: detaches the task (does NOT abort), so DB
-    /// persistence still completes asynchronously. The next-turn intent
-    /// decision proceeds with stale in-memory data — same behaviour as
-    /// the old extractor await.
-    async fn await_pending_post_response(&mut self) {
-        let Some(task) = self.post_response_task.take() else {
+    /// Apply a post-response outcome (from `drain_post_response`) to `self`.
+    /// `timeout` is only used for the timeout-warning log line.
+    fn apply_post_response_outcome(
+        &mut self,
+        outcome: PostResponseOutcome,
+        timeout: std::time::Duration,
+    ) {
+        let Some(result) = outcome else {
             return;
         };
-        let timeout =
-            self.extractor_settings.blocking_timeout + self.comprehension_settings.blocking_timeout;
-
-        match tokio::time::timeout(timeout, task).await {
+        match result {
             Ok(Ok(Some(result))) => {
                 // Apply extraction first so any new concepts are in
                 // learner.concepts before comprehension promotes their
@@ -3270,7 +3405,7 @@ mod tests {
         assert_eq!(assessments[0].depth, UnderstandingDepth::Recall);
         assert_eq!(classifier_id, "stub");
 
-        // Last comprehension applied to learner via await_pending_post_response.
+        // Last comprehension applied to learner via await_pending_background.
         let last_comp = dm
             .last_comprehension()
             .expect("last_comprehension must be set after the chain runs");
@@ -3339,7 +3474,7 @@ mod tests {
 
         dm.respond_to("Hello").await.unwrap();
         // Drain. If PanicOnCall.classify() were called, the panicked
-        // task would surface as an Err inside await_pending_post_response
+        // task would surface as an Err inside apply_post_response_outcome
         // (logged) — but the comprehension code path guards on
         // candidates.is_empty() before invoking classify, so classify
         // is never reached and no panic surfaces.
