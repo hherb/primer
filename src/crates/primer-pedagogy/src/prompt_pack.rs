@@ -122,6 +122,7 @@ pub fn load_cached(locale: Locale) -> Result<Arc<dyn PromptPack>> {
         return load(locale);
     }
     static EN_PACK: OnceLock<Arc<dyn PromptPack>> = OnceLock::new();
+    static DE_PACK: OnceLock<Arc<dyn PromptPack>> = OnceLock::new();
     match locale {
         Locale::English => {
             if let Some(p) = EN_PACK.get() {
@@ -129,6 +130,14 @@ pub fn load_cached(locale: Locale) -> Result<Arc<dyn PromptPack>> {
             }
             let p = load(locale)?;
             let _ = EN_PACK.set(Arc::clone(&p));
+            Ok(p)
+        }
+        Locale::German => {
+            if let Some(p) = DE_PACK.get() {
+                return Ok(Arc::clone(p));
+            }
+            let p = load(locale)?;
+            let _ = DE_PACK.set(Arc::clone(&p));
             Ok(p)
         }
     }
