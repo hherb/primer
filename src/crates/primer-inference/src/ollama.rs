@@ -11,10 +11,35 @@ use primer_core::error::{PrimerError, Result};
 use primer_core::inference::*;
 use serde::{Deserialize, Serialize};
 
+use crate::cloud::classify_reqwest_error;
+
+/// Translate a non-success Ollama HTTP response into an
+/// `InferenceError`. Pure — no I/O, no `Self`.
+///
+/// `requested_model` is the model name the user supplied via `--model`,
+/// used to populate `ModelNotFound { model }` when Ollama signals a
+/// missing model. `body` is the dev-facing payload for `Other`.
+pub(crate) fn classify_ollama_status(
+    status: reqwest::StatusCode,
+    body: &str,
+    requested_model: &str,
+) -> primer_core::error::InferenceError {
+    use primer_core::error::InferenceError::*;
+    let body_lower = body.to_lowercase();
+    match status.as_u16() {
+        404 if body_lower.contains("model") && body_lower.contains("not") => ModelNotFound {
+            model: requested_model.to_string(),
+        },
+        500..=599 => ServiceUnavailable,
+        _ => Other(format!("Ollama returned {status}: {body}")),
+    }
+}
+
 pub struct OllamaBackend {
     client: reqwest::Client,
     base_url: String,
     model: String,
+    retry_settings: primer_core::retry::RetrySettings,
 }
 
 impl OllamaBackend {
@@ -23,6 +48,7 @@ impl OllamaBackend {
             client: reqwest::Client::new(),
             base_url,
             model,
+            retry_settings: primer_core::retry::RetrySettings::default(),
         }
     }
 }
@@ -95,7 +121,7 @@ impl NdjsonBuffer {
 
 fn parse_ollama_line(line: &str) -> Result<TokenChunk> {
     let chunk: ChatChunk = serde_json::from_str(line).map_err(|e| {
-        PrimerError::Inference(format!("Ollama NDJSON parse error: {e}; line: {line}"))
+        PrimerError::Inference(format!("Ollama NDJSON parse error: {e}; line: {line}").into())
     })?;
     Ok(TokenChunk {
         text: chunk.message.content,
@@ -155,21 +181,27 @@ impl InferenceBackend for OllamaBackend {
             },
         };
 
-        let response = self
-            .client
-            .post(format!("{}/api/chat", self.base_url))
-            .json(&request)
-            .send()
-            .await
-            .map_err(|e| PrimerError::Inference(format!("Ollama request failed: {e}")))?;
-
-        let status = response.status();
-        if !status.is_success() {
-            let body = response.text().await.unwrap_or_default();
-            return Err(PrimerError::Inference(format!(
-                "Ollama returned {status}: {body}"
-            )));
-        }
+        // Retry the send + status-check phase only. Once we have a 2xx
+        // response and start consuming the byte stream, mid-stream errors
+        // propagate as before (the partial Primer turn is dropped at a
+        // higher layer).
+        let response = primer_core::retry::retry_with_backoff(&self.retry_settings, || async {
+            let resp = self
+                .client
+                .post(format!("{}/api/chat", self.base_url))
+                .json(&request)
+                .send()
+                .await
+                .map_err(|e| classify_reqwest_error(&e))?;
+            let status = resp.status();
+            if !status.is_success() {
+                let body = resp.text().await.unwrap_or_default();
+                return Err(classify_ollama_status(status, &body, &self.model));
+            }
+            Ok(resp)
+        })
+        .await
+        .map_err(PrimerError::Inference)?;
 
         let (mut tx, rx) = mpsc::unbounded::<Result<TokenChunk>>();
         let mut bytes_stream = response.bytes_stream();
@@ -207,9 +239,9 @@ impl InferenceBackend for OllamaBackend {
                     }
                     Some(Err(e)) => {
                         let _ = tx
-                            .send(Err(PrimerError::Inference(format!(
-                                "Ollama byte stream error: {e}"
-                            ))))
+                            .send(Err(PrimerError::Inference(
+                                format!("Ollama byte stream error: {e}").into(),
+                            )))
                             .await;
                         break 'outer;
                     }
@@ -298,5 +330,48 @@ mod tests {
         assert!(line.contains('b'));
         assert!(line.contains('\u{FFFD}'));
         assert_eq!(buf.pop_line(), None);
+    }
+
+    mod classify_ollama_tests {
+        use super::*;
+        use primer_core::error::InferenceError;
+        use reqwest::StatusCode;
+
+        #[test]
+        fn classifies_404_with_model_not_found_body() {
+            let body = r#"{"error":"model 'llama3.2' not found, try pulling it first"}"#;
+            let e = classify_ollama_status(StatusCode::NOT_FOUND, body, "llama3.2");
+            match e {
+                InferenceError::ModelNotFound { model } => assert_eq!(model, "llama3.2"),
+                other => panic!("expected ModelNotFound, got {other:?}"),
+            }
+        }
+
+        #[test]
+        fn classifies_404_without_model_body_as_other() {
+            let e = classify_ollama_status(StatusCode::NOT_FOUND, "page not found", "llama3.2");
+            assert!(matches!(e, InferenceError::Other(_)));
+        }
+
+        #[test]
+        fn classifies_500_as_service_unavailable() {
+            let e = classify_ollama_status(StatusCode::INTERNAL_SERVER_ERROR, "", "llama3.2");
+            assert!(matches!(e, InferenceError::ServiceUnavailable));
+        }
+
+        #[test]
+        fn classifies_503_as_service_unavailable() {
+            let e = classify_ollama_status(StatusCode::SERVICE_UNAVAILABLE, "", "llama3.2");
+            assert!(matches!(e, InferenceError::ServiceUnavailable));
+        }
+
+        #[test]
+        fn classifies_other_4xx_as_other() {
+            let e = classify_ollama_status(StatusCode::BAD_REQUEST, "bad payload", "llama3.2");
+            match e {
+                InferenceError::Other(s) => assert!(s.contains("400") && s.contains("bad payload")),
+                other => panic!("expected Other, got {other:?}"),
+            }
+        }
     }
 }

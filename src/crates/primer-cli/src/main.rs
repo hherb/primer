@@ -24,6 +24,7 @@ use primer_classifier::{
 };
 use primer_core::config::PedagogyConfig;
 use primer_core::error::{PrimerError, Result};
+use primer_core::i18n::{Locale, render_inference_error};
 use primer_core::inference::InferenceBackend;
 use primer_core::knowledge::KnowledgeBase;
 use primer_core::learner::*;
@@ -324,7 +325,9 @@ async fn build_backend(
             params.ollama_url.clone(),
             model,
         ))),
-        other => Err(PrimerError::Inference(format!("unknown backend: {other}"))),
+        other => Err(PrimerError::Inference(
+            format!("unknown backend: {other}").into(),
+        )),
     }
 }
 
@@ -786,6 +789,10 @@ async fn async_main() -> anyhow::Result<()> {
         }
     }
 
+    // Single locale-loading site for the future i18n PR to extend.
+    // Phase 0.1 ships only English; Locale::default() == Locale::English.
+    let cli_locale: Locale = Locale::default();
+
     // Knowledge base — in-memory by default (empty, but functional).
     let knowledge_path = cli.knowledge_db.unwrap_or_else(|| PathBuf::from(IN_MEMORY));
     let knowledge = SqliteKnowledgeBase::open(&knowledge_path)?;
@@ -1097,11 +1104,18 @@ async fn async_main() -> anyhow::Result<()> {
                     eprintln!("\n(no response generated)\n");
                 }
             }
-            Err(e) => {
+            Err(PrimerError::Inference(inf)) => {
                 if prefix_printed {
                     println!();
                 }
-                eprintln!("Error generating response: {e}\n");
+                tracing::warn!(error = %inf, "inference failed; surfacing user-friendly message");
+                eprintln!("{}\n", render_inference_error(&inf, &cli_locale));
+            }
+            Err(other) => {
+                if prefix_printed {
+                    println!();
+                }
+                eprintln!("Error generating response: {other}\n");
             }
         }
 
