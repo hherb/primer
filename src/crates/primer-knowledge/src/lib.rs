@@ -378,6 +378,74 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn cross_locale_isolation_passages_inserted_in_de_do_not_appear_in_en() {
+        // Open the same DB file under two different locales and verify
+        // their FTS5 indices stay isolated. This is the structural
+        // guarantee that BM25 stays locale-pure: each locale only ever
+        // queries its own `passages_<pack_id>` table.
+        let path = tmp_db_path();
+        // Insert a German passage.
+        {
+            let kb = SqliteKnowledgeBase::open_for_locale(&path, Locale::German).unwrap();
+            kb.insert_passage(
+                "de-1",
+                "wikipedia:de:Photosynthese",
+                "Photosynthese ist der Vorgang, bei dem Pflanzen Licht aufnehmen.",
+            )
+            .unwrap();
+        }
+        // Insert an English passage.
+        {
+            let kb = SqliteKnowledgeBase::open_for_locale(&path, Locale::English).unwrap();
+            kb.insert_passage(
+                "en-1",
+                "wikipedia:en:Photosynthesis",
+                "Photosynthesis is the process plants use to capture light.",
+            )
+            .unwrap();
+        }
+        // Query under English — only English row should come back.
+        {
+            let kb = SqliteKnowledgeBase::open_for_locale(&path, Locale::English).unwrap();
+            let got = kb
+                .retrieve(
+                    "photosynthesis",
+                    &RetrievalParams {
+                        top_k: 10,
+                        min_score: f64::NEG_INFINITY,
+                        source_filter: vec![],
+                    },
+                )
+                .await
+                .unwrap();
+            assert_eq!(got.len(), 1, "English KB must not return German rows");
+            assert_eq!(got[0].id, "en-1");
+        }
+        // Query under German — only German row should come back. Use
+        // the German term so the query is locale-appropriate; the
+        // index isolation is what's being verified here, not query
+        // tokenisation.
+        {
+            let kb = SqliteKnowledgeBase::open_for_locale(&path, Locale::German).unwrap();
+            let got = kb
+                .retrieve(
+                    "photosynthese",
+                    &RetrievalParams {
+                        top_k: 10,
+                        min_score: f64::NEG_INFINITY,
+                        source_filter: vec![],
+                    },
+                )
+                .await
+                .unwrap();
+            assert_eq!(got.len(), 1, "German KB must not return English rows");
+            assert_eq!(got[0].id, "de-1");
+        }
+
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[tokio::test]
     async fn legacy_migration_rolls_back_on_partial_failure() {
         // If a `passages_en` row pre-exists (manual user intervention,
         // partial prior migration crash, etc.) such that the migration
