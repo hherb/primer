@@ -44,12 +44,13 @@ use serde::{Deserialize, Serialize};
 pub enum Locale {
     #[default]
     English,
+    German,
 }
 
 impl Locale {
     /// Every variant, in declaration order. Used by tests and by any
     /// startup path that needs to enumerate available locales.
-    pub const ALL: &'static [Self] = &[Self::English];
+    pub const ALL: &'static [Self] = &[Self::English, Self::German];
 
     /// Canonical machine-readable name. Stable identifier — do not
     /// rename. Mirrors the `name()` pattern on `EngagementState` and
@@ -57,6 +58,7 @@ impl Locale {
     pub fn name(self) -> &'static str {
         match self {
             Self::English => "English",
+            Self::German => "German",
         }
     }
 
@@ -66,6 +68,7 @@ impl Locale {
     pub fn bcp47(self) -> &'static str {
         match self {
             Self::English => "en-US",
+            Self::German => "de-DE",
         }
     }
 
@@ -76,6 +79,7 @@ impl Locale {
     pub fn pack_id(self) -> &'static str {
         match self {
             Self::English => "en",
+            Self::German => "de",
         }
     }
 
@@ -85,6 +89,7 @@ impl Locale {
     pub fn from_pack_id(s: &str) -> Option<Self> {
         match s {
             "en" => Some(Self::English),
+            "de" => Some(Self::German),
             _ => None,
         }
     }
@@ -95,6 +100,7 @@ impl Locale {
 pub fn render_inference_error(err: &InferenceError, locale: &Locale) -> String {
     match locale {
         Locale::English => render_english(err),
+        Locale::German => render_german(err),
     }
 }
 
@@ -133,6 +139,46 @@ fn render_english(err: &InferenceError) -> String {
     }
 }
 
+/// German rendering. Uses informal "du" — the Primer is a children's
+/// product and German children are universally addressed as "du" by
+/// adults outside formal institutional contexts. Singular/plural
+/// agreement is handled explicitly for the rate-limited case
+/// (1 Sekunde vs N Sekunden).
+fn render_german(err: &InferenceError) -> String {
+    use InferenceError::*;
+    match err {
+        Auth => {
+            "Authentifizierung fehlgeschlagen. Bitte überprüfe deinen ANTHROPIC_API_KEY in .env oder ~/.primer_env."
+                .into()
+        }
+        RateLimited {
+            retry_after: Some(d),
+        } => {
+            let secs = d.as_secs();
+            if secs == 1 {
+                "Der Dienst ist gerade beschäftigt. Bitte versuche es in 1 Sekunde wieder.".into()
+            } else {
+                format!(
+                    "Der Dienst ist gerade beschäftigt. Bitte versuche es in {secs} Sekunden wieder."
+                )
+            }
+        }
+        RateLimited { retry_after: None } => {
+            "Der Dienst ist gerade beschäftigt. Bitte versuche es gleich wieder.".into()
+        }
+        ServiceUnavailable => {
+            "Der Dienst ist vorübergehend nicht verfügbar. Bitte versuche es gleich wieder.".into()
+        }
+        NetworkUnavailable => {
+            "Der Dienst ist nicht erreichbar. Bitte überprüfe deine Netzwerkverbindung.".into()
+        }
+        ModelNotFound { model } => {
+            format!("Modell '{model}' ist nicht verfügbar. Für Ollama führe `ollama pull {model}` aus.")
+        }
+        Other(_) => "Etwas Unerwartetes ist schiefgelaufen. Bitte versuche es erneut. (Details in den Logs.)".into(),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -146,8 +192,74 @@ mod tests {
 
     #[test]
     fn locale_all_lists_every_variant() {
-        assert_eq!(Locale::ALL.len(), 1);
+        assert_eq!(Locale::ALL.len(), 2);
         assert!(Locale::ALL.contains(&Locale::English));
+        assert!(Locale::ALL.contains(&Locale::German));
+    }
+
+    #[test]
+    fn locale_german_pack_id_and_bcp47() {
+        assert_eq!(Locale::German.pack_id(), "de");
+        assert_eq!(Locale::German.bcp47(), "de-DE");
+        assert_eq!(Locale::German.name(), "German");
+        assert_eq!(Locale::from_pack_id("de"), Some(Locale::German));
+    }
+
+    #[test]
+    fn render_inference_error_dispatches_on_locale() {
+        let auth_en = render_inference_error(&InferenceError::Auth, &Locale::English);
+        let auth_de = render_inference_error(&InferenceError::Auth, &Locale::German);
+        assert_ne!(
+            auth_en, auth_de,
+            "different locales must produce different text"
+        );
+        assert!(auth_de.contains("ANTHROPIC_API_KEY"));
+        assert!(auth_de.contains("fehlgeschlagen"));
+    }
+
+    #[test]
+    fn german_rate_limited_singular_vs_plural() {
+        let one = render_inference_error(
+            &InferenceError::RateLimited {
+                retry_after: Some(Duration::from_secs(1)),
+            },
+            &Locale::German,
+        );
+        let many = render_inference_error(
+            &InferenceError::RateLimited {
+                retry_after: Some(Duration::from_secs(7)),
+            },
+            &Locale::German,
+        );
+        assert!(
+            one.contains("1 Sekunde") && !one.contains("1 Sekunden"),
+            "singular form expected for 1s: {one}"
+        );
+        assert!(many.contains("7 Sekunden"), "plural form expected: {many}");
+    }
+
+    #[test]
+    fn german_model_not_found_includes_model_name_and_pull_hint() {
+        let s = render_inference_error(
+            &InferenceError::ModelNotFound {
+                model: "llama3.2".into(),
+            },
+            &Locale::German,
+        );
+        assert!(s.contains("llama3.2"), "got: {s}");
+        assert!(s.to_lowercase().contains("pull"), "got: {s}");
+    }
+
+    #[test]
+    fn german_other_does_not_leak_inner_dev_string() {
+        let s = render_inference_error(
+            &InferenceError::Other("RAW_DEV_STRING_FOO".into()),
+            &Locale::German,
+        );
+        assert!(
+            !s.contains("RAW_DEV_STRING_FOO"),
+            "Other's inner string must not reach users; got: {s}"
+        );
     }
 
     #[test]
