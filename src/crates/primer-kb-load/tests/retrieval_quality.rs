@@ -34,6 +34,7 @@ fn seed_path() -> PathBuf {
 /// `top_k = 5` mirrors the dialogue manager's realistic retrieval depth
 /// once `RetrievalParams::default()` is tuned (currently 3, may rise).
 const QUERIES: &[(&str, &[&str], usize)] = &[
+    // Space cluster
     ("how does the sun shine", &["fus", "hydrogen"], 5),
     ("why does the moon change shape", &["phase", "sunlight"], 5),
     ("why is it day and night", &["spin", "axis"], 5),
@@ -50,6 +51,18 @@ const QUERIES: &[(&str, &[&str], usize)] = &[
     ("what causes ocean tides", &["moon", "gravity"], 5),
     ("how did the universe begin", &["big bang", "expand"], 5),
     ("why are there seasons", &["tilt", "axis"], 5),
+    // Body cluster
+    ("how does the heart pump blood", &["heart", "ventric"], 5),
+    ("why do we breathe", &["oxygen", "alveoli"], 5),
+    ("what does the brain do", &["neuron", "cortex"], 5),
+    ("how does food get digested", &["stomach", "intestine"], 5),
+    ("how many bones are in the body", &["skeleton", "206"], 5),
+    ("how do muscles move", &["contract", "fibre"], 5),
+    ("what is skin made of", &["epidermis", "dermis"], 5),
+    ("how does the body fight germs", &["immune", "antibod"], 5),
+    ("how do eyes see", &["retina", "lens"], 5),
+    ("how do ears hear", &["cochlea", "vibrat"], 5),
+    ("why do we sleep and dream", &["rem", "memor"], 5),
 ];
 
 #[tokio::test]
