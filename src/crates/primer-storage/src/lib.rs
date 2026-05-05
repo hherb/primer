@@ -961,14 +961,15 @@ impl primer_core::storage::LearnerStore for SqliteSessionStore {
                 .prepare(
                     "INSERT INTO learner_concepts (
                          learner_id, concept_id, depth_id, confidence,
-                         encounter_count, last_encountered, notes
-                     ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)
+                         encounter_count, last_encountered, notes, box_level
+                     ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)
                      ON CONFLICT(learner_id, concept_id) DO UPDATE SET
                          depth_id = excluded.depth_id,
                          confidence = excluded.confidence,
                          encounter_count = excluded.encounter_count,
                          last_encountered = excluded.last_encountered,
-                         notes = excluded.notes",
+                         notes = excluded.notes,
+                         box_level = excluded.box_level",
                 )
                 .map_err(|e| PrimerError::Storage(format!("prepare upsert lc: {e}")))?;
 
@@ -1015,6 +1016,7 @@ impl primer_core::storage::LearnerStore for SqliteSessionStore {
                         concept.encounter_count as i64,
                         last_encountered,
                         notes_json,
+                        concept.box_level as i64,
                     ])
                     .map_err(|e| PrimerError::Storage(format!("upsert learner_concept: {e}")))?;
             }
@@ -1179,7 +1181,7 @@ impl primer_core::storage::LearnerStore for SqliteSessionStore {
         let mut stmt = conn
             .prepare(
                 "SELECT c.name, lc.depth_id, lc.confidence, lc.encounter_count,
-                        lc.last_encountered, lc.notes
+                        lc.last_encountered, lc.notes, lc.box_level
                  FROM learner_concepts lc
                  JOIN concepts c ON c.id = lc.concept_id
                  WHERE lc.learner_id = ?1",
@@ -1194,6 +1196,7 @@ impl primer_core::storage::LearnerStore for SqliteSessionStore {
                     r.get::<_, i64>(3)?,
                     r.get::<_, Option<String>>(4)?,
                     r.get::<_, String>(5)?,
+                    r.get::<_, i64>(6)?,
                 ))
             })
             .map_err(|e| PrimerError::Storage(format!("query learner_concepts: {e}")))?;
@@ -1207,6 +1210,7 @@ impl primer_core::storage::LearnerStore for SqliteSessionStore {
                 encounter_count,
                 last_encountered_opt,
                 notes_json,
+                box_level_raw,
             ) = row.map_err(|e| PrimerError::Storage(format!("read learner_concepts: {e}")))?;
             let depth = catalog::understanding_depth_from_id(depth_id)
                 .ok_or_else(|| PrimerError::Storage(format!("unknown depth_id {depth_id}")))?;
@@ -1216,6 +1220,11 @@ impl primer_core::storage::LearnerStore for SqliteSessionStore {
                 .transpose()?;
             let notes: Vec<String> = serde_json::from_str(&notes_json)
                 .map_err(|e| PrimerError::Storage(format!("decode notes: {e}")))?;
+            let box_level: u8 = box_level_raw.try_into().map_err(|_| {
+                PrimerError::Storage(format!(
+                    "learner_concepts.box_level out of u8 range: {box_level_raw}"
+                ))
+            })?;
             concepts.push(ConceptState {
                 concept_id: concept_name,
                 depth,
@@ -1223,7 +1232,7 @@ impl primer_core::storage::LearnerStore for SqliteSessionStore {
                 encounter_count: i64_to_u32(encounter_count, "learner_concepts.encounter_count")?,
                 last_encountered,
                 notes,
-                box_level: 0,
+                box_level,
             });
         }
 
@@ -3736,11 +3745,86 @@ mod learner_store_tests {
                 loaded_c.last_encountered.map(|t| t.timestamp()),
                 original_c.last_encountered.map(|t| t.timestamp()),
             );
+            assert_eq!(loaded_c.box_level, original_c.box_level);
         }
 
         // recent_assessments is rehydrated separately from
         // turn_classifications and is not part of the round-trip.
         assert!(loaded.recent_assessments.is_empty());
+    }
+
+    #[tokio::test]
+    async fn save_learner_persists_box_level_per_concept() {
+        let store = open_in_mem();
+        let mut learner = sample_learner();
+        learner.concepts = vec![
+            ConceptState {
+                concept_id: "physics:gravity".into(),
+                depth: UnderstandingDepth::Comprehension,
+                confidence: 0.85,
+                encounter_count: 3,
+                last_encountered: Some(Utc::now()),
+                notes: vec![],
+                box_level: 2,
+            },
+            ConceptState {
+                concept_id: "biology:photosynthesis".into(),
+                depth: UnderstandingDepth::Recall,
+                confidence: 0.7,
+                encounter_count: 1,
+                last_encountered: Some(Utc::now()),
+                notes: vec![],
+                box_level: 1,
+            },
+        ];
+        store.save_learner(&learner).await.unwrap();
+
+        // Read raw rows to verify box_level was written.
+        let conn = store.conn.lock().unwrap();
+        let mut rows: Vec<(String, i64)> = conn
+            .prepare(
+                "SELECT c.name, lc.box_level FROM learner_concepts lc \
+                 JOIN concepts c ON c.id = lc.concept_id ORDER BY c.name",
+            )
+            .unwrap()
+            .query_map([], |r| Ok((r.get::<_, String>(0)?, r.get::<_, i64>(1)?)))
+            .unwrap()
+            .map(|r| r.unwrap())
+            .collect();
+        rows.sort();
+        assert_eq!(
+            rows,
+            vec![
+                ("biology:photosynthesis".to_string(), 1),
+                ("physics:gravity".to_string(), 2),
+            ]
+        );
+    }
+
+    #[tokio::test]
+    async fn save_then_load_learner_round_trips_box_level() {
+        let store = open_in_mem();
+        let mut learner = sample_learner();
+        learner.concepts = vec![ConceptState {
+            concept_id: "physics:gravity".into(),
+            depth: UnderstandingDepth::Application,
+            confidence: 0.9,
+            encounter_count: 5,
+            last_encountered: Some(Utc::now()),
+            notes: vec!["struggled at first".into()],
+            box_level: 3,
+        }];
+        store.save_learner(&learner).await.unwrap();
+
+        let loaded = store.load_learner().await.unwrap().expect("learner present");
+        let concept = loaded
+            .concepts
+            .iter()
+            .find(|c| c.concept_id == "physics:gravity")
+            .unwrap();
+        assert_eq!(concept.box_level, 3);
+        assert_eq!(concept.depth, UnderstandingDepth::Application);
+        assert_eq!(concept.encounter_count, 5);
     }
 
     /// Inject a row with an out-of-range `age` to prove that
