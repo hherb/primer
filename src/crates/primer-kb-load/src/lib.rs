@@ -197,6 +197,62 @@ fn xdg_data_home() -> Option<PathBuf> {
         .map(|h| PathBuf::from(h).join(".local/share"))
 }
 
+/// Backfill embeddings for every passage in `kb` that doesn't already
+/// have one (or for every passage when `force = true`). Calls `embedder`
+/// in batches to amortise the per-call cost.
+///
+/// Returns the number of passages embedded. Errors fail the whole call —
+/// embedding is not best-effort here, because a partial fill is exactly
+/// the problem this is designed to fix.
+pub async fn reembed_kb(
+    kb: &SqliteKnowledgeBase,
+    embedder: &dyn primer_core::embedder::Embedder,
+    force: bool,
+    batch_size: usize,
+) -> Result<usize> {
+    // Today the missing-list is the only public per-passage iteration
+    // path on `SqliteKnowledgeBase`. `--force` semantics — re-embed
+    // everything regardless — would need a `list_passages_with_text()`
+    // accessor; tracked as a follow-up.
+    if force {
+        tracing::warn!(
+            target = "primer-kb-load",
+            "reembed --force is not yet a complete operation: it currently \
+             re-embeds only passages WITHOUT an embedding row. Re-embedding \
+             of already-embedded passages requires a `list_passages_with_text()` \
+             accessor on SqliteKnowledgeBase."
+        );
+    }
+    let candidates: Vec<(String, String)> = kb.passages_missing_embedding()?;
+
+    if candidates.is_empty() {
+        tracing::info!(
+            target = "primer-kb-load",
+            "no passages need embedding; nothing to do"
+        );
+        return Ok(0);
+    }
+
+    tracing::info!(
+        target = "primer-kb-load",
+        count = candidates.len(),
+        model = embedder.model_id(),
+        dim = embedder.dim(),
+        "reembedding passages"
+    );
+
+    let mut done = 0_usize;
+    for chunk in candidates.chunks(batch_size.max(1)) {
+        let texts: Vec<&str> = chunk.iter().map(|(_, t)| t.as_str()).collect();
+        let vecs = embedder.embed(&texts).await?;
+        for ((id, _), v) in chunk.iter().zip(vecs.into_iter()) {
+            kb.upsert_embedding(id, embedder.model_id(), embedder.dim(), &v)?;
+            done += 1;
+        }
+    }
+    Ok(done)
+}
+
 /// Auto-seed `kb` from the discovered JSONL if `kb` is empty.
 ///
 /// Returns:
@@ -325,6 +381,26 @@ mod tests {
             result.is_none(),
             "auto-seed must skip when KB already has passages"
         );
+    }
+
+    #[tokio::test]
+    async fn reembed_backfills_passages_missing_embeddings() {
+        use primer_embedding::StubEmbedder;
+        let db = tempfile::NamedTempFile::new().unwrap();
+        let kb = SqliteKnowledgeBase::open_for_locale(db.path(), Locale::English).unwrap();
+        // Insert two passages WITHOUT embeddings via the legacy path.
+        kb.insert_passage("p1", "src", "first text").unwrap();
+        kb.insert_passage("p2", "src", "second text").unwrap();
+        assert_eq!(kb.embedding_count().unwrap(), 0);
+
+        let stub = StubEmbedder::with_dim(16);
+        let n = reembed_kb(&kb, &stub, false, 8).await.unwrap();
+        assert_eq!(n, 2);
+        assert_eq!(kb.embedding_count().unwrap(), 2);
+
+        // Idempotent: a second pass touches nothing.
+        let n2 = reembed_kb(&kb, &stub, false, 8).await.unwrap();
+        assert_eq!(n2, 0);
     }
 
     #[test]

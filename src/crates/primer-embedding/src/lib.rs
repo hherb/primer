@@ -13,5 +13,14 @@
 //! [`Embedder`]: primer_core::embedder::Embedder
 
 pub mod stub;
-
 pub use stub::StubEmbedder;
+
+#[cfg(feature = "fastembed")]
+pub mod fastembed_backend;
+#[cfg(feature = "fastembed")]
+pub use fastembed_backend::{BGE_M3_MODEL_ID, FastEmbedBackend};
+
+#[cfg(feature = "ollama")]
+pub mod ollama;
+#[cfg(feature = "ollama")]
+pub use ollama::{DEFAULT_OLLAMA_MODEL, DEFAULT_OLLAMA_URL, OllamaEmbedder};

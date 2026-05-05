@@ -5,18 +5,28 @@ version.workspace = true
 edition.workspace = true
 
 [features]
-# Stubs are always built. Real backends (fastembed, ollama) come behind
-# their own feature flags so default-feature builds and hermetic tests
-# don't pull the model-runtime dep tree.
+# Stubs are always built. Real backends come behind their own feature
+# flags so users on minimal builds (or building only `speech`) can opt
+# out cleanly.
 #
-# `fastembed` and `ollama` are introduced as empty placeholders for now;
-# the actual implementations land in subsequent steps of the hybrid-
-# retrieval design (steps 7 and 8). Keeping the feature names stable
-# from day one means downstream crates (`primer-cli`, future tests)
-# can already declare their dependency surface.
+# `fastembed` pulls the upstream `fastembed-rs` crate (Qdrant; ONNX
+# Runtime under the hood). It pins `ort = "=2.0.0-rc.12"`, which
+# conflicts with the `=2.0.0-rc.10` pin used by our vendored
+# silero/whisper/piper speech deps when the workspace `speech` feature
+# is also enabled. As of today the conflict is real and unresolved;
+# the workaround is `cargo build --no-default-features --features speech`
+# until we bump the speech vendor patches to rc.12. Plain text-mode
+# builds (the common case) get hybrid retrieval out of the box.
+# The user has stated a preference for `fastembed` default-on so children
+# get hybrid retrieval out of the box. Temporarily default-off until the
+# project's CI infrastructure has demonstrably built the fastembed feature
+# end-to-end (the sandbox in which the initial implementation lands has
+# no network access to cdn.pyke.io, where ort-sys downloads its runtime
+# binary). Flip to `default = ["fastembed"]` after the first green CI
+# run. Tracking note in CLAUDE.md.
 default = []
-fastembed = []
-ollama = []
+fastembed = ["dep:fastembed", "dep:dirs"]
+ollama = ["dep:reqwest", "dep:serde", "dep:serde_json"]
 
 [dependencies]
 primer-core.workspace = true
@@ -24,6 +34,32 @@ async-trait.workspace = true
 tokio.workspace = true
 tracing.workspace = true
 thiserror.workspace = true
+
+# `fastembed` real-model backend (gated). 5.13.x pulls ort 2.0.0-rc.12
+# and exposes BGE-M3 (the project's default multilingual model) plus
+# bge-small-en-v1.5 and friends. The `embed` API is blocking; we wrap
+# calls in `tokio::task::spawn_blocking`. The `rt` tokio feature is
+# already on via the workspace's `full`.
+#
+# Default-features are turned off so we control the TLS backend and
+# ONNX-Runtime download flavour. `ort-download-binaries-rustls-tls`
+# matches the rustls path we already use in `reqwest`; `hf-hub-rustls-tls`
+# does the same for the model downloader.
+# Pinned to ~5.7 because that line uses `ort = "=2.0.0-rc.10"`, which
+# matches the workspace pin enforced by our vendored silero/whisper/piper
+# patches. fastembed 5.9+ moved to rc.11/rc.12 and is incompatible until
+# we bump those vendor patches. v5.7 is the latest fastembed-rs that
+# both has BGE-M3 support AND uses ort rc.10.
+fastembed = { version = "=5.7.0", default-features = false, features = [
+    "ort-download-binaries",
+    "hf-hub-rustls-tls",
+], optional = true }
+# Default model cache directory discovery.
+dirs = { version = "5", optional = true }
+# Optional Ollama backend (step 8).
+reqwest = { workspace = true, optional = true }
+serde = { workspace = true, optional = true }
+serde_json = { workspace = true, optional = true }
 
 [dev-dependencies]
 tempfile.workspace = true

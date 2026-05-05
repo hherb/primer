@@ -8,9 +8,16 @@ edition.workspace = true
 name = "primer-kb-load"
 path = "src/bin/primer_kb_load.rs"
 
+[features]
+default = []
+# Pulls primer-embedding/fastembed for `primer-kb-load --reembed` mode.
+# Off by default for the same reason as primer-cli's `embedding` feature.
+fastembed = ["primer-embedding/fastembed"]
+
 [dependencies]
 primer-core.workspace = true
 primer-knowledge.workspace = true
+primer-embedding = { path = "../primer-embedding" }
 tokio.workspace = true
 serde.workspace = true
 serde_json.workspace = true

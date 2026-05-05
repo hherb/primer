@@ -17,6 +17,7 @@ primer-inference = { path = "../primer-inference" }
 primer-speech = { path = "../primer-speech" }
 primer-knowledge = { path = "../primer-knowledge" }
 primer-kb-load = { path = "../primer-kb-load" }
+primer-embedding = { path = "../primer-embedding" }
 primer-pedagogy = { path = "../primer-pedagogy" }
 primer-storage = { path = "../primer-storage" }
 tokio.workspace = true
@@ -39,6 +40,22 @@ anyhow.workspace = true
 ringbuf.workspace = true
 
 [features]
+default = []
+
+# Hybrid retrieval via the fastembed-rs (BGE-M3) backend.
+# **Temporarily not in `default`** — see primer-embedding's Cargo.toml for the
+# rationale (ort 2.0.0-rc.10 vs rc.12 vendor pin, plus first-build CI
+# validation). User preference is for this to ship default-on; flip
+# `default = ["embedding"]` once CI proves out the build.
+# Conflicts with `speech` today: the `speech` features pull ort=rc.10
+# via vendored silero/whisper/piper, while fastembed pulls rc.12.
+# Workaround: `cargo run --no-default-features --features speech`.
+embedding = ["primer-embedding/fastembed"]
+
+# Lightweight Ollama-backed embedder. Useful for prototyping; not the
+# recommended runtime backend.
+ollama-embedding = ["primer-embedding/ollama"]
+
 # Voice REPL via --speech. Pulls every speech backend feature so the
 # state machine can compose VAD → STT → DialogueManager → TTS → cpal
 # without further conditional compilation in the binary.
