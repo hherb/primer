@@ -174,6 +174,16 @@ struct Cli {
     #[arg(long, value_name = "N", value_parser = clap::value_parser!(u64).range(1..))]
     vocab_max_per_prompt: Option<u64>,
 
+    /// Minutes between break-suggestion nudges. The Primer phrases the
+    /// suggestion in-character; the child can keep going. Default 30.
+    /// Must be >= 1.
+    #[arg(
+        long,
+        default_value_t = primer_core::consts::break_suggest::DEFAULT_INTERVAL_MINUTES,
+        value_parser = clap::value_parser!(u32).range(1..),
+    )]
+    session_break_after_mins: u32,
+
     /// Print pedagogical decisions (intent chosen, classifier output,
     /// extractor output, comprehension output) alongside the conversation,
     /// on stderr. Stdout stays clean.
@@ -992,7 +1002,10 @@ async fn async_main() -> anyhow::Result<()> {
     }
 
     // Pedagogy config.
-    let pedagogy_config = PedagogyConfig::default();
+    let pedagogy_config = PedagogyConfig {
+        break_suggest_after_minutes: cli.session_break_after_mins,
+        ..PedagogyConfig::default()
+    };
 
     let classifier_settings = ClassifierSettings {
         blocking_timeout: std::time::Duration::from_millis(cli.classifier_timeout_ms),
@@ -1925,5 +1938,49 @@ mod tests {
         // clap's range(1..) rejects it with a clear error.
         let result = Cli::try_parse_from(["primer", "--vocab-max-per-prompt", "0"]);
         assert!(result.is_err(), "0 should be rejected; got: {result:?}");
+    }
+}
+
+#[cfg(test)]
+mod break_suggest_flag_tests {
+    use super::*;
+    use clap::Parser;
+
+    #[test]
+    fn explicit_value_overrides_default() {
+        let cli = Cli::try_parse_from([
+            "primer",
+            "--name",
+            "Ada",
+            "--age",
+            "9",
+            "--session-break-after-mins",
+            "15",
+        ])
+        .unwrap();
+        assert_eq!(cli.session_break_after_mins, 15);
+    }
+
+    #[test]
+    fn default_is_30() {
+        let cli = Cli::try_parse_from(["primer", "--name", "Ada", "--age", "9"]).unwrap();
+        assert_eq!(
+            cli.session_break_after_mins,
+            primer_core::consts::break_suggest::DEFAULT_INTERVAL_MINUTES,
+        );
+    }
+
+    #[test]
+    fn zero_is_rejected() {
+        let result = Cli::try_parse_from([
+            "primer",
+            "--name",
+            "Ada",
+            "--age",
+            "9",
+            "--session-break-after-mins",
+            "0",
+        ]);
+        assert!(result.is_err(), "0 should be rejected by the value parser");
     }
 }
