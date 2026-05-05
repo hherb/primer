@@ -37,50 +37,32 @@ use primer_core::embedder::Embedder;
 use primer_core::error::{PrimerError, Result};
 use primer_core::speech::Named;
 use std::path::PathBuf;
-use std::sync::Mutex;
+use std::sync::{Arc, Mutex};
 
 /// Project default real-model id. The corresponding fastembed enum
 /// variant is [`EmbeddingModel::BGEM3`]; vector dim is 1024.
 pub const BGE_M3_MODEL_ID: &str = "bge-m3";
 const BGE_M3_DIM: usize = 1024;
 
-/// Name a fastembed model by the project's stable id. Mapping is
-/// explicit (rather than `format!("{:?}", variant)`) so the persisted
-/// `embedding_models.name` survives an upstream `Debug` impl change.
-fn project_id(model: &EmbeddingModel) -> &'static str {
-    match model {
-        EmbeddingModel::BGEM3 => BGE_M3_MODEL_ID,
-        EmbeddingModel::BGESmallENV15 => "bge-small-en-v1.5",
-        EmbeddingModel::BGEBaseENV15 => "bge-base-en-v1.5",
-        EmbeddingModel::BGELargeENV15 => "bge-large-en-v1.5",
-        EmbeddingModel::AllMiniLML6V2 => "all-MiniLM-L6-v2",
-        EmbeddingModel::MultilingualE5Small => "multilingual-e5-small",
-        EmbeddingModel::MultilingualE5Base => "multilingual-e5-base",
-        EmbeddingModel::MultilingualE5Large => "multilingual-e5-large",
-        EmbeddingModel::NomicEmbedTextV15 => "nomic-embed-text-v1.5",
-        // Catch-all so adding new fastembed variants doesn't break the
-        // build; we fall back to the canonical Debug name.
-        other => Box::leak(format!("{other:?}").into_boxed_str()),
-    }
-}
-
-/// Dimensionality table for the models we care about most. fastembed
-/// itself does not expose this through a stable accessor in 5.13.x;
-/// hard-coding for the supported variants is the pragmatic choice.
-fn dim_for(model: &EmbeddingModel) -> usize {
-    match model {
-        EmbeddingModel::BGEM3 => BGE_M3_DIM,
-        EmbeddingModel::BGESmallENV15 => 384,
-        EmbeddingModel::BGEBaseENV15 => 768,
-        EmbeddingModel::BGELargeENV15 => 1024,
-        EmbeddingModel::AllMiniLML6V2 => 384,
-        EmbeddingModel::MultilingualE5Small => 384,
-        EmbeddingModel::MultilingualE5Base => 768,
-        EmbeddingModel::MultilingualE5Large => 1024,
-        EmbeddingModel::NomicEmbedTextV15 => 768,
-        // Conservative default; downstream `dim()` callers can validate.
-        _ => 0,
-    }
+/// Name + dim for every fastembed variant we explicitly support.
+/// Returns `None` for unsupported variants so callers can produce a
+/// clean error rather than constructing an unnamed/unknown-dim
+/// embedder. Mapping is explicit (rather than `format!("{:?}", v)`)
+/// so the persisted `embedding_models.name` survives an upstream
+/// `Debug` impl change.
+fn supported(model: &EmbeddingModel) -> Option<(&'static str, usize)> {
+    Some(match model {
+        EmbeddingModel::BGEM3 => (BGE_M3_MODEL_ID, BGE_M3_DIM),
+        EmbeddingModel::BGESmallENV15 => ("bge-small-en-v1.5", 384),
+        EmbeddingModel::BGEBaseENV15 => ("bge-base-en-v1.5", 768),
+        EmbeddingModel::BGELargeENV15 => ("bge-large-en-v1.5", 1024),
+        EmbeddingModel::AllMiniLML6V2 => ("all-MiniLM-L6-v2", 384),
+        EmbeddingModel::MultilingualE5Small => ("multilingual-e5-small", 384),
+        EmbeddingModel::MultilingualE5Base => ("multilingual-e5-base", 768),
+        EmbeddingModel::MultilingualE5Large => ("multilingual-e5-large", 1024),
+        EmbeddingModel::NomicEmbedTextV15 => ("nomic-embed-text-v1.5", 768),
+        _ => return None,
+    })
 }
 
 /// Default model-cache directory: `$XDG_CACHE_HOME/primer/models` (or
@@ -91,9 +73,12 @@ fn default_cache_dir() -> Option<PathBuf> {
     dirs::cache_dir().map(|p| p.join("primer/models"))
 }
 
-/// Fastembed-backed [`Embedder`].
+/// Fastembed-backed [`Embedder`]. The model is held inside an
+/// `Arc<Mutex<…>>` so each `embed()` call can clone the Arc into a
+/// `tokio::task::spawn_blocking` worker — keeping the synchronous
+/// 50-100 ms ONNX call off the conversation hot path.
 pub struct FastEmbedBackend {
-    inner: Mutex<TextEmbedding>,
+    inner: Arc<Mutex<TextEmbedding>>,
     model_id: &'static str,
     dim: usize,
 }
@@ -110,13 +95,15 @@ impl FastEmbedBackend {
 
     /// Construct with a specific fastembed model.
     pub fn with_model(model: EmbeddingModel) -> Result<Self> {
-        let model_id = project_id(&model);
-        let dim = dim_for(&model);
-        if dim == 0 {
-            return Err(PrimerError::Inference(
-                format!("fastembed model {model_id:?} has unknown dim; add it to dim_for()").into(),
-            ));
-        }
+        let (model_id, dim) = supported(&model).ok_or_else(|| {
+            PrimerError::Inference(
+                format!(
+                    "fastembed model {model:?} is not in primer's supported list; \
+                     add it to fastembed_backend::supported() with its stable id and dim"
+                )
+                .into(),
+            )
+        })?;
         let mut opts = TextInitOptions::new(model);
         if let Some(dir) = default_cache_dir() {
             // best-effort: silently fall through to fastembed default if mkdir fails
@@ -127,7 +114,7 @@ impl FastEmbedBackend {
             PrimerError::Inference(format!("fastembed init for {model_id:?}: {e}").into())
         })?;
         Ok(Self {
-            inner: Mutex::new(inner),
+            inner: Arc::new(Mutex::new(inner)),
             model_id,
             dim,
         })
@@ -146,43 +133,34 @@ impl Embedder for FastEmbedBackend {
         if texts.is_empty() {
             return Ok(vec![]);
         }
-        // fastembed wants `Vec<&str>` (or owned strings); we own the
-        // input lifetime by cloning into String here so the spawned
-        // blocking task is `'static`.
+        // Move owned strings + an Arc-clone into spawn_blocking so the
+        // tokio runtime can schedule the synchronous embed off-thread.
         let owned: Vec<String> = texts.iter().map(|s| s.to_string()).collect();
-        let inner = &self.inner;
-        // We can't move `&Mutex` into spawn_blocking, so we lock here
-        // and ship the guard contents over via raw pointer? No — simpler:
-        // the embedder is held inside a Mutex, so we lock *inside* the
-        // spawn_blocking by using an Arc-clone of an Arc<Mutex<…>>. But
-        // the struct only owns Mutex, not Arc<Mutex>. Easiest fix: hold
-        // the model directly inside Mutex (already done) and move
-        // ownership-free reference into a tokio_blocking task by
-        // unsafely transmuting lifetime — NO. Cleaner: do the work on
-        // the current thread (it's blocking IO/CPU, ~50-100ms). For the
-        // dialogue-manager hot path that's acceptable; if it shows up
-        // in profiling we'll revisit with an Arc<Mutex<TextEmbedding>>
-        // shape.
-        let mut guard = inner
-            .lock()
-            .map_err(|_| PrimerError::Inference("fastembed mutex poisoned".into()))?;
-        let refs: Vec<&str> = owned.iter().map(|s| s.as_str()).collect();
-        let out = guard
-            .embed(refs, None)
-            .map_err(|e| PrimerError::Inference(format!("fastembed embed failed: {e}").into()))?;
-        // Sanity: every vector should have the declared dimension.
-        for v in &out {
-            if v.len() != self.dim {
-                return Err(PrimerError::Inference(
-                    format!(
-                        "fastembed returned vec of len {} but expected dim {}",
-                        v.len(),
-                        self.dim
-                    )
-                    .into(),
-                ));
+        let inner = Arc::clone(&self.inner);
+        let dim = self.dim;
+        let out = tokio::task::spawn_blocking(move || -> Result<Vec<Vec<f32>>> {
+            let mut guard = inner
+                .lock()
+                .map_err(|_| PrimerError::Inference("fastembed mutex poisoned".into()))?;
+            let refs: Vec<&str> = owned.iter().map(|s| s.as_str()).collect();
+            let vecs = guard.embed(refs, None).map_err(|e| {
+                PrimerError::Inference(format!("fastembed embed failed: {e}").into())
+            })?;
+            for v in &vecs {
+                if v.len() != dim {
+                    return Err(PrimerError::Inference(
+                        format!(
+                            "fastembed returned vec of len {} but expected dim {dim}",
+                            v.len()
+                        )
+                        .into(),
+                    ));
+                }
             }
-        }
+            Ok(vecs)
+        })
+        .await
+        .map_err(|e| PrimerError::Inference(format!("fastembed task join: {e}").into()))??;
         Ok(out)
     }
 

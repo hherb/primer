@@ -942,6 +942,13 @@ impl primer_core::storage::SessionStore for SqliteSessionStore {
         params: &primer_core::knowledge::HybridParams,
         exclude_indices_at_or_after: usize,
     ) -> Result<Vec<primer_core::conversation::Turn>> {
+        // 0. Validate embedder identity against the per-DB registry.
+        validate_storage_embedder(
+            &self.conn.lock().unwrap(),
+            embedder.model_id(),
+            embedder.dim(),
+        )?;
+
         // 1. BM25 leg via the existing path.
         let bm25 = self
             .retrieve_session_turns(
@@ -1089,6 +1096,45 @@ impl SqliteSessionStore {
         scored.truncate(top_k);
         Ok(scored.into_iter().map(|(_, t)| t).collect())
     }
+}
+
+/// Read-side counterpart to `upsert_storage_embedding_model`. Same
+/// invariant on dim mismatch (hard error), and surfaces a tracing
+/// warning when the embedder isn't registered yet but other models
+/// already wrote vectors to this DB — that combination silently
+/// degrades the vector leg to empty, and we want the user to see why.
+fn validate_storage_embedder(conn: &Connection, name: &str, dim: usize) -> Result<()> {
+    let existing: Option<i64> = conn
+        .query_row(
+            "SELECT dim FROM embedding_models WHERE name = ?1",
+            rusqlite::params![name],
+            |r| r.get(0),
+        )
+        .ok();
+    if let Some(existing_dim) = existing {
+        if existing_dim as usize != dim {
+            return Err(PrimerError::Storage(format!(
+                "embedder model {name} registered with dim {existing_dim}, now reports dim {dim}; \
+                 the original embedder is required to read existing vectors"
+            )));
+        }
+        return Ok(());
+    }
+    let other_count: i64 = conn
+        .query_row(
+            "SELECT COUNT(*) FROM embedding_models WHERE name != ?1",
+            rusqlite::params![name],
+            |r| r.get(0),
+        )
+        .unwrap_or(0);
+    if other_count > 0 {
+        tracing::warn!(
+            "embedder {name} (dim {dim}) is not registered in this session DB but \
+             {other_count} other model(s) are; vector leg will return empty until \
+             turns are re-embedded"
+        );
+    }
+    Ok(())
 }
 
 fn upsert_storage_embedding_model(conn: &Connection, name: &str, dim: usize) -> Result<i64> {

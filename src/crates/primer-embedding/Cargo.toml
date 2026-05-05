@@ -5,25 +5,17 @@ version.workspace = true
 edition.workspace = true
 
 [features]
-# Stubs are always built. Real backends come behind their own feature
+# Stub is always built. Real backends come behind their own feature
 # flags so users on minimal builds (or building only `speech`) can opt
-# out cleanly.
-#
-# `fastembed` pulls the upstream `fastembed-rs` crate (Qdrant; ONNX
-# Runtime under the hood). It pins `ort = "=2.0.0-rc.12"`, which
-# conflicts with the `=2.0.0-rc.10` pin used by our vendored
-# silero/whisper/piper speech deps when the workspace `speech` feature
-# is also enabled. As of today the conflict is real and unresolved;
-# the workaround is `cargo build --no-default-features --features speech`
-# until we bump the speech vendor patches to rc.12. Plain text-mode
-# builds (the common case) get hybrid retrieval out of the box.
-# The user has stated a preference for `fastembed` default-on so children
-# get hybrid retrieval out of the box. Temporarily default-off until the
-# project's CI infrastructure has demonstrably built the fastembed feature
-# end-to-end (the sandbox in which the initial implementation lands has
-# no network access to cdn.pyke.io, where ort-sys downloads its runtime
-# binary). Flip to `default = ["fastembed"]` after the first green CI
-# run. Tracking note in CLAUDE.md.
+# out cleanly. `fastembed` is pinned to 5.7.x — the latest line that
+# uses ort = "=2.0.0-rc.10", matching the workspace pin enforced by
+# our vendored silero/whisper/piper. fastembed 5.9+ moved to rc.11/
+# rc.12 and would force a coordinated bump of the speech vendor
+# patches; until that lands, `--features embedding,speech` resolves
+# cleanly because both paths agree on rc.10. Default-off pending CI
+# validation that the cdn.pyke.io ort-runtime download path works on
+# the project's CI runners; the user's stated preference is default-on
+# once that's proven.
 default = []
 fastembed = ["dep:fastembed", "dep:dirs"]
 ollama = ["dep:reqwest", "dep:serde", "dep:serde_json"]
@@ -35,21 +27,18 @@ tokio.workspace = true
 tracing.workspace = true
 thiserror.workspace = true
 
-# `fastembed` real-model backend (gated). 5.13.x pulls ort 2.0.0-rc.12
-# and exposes BGE-M3 (the project's default multilingual model) plus
-# bge-small-en-v1.5 and friends. The `embed` API is blocking; we wrap
-# calls in `tokio::task::spawn_blocking`. The `rt` tokio feature is
-# already on via the workspace's `full`.
-#
-# Default-features are turned off so we control the TLS backend and
-# ONNX-Runtime download flavour. `ort-download-binaries-rustls-tls`
-# matches the rustls path we already use in `reqwest`; `hf-hub-rustls-tls`
-# does the same for the model downloader.
-# Pinned to ~5.7 because that line uses `ort = "=2.0.0-rc.10"`, which
-# matches the workspace pin enforced by our vendored silero/whisper/piper
-# patches. fastembed 5.9+ moved to rc.11/rc.12 and is incompatible until
-# we bump those vendor patches. v5.7 is the latest fastembed-rs that
-# both has BGE-M3 support AND uses ort rc.10.
+# `fastembed` real-model backend (gated). Pinned to =5.7.0 — the
+# latest line that uses ort = "=2.0.0-rc.10", matching the workspace
+# pin enforced by our vendored silero/whisper/piper. fastembed 5.9+
+# moved to rc.11/rc.12 and would break the speech build until those
+# vendor patches are bumped in lockstep. v5.7 still exposes BGE-M3
+# (the project's default multilingual model) and the BGE-small/E5
+# variants. The `embed` API is blocking; we wrap calls in
+# `tokio::task::spawn_blocking` (see fastembed_backend.rs).
+# Default-features off so we control the TLS backend and the ONNX-
+# Runtime download flavour: `ort-download-binaries` pulls the prebuilt
+# ort binary from cdn.pyke.io, `hf-hub-rustls-tls` keeps the model
+# downloader on the rustls path the rest of the workspace uses.
 fastembed = { version = "=5.7.0", default-features = false, features = [
     "ort-download-binaries",
     "hf-hub-rustls-tls",

@@ -333,15 +333,26 @@ impl SqliteKnowledgeBase {
     /// two ranked lists via Reciprocal Rank Fusion, and returns the top
     /// `final_top_k` passages by combined score.
     ///
-    /// Embedder model must match what's already in the DB (validated
-    /// at this call). A `min_score` floor and a `source_filter` allow-
-    /// list apply post-fusion.
+    /// Embedder model identity is validated up-front: a registered
+    /// `model_id` with a mismatching `dim` is a hard error (matches the
+    /// insert-side invariant). A `model_id` not registered in this DB
+    /// but with stored vectors under a different model logs a warning
+    /// and returns an empty vec leg (effective BM25-only fallback) —
+    /// silent degradation would invisibly hurt retrieval. A `min_score`
+    /// floor and a `source_filter` allow-list apply post-fusion.
     pub async fn retrieve_hybrid(
         &self,
         query: &str,
         embedder: &dyn Embedder,
         params: &HybridParams,
     ) -> Result<Vec<Passage>> {
+        // 0. Validate embedder identity against what's already in the DB.
+        validate_embedder_against_db(
+            &self.conn.lock().unwrap(),
+            embedder.model_id(),
+            embedder.dim(),
+        )?;
+
         // 1. BM25 leg via the existing path.
         let bm25 = self
             .retrieve(
@@ -463,6 +474,51 @@ impl SqliteKnowledgeBase {
         scored.truncate(top_k);
         Ok(scored.into_iter().map(|(_, p)| p).collect())
     }
+}
+
+/// Read-side embedder validation. Symmetric to `upsert_embedding_model`
+/// but read-only:
+/// - registered name + matching dim → Ok(())
+/// - registered name + mismatching dim → hard error (would silently
+///   return zero hits otherwise because cosine on different-dim vectors
+///   is meaningless and `knn_scan` skips dim mismatches)
+/// - unregistered name + zero stored embeddings → Ok(()) (fresh DB or
+///   pure BM25 corpus; vec leg will simply be empty)
+/// - unregistered name + non-zero stored embeddings → tracing::warn but
+///   Ok(()) (caller will get an empty vec leg, effective BM25-only;
+///   warning surfaces the silent-degradation risk to the user)
+fn validate_embedder_against_db(conn: &Connection, name: &str, dim: usize) -> Result<()> {
+    let existing: Option<i64> = conn
+        .query_row(
+            "SELECT dim FROM embedding_models WHERE name = ?1",
+            rusqlite::params![name],
+            |r| r.get(0),
+        )
+        .ok();
+    if let Some(existing_dim) = existing {
+        if existing_dim as usize != dim {
+            return Err(PrimerError::Knowledge(format!(
+                "embedder model {name} registered with dim {existing_dim}, now reports dim {dim}; \
+                 re-embed with `primer-kb-load --reembed --force` or restore the original model"
+            )));
+        }
+        return Ok(());
+    }
+    let other_count: i64 = conn
+        .query_row(
+            "SELECT COUNT(*) FROM embedding_models WHERE name != ?1",
+            rusqlite::params![name],
+            |r| r.get(0),
+        )
+        .unwrap_or(0);
+    if other_count > 0 {
+        tracing::warn!(
+            "embedder {name} (dim {dim}) is not registered in this knowledge DB but \
+             {other_count} other model(s) are; vector leg will return empty until \
+             you re-embed (`primer-kb-load --reembed`)"
+        );
+    }
+    Ok(())
 }
 
 fn upsert_embedding_model(conn: &Connection, name: &str, dim: usize) -> Result<i64> {
@@ -1392,6 +1448,30 @@ mod tests {
         assert!(
             matches!(result, Err(PrimerError::Knowledge(_))),
             "dim mismatch must be a hard error, got {result:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn retrieve_hybrid_dim_mismatch_under_registered_name_is_hard_error() {
+        // Set up a DB with an embedding under model "stub-fxhash-v1" / dim 16.
+        use primer_embedding::StubEmbedder;
+        let db = tmp_db();
+        let kb = SqliteKnowledgeBase::open_for_locale(db.path(), Locale::English).unwrap();
+        let stub_a = StubEmbedder::with_dim(16);
+        kb.insert_passage_with_embedding("p1", "src", "first", &stub_a)
+            .await
+            .unwrap();
+
+        // Now ask retrieve_hybrid with the same name but a different dim.
+        // Validation must fire before the embed call so this is a hard
+        // error rather than a silent BM25 fallback.
+        let stub_b = StubEmbedder::with_dim(384);
+        let result = kb
+            .retrieve_hybrid("first", &stub_b, &HybridParams::default())
+            .await;
+        assert!(
+            matches!(result, Err(PrimerError::Knowledge(_))),
+            "hybrid retrieve dim mismatch must hard-error, got {result:?}"
         );
     }
 

@@ -174,13 +174,16 @@ struct Cli {
     #[arg(long, value_name = "N", value_parser = clap::value_parser!(u64).range(1..))]
     vocab_max_per_prompt: Option<u64>,
 
-    /// Embedder backend for hybrid retrieval. `stub` uses the in-process
-    /// deterministic hash embedder (no model download, no network — the
-    /// safe default); `fastembed` uses the BGE-M3 dense embedding model
-    /// via `fastembed-rs` (~570 MB on first run; requires the `embedding`
-    /// cargo feature); `ollama` uses Ollama's `/api/embeddings` (requires
-    /// the `ollama-embedding` cargo feature and Ollama running locally).
-    #[arg(long, value_name = "BACKEND", default_value = "stub")]
+    /// Embedder backend for hybrid retrieval. `none` (the default)
+    /// disables hybrid retrieval and uses BM25-only — the same behaviour
+    /// as before this flag existed; `stub` uses the in-process
+    /// deterministic hash embedder (no semantic value, only useful for
+    /// testing the hybrid pipeline end-to-end); `fastembed` uses the
+    /// BGE-M3 dense embedding model via `fastembed-rs` (~570 MB on first
+    /// run; requires the `embedding` cargo feature); `ollama` uses
+    /// Ollama's `/api/embeddings` (requires the `ollama-embedding`
+    /// cargo feature and Ollama running locally).
+    #[arg(long, value_name = "BACKEND", default_value = "none")]
     embedder_backend: String,
 
     /// Model name for the embedder. With `--embedder-backend fastembed`,
@@ -620,7 +623,7 @@ fn build_fastembed_embedder(
 ) -> Option<Arc<dyn primer_core::embedder::Embedder>> {
     eprintln!(
         "Error: --embedder-backend fastembed requires the `embedding` cargo feature. \
-         Build with `cargo run --features primer-cli/embedding -- ...` (or use --embedder-backend stub)."
+         Build with `cargo run --features primer-cli/embedding -- ...` (or use --embedder-backend none)."
     );
     std::process::exit(1);
 }
@@ -1174,19 +1177,22 @@ async fn async_main() -> anyhow::Result<()> {
 
     // ─── Embedder ────────────────────────────────────────────────────
     //
-    // `stub` is the safe default: deterministic, no download, no network.
-    // `fastembed` requires the `embedding` cargo feature; if that feature
-    // wasn't compiled in, an explicit `--embedder-backend fastembed` flag
-    // is rejected loudly so the user knows to pass `--features embedding`.
-    // `ollama` likewise requires `ollama-embedding`.
+    // `none` (the default) skips embedder construction entirely so the
+    // dialogue manager runs BM25-only retrieval — the pre-Phase-0.2.5
+    // behaviour. `stub` constructs a deterministic hash embedder useful
+    // only for testing the hybrid pipeline; with no semantic signal it
+    // dilutes BM25 with noise, so it is not the production default.
+    // `fastembed` and `ollama` need their respective cargo features;
+    // if missing, the dispatch helpers exit with a clear error.
     //
-    // Construction failures fall back to `StubEmbedder` with a `tracing::warn!`
-    // — the conversation still works on BM25-only retrieval, which is
-    // strictly better than refusing to start.
+    // Real-backend construction failures fall back to BM25-only with a
+    // tracing warn — the conversation still works, which is strictly
+    // better than refusing to start.
     let embedder: Option<Arc<dyn primer_core::embedder::Embedder>> = match cli
         .embedder_backend
         .as_str()
     {
+        "none" => None,
         "stub" => Some(Arc::new(primer_embedding::StubEmbedder::new()) as _),
         "fastembed" => build_fastembed_embedder(cli.embedder_model.as_deref()),
         "ollama" => {
@@ -1198,7 +1204,7 @@ async fn async_main() -> anyhow::Result<()> {
         }
         other => {
             eprintln!(
-                "Error: unknown --embedder-backend {other:?}; expected one of stub, fastembed, ollama"
+                "Error: unknown --embedder-backend {other:?}; expected one of none, stub, fastembed, ollama"
             );
             std::process::exit(1);
         }

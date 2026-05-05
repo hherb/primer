@@ -43,13 +43,12 @@ ringbuf.workspace = true
 default = []
 
 # Hybrid retrieval via the fastembed-rs (BGE-M3) backend.
-# **Temporarily not in `default`** — see primer-embedding's Cargo.toml for the
-# rationale (ort 2.0.0-rc.10 vs rc.12 vendor pin, plus first-build CI
-# validation). User preference is for this to ship default-on; flip
-# `default = ["embedding"]` once CI proves out the build.
-# Conflicts with `speech` today: the `speech` features pull ort=rc.10
-# via vendored silero/whisper/piper, while fastembed pulls rc.12.
-# Workaround: `cargo run --no-default-features --features speech`.
+# Default-off pending CI validation of the cdn.pyke.io ort-runtime
+# download path; flip to `default = ["embedding"]` once that's proven.
+# `embedding` and `speech` build cleanly together because both paths
+# resolve to ort = "=2.0.0-rc.10" (fastembed pinned to =5.7.0 here,
+# which is the last line that targets rc.10). See primer-embedding's
+# Cargo.toml for the version-pin rationale.
 embedding = ["primer-embedding/fastembed"]
 
 # Lightweight Ollama-backed embedder. Useful for prototyping; not the
