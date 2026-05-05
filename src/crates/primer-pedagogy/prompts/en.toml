@@ -129,6 +129,8 @@ explored today (not what was 'learned' — what was *explored*). \
 Leave the child with one question to think about until next time.\
 """
 
+suggest_break = "Make a calm, brief acknowledgement that you've been together a while, and offer them a pause — phrase it as their choice, not a directive. They can keep going if they want to."
+
 # --- ENGAGEMENT-STATE NOTES ---
 # Appended to the system prompt only when the learner is in the
 # corresponding state. No placeholders allowed.

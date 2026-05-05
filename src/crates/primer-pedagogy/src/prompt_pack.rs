@@ -441,6 +441,7 @@ const ALL_INTENTS: &[PedagogicalIntent] = &[
     PedagogicalIntent::DirectAnswer,
     PedagogicalIntent::AnswerThenPivot,
     PedagogicalIntent::SessionClose,
+    PedagogicalIntent::SuggestBreak,
 ];
 
 fn intent_key(intent: PedagogicalIntent) -> &'static str {
@@ -453,6 +454,7 @@ fn intent_key(intent: PedagogicalIntent) -> &'static str {
         PedagogicalIntent::DirectAnswer => "direct_answer",
         PedagogicalIntent::AnswerThenPivot => "answer_then_pivot",
         PedagogicalIntent::SessionClose => "session_close",
+        PedagogicalIntent::SuggestBreak => "suggest_break",
     }
 }
 

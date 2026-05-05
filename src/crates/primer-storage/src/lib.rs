@@ -1455,7 +1455,7 @@ mod tests {
         let intent_count: i64 = conn
             .query_row("SELECT COUNT(*) FROM pedagogical_intents", [], |r| r.get(0))
             .unwrap();
-        assert_eq!(intent_count, 8);
+        assert_eq!(intent_count, 9);
 
         // Spot-check a specific row.
         let name: String = conn
@@ -1619,7 +1619,7 @@ mod tests {
         let count: i64 = conn
             .query_row("SELECT COUNT(*) FROM pedagogical_intents", [], |r| r.get(0))
             .unwrap();
-        assert_eq!(count, 8, "missing rows should have been seeded");
+        assert_eq!(count, 9, "missing rows should have been seeded");
         drop(conn);
         drop(store);
         let _ = std::fs::remove_file(&tmp);
@@ -1867,6 +1867,37 @@ mod tests {
         }
         let expected: Vec<PedagogicalIntent> = PedagogicalIntent::ALL.to_vec();
         assert_eq!(variants_seen, expected);
+    }
+
+    #[tokio::test]
+    async fn round_trip_turn_with_intent_suggest_break() {
+        // Pinned single-variant test for the SuggestBreak intent.
+        // Catches a future regression where the catalog id mapping
+        // drifts away from the variant order.
+        use primer_core::conversation::{PedagogicalIntent, Speaker};
+
+        let path = tempfile_path();
+        let store =
+            SqliteSessionStore::open_for_locale(&path, primer_core::i18n::Locale::default())
+                .unwrap();
+
+        let mut session = Session::new(Uuid::new_v4());
+        session.add_turn(Turn {
+            speaker: Speaker::Primer,
+            text: "Want to take a break?".into(),
+            timestamp: Utc::now(),
+            intent: Some(PedagogicalIntent::SuggestBreak),
+            concepts: vec![],
+        });
+
+        store.save_session(&session).await.unwrap();
+        let loaded = store.load_session(session.id).await.unwrap().unwrap();
+
+        assert_eq!(loaded.turns.len(), 1);
+        assert_eq!(
+            loaded.turns[0].intent,
+            Some(PedagogicalIntent::SuggestBreak),
+        );
     }
 
     #[tokio::test]

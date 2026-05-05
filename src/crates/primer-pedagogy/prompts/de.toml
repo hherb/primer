@@ -143,6 +143,8 @@ was heute *erforscht* wurde (nicht was 'gelernt' wurde — was \
 zum nächsten Mal.\
 """
 
+suggest_break = "Mach eine ruhige, kurze Bemerkung dazu, dass ihr schon eine Weile zusammen seid, und biete eine Pause an — als Vorschlag, nicht als Anweisung. Sie können weitermachen, wenn sie möchten."
+
 # --- ENGAGEMENT-HINWEISE ---
 # Werden nur an den Systemprompt angefügt, wenn das Kind im
 # entsprechenden Zustand ist. Keine Platzhalter erlaubt.
