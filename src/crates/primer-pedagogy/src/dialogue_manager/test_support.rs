@@ -326,3 +326,178 @@ pub(super) fn make_test_session_with_turns(n: usize, learner_id: Uuid) -> Sessio
     }
     session
 }
+
+/// Build a `(LearnerModel, Arc<CountingLearnerStore>)` pair for the
+/// per-turn save dirty-flag tests. Isolated here so multiple test
+/// files can drive the same setup.
+pub(super) fn dirty_flag_test_setup(
+    starting: EngagementState,
+) -> (LearnerModel, Arc<CountingLearnerStore>) {
+    let mut learner = test_learner();
+    learner.current_engagement = starting;
+    let store = Arc::new(CountingLearnerStore::new());
+    (learner, store)
+}
+
+// ─── RepeatingBackend ────────────────────────────────────────────────
+
+/// Backend that serves the same single-chunk response on every
+/// `generate_stream` call. Used by multi-turn tests where the exact
+/// content of the Primer response does not matter.
+pub(super) struct RepeatingBackend;
+
+#[async_trait]
+impl InferenceBackend for RepeatingBackend {
+    fn name(&self) -> &str {
+        "repeating-test"
+    }
+    async fn is_available(&self) -> bool {
+        true
+    }
+    async fn generate_stream(
+        &self,
+        _prompt: &Prompt,
+        _params: &GenerationParams,
+    ) -> Result<TokenStream> {
+        let items: Vec<Result<TokenChunk>> = vec![Ok(chunk("ok.", false)), Ok(chunk("", true))];
+        Ok(Box::pin(stream::iter(items)))
+    }
+    async fn summarize(&self, turns: &[Turn], _target_chars: usize) -> Result<String> {
+        Ok(format!(
+            "[repeating-backend summary covering {} turns]",
+            turns.len()
+        ))
+    }
+}
+
+// ─── ConceptCapturingStore ───────────────────────────────────────────
+
+/// Session-store spy that captures `update_turn_concepts`,
+/// `update_exchange_concepts`, and `save_comprehensions` calls so
+/// extractor / comprehension tests can assert on what landed.
+pub(super) struct ConceptCapturingStore {
+    inner: CountingStore,
+    captures: Mutex<Vec<(usize, Vec<String>)>>,
+    comprehensions: Mutex<
+        Vec<(
+            usize,
+            Vec<primer_core::comprehension::ComprehensionAssessment>,
+            String,
+        )>,
+    >,
+}
+
+impl ConceptCapturingStore {
+    pub(super) fn new() -> Self {
+        Self {
+            inner: CountingStore::new(),
+            captures: Mutex::new(vec![]),
+            comprehensions: Mutex::new(vec![]),
+        }
+    }
+    pub(super) fn captured(&self) -> Vec<(usize, Vec<String>)> {
+        self.captures.lock().unwrap().clone()
+    }
+    pub(super) fn captured_comprehensions(
+        &self,
+    ) -> Vec<(
+        usize,
+        Vec<primer_core::comprehension::ComprehensionAssessment>,
+        String,
+    )> {
+        self.comprehensions.lock().unwrap().clone()
+    }
+}
+
+#[async_trait]
+impl primer_core::storage::SessionStore for ConceptCapturingStore {
+    async fn save_session(&self, session: &Session) -> Result<()> {
+        self.inner.save_session(session).await
+    }
+    async fn load_session(&self, id: uuid::Uuid) -> Result<Option<Session>> {
+        self.inner.load_session(id).await
+    }
+    async fn retrieve_session_turns(
+        &self,
+        session_id: uuid::Uuid,
+        query: &str,
+        k: usize,
+        exclude_indices_at_or_after: usize,
+    ) -> Result<Vec<Turn>> {
+        self.inner
+            .retrieve_session_turns(session_id, query, k, exclude_indices_at_or_after)
+            .await
+    }
+    async fn save_classification(
+        &self,
+        session_id: primer_core::conversation::SessionId,
+        turn_index: usize,
+        assessment: &primer_core::classifier::EngagementAssessment,
+        classifier_identifier: &str,
+    ) -> Result<()> {
+        self.inner
+            .save_classification(session_id, turn_index, assessment, classifier_identifier)
+            .await
+    }
+    async fn load_recent_assessments(
+        &self,
+        session_id: primer_core::conversation::SessionId,
+        classifier_identifier: &str,
+        k: usize,
+    ) -> Result<Vec<primer_core::classifier::EngagementAssessment>> {
+        self.inner
+            .load_recent_assessments(session_id, classifier_identifier, k)
+            .await
+    }
+    async fn most_recent_session_learner_id(&self) -> Result<Option<uuid::Uuid>> {
+        self.inner.most_recent_session_learner_id().await
+    }
+    async fn update_turn_concepts(
+        &self,
+        _session_id: primer_core::conversation::SessionId,
+        turn_index: usize,
+        concepts: &[String],
+    ) -> Result<()> {
+        self.captures
+            .lock()
+            .unwrap()
+            .push((turn_index, concepts.to_vec()));
+        Ok(())
+    }
+
+    async fn update_exchange_concepts(
+        &self,
+        _session_id: primer_core::conversation::SessionId,
+        child_turn_index: usize,
+        child_concepts: &[String],
+        primer_turn_index: usize,
+        primer_concepts: &[String],
+    ) -> Result<()> {
+        // Mirror the storage impl: push only the speaker(s) that
+        // actually have concepts, so tests that scripted an
+        // empty-on-one-side extraction don't see a phantom capture.
+        let mut captures = self.captures.lock().unwrap();
+        if !child_concepts.is_empty() {
+            captures.push((child_turn_index, child_concepts.to_vec()));
+        }
+        if !primer_concepts.is_empty() {
+            captures.push((primer_turn_index, primer_concepts.to_vec()));
+        }
+        Ok(())
+    }
+
+    async fn save_comprehensions(
+        &self,
+        _session_id: primer_core::conversation::SessionId,
+        primer_turn_index: usize,
+        assessments: &[primer_core::comprehension::ComprehensionAssessment],
+        classifier_identifier: &str,
+    ) -> Result<()> {
+        self.comprehensions.lock().unwrap().push((
+            primer_turn_index,
+            assessments.to_vec(),
+            classifier_identifier.to_string(),
+        ));
+        Ok(())
+    }
+}
