@@ -1,0 +1,56 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+# Cancel in-flight runs on the same branch when a new push lands.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  CARGO_TERM_COLOR: always
+  RUSTFLAGS: -D warnings
+
+jobs:
+  # Default-feature build + test on Linux. The full speech-feature build
+  # needs ONNX Runtime + espeak-ng and significantly more time; left to a
+  # later workflow once the speech path stabilises.
+  test:
+    name: cargo test (default features)
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: src
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust toolchain
+        # rust-toolchain.toml lives at src/rust-toolchain.toml — pinned
+        # to 1.87 + rustfmt + clippy. The action picks it up automatically
+        # when invoked from the workspace root.
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+          # Pinning the channel here would override the toolchain file;
+          # leave it on `stable` and let rustup honor src/rust-toolchain.toml.
+
+      - name: Cache cargo registry + build
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: src
+
+      - name: cargo fmt --check
+        run: cargo fmt --all -- --check
+
+      - name: cargo clippy
+        run: cargo clippy --workspace --all-targets
+
+      - name: cargo test
+        # Includes the retrieval-quality integration test in
+        # primer-kb-load/tests/retrieval_quality.rs, which loads the
+        # in-repo seed corpus and asserts canonical child queries
+        # surface the right passages.
+        run: cargo test --workspace --no-fail-fast

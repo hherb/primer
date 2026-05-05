@@ -115,6 +115,11 @@ impl SqliteSessionStore {
         // the Leitner-box spaced-repetition vocabulary feature.
         schema::apply_v7_migrations(&conn)?;
 
+        // v8 migrations: idempotent on every open. Adds
+        // embedding_models + embeddings_turns for hybrid long-term-
+        // memory retrieval (Phase 0.2.5).
+        schema::apply_v8_migrations(&conn)?;
+
         if existing_version != schema::USER_VERSION {
             conn.execute_batch(&format!("PRAGMA user_version = {};", schema::USER_VERSION))
                 .map_err(|e| PrimerError::Storage(format!("set user_version failed: {e}")))?;
@@ -884,6 +889,303 @@ impl primer_core::storage::SessionStore for SqliteSessionStore {
             .map_err(|e| PrimerError::Storage(format!("save_comprehensions commit: {e}")))?;
         Ok(())
     }
+
+    async fn save_turn_embedding(
+        &self,
+        session_id: primer_core::conversation::SessionId,
+        turn_index: usize,
+        model_id: &str,
+        dim: usize,
+        vec: &[f32],
+    ) -> Result<()> {
+        if vec.is_empty() || dim == 0 {
+            return Err(PrimerError::Storage(
+                "save_turn_embedding: empty vec or zero dim".into(),
+            ));
+        }
+        if vec.len() != dim {
+            return Err(PrimerError::Storage(format!(
+                "save_turn_embedding: vec len {} != declared dim {dim}",
+                vec.len()
+            )));
+        }
+        let conn = self.conn.lock().unwrap();
+        let model_row = upsert_storage_embedding_model(&conn, model_id, dim)?;
+        let turn_id: i64 = conn
+            .query_row(
+                "SELECT id FROM turns WHERE session_id = ?1 AND turn_index = ?2",
+                rusqlite::params![session_id.to_string(), turn_index as i64],
+                |r| r.get(0),
+            )
+            .map_err(|e| {
+                PrimerError::Storage(format!(
+                    "save_turn_embedding: lookup turn ({session_id}, {turn_index}): {e}"
+                ))
+            })?;
+        let blob = vec_to_blob(vec);
+        conn.execute(
+            "INSERT INTO embeddings_turns(turn_id, model_id, vec) VALUES (?1, ?2, ?3)
+             ON CONFLICT(turn_id) DO UPDATE SET
+                model_id = excluded.model_id,
+                vec      = excluded.vec",
+            rusqlite::params![turn_id, model_row, blob],
+        )
+        .map_err(|e| PrimerError::Storage(format!("save_turn_embedding: upsert: {e}")))?;
+        Ok(())
+    }
+
+    async fn retrieve_session_turns_hybrid(
+        &self,
+        session_id: Uuid,
+        query: &str,
+        embedder: &dyn primer_core::embedder::Embedder,
+        params: &primer_core::knowledge::HybridParams,
+        exclude_indices_at_or_after: usize,
+    ) -> Result<Vec<primer_core::conversation::Turn>> {
+        // 0. Validate embedder identity against the per-DB registry.
+        validate_storage_embedder(
+            &self.conn.lock().unwrap(),
+            embedder.model_id(),
+            embedder.dim(),
+        )?;
+
+        // 1. BM25 leg via the existing path.
+        let bm25 = self
+            .retrieve_session_turns(
+                session_id,
+                query,
+                params.bm25_top_k,
+                exclude_indices_at_or_after,
+            )
+            .await?;
+
+        // 2. Vector leg.
+        let q_vec = embedder
+            .embed(&[query])
+            .await?
+            .into_iter()
+            .next()
+            .ok_or_else(|| {
+                PrimerError::Storage("retrieve_session_turns_hybrid: empty embed".into())
+            })?;
+        if q_vec.len() != embedder.dim() {
+            return Err(PrimerError::Storage(format!(
+                "retrieve_session_turns_hybrid: vec len {} != dim {}",
+                q_vec.len(),
+                embedder.dim()
+            )));
+        }
+        let vec_hits = self.knn_scan_turns(
+            session_id,
+            &q_vec,
+            embedder.model_id(),
+            params.vector_top_k,
+            exclude_indices_at_or_after,
+        )?;
+
+        // 3. RRF over (speaker, text, timestamp) signature — turns
+        //    don't have a natural string id, so we construct a stable
+        //    composite key using `(turn_index_string, text-hash)`. The
+        //    underlying retrieval methods both go through the same
+        //    `(session_id, turn_index)` PK, but we don't have access
+        //    to turn_index from the BM25 path's `Turn` shape. Easiest
+        //    fix: use turn `text` as the fusion key — guaranteed unique
+        //    within a single session because turn texts are user input
+        //    and primer responses, never empty, and the chance of a
+        //    collision in practice is negligible. Belt-and-braces: also
+        //    include the timestamp.
+        use primer_core::conversation::Turn;
+        let key = |t: &Turn| format!("{}::{}", t.timestamp.timestamp_micros(), t.text);
+        let bm25_keys: Vec<String> = bm25.iter().map(key).collect();
+        let vec_keys: Vec<String> = vec_hits.iter().map(key).collect();
+        let fused =
+            primer_core::rrf::fuse(&[bm25_keys.as_slice(), vec_keys.as_slice()], params.rrf_k);
+
+        let mut by_key: std::collections::HashMap<String, Turn> = std::collections::HashMap::new();
+        for t in bm25.into_iter().chain(vec_hits.into_iter()) {
+            by_key.entry(key(&t)).or_insert(t);
+        }
+        let mut out = Vec::with_capacity(params.final_top_k);
+        for (k, _score) in fused {
+            if let Some(t) = by_key.remove(&k) {
+                out.push(t);
+                if out.len() >= params.final_top_k {
+                    break;
+                }
+            }
+        }
+        Ok(out)
+    }
+}
+
+impl SqliteSessionStore {
+    /// In-Rust cosine top-K over embeddings stored for this session,
+    /// filtered by the embedder's model id and the same
+    /// `exclude_indices_at_or_after` boundary the BM25 path uses.
+    fn knn_scan_turns(
+        &self,
+        session_id: Uuid,
+        query: &[f32],
+        model_id: &str,
+        top_k: usize,
+        exclude_indices_at_or_after: usize,
+    ) -> Result<Vec<primer_core::conversation::Turn>> {
+        use primer_core::conversation::Turn;
+        let conn = self.conn.lock().unwrap();
+        let mut stmt = conn
+            .prepare(
+                "SELECT t.speaker_id, t.text, t.timestamp, t.intent_id, e.vec
+                 FROM embeddings_turns e
+                 JOIN turns t ON t.id = e.turn_id
+                 JOIN embedding_models m ON m.id = e.model_id
+                 WHERE m.name = ?1
+                   AND t.session_id = ?2
+                   AND t.turn_index < ?3",
+            )
+            .map_err(|e| PrimerError::Storage(format!("prepare knn_scan_turns: {e}")))?;
+        let rows = stmt
+            .query_map(
+                rusqlite::params![
+                    model_id,
+                    session_id.to_string(),
+                    exclude_indices_at_or_after as i64,
+                ],
+                |row| {
+                    Ok((
+                        row.get::<_, i64>(0)?,
+                        row.get::<_, String>(1)?,
+                        row.get::<_, String>(2)?,
+                        row.get::<_, Option<i64>>(3)?,
+                        row.get::<_, Vec<u8>>(4)?,
+                    ))
+                },
+            )
+            .map_err(|e| PrimerError::Storage(format!("query knn_scan_turns: {e}")))?;
+
+        let mut scored: Vec<(f64, Turn)> = Vec::new();
+        for r in rows {
+            let (speaker_id, text, ts, intent_id, blob) =
+                r.map_err(|e| PrimerError::Storage(format!("read knn row: {e}")))?;
+            let v = blob_to_vec(&blob)?;
+            if v.len() != query.len() {
+                continue;
+            }
+            let sim = cosine(query, &v) as f64;
+            let speaker = catalog::speaker_from_id(speaker_id)
+                .ok_or_else(|| PrimerError::Storage(format!("unknown speaker_id {speaker_id}")))?;
+            let intent = match intent_id {
+                None => None,
+                Some(id) => Some(
+                    catalog::intent_from_id(id)
+                        .ok_or_else(|| PrimerError::Storage(format!("unknown intent_id {id}")))?,
+                ),
+            };
+            let timestamp = parse_rfc3339(&ts, "turn timestamp")?;
+            scored.push((
+                sim,
+                Turn {
+                    speaker,
+                    text,
+                    timestamp,
+                    intent,
+                    concepts: vec![],
+                },
+            ));
+        }
+        scored.sort_by(|a, b| b.0.partial_cmp(&a.0).unwrap_or(std::cmp::Ordering::Equal));
+        scored.truncate(top_k);
+        Ok(scored.into_iter().map(|(_, t)| t).collect())
+    }
+}
+
+/// Read-side counterpart to `upsert_storage_embedding_model`. Same
+/// invariant on dim mismatch (hard error), and surfaces a tracing
+/// warning when the embedder isn't registered yet but other models
+/// already wrote vectors to this DB — that combination silently
+/// degrades the vector leg to empty, and we want the user to see why.
+fn validate_storage_embedder(conn: &Connection, name: &str, dim: usize) -> Result<()> {
+    let existing: Option<i64> = conn
+        .query_row(
+            "SELECT dim FROM embedding_models WHERE name = ?1",
+            rusqlite::params![name],
+            |r| r.get(0),
+        )
+        .ok();
+    if let Some(existing_dim) = existing {
+        if existing_dim as usize != dim {
+            return Err(PrimerError::Storage(format!(
+                "embedder model {name} registered with dim {existing_dim}, now reports dim {dim}; \
+                 the original embedder is required to read existing vectors"
+            )));
+        }
+        return Ok(());
+    }
+    let other_count: i64 = conn
+        .query_row(
+            "SELECT COUNT(*) FROM embedding_models WHERE name != ?1",
+            rusqlite::params![name],
+            |r| r.get(0),
+        )
+        .unwrap_or(0);
+    if other_count > 0 {
+        tracing::warn!(
+            "embedder {name} (dim {dim}) is not registered in this session DB but \
+             {other_count} other model(s) are; vector leg will return empty until \
+             turns are re-embedded"
+        );
+    }
+    Ok(())
+}
+
+fn upsert_storage_embedding_model(conn: &Connection, name: &str, dim: usize) -> Result<i64> {
+    let existing: Option<(i64, i64)> = conn
+        .query_row(
+            "SELECT id, dim FROM embedding_models WHERE name = ?1",
+            rusqlite::params![name],
+            |r| Ok((r.get(0)?, r.get(1)?)),
+        )
+        .ok();
+    if let Some((id, existing_dim)) = existing {
+        if existing_dim as usize != dim {
+            return Err(PrimerError::Storage(format!(
+                "embedding model {name} previously registered with dim {existing_dim}, now reports dim {dim}"
+            )));
+        }
+        return Ok(id);
+    }
+    conn.execute(
+        "INSERT INTO embedding_models(name, dim) VALUES (?1, ?2)",
+        rusqlite::params![name, dim as i64],
+    )
+    .map_err(|e| PrimerError::Storage(format!("insert embedding_model: {e}")))?;
+    Ok(conn.last_insert_rowid())
+}
+
+fn vec_to_blob(v: &[f32]) -> Vec<u8> {
+    let mut out = Vec::with_capacity(v.len() * 4);
+    for x in v {
+        out.extend_from_slice(&x.to_le_bytes());
+    }
+    out
+}
+
+fn blob_to_vec(blob: &[u8]) -> Result<Vec<f32>> {
+    if blob.len() % 4 != 0 {
+        return Err(PrimerError::Storage(format!(
+            "embedding blob length {} not a multiple of 4",
+            blob.len()
+        )));
+    }
+    let mut out = Vec::with_capacity(blob.len() / 4);
+    for chunk in blob.chunks_exact(4) {
+        let arr: [u8; 4] = chunk.try_into().unwrap();
+        out.push(f32::from_le_bytes(arr));
+    }
+    Ok(out)
+}
+
+fn cosine(a: &[f32], b: &[f32]) -> f32 {
+    a.iter().zip(b.iter()).map(|(x, y)| x * y).sum()
 }
 
 #[async_trait]
@@ -1386,6 +1688,8 @@ mod tests {
             "learner_concepts",
             "comprehension_classifiers",
             "turn_comprehensions",
+            "embedding_models",
+            "embeddings_turns",
         ] {
             let count: i64 = conn
                 .query_row(
@@ -2524,8 +2828,8 @@ mod tests {
     }
 
     #[test]
-    fn user_version_is_seven() {
-        assert_eq!(schema::USER_VERSION, 7);
+    fn user_version_is_eight() {
+        assert_eq!(schema::USER_VERSION, 8);
     }
 
     // ─── save_classification / load_recent_assessments ───────────────
@@ -3423,6 +3727,146 @@ mod tests {
                 "save_comprehensions must tag with store locale: {tags:?}"
             );
         }
+    }
+
+    // ─── embedding storage + hybrid retrieval (schema v8) ────────────
+
+    #[tokio::test]
+    async fn save_turn_embedding_round_trip() {
+        use primer_core::conversation::Speaker;
+        use primer_core::embedder::Embedder;
+        use primer_embedding::StubEmbedder;
+        let store = open_memory();
+        let mut session = Session::new(Uuid::new_v4());
+        session.add_turn(make_turn(Speaker::Child, "hello world", None, vec![]));
+        store.save_session(&session).await.unwrap();
+
+        let stub = StubEmbedder::with_dim(16);
+        let v = stub.embed(&["hello world"]).await.unwrap().remove(0);
+        store
+            .save_turn_embedding(session.id, 0, stub.model_id(), stub.dim(), &v)
+            .await
+            .unwrap();
+
+        let conn = store.conn.lock().unwrap();
+        let n: i64 = conn
+            .query_row("SELECT COUNT(*) FROM embeddings_turns", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(n, 1);
+    }
+
+    #[tokio::test]
+    async fn save_turn_embedding_overwrites_on_second_call() {
+        use primer_core::conversation::Speaker;
+        use primer_core::embedder::Embedder;
+        use primer_embedding::StubEmbedder;
+        let store = open_memory();
+        let mut session = Session::new(Uuid::new_v4());
+        session.add_turn(make_turn(Speaker::Child, "hello", None, vec![]));
+        store.save_session(&session).await.unwrap();
+
+        let stub = StubEmbedder::with_dim(16);
+        let v1 = stub.embed(&["hello"]).await.unwrap().remove(0);
+        let v2 = stub.embed(&["different text"]).await.unwrap().remove(0);
+        store
+            .save_turn_embedding(session.id, 0, stub.model_id(), stub.dim(), &v1)
+            .await
+            .unwrap();
+        store
+            .save_turn_embedding(session.id, 0, stub.model_id(), stub.dim(), &v2)
+            .await
+            .unwrap();
+
+        let conn = store.conn.lock().unwrap();
+        let n: i64 = conn
+            .query_row("SELECT COUNT(*) FROM embeddings_turns", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(n, 1, "second save must upsert, not duplicate");
+    }
+
+    #[tokio::test]
+    async fn save_turn_embedding_rejects_dim_mismatch() {
+        use primer_core::conversation::Speaker;
+        use primer_core::embedder::Embedder;
+        use primer_embedding::StubEmbedder;
+        let store = open_memory();
+        let mut session = Session::new(Uuid::new_v4());
+        session.add_turn(make_turn(Speaker::Child, "hello", None, vec![]));
+        store.save_session(&session).await.unwrap();
+
+        let stub_a = StubEmbedder::with_dim(16);
+        let v1 = stub_a.embed(&["hello"]).await.unwrap().remove(0);
+        store
+            .save_turn_embedding(session.id, 0, stub_a.model_id(), 16, &v1)
+            .await
+            .unwrap();
+
+        // Same model_id (the stub uses a constant), different dim.
+        let stub_b = StubEmbedder::with_dim(384);
+        let v2 = stub_b.embed(&["hello"]).await.unwrap().remove(0);
+        let result = store
+            .save_turn_embedding(session.id, 0, stub_b.model_id(), 384, &v2)
+            .await;
+        assert!(
+            matches!(result, Err(PrimerError::Storage(_))),
+            "dim mismatch must hard-error, got {result:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn retrieve_session_turns_hybrid_includes_bm25_hit() {
+        use primer_core::conversation::Speaker;
+        use primer_core::embedder::Embedder;
+        use primer_core::knowledge::HybridParams;
+        use primer_embedding::StubEmbedder;
+        let store = open_memory();
+        let mut session = Session::new(Uuid::new_v4());
+        session.add_turn(make_turn(Speaker::Child, "I love kittens", None, vec![]));
+        session.add_turn(make_turn(
+            Speaker::Primer,
+            "tell me about gravity",
+            None,
+            vec![],
+        ));
+        session.add_turn(make_turn(
+            Speaker::Child,
+            "what causes lightning",
+            None,
+            vec![],
+        ));
+        store.save_session(&session).await.unwrap();
+
+        let stub = StubEmbedder::with_dim(16);
+        for (i, turn) in session.turns.iter().enumerate() {
+            let v = stub.embed(&[turn.text.as_str()]).await.unwrap().remove(0);
+            store
+                .save_turn_embedding(session.id, i, stub.model_id(), stub.dim(), &v)
+                .await
+                .unwrap();
+        }
+
+        let hits = store
+            .retrieve_session_turns_hybrid(
+                session.id,
+                "gravity",
+                &stub,
+                &HybridParams {
+                    bm25_top_k: 5,
+                    vector_top_k: 5,
+                    final_top_k: 3,
+                    rrf_k: 60.0,
+                    min_score: f64::NEG_INFINITY,
+                    source_filter: vec![],
+                },
+                1000,
+            )
+            .await
+            .unwrap();
+        assert!(!hits.is_empty(), "hybrid must return at least one hit");
+        assert!(
+            hits.iter().any(|t| t.text.contains("gravity")),
+            "hybrid result must include the BM25-matching turn"
+        );
     }
 }
 

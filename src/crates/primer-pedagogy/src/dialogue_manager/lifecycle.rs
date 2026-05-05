@@ -68,6 +68,7 @@ impl<'a> DialogueManager<'a> {
             last_extraction: None,
             learner_dirty: false,
             prompt_pack,
+            embedder: subsystems.embedder,
         }
     }
 

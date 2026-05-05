@@ -9,7 +9,9 @@ use uuid::Uuid;
 use crate::classifier::EngagementAssessment;
 use crate::comprehension::ComprehensionAssessment;
 use crate::conversation::{Session, SessionId, Turn};
+use crate::embedder::Embedder;
 use crate::error::Result;
+use crate::knowledge::HybridParams;
 use crate::learner::LearnerModel;
 
 /// Persists conversation sessions.
@@ -174,6 +176,62 @@ pub trait SessionStore: Send + Sync {
         assessments: &[ComprehensionAssessment],
         classifier_identifier: &str,
     ) -> Result<()>;
+
+    /// Persist an embedding for a previously-saved turn. Analogous to
+    /// `update_turn_concepts` but for vectors: the dialogue manager's
+    /// embed-on-save task spawns this in the background and is detached
+    /// from the conversation flow. Implementations that don't track
+    /// embeddings can override the default no-op.
+    ///
+    /// `model_id` is used to look up (or create) a row in the per-DB
+    /// `embedding_models` registry. A second call for the same turn
+    /// overwrites the existing vector — the most-recent embedder wins,
+    /// which is what we want when re-embedding under a different model.
+    /// Mismatched `dim` for an existing `model_id` is a hard error.
+    ///
+    /// Empty `vec` is rejected (caller bug); zero-`dim` likewise.
+    async fn save_turn_embedding(
+        &self,
+        _session_id: SessionId,
+        _turn_index: usize,
+        _model_id: &str,
+        _dim: usize,
+        _vec: &[f32],
+    ) -> Result<()> {
+        Ok(())
+    }
+
+    /// Hybrid (BM25 + vector cosine) variant of
+    /// [`retrieve_session_turns`]. Embeds the query, runs an in-store
+    /// vector top-K, runs the existing BM25 path, and fuses both lists
+    /// via Reciprocal Rank Fusion using `params.rrf_k`. Implementations
+    /// without vector support should fall back to the BM25-only path —
+    /// the default impl does exactly that, so callers can always invoke
+    /// this method even when no embedder is wired (passing
+    /// `embedder.dim() == 0`-shaped stubs is also acceptable).
+    ///
+    /// Same `exclude_indices_at_or_after` invariant as
+    /// `retrieve_session_turns`.
+    async fn retrieve_session_turns_hybrid(
+        &self,
+        session_id: Uuid,
+        query: &str,
+        embedder: &dyn Embedder,
+        params: &HybridParams,
+        exclude_indices_at_or_after: usize,
+    ) -> Result<Vec<Turn>> {
+        // Default fallback for backends that don't implement vector
+        // retrieval: just use BM25 with `final_top_k`. The embedder
+        // argument is unused on this path.
+        let _ = embedder;
+        self.retrieve_session_turns(
+            session_id,
+            query,
+            params.final_top_k,
+            exclude_indices_at_or_after,
+        )
+        .await
+    }
 }
 
 /// Persists the per-child `LearnerModel` to disk.

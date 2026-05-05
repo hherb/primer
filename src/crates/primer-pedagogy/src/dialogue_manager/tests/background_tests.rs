@@ -64,6 +64,7 @@ async fn respond_to_streaming_spawns_classify_task_and_persists() {
             comprehension: stub_comprehension(),
             comprehension_settings: primer_comprehension::ComprehensionSettings::default(),
             vocab_settings: crate::VocabSettings::default(),
+            embedder: None,
         },
         PedagogyConfig::default(),
     );
@@ -141,6 +142,7 @@ async fn await_pending_classification_aborts_and_preserves_state_on_timeout() {
             comprehension: stub_comprehension(),
             comprehension_settings: primer_comprehension::ComprehensionSettings::default(),
             vocab_settings: crate::VocabSettings::default(),
+            embedder: None,
         },
         PedagogyConfig::default(),
     );
@@ -257,6 +259,7 @@ async fn end_to_end_classifier_routing_across_multi_turn_session() {
             comprehension: stub_comprehension(),
             comprehension_settings: primer_comprehension::ComprehensionSettings::default(),
             vocab_settings: crate::VocabSettings::default(),
+            embedder: None,
         },
         PedagogyConfig::default(),
     );
@@ -638,6 +641,7 @@ async fn post_response_chain_persists_extraction_and_comprehension() {
         comprehension,
         comprehension_settings: primer_comprehension::ComprehensionSettings::default(),
         vocab_settings: crate::VocabSettings::default(),
+        embedder: None,
     };
 
     let mut dm = DialogueManager::new(
@@ -737,6 +741,7 @@ async fn post_response_chain_skips_comprehension_on_empty_extraction() {
         comprehension,
         comprehension_settings: primer_comprehension::ComprehensionSettings::default(),
         vocab_settings: crate::VocabSettings::default(),
+        embedder: None,
     };
 
     let mut dm = DialogueManager::new(
