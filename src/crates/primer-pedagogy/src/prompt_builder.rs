@@ -1057,6 +1057,7 @@ disengaging = ""
 knowledge_intro = ""
 summary_intro = ""
 retrieved_intro = ""
+vocab_review_intro = ""
 
 [labels]
 child = "Child"
