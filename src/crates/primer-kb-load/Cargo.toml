@@ -1,0 +1,24 @@
+[package]
+name = "primer-kb-load"
+description = "Load JSONL passage corpora into the Primer knowledge base"
+version.workspace = true
+edition.workspace = true
+
+[[bin]]
+name = "primer-kb-load"
+path = "src/bin/primer_kb_load.rs"
+
+[dependencies]
+primer-core.workspace = true
+primer-knowledge.workspace = true
+tokio.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+thiserror.workspace = true
+tracing.workspace = true
+tracing-subscriber.workspace = true
+clap.workspace = true
+chrono.workspace = true
+
+[dev-dependencies]
+tempfile.workspace = true

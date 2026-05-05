@@ -3,7 +3,15 @@
 **Date:** 2026-05-05
 **Phase:** Phase 0.2
 **Author:** Claude (with Horst Herb)
-**Status:** Draft, pending user review
+**Status:** Approved by user, implementation in progress
+
+## Decisions from review
+
+- **Seed corpus distribution:** in-repo on GitHub for now (under `data/seed/`); final download location for the *full* corpus is TBD.
+- **Python pipeline location:** `scripts/kb-ingest/` at project root.
+- **Retrieval-quality test in CI:** yes — runs against the in-repo seed corpus.
+- **Seed-drafting cadence:** five-cluster, ~10-passage batches.
+- **`--print-attribution` UX:** default one-line summary; `--print-attribution full` for the dump.
 
 ## Goal
 
@@ -12,7 +20,7 @@ Populate the per-locale FTS5 knowledge base (`passages_<pack_id>`) with high-qua
 After this work:
 
 - A small **curated seed corpus** ships with the repository (~50–100 passages per locale, JSONL, hand-drafted by Claude and human-edited) and auto-loads on first open of an empty `passages_<pack_id>` table.
-- A **Python ingestion pipeline** at `tools/kb-ingest/` produces a fuller corpus on demand from CC-BY / CC-BY-SA / CC0 / public-domain sources (Simple English Wikipedia, OpenStax, PMC OA-CC-BY subset, Wikibooks, Wikidata, NASA/NOAA/NIH, Project Gutenberg). Output is a SQLite file matching the existing schema; users drop it at `--knowledge-db <path>`.
+- A **Python ingestion pipeline** at `scripts/kb-ingest/` produces a fuller corpus on demand from CC-BY / CC-BY-SA / CC0 / public-domain sources (Simple English Wikipedia, OpenStax, PMC OA-CC-BY subset, Wikibooks, Wikidata, NASA/NOAA/NIH, Project Gutenberg). Output is a SQLite file matching the existing schema; users drop it at `--knowledge-db <path>`.
 - A new **`primer-kb-load` Rust binary** ingests JSONL files into the KB without requiring Python — used by both the auto-seed path and by users who fetch a pre-built JSONL but don't want to run the Python pipeline.
 - A new lightweight **`sources` table** in the KB DB records `(id, license, attribution, retrieved_at)` per source, so licence compliance travels with the data and a `--print-attribution` CLI flag can produce the credit list at any time.
 - A new **retrieval-quality integration test** asserts canonical child queries ("why is the sky blue", "how do plants eat", etc.) return passages containing the expected key terms (Rayleigh, photosynthesis, …) — also drives `RetrievalParams` default tuning.
@@ -82,7 +90,7 @@ Three deliverables, layered:
        ┌───────────┴────────────┐
        │                        │
 ┌──────┴───────────┐   ┌────────┴────────────────────────────┐
-│ tools/kb-ingest/ │   │ src/crates/primer-kb-load/          │
+│ scripts/kb-ingest/ │   │ src/crates/primer-kb-load/          │
 │ (Python)         │   │ Rust bin: ingest JSONL → SQLite     │
 │ download/parse/  │   │ used by both auto-seed and          │
 │ filter/chunk/    │   │ "I downloaded the JSONL but no      │
@@ -172,12 +180,12 @@ Reads JSONL, opens `SqliteKnowledgeBase::open_for_locale`, calls `upsert_source`
 
 This is what the auto-seed path also calls internally (extracted as a library function `primer_kb_load::load_jsonl(kb, path) -> Result<usize>`).
 
-### Python ingestion pipeline (`tools/kb-ingest/`)
+### Python ingestion pipeline (`scripts/kb-ingest/`)
 
 Layout:
 
 ```
-tools/kb-ingest/
+scripts/kb-ingest/
     README.md
     pyproject.toml          # uv- or pip-installable
     sources.toml            # declarative source registry
@@ -249,7 +257,7 @@ Each stage is idempotent and cached; re-running `all` after one source's parse c
 
 A two-stage filter:
 
-1. **Category blacklist** (Wikipedia-specific): drop any article whose category set intersects a blacklist (`Sexuality`, `Pornography`, `Weapons`, `Violence`, `Drugs`, `Suicide`, `Genocide`, `Torture`, `Nudity`, …). The full list lives in `tools/kb-ingest/kb_ingest/filter.py` and is reviewed by humans.
+1. **Category blacklist** (Wikipedia-specific): drop any article whose category set intersects a blacklist (`Sexuality`, `Pornography`, `Weapons`, `Violence`, `Drugs`, `Suicide`, `Genocide`, `Torture`, `Nudity`, …). The full list lives in `scripts/kb-ingest/kb_ingest/filter.py` and is reviewed by humans.
 2. **Keyword screen** for sources without categories (OpenStax, gov pages): a small list of substrings; if any appears, drop the passage. False-positive bias.
 
 Quality filters:
@@ -268,7 +276,7 @@ The article title prefix matters for FTS5: a query "rayleigh scattering" might o
 |---|---|---|
 | Seed corpus JSONL (per locale) | In `data/seed/` in repo | ~50–500 KB |
 | Pre-built English corpus DB | GitHub Release artefact | est. 200 MB–1 GB |
-| `tools/kb-ingest/` source | In repo | ~50 KB |
+| `scripts/kb-ingest/` source | In repo | ~50 KB |
 | `primer-kb-load` binary | In workspace | tiny |
 
 Releases gain a step: run `kb-ingest all --locale en` on a maintainer's box, upload the resulting `.db` and `.jsonl` to the release. CI does **not** run ingestion (too slow, too much disk).
@@ -304,7 +312,7 @@ This test also drives `RetrievalParams::default()` tuning (the explicit ROADMAP 
 5. **Auto-seed-on-empty** in `SqliteKnowledgeBase::open_for_locale`. The discovery rules above; falls back to "log + continue" if no seed found. Test fixture: a 3-passage minimal seed.
 6. **Seed corpus drafting (Claude → Horst editing).** Batches of ~10 passages per topic cluster. Five clusters: space, earth/weather, life, body, how-things-work. Each batch a separate PR. (The two not-so-on-the-critical-path clusters — maths primers, history — get drafted last.)
 7. **Retrieval quality integration test.** Lands once the seed corpus has ≥30 passages so queries have something to find.
-8. **`tools/kb-ingest/` Python pipeline.** Lands in pieces: download + sources.toml first; then Wikipedia parser; then OpenStax; then PMC; then filter + chunk + emit. Each parser ships with a small fixture-based unit test.
+8. **`scripts/kb-ingest/` Python pipeline.** Lands in pieces: download + sources.toml first; then Wikipedia parser; then OpenStax; then PMC; then filter + chunk + emit. Each parser ships with a small fixture-based unit test.
 9. **First full English corpus build.** Maintainer runs `kb-ingest all --locale en`, publishes the `.db` and `.jsonl` as a GitHub Release artefact. Document in `README.md` how to use a downloaded corpus.
 10. **`--print-attribution` CLI flag** on `primer-cli`. Reads `kb.list_sources()`, prints the credit list. (Required for licence compliance under CC-BY and CC-BY-SA when the device ships.)
 
@@ -324,6 +332,6 @@ The auto-seed path (steps 1–6) is independently shippable and gives the Primer
 
 1. **Seed corpus drafting cadence.** Drafting 50–100 passages is ~3–5 sessions of Claude work + 3–5 sessions of Horst editing. Is the "five-cluster, ~10-passage batches" cadence right, or should the first batch be smaller (3–5 passages of one topic) so the workflow can be debugged before scaling up?
 2. **Distribution of the full corpus.** GitHub Releases caps at 2 GB per asset, which is fine for a single-locale `.db` but might pinch if we bundle multiple locales. Hugging Face Datasets is a natural alternative for the corpus artefact; the repo stays code-only. Preference?
-3. **Where does `tools/kb-ingest/` live in the workspace?** I'd put it as a top-level repo directory (sibling of `src/` and `docs/`), not inside `src/` — it's not Rust and not part of the cargo workspace. Confirm.
+3. **Where does `scripts/kb-ingest/` live in the workspace?** I'd put it as a top-level repo directory (sibling of `src/` and `docs/`), not inside `src/` — it's not Rust and not part of the cargo workspace. Confirm.
 4. **CI coverage.** Should the retrieval-quality test run in CI? It depends on the seed corpus JSONL existing; if the JSONL is in-repo, yes. If it lives only in releases, it has to be a manual check.
 5. **`--print-attribution` UX.** Default to a one-line summary ("KB contains 2,341 passages from 4 sources; full credits at <path>"); `--print-attribution full` dumps the entire list. Acceptable, or should the full list be the default?

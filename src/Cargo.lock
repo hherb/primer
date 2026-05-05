@@ -1849,6 +1849,7 @@ dependencies = [
  "primer-core",
  "primer-extractor",
  "primer-inference",
+ "primer-kb-load",
  "primer-knowledge",
  "primer-pedagogy",
  "primer-speech",
@@ -1921,6 +1922,23 @@ dependencies = [
  "thiserror 2.0.18",
  "tokio",
  "tracing",
+]
+
+[[package]]
+name = "primer-kb-load"
+version = "0.1.0"
+dependencies = [
+ "chrono",
+ "clap",
+ "primer-core",
+ "primer-knowledge",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "thiserror 2.0.18",
+ "tokio",
+ "tracing",
+ "tracing-subscriber",
 ]
 
 [[package]]

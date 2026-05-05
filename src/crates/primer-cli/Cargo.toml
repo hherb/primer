@@ -16,6 +16,7 @@ primer-comprehension.workspace = true
 primer-inference = { path = "../primer-inference" }
 primer-speech = { path = "../primer-speech" }
 primer-knowledge = { path = "../primer-knowledge" }
+primer-kb-load = { path = "../primer-kb-load" }
 primer-pedagogy = { path = "../primer-pedagogy" }
 primer-storage = { path = "../primer-storage" }
 tokio.workspace = true

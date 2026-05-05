@@ -860,6 +860,19 @@ async fn async_main() -> anyhow::Result<()> {
     // so BM25 statistics stay locale-pure.
     let knowledge_path = cli.knowledge_db.unwrap_or_else(|| PathBuf::from(IN_MEMORY));
     let knowledge = SqliteKnowledgeBase::open_for_locale(&knowledge_path, cli_locale)?;
+    // Auto-seed-on-empty: if the KB has no passages and a seed JSONL is
+    // discoverable for this locale, load it. Returns Ok(None) and logs at
+    // info level when no seed file is found — empty KB is a valid runtime
+    // state and the rest of the system handles it gracefully.
+    if let Some(stats) = primer_kb_load::auto_seed_if_empty(&knowledge, cli_locale).await? {
+        tracing::info!(
+            target = "primer::startup",
+            inserted = stats.inserted,
+            sources = stats.sources_seen,
+            "auto-seeded knowledge base for locale {}",
+            cli_locale.pack_id()
+        );
+    }
 
     // Session store — defaults to a per-learner file under `~/.primer/`.
     // We look up HOME here (rather than inside `resolve_session_db_path`)

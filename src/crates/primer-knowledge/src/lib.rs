@@ -36,6 +36,10 @@ use rusqlite::Connection;
 use std::path::Path;
 use std::sync::Mutex;
 
+/// Current schema version. Bumped whenever a new `apply_vN_migrations`
+/// is added. v1 = legacy / per-locale tables only; v2 = `sources` table.
+pub const USER_VERSION: i32 = 2;
+
 /// SQLite FTS5-backed knowledge base, scoped to one `Locale`.
 pub struct SqliteKnowledgeBase {
     conn: Mutex<Connection>,
@@ -87,6 +91,37 @@ impl SqliteKnowledgeBase {
         self.locale
     }
 
+    /// All passage ids currently in this locale's table. Used by the
+    /// loader to dedup against existing rows in O(N+M).
+    pub fn list_passage_ids(&self) -> Result<std::collections::HashSet<String>> {
+        let conn = self.conn.lock().unwrap();
+        let content_table = &self.content_table;
+        let mut stmt = conn
+            .prepare(&format!("SELECT id FROM {content_table}"))
+            .map_err(|e| PrimerError::Knowledge(format!("prepare list ids: {e}")))?;
+        let rows = stmt
+            .query_map([], |r| r.get::<_, String>(0))
+            .map_err(|e| PrimerError::Knowledge(format!("query ids: {e}")))?;
+        let mut out = std::collections::HashSet::new();
+        for r in rows {
+            out.insert(r.map_err(|e| PrimerError::Knowledge(format!("read id row: {e}")))?);
+        }
+        Ok(out)
+    }
+
+    /// Number of passages currently in this locale's table. Used by the
+    /// auto-seed-on-empty path to decide whether to load the seed corpus.
+    pub fn passage_count(&self) -> Result<i64> {
+        let conn = self.conn.lock().unwrap();
+        let content_table = &self.content_table;
+        let n: i64 = conn
+            .query_row(&format!("SELECT COUNT(*) FROM {content_table}"), [], |r| {
+                r.get(0)
+            })
+            .map_err(|e| PrimerError::Knowledge(format!("count passages: {e}")))?;
+        Ok(n)
+    }
+
     /// Insert a passage into the knowledge base.
     pub fn insert_passage(&self, id: &str, source: &str, text: &str) -> Result<()> {
         let conn = self.conn.lock().unwrap();
@@ -114,14 +149,74 @@ impl SqliteKnowledgeBase {
 
 #[async_trait]
 impl KnowledgeBase for SqliteKnowledgeBase {
+    async fn upsert_source(&self, source: &SourceMeta) -> Result<()> {
+        let conn = self.conn.lock().unwrap();
+        conn.execute(
+            "INSERT INTO sources(id, license, attribution, source_url, retrieved_at)
+                 VALUES (?1, ?2, ?3, ?4, ?5)
+                 ON CONFLICT(id) DO UPDATE SET
+                    license       = excluded.license,
+                    attribution   = excluded.attribution,
+                    source_url    = excluded.source_url,
+                    retrieved_at  = excluded.retrieved_at",
+            rusqlite::params![
+                source.id,
+                source.license,
+                source.attribution,
+                source.source_url,
+                source.retrieved_at,
+            ],
+        )
+        .map_err(|e| PrimerError::Knowledge(format!("upsert source: {e}")))?;
+        Ok(())
+    }
+
+    async fn list_sources(&self) -> Result<Vec<SourceMeta>> {
+        let conn = self.conn.lock().unwrap();
+        let mut stmt = conn
+            .prepare(
+                "SELECT id, license, attribution, source_url, retrieved_at
+                 FROM sources ORDER BY id",
+            )
+            .map_err(|e| PrimerError::Knowledge(format!("prepare list sources: {e}")))?;
+        let rows = stmt
+            .query_map([], |row| {
+                Ok(SourceMeta {
+                    id: row.get(0)?,
+                    license: row.get(1)?,
+                    attribution: row.get(2)?,
+                    source_url: row.get(3)?,
+                    retrieved_at: row.get(4)?,
+                })
+            })
+            .map_err(|e| PrimerError::Knowledge(format!("query sources: {e}")))?;
+        let mut out = Vec::new();
+        for r in rows {
+            out.push(r.map_err(|e| PrimerError::Knowledge(format!("read source row: {e}")))?);
+        }
+        Ok(out)
+    }
+
     async fn retrieve(&self, query: &str, params: &RetrievalParams) -> Result<Vec<Passage>> {
+        // Sanitize the input into FTS5-friendly form: strip reserved
+        // keywords and non-alphanumerics, OR-join the surviving tokens.
+        // Without this, a natural-language query like "how does the sun
+        // shine" would AND every token together (FTS5's default) and
+        // miss any passage that uses different filler words. Mirrors the
+        // sanitizer in `primer-storage`; consolidating both into
+        // `primer-core::fts_util` is a separate cleanup.
+        let phrase = sanitize_fts_phrase(query);
+        if phrase.is_empty() {
+            return Ok(vec![]);
+        }
+
         let conn = self.conn.lock().unwrap();
         let passages_table = &self.passages_table;
 
         // FTS5 match query with BM25 ranking. Table name is interpolated
         // (NOT user input — comes from `Locale::pack_id()`, a closed
         // enum projection), parameters are bound positionally — the
-        // user query and limit go through `?1` and `?2`.
+        // sanitized phrase and limit go through `?1` and `?2`.
         let sql = format!(
             "SELECT id, source, text, rank
              FROM {passages_table}
@@ -134,7 +229,7 @@ impl KnowledgeBase for SqliteKnowledgeBase {
             .map_err(|e| PrimerError::Knowledge(format!("Query prepare failed: {e}")))?;
 
         let passages = stmt
-            .query_map(rusqlite::params![query, params.top_k as i64], |row| {
+            .query_map(rusqlite::params![phrase, params.top_k as i64], |row| {
                 Ok(Passage {
                     id: row.get(0)?,
                     source: row.get(1)?,
@@ -155,6 +250,44 @@ impl KnowledgeBase for SqliteKnowledgeBase {
 
         Ok(passages)
     }
+}
+
+// ─── FTS5 query sanitization ───────────────────────────────────────────────
+
+/// Coerce free-form input into an FTS5-safe phrase. Strips non-alphanumerics
+/// (so any FTS5-special character is inert), drops reserved keywords
+/// (`AND`, `OR`, `NOT`, `NEAR`), quotes each surviving token, and joins
+/// them with explicit `OR`. An empty result means "no useful tokens";
+/// the caller short-circuits to empty results rather than issuing
+/// `MATCH ''` which FTS5 rejects.
+///
+/// `OR` is chosen over implicit-AND so a natural-language query like
+/// "how does the sun shine" surfaces passages that mention any of
+/// `sun`/`shine` rather than requiring all five words. BM25 ranking +
+/// the caller's `LIMIT k` keep the list focused on the most relevant.
+///
+/// Mirrors the same-named function in `primer-storage`. A future cleanup
+/// should hoist both into `primer-core::fts_util`.
+fn sanitize_fts_phrase(query: &str) -> String {
+    const RESERVED: &[&str] = &["AND", "OR", "NOT", "NEAR"];
+    let tokens: Vec<String> = query
+        .split_whitespace()
+        .map(|tok| {
+            tok.chars()
+                .filter(|c| c.is_alphanumeric())
+                .collect::<String>()
+        })
+        .filter(|tok| !tok.is_empty())
+        .filter(|tok| !RESERVED.iter().any(|r| r.eq_ignore_ascii_case(tok)))
+        .collect();
+    if tokens.is_empty() {
+        return String::new();
+    }
+    tokens
+        .iter()
+        .map(|t| format!("\"{t}\""))
+        .collect::<Vec<_>>()
+        .join(" OR ")
 }
 
 // ─── Schema management ─────────────────────────────────────────────────────
@@ -198,19 +331,61 @@ fn create_per_locale_tables(conn: &Connection, pack: &str) -> Result<()> {
     Ok(())
 }
 
-/// Idempotent open-time setup. Three cases:
+/// Create the cross-locale `sources` table idempotently. Stores per-source
+/// licence + attribution metadata so credits travel with the data; one
+/// table for the whole DB (no locale partition) since `Passage.source`
+/// values are already globally unique strings.
+fn create_sources_table(conn: &Connection) -> Result<()> {
+    conn.execute_batch(
+        "CREATE TABLE IF NOT EXISTS sources(
+            id            TEXT PRIMARY KEY,
+            license       TEXT NOT NULL,
+            attribution   TEXT NOT NULL,
+            source_url    TEXT,
+            retrieved_at  INTEGER NOT NULL
+        );",
+    )
+    .map_err(|e| PrimerError::Knowledge(format!("create sources table: {e}")))?;
+    Ok(())
+}
+
+/// Read SQLite's `PRAGMA user_version`. Defaults to 0 on a fresh DB.
+fn read_user_version(conn: &Connection) -> Result<i32> {
+    let v: i32 = conn
+        .pragma_query_value(None, "user_version", |r| r.get(0))
+        .map_err(|e| PrimerError::Knowledge(format!("read user_version: {e}")))?;
+    Ok(v)
+}
+
+fn write_user_version(conn: &Connection, v: i32) -> Result<()> {
+    conn.pragma_update(None, "user_version", v)
+        .map_err(|e| PrimerError::Knowledge(format!("write user_version: {e}")))?;
+    Ok(())
+}
+
+/// Idempotent open-time setup. Cases handled:
 ///
-/// 1. **Legacy DB without locale tables**: copy rows from `passages_content`
-///    into `passages_<pack>_content`, rebuild the FTS index, drop the
-///    legacy tables. All in one transaction so a partial failure rolls
-///    back to the pre-migration state.
-/// 2. **Fresh or already-migrated DB**: create the locale tables if
-///    they don't already exist; otherwise no-op.
+/// 1. **Legacy DB without locale tables** (any version): copy rows from
+///    `passages_content` into `passages_<pack>_content`, rebuild the
+///    FTS index, drop the legacy tables. All in one transaction so a
+///    partial failure rolls back to the pre-migration state.
+/// 2. **Fresh or already-migrated DB**: create the per-locale tables
+///    if they don't already exist; otherwise no-op for that step.
+/// 3. **v1 → v2 schema bump**: add the cross-locale `sources` table.
+///    Idempotent and additive, like every other migration in this codebase.
 ///
 /// Migration is locale-specific: we adopt the legacy corpus into the
 /// locale being opened. That's the only sound assumption when the
-/// locale wasn't tracked at write time.
+/// locale wasn't tracked at write time. A `user_version` newer than
+/// `USER_VERSION` is rejected — same policy as `primer-storage`.
 fn migrate_or_create(conn: &Connection, pack: &str) -> Result<()> {
+    let existing_version = read_user_version(conn)?;
+    if existing_version > USER_VERSION {
+        return Err(PrimerError::Knowledge(format!(
+            "knowledge DB user_version {existing_version} is newer than supported {USER_VERSION}"
+        )));
+    }
+
     let tx = conn
         .unchecked_transaction()
         .map_err(|e| PrimerError::Knowledge(format!("begin migration tx: {e}")))?;
@@ -247,8 +422,16 @@ fn migrate_or_create(conn: &Connection, pack: &str) -> Result<()> {
         create_per_locale_tables(&tx, pack)?;
     }
 
+    // v2: cross-locale sources table. Idempotent CREATE IF NOT EXISTS,
+    // safe to run on every open regardless of `existing_version`.
+    create_sources_table(&tx)?;
+
     tx.commit()
         .map_err(|e| PrimerError::Knowledge(format!("commit migration: {e}")))?;
+
+    if existing_version != USER_VERSION {
+        write_user_version(conn, USER_VERSION)?;
+    }
     Ok(())
 }
 
@@ -548,5 +731,118 @@ mod tests {
             !table_exists(&conn, "passages_en_content").unwrap(),
             "passages_en_content must roll back when migration fails"
         );
+    }
+
+    #[tokio::test]
+    async fn fresh_db_lands_at_current_user_version_with_sources_table() {
+        let db = tmp_db();
+        let _kb = SqliteKnowledgeBase::open_for_locale(db.path(), Locale::English).unwrap();
+        let conn = Connection::open(db.path()).unwrap();
+        let v: i32 = conn
+            .pragma_query_value(None, "user_version", |r| r.get(0))
+            .unwrap();
+        assert_eq!(v, USER_VERSION);
+        assert!(table_exists(&conn, "sources").unwrap());
+    }
+
+    #[tokio::test]
+    async fn upsert_and_list_sources_round_trip() {
+        let db = tmp_db();
+        let kb = SqliteKnowledgeBase::open_for_locale(db.path(), Locale::English).unwrap();
+        let s1 = SourceMeta {
+            id: "seed:en:photosynthesis".to_string(),
+            license: "CC0-1.0".to_string(),
+            attribution: "The Primer seed corpus".to_string(),
+            source_url: None,
+            retrieved_at: 1_700_000_000,
+        };
+        let s2 = SourceMeta {
+            id: "wikipedia:en:Rayleigh_scattering".to_string(),
+            license: "CC-BY-SA-4.0".to_string(),
+            attribution: "Wikipedia contributors".to_string(),
+            source_url: Some("https://en.wikipedia.org/wiki/Rayleigh_scattering".to_string()),
+            retrieved_at: 1_700_001_000,
+        };
+        kb.upsert_source(&s1).await.unwrap();
+        kb.upsert_source(&s2).await.unwrap();
+
+        let listed = kb.list_sources().await.unwrap();
+        assert_eq!(listed.len(), 2);
+        // ORDER BY id: seed: < wikipedia:
+        assert_eq!(listed[0], s1);
+        assert_eq!(listed[1], s2);
+
+        // Upsert is idempotent and updates the row.
+        let s1_updated = SourceMeta {
+            attribution: "The Primer seed corpus, v2".to_string(),
+            retrieved_at: 1_700_005_000,
+            ..s1.clone()
+        };
+        kb.upsert_source(&s1_updated).await.unwrap();
+        let listed = kb.list_sources().await.unwrap();
+        assert_eq!(listed.len(), 2, "upsert must not create a duplicate");
+        assert_eq!(listed[0], s1_updated);
+    }
+
+    #[tokio::test]
+    async fn migration_from_v0_legacy_db_lands_at_v2() {
+        // A pre-PR-2 DB had no `user_version` set (defaults to 0) and a
+        // single legacy `passages` table. Opening under the new API
+        // should run the legacy → per-locale migration AND create the
+        // sources table AND bump user_version to USER_VERSION.
+        let db = tmp_db();
+        let path = db.path();
+        {
+            let conn = Connection::open(path).unwrap();
+            conn.execute_batch(
+                "CREATE VIRTUAL TABLE passages USING fts5(
+                    id, source, text,
+                    content='passages_content', content_rowid='rowid'
+                );
+                CREATE TABLE passages_content(
+                    rowid INTEGER PRIMARY KEY,
+                    id TEXT NOT NULL,
+                    source TEXT NOT NULL,
+                    text TEXT NOT NULL
+                );",
+            )
+            .unwrap();
+        }
+
+        let _kb = SqliteKnowledgeBase::open_for_locale(path, Locale::English).unwrap();
+        let conn = Connection::open(path).unwrap();
+        let v: i32 = conn
+            .pragma_query_value(None, "user_version", |r| r.get(0))
+            .unwrap();
+        assert_eq!(v, USER_VERSION);
+        assert!(table_exists(&conn, "passages_en").unwrap());
+        assert!(table_exists(&conn, "sources").unwrap());
+        assert!(!table_exists(&conn, "passages").unwrap());
+    }
+
+    #[tokio::test]
+    async fn newer_user_version_is_rejected() {
+        let db = tmp_db();
+        let path = db.path();
+        {
+            let conn = Connection::open(path).unwrap();
+            conn.pragma_update(None, "user_version", USER_VERSION + 1)
+                .unwrap();
+        }
+        let result = SqliteKnowledgeBase::open_for_locale(path, Locale::English);
+        assert!(
+            matches!(result, Err(PrimerError::Knowledge(_))),
+            "newer user_version must be rejected"
+        );
+    }
+
+    #[tokio::test]
+    async fn passage_count_reflects_inserts() {
+        let db = tmp_db();
+        let kb = SqliteKnowledgeBase::open_for_locale(db.path(), Locale::English).unwrap();
+        assert_eq!(kb.passage_count().unwrap(), 0);
+        kb.insert_passage("p1", "src", "hello world").unwrap();
+        kb.insert_passage("p2", "src", "another row").unwrap();
+        assert_eq!(kb.passage_count().unwrap(), 2);
     }
 }
