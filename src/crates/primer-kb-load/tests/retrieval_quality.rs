@@ -75,6 +75,26 @@ const QUERIES: &[(&str, &[&str], usize)] = &[
     ("why does ice float", &["density", "molecule"], 5),
     ("why does salt melt ice", &["freezing", "sodium"], 5),
     ("how does soap clean", &["oil", "molecule"], 5),
+    // Life cluster
+    (
+        "how do plants make food",
+        &["photosynthesis", "chlorophyll"],
+        5,
+    ),
+    ("how do seeds sprout germinate", &["germinat", "root"], 5),
+    ("what is a food chain", &["producer", "consumer"], 5),
+    ("what are cells", &["cell", "nucleus"], 5),
+    ("how does evolution work", &["natural selection", "dna"], 5),
+    (
+        "what happened to the dinosaurs",
+        &["asteroid", "extinct"],
+        5,
+    ),
+    ("what makes a mammal a mammal", &["fur", "milk"], 5),
+    ("how do birds fly", &["feather", "wing"], 5),
+    ("what is a frog", &["amphibian", "tadpole"], 5),
+    ("how many legs does an insect have", &["six", "thorax"], 5),
+    ("where do babies come from", &["egg", "sperm"], 5),
 ];
 
 #[tokio::test]
