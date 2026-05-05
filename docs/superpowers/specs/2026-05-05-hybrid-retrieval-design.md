@@ -3,7 +3,12 @@
 **Date:** 2026-05-05
 **Phase:** Phase 0.2.5 (between KB bootstrapping and the Python ingestion pipeline)
 **Author:** Claude (with Horst Herb)
-**Status:** Draft, pending user review
+**Status:** Draft, partial review (Q1 settled)
+
+## Decisions from review
+
+- **Default model: BGE-M3** (multilingual, 1024-dim, ~570 MB int8 via fastembed-rs). Locked because the initial test cohort — three of Horst's grandchildren — is bi/trilingual: two native German+English (one with basic Japanese), one native English with basic Hindi and German. EN + DE must work from day one without a model swap on the `--language` flag, and a smaller English-only default would have meant the German-speaking children hit a 570 MB download as soon as they switched languages — exactly the wrong first impression. BGE-M3 covers all four of those languages in one model.
+- **Test matrix: English + German minimum.** The existing English seed corpus (55 passages) gets vectors first; a German seed corpus (drafted later, separate cluster batch) is the second locale. Japanese and Hindi are stretch — BGE-M3 supports them so the runtime story is the same; what's missing is the seed content.
 
 ## Goal
 
@@ -290,7 +295,7 @@ This sequencing means steps 2–6 land on default features with zero external de
 
 ## Open questions for review
 
-1. **Default model for the `fastembed` build.** I'm proposing BGE-M3 (multilingual, 1024-dim, ~570 MB int8). Alternative: ship `bge-small-en-v1.5` (33 MB) as the *default* and BGE-M3 as opt-in for non-English locales — much faster first-run experience, at the cost of a model swap when `--language de` is passed. Your call.
+1. **Default model for the `fastembed` build.** ✅ Settled: BGE-M3 (see Decisions section above).
 2. **Whether on-insert embedding should be sync or `tokio::spawn`-async.** Sync is simpler and the current pattern for KB ingestion (which is offline anyway). Async via `spawn` is what the classifier/extractor/comprehension chain does for session turns. I'm leaning sync for KB inserts, async-spawn for session-turn inserts. Confirm.
 3. **Where does the embedder get constructed?** I'm proposing `primer-cli` constructs one `Arc<dyn Embedder>` at startup and shares it across the dialogue manager (for retrieval + on-insert) and the kb-load tool (for ingestion). Single instance, single download, single model-id check. Same pattern as `Arc<dyn InferenceBackend>`. Confirm.
 4. **Should `primer-storage::retrieve_session_turns_hybrid` filter `model_id` the same way `retrieve_hybrid` does on the KB?** I think yes — if a learner DB has turns embedded under model A and the user re-opens with model B, the vector leg simply has no hits and the BM25 leg carries the day, with a `tracing::warn!`. Cleanest behaviour but worth confirming.
