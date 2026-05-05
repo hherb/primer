@@ -1,0 +1,54 @@
+[package]
+name = "primer-embedding"
+description = "Embedding backends for the Primer's hybrid retrieval"
+version.workspace = true
+edition.workspace = true
+
+[features]
+# Stub is always built. Real backends come behind their own feature
+# flags so users on minimal builds (or building only `speech`) can opt
+# out cleanly. `fastembed` is pinned to 5.7.x — the latest line that
+# uses ort = "=2.0.0-rc.10", matching the workspace pin enforced by
+# our vendored silero/whisper/piper. fastembed 5.9+ moved to rc.11/
+# rc.12 and would force a coordinated bump of the speech vendor
+# patches; until that lands, `--features embedding,speech` resolves
+# cleanly because both paths agree on rc.10. Default-off pending CI
+# validation that the cdn.pyke.io ort-runtime download path works on
+# the project's CI runners; the user's stated preference is default-on
+# once that's proven.
+default = []
+fastembed = ["dep:fastembed", "dep:dirs"]
+ollama = ["dep:reqwest", "dep:serde", "dep:serde_json"]
+
+[dependencies]
+primer-core.workspace = true
+async-trait.workspace = true
+tokio.workspace = true
+tracing.workspace = true
+thiserror.workspace = true
+
+# `fastembed` real-model backend (gated). Pinned to =5.7.0 — the
+# latest line that uses ort = "=2.0.0-rc.10", matching the workspace
+# pin enforced by our vendored silero/whisper/piper. fastembed 5.9+
+# moved to rc.11/rc.12 and would break the speech build until those
+# vendor patches are bumped in lockstep. v5.7 still exposes BGE-M3
+# (the project's default multilingual model) and the BGE-small/E5
+# variants. The `embed` API is blocking; we wrap calls in
+# `tokio::task::spawn_blocking` (see fastembed_backend.rs).
+# Default-features off so we control the TLS backend and the ONNX-
+# Runtime download flavour: `ort-download-binaries` pulls the prebuilt
+# ort binary from cdn.pyke.io, `hf-hub-rustls-tls` keeps the model
+# downloader on the rustls path the rest of the workspace uses.
+fastembed = { version = "=5.7.0", default-features = false, features = [
+    "ort-download-binaries",
+    "hf-hub-rustls-tls",
+], optional = true }
+# Default model cache directory discovery.
+dirs = { version = "5", optional = true }
+# Optional Ollama backend (step 8).
+reqwest = { workspace = true, optional = true }
+serde = { workspace = true, optional = true }
+serde_json = { workspace = true, optional = true }
+
+[dev-dependencies]
+tempfile.workspace = true

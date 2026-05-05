@@ -184,6 +184,31 @@ struct Cli {
     )]
     session_break_after_mins: u32,
 
+    /// Embedder backend for hybrid retrieval. `none` (the default)
+    /// disables hybrid retrieval and uses BM25-only — the same behaviour
+    /// as before this flag existed; `stub` uses the in-process
+    /// deterministic hash embedder (no semantic value, only useful for
+    /// testing the hybrid pipeline end-to-end); `fastembed` uses the
+    /// BGE-M3 dense embedding model via `fastembed-rs` (~570 MB on first
+    /// run; requires the `embedding` cargo feature); `ollama` uses
+    /// Ollama's `/api/embeddings` (requires the `ollama-embedding`
+    /// cargo feature and Ollama running locally).
+    #[arg(long, value_name = "BACKEND", default_value = "none")]
+    embedder_backend: String,
+
+    /// Model name for the embedder. With `--embedder-backend fastembed`,
+    /// defaults to `bge-m3` and accepts other fastembed model ids
+    /// (e.g. `bge-small-en-v1.5`). With `--embedder-backend ollama`,
+    /// defaults to `nomic-embed-text`.
+    #[arg(long, value_name = "NAME")]
+    embedder_model: Option<String>,
+
+    /// Override the Ollama endpoint used for `--embedder-backend ollama`.
+    /// Defaults to `http://localhost:11434`. Has no effect on
+    /// `stub`/`fastembed` backends.
+    #[arg(long, value_name = "URL")]
+    embedder_ollama_url: Option<String>,
+
     /// Print pedagogical decisions (intent chosen, classifier output,
     /// extractor output, comprehension output) alongside the conversation,
     /// on stderr. Stdout stays clean.
@@ -575,6 +600,76 @@ async fn build_comprehension(
     }
 }
 
+/// Construct a fastembed-rs-backed `Embedder`. Returns `None` and emits
+/// a stderr error when the `embedding` cargo feature is not compiled
+/// in or when fastembed init fails. Failure is *not* fatal — the
+/// caller falls back to BM25-only retrieval.
+#[cfg(feature = "embedding")]
+fn build_fastembed_embedder(
+    model: Option<&str>,
+) -> Option<Arc<dyn primer_core::embedder::Embedder>> {
+    use primer_embedding::FastEmbedBackend;
+    let m = model.unwrap_or(primer_embedding::BGE_M3_MODEL_ID);
+    if m != primer_embedding::BGE_M3_MODEL_ID {
+        eprintln!(
+            "Note: --embedder-model {m} not yet supported by the CLI dispatch; using bge-m3."
+        );
+    }
+    eprintln!(
+        "Loading fastembed model {m}; first run downloads ~570 MB into ~/.cache/primer/models/."
+    );
+    match FastEmbedBackend::new() {
+        Ok(b) => Some(Arc::new(b) as _),
+        Err(e) => {
+            eprintln!("fastembed init failed ({e}); falling back to BM25-only retrieval.");
+            None
+        }
+    }
+}
+
+#[cfg(not(feature = "embedding"))]
+fn build_fastembed_embedder(
+    _model: Option<&str>,
+) -> Option<Arc<dyn primer_core::embedder::Embedder>> {
+    eprintln!(
+        "Error: --embedder-backend fastembed requires the `embedding` cargo feature. \
+         Build with `cargo run --features primer-cli/embedding -- ...` (or use --embedder-backend none)."
+    );
+    std::process::exit(1);
+}
+
+#[cfg(feature = "ollama-embedding")]
+async fn build_ollama_embedder(
+    url: Option<&str>,
+    model: Option<&str>,
+) -> Option<Arc<dyn primer_core::embedder::Embedder>> {
+    use primer_embedding::{DEFAULT_OLLAMA_MODEL, DEFAULT_OLLAMA_URL, OllamaEmbedder};
+    let url = url.unwrap_or(DEFAULT_OLLAMA_URL);
+    let model = model.unwrap_or(DEFAULT_OLLAMA_MODEL);
+    match OllamaEmbedder::with_endpoint(url, model).await {
+        Ok(b) => {
+            eprintln!("Embedder: ollama {model} at {url}");
+            Some(Arc::new(b) as _)
+        }
+        Err(e) => {
+            eprintln!("ollama embedder init failed ({e}); falling back to BM25-only retrieval.");
+            None
+        }
+    }
+}
+
+#[cfg(not(feature = "ollama-embedding"))]
+async fn build_ollama_embedder(
+    _url: Option<&str>,
+    _model: Option<&str>,
+) -> Option<Arc<dyn primer_core::embedder::Embedder>> {
+    eprintln!(
+        "Error: --embedder-backend ollama requires the `ollama-embedding` cargo feature. \
+         Build with `cargo run --features primer-cli/ollama-embedding -- ...`"
+    );
+    std::process::exit(1);
+}
+
 /// Reconcile a freshly-loaded persisted `LearnerModel` against the
 /// CLI flags for this launch.
 ///
@@ -870,6 +965,19 @@ async fn async_main() -> anyhow::Result<()> {
     // so BM25 statistics stay locale-pure.
     let knowledge_path = cli.knowledge_db.unwrap_or_else(|| PathBuf::from(IN_MEMORY));
     let knowledge = SqliteKnowledgeBase::open_for_locale(&knowledge_path, cli_locale)?;
+    // Auto-seed-on-empty: if the KB has no passages and a seed JSONL is
+    // discoverable for this locale, load it. Returns Ok(None) and logs at
+    // info level when no seed file is found — empty KB is a valid runtime
+    // state and the rest of the system handles it gracefully.
+    if let Some(stats) = primer_kb_load::auto_seed_if_empty(&knowledge, cli_locale).await? {
+        tracing::info!(
+            target = "primer::startup",
+            inserted = stats.inserted,
+            sources = stats.sources_seen,
+            "auto-seeded knowledge base for locale {}",
+            cli_locale.pack_id()
+        );
+    }
 
     // Session store — defaults to a per-learner file under `~/.primer/`.
     // We look up HOME here (rather than inside `resolve_session_db_path`)
@@ -1080,6 +1188,41 @@ async fn async_main() -> anyhow::Result<()> {
             }
         };
 
+    // ─── Embedder ────────────────────────────────────────────────────
+    //
+    // `none` (the default) skips embedder construction entirely so the
+    // dialogue manager runs BM25-only retrieval — the pre-Phase-0.2.5
+    // behaviour. `stub` constructs a deterministic hash embedder useful
+    // only for testing the hybrid pipeline; with no semantic signal it
+    // dilutes BM25 with noise, so it is not the production default.
+    // `fastembed` and `ollama` need their respective cargo features;
+    // if missing, the dispatch helpers exit with a clear error.
+    //
+    // Real-backend construction failures fall back to BM25-only with a
+    // tracing warn — the conversation still works, which is strictly
+    // better than refusing to start.
+    let embedder: Option<Arc<dyn primer_core::embedder::Embedder>> = match cli
+        .embedder_backend
+        .as_str()
+    {
+        "none" => None,
+        "stub" => Some(Arc::new(primer_embedding::StubEmbedder::new()) as _),
+        "fastembed" => build_fastembed_embedder(cli.embedder_model.as_deref()),
+        "ollama" => {
+            build_ollama_embedder(
+                cli.embedder_ollama_url.as_deref(),
+                cli.embedder_model.as_deref(),
+            )
+            .await
+        }
+        other => {
+            eprintln!(
+                "Error: unknown --embedder-backend {other:?}; expected one of none, stub, fastembed, ollama"
+            );
+            std::process::exit(1);
+        }
+    };
+
     // ─── Dialogue manager ────────────────────────────────────────────
 
     let stores = primer_pedagogy::DialogueManagerStores {
@@ -1100,6 +1243,7 @@ async fn async_main() -> anyhow::Result<()> {
         comprehension,
         comprehension_settings,
         vocab_settings,
+        embedder: embedder.clone(),
     };
     let mut dm = DialogueManager::new(
         learner,

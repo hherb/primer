@@ -84,6 +84,11 @@ pub struct DialogueManagerSubsystems {
     /// Tunables for the spaced-repetition vocabulary feature
     /// (max overdue concepts injected per turn).
     pub vocab_settings: crate::vocab::VocabSettings,
+    /// Optional embedder for hybrid retrieval. When `Some`, `retrieve_knowledge`
+    /// and `retrieve_long_term_memory` use the BM25 + vector RRF path; when
+    /// `None`, both fall back to BM25-only (existing behaviour). Arc so the
+    /// post-response embedding-of-turn-text task can capture it.
+    pub embedder: Option<Arc<dyn primer_core::embedder::Embedder>>,
 }
 
 /// The dialogue manager for a single session.
@@ -177,6 +182,12 @@ pub struct DialogueManager<'a> {
     /// the locale is bound for the lifetime of this manager (no
     /// in-session locale switching today).
     prompt_pack: Arc<dyn PromptPack>,
+    /// Optional embedder for hybrid retrieval. `None` is the existing
+    /// BM25-only behaviour; `Some` switches both the knowledge-base
+    /// retrieval helper and the long-term-memory helper to use the
+    /// hybrid path. Embedder is also handed to the storage layer for
+    /// per-turn embedding-on-save.
+    pub(super) embedder: Option<Arc<dyn primer_core::embedder::Embedder>>,
 }
 
 /// Output of the spawned post-response task: the extracted concepts

@@ -15,3 +15,7 @@ thiserror.workspace = true
 chrono.workspace = true
 uuid.workspace = true
 serde_json.workspace = true
+
+[dev-dependencies]
+primer-embedding = { path = "../primer-embedding" }
+tempfile.workspace = true
