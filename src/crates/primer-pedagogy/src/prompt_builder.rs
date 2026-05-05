@@ -251,12 +251,14 @@ pub fn build_prompt_with_pack(
         retrieved_older,
         context_turns,
         &[],
+        0,
     )
 }
 
-/// Like [`build_prompt_with_pack`] but threads `due_vocab` through to
-/// the system-prompt builder. The dialogue manager uses this variant;
-/// every other caller can keep using the no-vocab wrapper.
+/// Like [`build_prompt_with_pack`] but threads `due_vocab` and
+/// `break_minutes` through to the system-prompt builder. The dialogue
+/// manager uses this variant; every other caller can keep using the
+/// no-vocab wrapper.
 #[allow(clippy::too_many_arguments)]
 pub fn build_prompt_with_pack_and_vocab(
     pack: &dyn PromptPack,
@@ -268,6 +270,7 @@ pub fn build_prompt_with_pack_and_vocab(
     retrieved_older: &[Turn],
     context_turns: usize,
     due_vocab: &[&ConceptState],
+    break_minutes: u32,
 ) -> Prompt {
     Prompt {
         system: build_system_prompt_with_pack_and_vocab(
@@ -278,7 +281,7 @@ pub fn build_prompt_with_pack_and_vocab(
             summary,
             retrieved_older,
             due_vocab,
-            0, // TODO Task 9: pass config.break_suggest_after_minutes
+            break_minutes,
         ),
         messages: build_messages(session, context_turns),
     }

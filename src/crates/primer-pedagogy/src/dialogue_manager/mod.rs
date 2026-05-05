@@ -223,7 +223,6 @@ impl<'a> DialogueManager<'a> {
     /// Returns the current wallclock for break-gate decisions. Tests
     /// can override via `clock_override`; production always reads
     /// `chrono::Utc::now()`.
-    #[allow(dead_code)] // Used by Task 9 (respond_to_streaming gate).
     pub(super) fn now(&self) -> chrono::DateTime<chrono::Utc> {
         #[cfg(test)]
         if let Some(t) = self.clock_override {
