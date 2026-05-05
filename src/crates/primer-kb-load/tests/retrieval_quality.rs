@@ -63,6 +63,18 @@ const QUERIES: &[(&str, &[&str], usize)] = &[
     ("how do eyes see", &["retina", "lens"], 5),
     ("how do ears hear", &["cochlea", "vibrat"], 5),
     ("why do we sleep and dream", &["rem", "memor"], 5),
+    // How-things-work cluster
+    ("how do magnets work", &["magnetic field", "pole"], 5),
+    ("what is electricity", &["electron", "circuit"], 5),
+    ("how does a battery store energy", &["chemical", "anode"], 5),
+    ("how does a lever work", &["fulcrum", "force"], 5),
+    ("what makes sound", &["vibrat", "wave"], 5),
+    ("speed of light photons", &["photon", "wavelength"], 5),
+    ("how does a mirror work", &["reflect", "angle"], 5),
+    ("how does fire burn", &["oxygen", "fuel"], 5),
+    ("why does ice float", &["density", "molecule"], 5),
+    ("why does salt melt ice", &["freezing", "sodium"], 5),
+    ("how does soap clean", &["oil", "molecule"], 5),
 ];
 
 #[tokio::test]
