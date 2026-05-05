@@ -34,8 +34,8 @@ primer-storage
   (validate_and_seed_lookup auto-INSERTs id=9 on next open)
 
 primer-pedagogy
-  prompt_pack::PromptPack::break_suggestion_intro(&self) -> &str    (new trait method)
-  prompts/en.toml + prompts/de.toml gain break_suggestion_intro key
+  prompt_pack::PromptPack::break_suggestion_intro(&self, minutes: u32) -> String  (new trait method, locale-aware)
+  prompts/en.toml + prompts/de.toml gain break_suggestion_intro key (with {minutes} placeholder)
   prompt_builder::decide_intent_at_with_pack(..., break_gate: BreakGate)  (new param)
   prompt_builder::build_system_prompt_*  (adds break_suggestion_intro section when intent==SuggestBreak)
   dialogue_manager::DialogueManager.last_break_suggested_at: Option<DateTime<Utc>>
@@ -145,15 +145,26 @@ Removed:
 - The hardcoded `println!("Primer: We've been talking for a while…")` at `main.rs:1252-1254`. The LLM's response *is* the break suggestion now.
 - `DialogueManager::should_suggest_break()` in `lifecycle.rs:208`. Dead code after this PR; deleted to keep the API surface honest.
 
-## Locale strings
+## Locale strings (multilingual is a first-class citizen)
 
-Both `prompts/en.toml` and `prompts/de.toml` gain a `break_suggestion_intro` key. The English value (final wording subject to last-mile editing during the implementation pass):
+Both `prompts/en.toml` and `prompts/de.toml` gain a `break_suggestion_intro` key whose value is a **template string** with a `{minutes}` placeholder. The trait method takes the actual interval in minutes as a parameter and returns the rendered string with the placeholder substituted; the unit word ("minutes" vs "Minuten") lives **inside** each locale's template, not in shared Rust code, so adding a new locale is purely additive (new TOML file, no code change).
 
-> "The child has been working for a while. In your next response, gently suggest they take a break — phrase it as their choice, not a directive. You can finish a thought naturally first if you're mid-explanation. Don't lecture about screen time, don't be apologetic. The child can keep going if they want to."
+```rust
+// In trait PromptPack:
+fn break_suggestion_intro(&self, minutes: u32) -> String;
+```
 
-The German value is a translator's pass on the same content. Both packs ship the key as part of their `[sections]` table; loading is the same `prompt_pack::load_cached` path used for `vocab_review_intro`.
+English template (final wording subject to last-mile editing during implementation):
 
-The intro is injected into the system prompt only when `intent == SuggestBreak`, so the LLM gets the guidance exactly when needed.
+> `"The child has been working for ~{minutes} minutes. In your next response, gently suggest they take a break — phrase it as their choice, not a directive. You can finish a thought naturally first if you're mid-explanation. Don't lecture about screen time, don't be apologetic. The child can keep going if they want to."`
+
+German template — translator's pass over the same content; the unit word becomes "Minuten" with appropriate phrasing.
+
+**Substitution.** The default `TomlPromptPack` implementation uses `template.replace("{minutes}", &minutes.to_string())`. Templates without the placeholder render unchanged (graceful — useful for stub packs in tests). No `format!`-style escaping subtleties; `{minutes}` is the only variable.
+
+The intro is injected into the system prompt only when `intent == SuggestBreak`. Both packs ship the key in their `[sections]` table; loading is the same `prompt_pack::load_cached` path used for `vocab_review_intro`.
+
+**Why parameterise rather than say "for a while".** Multilingual is a first-class concern in this codebase, and the locale-aware-duration formatting question is going to come up again (vocab "last seen N days ago" in the prompt, future natural-language schedule confirmations). Solving it now — even at the simplest possible level (a placeholder substitution per template) — establishes the pattern: locale-specific *templates* carry locale-specific *formatting choices*. Shared Rust code just hands locales a number; each locale formats it its own way. No `chrono::format` localization machinery needed.
 
 ## Test seam for `Utc::now()` in `DialogueManager`
 
@@ -185,11 +196,11 @@ This is a smaller blast radius than threading `now` through every call site. Doc
 | `primer-core::conversation` | 1 (update) | `pedagogical_intent_all_lists_every_variant` count: 8 → 9 |
 | `primer-storage::lib` | 2 | open-then-seed has SuggestBreak at id=9 with the expected name; round-trip a `Turn` with `intent=Some(SuggestBreak)` |
 | `primer-pedagogy::prompt_builder` | 7 | (a) pre-threshold+Engaged → no SuggestBreak; (b) post-threshold+Engaged → SuggestBreak; (c) post-threshold+FrustratedStuck → Scaffolding (engagement wins); (d) post-threshold+Disengaging-sustained → SessionClose (engagement wins); (e) gate disabled → never SuggestBreak; (f) post-threshold-with-prior-not-yet-due → falls through to natural intent; (g) `build_system_prompt_with_pack_and_vocab` includes `break_suggestion_intro` when intent==SuggestBreak |
-| `primer-pedagogy::prompt_pack` | 2 | en + de packs expose non-empty `break_suggestion_intro` |
+| `primer-pedagogy::prompt_pack` | 4 | en + de packs expose non-empty `break_suggestion_intro`; en pack substitutes `{minutes}` with the supplied number; de pack substitutes `{minutes}` and uses "Minuten" in its rendered output |
 | `primer-pedagogy::dialogue_manager` | 4 | (a) end-to-end via `respond_to_streaming` with `clock_override` advanced past threshold yields intent=SuggestBreak and records `last_break_suggested_at`; (b) immediate next turn with same wallclock returns natural intent (cadence reset works); (c) `resume_session` clears `last_break_suggested_at`; (d) `new()` initialises it to None |
 | `primer-cli` | 3 | `--session-break-after-mins 0` rejected at parse; default flows into `PedagogyConfig`; explicit value overrides default |
 
-**Total new/changed tests: ~25.** Existing 474 tests must stay green; the 18 prompt-builder characterization tests use `decide_intent` (no-pack) and `decide_intent_at` (no-pack) — both default to `BreakGate::disabled()`, so they pass verbatim.
+**Total new/changed tests: ~27.** Existing 474 tests must stay green; the 18 prompt-builder characterization tests use `decide_intent` (no-pack) and `decide_intent_at` (no-pack) — both default to `BreakGate::disabled()`, so they pass verbatim.
 
 ## Decisions and risks
 
@@ -220,6 +231,6 @@ This is a smaller blast radius than threading `now` through every call site. Doc
 ## Out of scope (deferred)
 
 - Back-off-on-decline behaviour.
-- Locale-aware "you've been working for ~M minutes" interpolation in the system-prompt section (the LLM doesn't need the exact number; "for a while" works).
 - Persisting `last_break_suggested_at` across `--resume`.
 - Per-child `break_suggest_after_minutes` overriding the global flag (parents may want this; deferred until field-tested).
+- Locale-aware *unit selection* (e.g. switching from "minutes" to "hours" when interval ≥ 60). For now templates hard-code the unit word; if intervals routinely exceed 60 minutes, this can be revisited per-locale.
