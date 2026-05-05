@@ -27,3 +27,4 @@ pub mod llm_util;
 pub mod retry;
 pub mod speech;
 pub mod storage;
+pub mod vocab;

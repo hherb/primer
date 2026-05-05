@@ -311,6 +311,7 @@ async fn resume_session_rehydrates_recent_assessments() {
             extractor_settings: ExtractorSettings::default(),
             comprehension: stub_comprehension(),
             comprehension_settings: primer_comprehension::ComprehensionSettings::default(),
+            vocab_settings: crate::VocabSettings::default(),
         },
         PedagogyConfig::default(),
     );

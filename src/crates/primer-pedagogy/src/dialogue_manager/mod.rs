@@ -81,6 +81,9 @@ pub struct DialogueManagerSubsystems {
     pub extractor_settings: ExtractorSettings,
     pub comprehension: Arc<dyn primer_comprehension::ComprehensionClassifier>,
     pub comprehension_settings: primer_comprehension::ComprehensionSettings,
+    /// Tunables for the spaced-repetition vocabulary feature
+    /// (max overdue concepts injected per turn).
+    pub vocab_settings: crate::vocab::VocabSettings,
 }
 
 /// The dialogue manager for a single session.
@@ -137,6 +140,10 @@ pub struct DialogueManager<'a> {
     comprehension: Arc<dyn primer_comprehension::ComprehensionClassifier>,
     /// Tunable parameters for the comprehension classifier.
     comprehension_settings: primer_comprehension::ComprehensionSettings,
+    /// Tunables for the vocabulary review feature. Read by
+    /// `build_turn_prompt` to bound how many overdue concepts go into
+    /// the system prompt; never mutated after construction.
+    vocab_settings: crate::vocab::VocabSettings,
     /// Most recent comprehension result applied to the learner. Cleared
     /// on session lifecycle events. Used by `--verbose`.
     last_comprehension: Option<primer_core::comprehension::ComprehensionResult>,

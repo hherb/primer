@@ -87,6 +87,7 @@ pub(super) fn apply_extraction(
                 encounter_count: 1,
                 last_encountered: Some(now),
                 notes: vec![],
+                box_level: 0,
             });
             changed = true;
         }
@@ -134,6 +135,26 @@ pub(super) fn apply_comprehension(
                 // than max'ing with the prior — the prior measured belief
                 // in a different (lower) depth and is no longer applicable.
                 c.confidence = a.confidence;
+                changed = true;
+            }
+            // Box transition runs on EVERY accepted assessment, regardless
+            // of whether depth moved. Successful re-confirmation at the same
+            // depth is the SR mechanism for expanding intervals — without
+            // this, a concept stuck at Comprehension would never advance
+            // even after years of confident re-engagement. The inner
+            // `confidence < MIN_CONF_FOR_BOX_PROMOTION` reset branch in
+            // `apply_box_transition` is redundant in the default config
+            // (numerically equal to the outer `confidence_threshold` of
+            // 0.6), but stays load-bearing if a future researcher lowers
+            // `comprehension_settings.confidence_threshold` below 0.6 to
+            // accept noisier comprehension signal — the const-keyed inner
+            // guard then prevents weak signal from driving box promotion.
+            // See docs/superpowers/specs/2026-05-05-vocabulary-spaced-repetition-design.md
+            // ("Subtle but deliberate") for the policy split.
+            let new_box =
+                primer_core::vocab::apply_box_transition(c.box_level, a.depth, a.confidence);
+            if new_box != c.box_level {
+                c.box_level = new_box;
                 changed = true;
             }
         }
@@ -305,6 +326,7 @@ mod tests {
             encounter_count: 1,
             last_encountered: None,
             notes: vec![],
+            box_level: 0,
         });
 
         let result = ComprehensionResult {
@@ -343,6 +365,7 @@ mod tests {
             encounter_count: 5,
             last_encountered: None,
             notes: vec![],
+            box_level: 0,
         });
         let result = ComprehensionResult {
             assessments: vec![ComprehensionAssessment {
@@ -380,6 +403,7 @@ mod tests {
             encounter_count: 1,
             last_encountered: None,
             notes: vec![],
+            box_level: 0,
         });
         let result = ComprehensionResult {
             assessments: vec![ComprehensionAssessment {
@@ -423,5 +447,142 @@ mod tests {
         assert!(!changed);
         // No insertion — apply_extraction is the only insertion path.
         assert!(!learner.concepts.iter().any(|c| c.concept_id == "missing"));
+    }
+
+    // ─── apply_comprehension box-transition ───────────────────────────
+
+    #[test]
+    fn apply_comprehension_advances_box_on_strong_assessment_with_depth_promotion() {
+        use primer_comprehension::ComprehensionSettings;
+        use primer_core::comprehension::{ComprehensionAssessment, ComprehensionResult};
+        use primer_core::learner::{ConceptState, UnderstandingDepth};
+
+        let mut learner = test_learner();
+        learner.concepts.push(ConceptState {
+            concept_id: "x".into(),
+            depth: UnderstandingDepth::Aware,
+            confidence: 0.5,
+            encounter_count: 1,
+            last_encountered: Some(Utc::now()),
+            notes: vec![],
+            box_level: 0,
+        });
+        let result = ComprehensionResult {
+            assessments: vec![ComprehensionAssessment {
+                concept: "x".into(),
+                depth: UnderstandingDepth::Recall,
+                confidence: 0.85,
+                evidence: None,
+            }],
+        };
+        assert!(apply_comprehension(
+            &mut learner,
+            &result,
+            &ComprehensionSettings::default()
+        ));
+        assert_eq!(learner.concepts[0].depth, UnderstandingDepth::Recall);
+        assert_eq!(learner.concepts[0].box_level, 1);
+    }
+
+    #[test]
+    fn apply_comprehension_advances_box_on_strong_reconfirmation_at_same_depth() {
+        // SR-critical: same depth + high confidence still advances the box.
+        // Without this, expanding intervals never expand for stable concepts.
+        use primer_comprehension::ComprehensionSettings;
+        use primer_core::comprehension::{ComprehensionAssessment, ComprehensionResult};
+        use primer_core::learner::{ConceptState, UnderstandingDepth};
+
+        let mut learner = test_learner();
+        learner.concepts.push(ConceptState {
+            concept_id: "x".into(),
+            depth: UnderstandingDepth::Comprehension,
+            confidence: 0.8,
+            encounter_count: 3,
+            last_encountered: Some(Utc::now()),
+            notes: vec![],
+            box_level: 1,
+        });
+        let result = ComprehensionResult {
+            assessments: vec![ComprehensionAssessment {
+                concept: "x".into(),
+                depth: UnderstandingDepth::Comprehension,
+                confidence: 0.9,
+                evidence: None,
+            }],
+        };
+        assert!(apply_comprehension(
+            &mut learner,
+            &result,
+            &ComprehensionSettings::default()
+        ));
+        assert_eq!(learner.concepts[0].depth, UnderstandingDepth::Comprehension);
+        assert_eq!(learner.concepts[0].box_level, 2);
+    }
+
+    #[test]
+    fn apply_comprehension_resets_box_on_aware_assessment() {
+        use primer_comprehension::ComprehensionSettings;
+        use primer_core::comprehension::{ComprehensionAssessment, ComprehensionResult};
+        use primer_core::learner::{ConceptState, UnderstandingDepth};
+
+        let mut learner = test_learner();
+        learner.concepts.push(ConceptState {
+            concept_id: "x".into(),
+            depth: UnderstandingDepth::Comprehension,
+            confidence: 0.85,
+            encounter_count: 5,
+            last_encountered: Some(Utc::now()),
+            notes: vec![],
+            box_level: 3,
+        });
+        let result = ComprehensionResult {
+            assessments: vec![ComprehensionAssessment {
+                concept: "x".into(),
+                depth: UnderstandingDepth::Aware,
+                confidence: 0.85,
+                evidence: None,
+            }],
+        };
+        assert!(apply_comprehension(
+            &mut learner,
+            &result,
+            &ComprehensionSettings::default()
+        ));
+        // Depth is monotonic-max: stays at Comprehension despite Aware reading.
+        assert_eq!(learner.concepts[0].depth, UnderstandingDepth::Comprehension);
+        // Box dropped to 0 reflecting "needs re-review soon".
+        assert_eq!(learner.concepts[0].box_level, 0);
+    }
+
+    #[test]
+    fn apply_comprehension_leaves_box_unchanged_on_subthreshold_assessment() {
+        use primer_comprehension::ComprehensionSettings;
+        use primer_core::comprehension::{ComprehensionAssessment, ComprehensionResult};
+        use primer_core::learner::{ConceptState, UnderstandingDepth};
+
+        let mut learner = test_learner();
+        learner.concepts.push(ConceptState {
+            concept_id: "x".into(),
+            depth: UnderstandingDepth::Comprehension,
+            confidence: 0.8,
+            encounter_count: 3,
+            last_encountered: Some(Utc::now()),
+            notes: vec![],
+            box_level: 2,
+        });
+        let result = ComprehensionResult {
+            assessments: vec![ComprehensionAssessment {
+                concept: "x".into(),
+                depth: UnderstandingDepth::Application,
+                confidence: 0.4, // below default 0.6 threshold
+                evidence: None,
+            }],
+        };
+        let changed = apply_comprehension(&mut learner, &result, &ComprehensionSettings::default());
+        // Sub-threshold → outer guard skips entirely. depth, confidence,
+        // and box stay as they were; returns false.
+        assert!(!changed);
+        assert_eq!(learner.concepts[0].depth, UnderstandingDepth::Comprehension);
+        assert_eq!(learner.concepts[0].box_level, 2);
     }
 }

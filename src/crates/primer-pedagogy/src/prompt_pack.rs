@@ -54,6 +54,9 @@ pub trait PromptPack: Send + Sync {
     fn knowledge_intro(&self, age: u8) -> String;
     fn summary_intro(&self) -> &str;
     fn retrieved_intro(&self) -> &str;
+    /// Single-line intro for the spaced-repetition vocabulary review
+    /// section. Renders only when `due_vocab` is non-empty. Locale-keyed.
+    fn vocab_review_intro(&self) -> &str;
     fn child_label(&self) -> &str;
     fn primer_label(&self) -> &str;
     /// Lowercased prefixes that mark a child's input as a direct
@@ -159,6 +162,7 @@ pub struct TomlPromptPack {
     knowledge_intro_template: String,
     summary_intro: String,
     retrieved_intro: String,
+    vocab_review_intro: String,
     child_label: String,
     primer_label: String,
     factual_prefixes: Vec<String>,
@@ -289,6 +293,7 @@ impl TomlPromptPack {
             knowledge_intro_template: raw.sections.knowledge_intro,
             summary_intro: raw.sections.summary_intro,
             retrieved_intro: raw.sections.retrieved_intro,
+            vocab_review_intro: raw.sections.vocab_review_intro,
             child_label: raw.labels.child,
             primer_label: raw.labels.primer,
             factual_prefixes: raw.question_detection.factual_prefixes,
@@ -347,6 +352,9 @@ impl PromptPack for TomlPromptPack {
     }
     fn retrieved_intro(&self) -> &str {
         &self.retrieved_intro
+    }
+    fn vocab_review_intro(&self) -> &str {
+        &self.vocab_review_intro
     }
     fn child_label(&self) -> &str {
         &self.child_label
@@ -408,6 +416,7 @@ struct SectionsSection {
     knowledge_intro: String,
     summary_intro: String,
     retrieved_intro: String,
+    vocab_review_intro: String,
 }
 
 #[derive(Deserialize)]
@@ -650,6 +659,7 @@ disengaging = ""
 knowledge_intro = ""
 summary_intro = ""
 retrieved_intro = ""
+vocab_review_intro = ""
 
 [labels]
 child = "Kind"
@@ -794,6 +804,7 @@ disengaging = ""
 knowledge_intro = ""
 summary_intro = ""
 retrieved_intro = ""
+vocab_review_intro = ""
 
 [labels]
 child = "Child"
@@ -841,6 +852,7 @@ disengaging = ""
 knowledge_intro = ""
 summary_intro = ""
 retrieved_intro = ""
+vocab_review_intro = ""
 
 [labels]
 child = "Child"
@@ -898,6 +910,7 @@ disengaging = ""
 knowledge_intro = ""
 summary_intro = ""
 retrieved_intro = ""
+vocab_review_intro = ""
 
 [labels]
 child = "Child"
@@ -988,6 +1001,31 @@ factual_prefixes = {factual_prefixes_array}
         assert!(
             Arc::ptr_eq(&a, &b),
             "load_cached should return the same Arc on repeat calls"
+        );
+    }
+
+    #[test]
+    fn english_pack_exposes_vocab_review_intro() {
+        let pack = english_pack();
+        let intro = pack.vocab_review_intro();
+        assert!(!intro.is_empty(), "vocab_review_intro must not be empty");
+        assert!(
+            intro.contains("topically relevant"),
+            "expected English intro to contain 'topically relevant', got: {intro}"
+        );
+    }
+
+    #[test]
+    fn german_pack_exposes_vocab_review_intro() {
+        let pack = german_pack();
+        let intro = pack.vocab_review_intro();
+        assert!(
+            !intro.is_empty(),
+            "German vocab_review_intro must not be empty"
+        );
+        assert!(
+            intro.contains("thematisch passen"),
+            "expected German intro to contain 'thematisch passen', got: {intro}"
         );
     }
 }

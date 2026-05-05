@@ -134,10 +134,24 @@ impl<'a> DialogueManager<'a> {
     /// builder along with the active intent. `decide_intent_with_pack`
     /// stays with the caller so the orchestrator can hold the intent
     /// for use in step 4.
-    async fn build_turn_prompt(&self, child_input: &str, intent: PedagogicalIntent) -> Prompt {
+    pub(super) async fn build_turn_prompt(
+        &self,
+        child_input: &str,
+        intent: PedagogicalIntent,
+    ) -> Prompt {
         let knowledge_context = self.retrieve_knowledge(child_input).await;
         let (summary, retrieved_older) = self.retrieve_long_term_memory(child_input).await;
-        prompt_builder::build_prompt_with_pack(
+        // Compute due-vocab once per turn. Wallclock dependency is
+        // `chrono::Utc::now()` here — pure functions stay testable via
+        // `now`-injection, but the production call site reads the system
+        // clock. A future "fast-forward time for testing" mode would
+        // override at this call site.
+        let due_vocab = primer_core::vocab::due_concepts(
+            &self.learner,
+            chrono::Utc::now(),
+            self.vocab_settings.max_per_prompt,
+        );
+        prompt_builder::build_prompt_with_pack_and_vocab(
             &*self.prompt_pack,
             &self.learner,
             &self.session,
@@ -146,6 +160,7 @@ impl<'a> DialogueManager<'a> {
             &summary,
             &retrieved_older,
             self.config.context_window_turns,
+            &due_vocab,
         )
     }
 
