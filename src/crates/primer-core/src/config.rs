@@ -65,8 +65,13 @@ pub struct KnowledgeConfig {
 pub struct PedagogyConfig {
     /// How many conversation turns to include in the LLM context window.
     pub context_window_turns: usize,
-    /// Maximum session length in minutes before the Primer suggests a break.
-    pub max_session_minutes: u32,
+    /// Minutes between break-suggestion nudges. After this many minutes
+    /// of session time (or this many minutes since the last suggestion,
+    /// whichever is more recent), the next pedagogical intent is forced
+    /// to `SuggestBreak`. The Primer never enforces a session halt — the
+    /// child can keep going past any number of suggestions. Set to `0`
+    /// to disable the gate entirely.
+    pub break_suggest_after_minutes: u32,
     /// How aggressively to probe for comprehension (0.0 = gentle, 1.0 = rigorous).
     /// Adapts based on learner profile, but this sets the baseline.
     pub socratic_pressure: f32,
@@ -76,7 +81,7 @@ impl Default for PedagogyConfig {
     fn default() -> Self {
         Self {
             context_window_turns: 20,
-            max_session_minutes: 30,
+            break_suggest_after_minutes: crate::consts::break_suggest::DEFAULT_INTERVAL_MINUTES,
             socratic_pressure: 0.5,
         }
     }

@@ -7,9 +7,8 @@
 //! `tracing::warn!` rather than propagating, matching the soft-fail
 //! posture used elsewhere.
 //!
-//! `should_suggest_break` is a thin elapsed-time check that lives here
-//! because it's a public read-only accessor on session state, not part
-//! of the per-turn hot path.
+//! Break-suggestion timing decisions live in `decide_intent_at_with_pack`
+//! — see `primer_core::session_timing` for the pure helper.
 
 use chrono::Utc;
 
@@ -201,15 +200,6 @@ impl<'a> DialogueManager<'a> {
     /// Stable identifier of the active comprehension classifier (used by `--verbose`).
     pub fn comprehension_identifier(&self) -> &str {
         self.comprehension.identifier()
-    }
-
-    /// Check whether the session has run long enough that the Primer
-    /// should suggest a break.
-    pub fn should_suggest_break(&self) -> bool {
-        let elapsed = Utc::now()
-            .signed_duration_since(self.session.started_at)
-            .num_minutes();
-        elapsed >= self.config.max_session_minutes as i64
     }
 
     /// End the session gracefully. Drains any in-flight classifier task so

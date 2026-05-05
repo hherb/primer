@@ -1248,11 +1248,6 @@ async fn async_main() -> anyhow::Result<()> {
             }
         }
 
-        // Check if the session has run long.
-        if dm.should_suggest_break() {
-            println!("Primer: We've been talking for a while. Want to take a break?\n");
-        }
-
         print!("{}: ", dm.learner.profile.name);
         stdout.flush()?;
     }
