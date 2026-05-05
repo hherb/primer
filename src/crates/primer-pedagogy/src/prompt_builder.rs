@@ -366,7 +366,13 @@ pub fn decide_intent_with_pack(
     learner: &LearnerModel,
     session: &Session,
 ) -> PedagogicalIntent {
-    decide_intent_at_with_pack(pack, learner, session, chrono::Utc::now())
+    decide_intent_at_with_pack(
+        pack,
+        learner,
+        session,
+        chrono::Utc::now(),
+        primer_core::session_timing::BreakGate::disabled(),
+    )
 }
 
 /// Time-aware core of [`decide_intent`].
@@ -375,7 +381,13 @@ pub fn decide_intent_at(
     session: &Session,
     now: chrono::DateTime<chrono::Utc>,
 ) -> PedagogicalIntent {
-    decide_intent_at_with_pack(english_pack(), learner, session, now)
+    decide_intent_at_with_pack(
+        english_pack(),
+        learner,
+        session,
+        now,
+        primer_core::session_timing::BreakGate::disabled(),
+    )
 }
 
 /// Time-aware, locale-aware core. Accepts an explicit `now` so tests
@@ -388,6 +400,7 @@ pub fn decide_intent_at_with_pack(
     learner: &LearnerModel,
     session: &Session,
     now: chrono::DateTime<chrono::Utc>,
+    break_gate: primer_core::session_timing::BreakGate,
 ) -> PedagogicalIntent {
     use primer_core::learner::EngagementState;
     // Engagement-state overrides fire before turn analysis.
@@ -406,6 +419,19 @@ pub fn decide_intent_at_with_pack(
         }
         EngagementState::Engaged | EngagementState::Reflecting | EngagementState::Unknown => { /* fall through to turn analysis */
         }
+    }
+
+    // Break-suggestion gate: fires after engagement-state overrides
+    // (a frustrated child past 30 minutes still gets Scaffolding,
+    // not SuggestBreak — fix the frustration first) but before turn
+    // analysis so it overrides the natural Socratic flow.
+    if primer_core::session_timing::should_suggest_break_now(
+        now,
+        session.started_at,
+        break_gate.last_suggested_at,
+        break_gate.interval_minutes,
+    ) {
+        return PedagogicalIntent::SuggestBreak;
     }
 
     // Look at the last turn — if it was a child's response, decide
@@ -1456,6 +1482,111 @@ factual_prefixes = []
             !prompt.contains("topically relevant"),
             "vocab intro should not appear when due_vocab is empty: {prompt}"
         );
+    }
+
+    // ─── Break-gate tests for decide_intent_at_with_pack ──────────────
+    //
+    // These tests reuse the existing `learner_with(engagement, concepts)`
+    // helper at `prompt_builder.rs:478` and the existing `english_pack()`
+    // helper. New helper for break-gate tests:
+
+    fn session_started_at(when: chrono::DateTime<chrono::Utc>) -> Session {
+        let mut s = Session::new(Uuid::new_v4());
+        s.started_at = when;
+        s
+    }
+
+    fn fixed_now(min: i64) -> chrono::DateTime<chrono::Utc> {
+        use chrono::TimeZone;
+        chrono::Utc.with_ymd_and_hms(2026, 5, 5, 12, 0, 0).unwrap() + chrono::Duration::minutes(min)
+    }
+
+    #[test]
+    fn pre_threshold_engaged_does_not_fire_suggest_break() {
+        let session = session_started_at(fixed_now(0));
+        let learner = learner_with(EngagementState::Engaged, vec![]);
+        let gate = primer_core::session_timing::BreakGate {
+            interval_minutes: 30,
+            last_suggested_at: None,
+        };
+        let intent =
+            decide_intent_at_with_pack(english_pack(), &learner, &session, fixed_now(5), gate);
+        assert_ne!(intent, PedagogicalIntent::SuggestBreak);
+    }
+
+    #[test]
+    fn post_threshold_engaged_fires_suggest_break() {
+        let session = session_started_at(fixed_now(0));
+        let learner = learner_with(EngagementState::Engaged, vec![]);
+        let gate = primer_core::session_timing::BreakGate {
+            interval_minutes: 30,
+            last_suggested_at: None,
+        };
+        let intent =
+            decide_intent_at_with_pack(english_pack(), &learner, &session, fixed_now(31), gate);
+        assert_eq!(intent, PedagogicalIntent::SuggestBreak);
+    }
+
+    #[test]
+    fn frustrated_stuck_wins_over_break_gate() {
+        // Engagement-state overrides fire BEFORE the break gate.
+        // Past threshold AND FrustratedStuck → Scaffolding (fix
+        // the frustration first), not SuggestBreak.
+        let session = session_started_at(fixed_now(0));
+        let learner = learner_with(EngagementState::FrustratedStuck, vec![]);
+        let gate = primer_core::session_timing::BreakGate {
+            interval_minutes: 30,
+            last_suggested_at: None,
+        };
+        let intent =
+            decide_intent_at_with_pack(english_pack(), &learner, &session, fixed_now(45), gate);
+        assert_eq!(intent, PedagogicalIntent::Scaffolding);
+    }
+
+    #[test]
+    fn disengaging_sustained_wins_over_break_gate() {
+        let session = session_started_at(fixed_now(0));
+        let mut learner = learner_with(EngagementState::Disengaging, vec![]);
+        learner.preferences.early_disengagement_threshold = std::time::Duration::from_secs(60);
+        let gate = primer_core::session_timing::BreakGate {
+            interval_minutes: 30,
+            last_suggested_at: None,
+        };
+        let intent =
+            decide_intent_at_with_pack(english_pack(), &learner, &session, fixed_now(45), gate);
+        assert_eq!(intent, PedagogicalIntent::SessionClose);
+    }
+
+    #[test]
+    fn disabled_gate_never_fires_suggest_break() {
+        let session = session_started_at(fixed_now(0));
+        let learner = learner_with(EngagementState::Engaged, vec![]);
+        let gate = primer_core::session_timing::BreakGate::disabled();
+        let intent =
+            decide_intent_at_with_pack(english_pack(), &learner, &session, fixed_now(120), gate);
+        assert_ne!(intent, PedagogicalIntent::SuggestBreak);
+    }
+
+    #[test]
+    fn post_threshold_with_recent_prior_falls_through_to_natural_intent() {
+        // Started 60 min ago, suggested 5 min ago, 30 min interval —
+        // not yet due again; should fall through to turn-analysis path.
+        let mut session = session_started_at(fixed_now(0));
+        session.add_turn(Turn {
+            speaker: Speaker::Child,
+            text: "what's gravity".into(),
+            timestamp: fixed_now(60),
+            intent: None,
+            concepts: vec![],
+        });
+        let learner = learner_with(EngagementState::Engaged, vec![]);
+        let gate = primer_core::session_timing::BreakGate {
+            interval_minutes: 30,
+            last_suggested_at: Some(fixed_now(55)),
+        };
+        let intent =
+            decide_intent_at_with_pack(english_pack(), &learner, &session, fixed_now(60), gate);
+        assert_ne!(intent, PedagogicalIntent::SuggestBreak);
     }
 
     #[test]
