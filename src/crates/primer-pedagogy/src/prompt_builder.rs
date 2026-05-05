@@ -13,7 +13,7 @@ use primer_core::conversation::{PedagogicalIntent, Session, Speaker, Turn};
 use primer_core::i18n::Locale;
 use primer_core::inference::{Message, Prompt, Role};
 use primer_core::knowledge::Passage;
-use primer_core::learner::{LearnerModel, UnderstandingDepth};
+use primer_core::learner::{ConceptState, LearnerModel, UnderstandingDepth};
 
 use crate::prompt_pack::{self, PromptPack};
 
@@ -57,6 +57,39 @@ pub fn build_system_prompt_with_pack(
     knowledge_context: &[Passage],
     summary: &str,
     retrieved_older: &[Turn],
+) -> String {
+    build_system_prompt_with_pack_and_vocab(
+        pack,
+        learner,
+        intent,
+        knowledge_context,
+        summary,
+        retrieved_older,
+        &[],
+    )
+}
+
+/// Build the system prompt with a vocabulary review section in addition
+/// to the existing knowledge / summary / retrieved sections.
+///
+/// `due_vocab` is the slice of due concepts (typically from
+/// [`primer_core::vocab::due_concepts`]). Empty → vocab section omitted.
+/// Section order: base / intent / engagement / summary / retrieved /
+/// vocab / knowledge.
+///
+/// The vocab section is the LLM-facing hint list for the spaced-repetition
+/// scheduler. It is rendered in English regardless of locale (the LLM
+/// consumes it; the child never sees this) and explicitly tells the
+/// model to weave words in only if topically relevant — no drilling.
+#[allow(clippy::too_many_arguments)]
+pub fn build_system_prompt_with_pack_and_vocab(
+    pack: &dyn PromptPack,
+    learner: &LearnerModel,
+    intent: PedagogicalIntent,
+    knowledge_context: &[Passage],
+    summary: &str,
+    retrieved_older: &[Turn],
+    due_vocab: &[&ConceptState],
 ) -> String {
     let age = learner.profile.age;
     let name = &learner.profile.name;
@@ -108,9 +141,41 @@ pub fn build_system_prompt_with_pack(
         format!("\n\n{intro}\n\n{lines}")
     };
 
+    let vocab_section = if due_vocab.is_empty() {
+        String::new()
+    } else {
+        let now = chrono::Utc::now();
+        let lines: String = due_vocab
+            .iter()
+            .map(|c| {
+                let days_ago = c
+                    .last_encountered
+                    .map(|last| days_since(last, now))
+                    .unwrap_or(0);
+                format!(
+                    "- {} (depth: {}, last seen {} day{} ago)",
+                    c.concept_id,
+                    c.depth,
+                    days_ago,
+                    if days_ago == 1 { "" } else { "s" }
+                )
+            })
+            .collect::<Vec<_>>()
+            .join("\n");
+        let intro = pack.vocab_review_intro();
+        format!("\n\n{intro}\n\n{lines}")
+    };
+
     format!(
-        "{base}\n\n{intent_instruction}{engagement_note}{summary_section}{retrieved_section}{knowledge_section}"
+        "{base}\n\n{intent_instruction}{engagement_note}\
+         {summary_section}{retrieved_section}{vocab_section}{knowledge_section}"
     )
+}
+
+/// Render `now - last` as integer days, floored, non-negative.
+/// Used by the vocab review section. Returns 0 for `now <= last`.
+fn days_since(last: chrono::DateTime<chrono::Utc>, now: chrono::DateTime<chrono::Utc>) -> i64 {
+    (now - last).num_days().max(0)
 }
 
 /// Convenience wrapper consulting the process-wide cached English pack.
@@ -167,14 +232,43 @@ pub fn build_prompt_with_pack(
     retrieved_older: &[Turn],
     context_turns: usize,
 ) -> Prompt {
+    build_prompt_with_pack_and_vocab(
+        pack,
+        learner,
+        session,
+        intent,
+        knowledge_context,
+        summary,
+        retrieved_older,
+        context_turns,
+        &[],
+    )
+}
+
+/// Like [`build_prompt_with_pack`] but threads `due_vocab` through to
+/// the system-prompt builder. The dialogue manager uses this variant;
+/// every other caller can keep using the no-vocab wrapper.
+#[allow(clippy::too_many_arguments)]
+pub fn build_prompt_with_pack_and_vocab(
+    pack: &dyn PromptPack,
+    learner: &LearnerModel,
+    session: &Session,
+    intent: PedagogicalIntent,
+    knowledge_context: &[Passage],
+    summary: &str,
+    retrieved_older: &[Turn],
+    context_turns: usize,
+    due_vocab: &[&ConceptState],
+) -> Prompt {
     Prompt {
-        system: build_system_prompt_with_pack(
+        system: build_system_prompt_with_pack_and_vocab(
             pack,
             learner,
             intent,
             knowledge_context,
             summary,
             retrieved_older,
+            due_vocab,
         ),
         messages: build_messages(session, context_turns),
     }
@@ -1291,6 +1385,119 @@ factual_prefixes = []
         assert!(
             prompt.system.contains("appears frustrated"),
             "engagement note should appear for FrustratedTrying"
+        );
+    }
+
+    // ─── Vocab review section (build_system_prompt_with_pack_and_vocab) ──
+
+    fn vocab_concept(id: &str, depth: UnderstandingDepth, days_ago: i64) -> ConceptState {
+        ConceptState {
+            concept_id: id.to_string(),
+            depth,
+            confidence: 0.8,
+            encounter_count: 2,
+            last_encountered: Some(Utc::now() - chrono::Duration::days(days_ago)),
+            notes: vec![],
+            box_level: 1,
+        }
+    }
+
+    #[test]
+    fn build_system_prompt_includes_vocab_section_when_due_vocab_non_empty() {
+        let learner = learner_with(EngagementState::Engaged, vec![]);
+        let due_vocab = vec![
+            vocab_concept("physics:gravity", UnderstandingDepth::Recall, 5),
+            vocab_concept("biology:photosynthesis", UnderstandingDepth::Comprehension, 12),
+        ];
+        let due_refs: Vec<&ConceptState> = due_vocab.iter().collect();
+        let prompt = build_system_prompt_with_pack_and_vocab(
+            english_pack(),
+            &learner,
+            PedagogicalIntent::SocraticQuestion,
+            &[],
+            "",
+            &[],
+            &due_refs,
+        );
+        assert!(
+            prompt.contains("topically relevant"),
+            "expected vocab intro in prompt, got: {prompt}"
+        );
+        assert!(
+            prompt.contains("physics:gravity"),
+            "expected first concept in prompt, got: {prompt}"
+        );
+        assert!(
+            prompt.contains("biology:photosynthesis"),
+            "expected second concept in prompt, got: {prompt}"
+        );
+    }
+
+    #[test]
+    fn build_system_prompt_omits_vocab_section_when_due_vocab_empty() {
+        let learner = learner_with(EngagementState::Engaged, vec![]);
+        let prompt = build_system_prompt_with_pack_and_vocab(
+            english_pack(),
+            &learner,
+            PedagogicalIntent::SocraticQuestion,
+            &[],
+            "",
+            &[],
+            &[],
+        );
+        assert!(
+            !prompt.contains("topically relevant"),
+            "vocab intro should not appear when due_vocab is empty: {prompt}"
+        );
+    }
+
+    #[test]
+    fn build_system_prompt_places_vocab_after_retrieved_before_knowledge() {
+        let learner = learner_with(EngagementState::Engaged, vec![]);
+        let retrieved = vec![Turn {
+            speaker: Speaker::Child,
+            text: "remember when we talked about clouds".into(),
+            timestamp: Utc::now(),
+            intent: None,
+            concepts: vec![],
+        }];
+        let knowledge = vec![Passage {
+            id: "test:cloud".into(),
+            text: "Clouds are condensed water vapor".into(),
+            source: "test".into(),
+            score: 1.0,
+        }];
+        let due_vocab = vec![vocab_concept(
+            "weather:cloud",
+            UnderstandingDepth::Recall,
+            5,
+        )];
+        let due_refs: Vec<&ConceptState> = due_vocab.iter().collect();
+        let prompt = build_system_prompt_with_pack_and_vocab(
+            english_pack(),
+            &learner,
+            PedagogicalIntent::SocraticQuestion,
+            &knowledge,
+            "Earlier we talked about water cycles.",
+            &retrieved,
+            &due_refs,
+        );
+        let retrieved_idx = prompt
+            .find("clouds")
+            .expect("retrieved snippet must appear");
+        let vocab_idx = prompt
+            .find("weather:cloud")
+            .expect("vocab concept must appear");
+        let knowledge_idx = prompt
+            .find("condensed water vapor")
+            .expect("knowledge snippet must appear");
+        assert!(
+            retrieved_idx < vocab_idx,
+            "retrieved must precede vocab: {prompt}"
+        );
+        assert!(
+            vocab_idx < knowledge_idx,
+            "vocab must precede knowledge: {prompt}"
         );
     }
 }
