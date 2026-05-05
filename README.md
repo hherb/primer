@@ -29,7 +29,7 @@ The learner model (what the child knows, how deeply they understand it, what top
 
 ## Status
 
-**Phase 0.1 done; Phase 0.3 substantially progressed.** The trait architecture and module boundaries are in place, and the text REPL holds real Socratic conversations against either the Anthropic Claude API or a local Ollama model.
+**Phase 0.1 done; Phase 0.3 done; Phase 0.2 partially done.** The trait architecture and module boundaries are in place, the text REPL holds real Socratic conversations against either the Anthropic Claude API or a local Ollama model, and a small hand-drafted seed corpus + hybrid (BM25 + dense-vector) retrieval pipeline are now wired through.
 
 **What works today:**
 
@@ -42,15 +42,17 @@ The learner model (what the child knows, how deeply they understand it, what top
 - **Comprehension classifier** — chained after the concept extractor (configurable via `--comprehension-backend` / `--comprehension-model`), assesses the depth of the child's understanding for each concept the exchange touched. Per-concept `{depth, confidence, evidence}` rows persist to `turn_comprehensions`; the in-memory `LearnerModel.concepts.depth` is promoted via monotonic max (threshold-gated, never demoted by a single weak exchange).
 - **Spaced-repetition vocabulary review** — concepts the child has previously encountered are gently surfaced back into the conversation at expanding intervals (1d / 3d / 7d / 14d / 30d) via a Leitner-box scheduler driven by the existing comprehension classifier (no extra LLM call). Strong re-confirmation advances the box; an `Aware` reading or sub-confidence resets it. The Primer's system prompt receives a passive hint list — the LLM weaves words in only if topically relevant; no drilling, no quizzing. Configurable via `--vocab-max-per-prompt N` (default 4). Schema v7 persists `box_level` alongside the existing depth/confidence/last-encountered state.
 - **Session break suggestions** — after a configurable wallclock interval (default 30 minutes), the Primer's next utterance is phrased as a gentle, in-character break suggestion. Cadence resets on each suggestion so nudges stay gentle and spaced. Engagement-state overrides win: a frustrated child past the threshold gets `Scaffolding` or `Encouragement`, not a break nudge. The Primer never enforces a session halt — children can keep going through any number of suggestions. Configurable via `--session-break-after-mins N`.
+- **Hybrid retrieval (BM25 + dense vector)** — the knowledge base and the long-term-memory layer both run a lexical leg (FTS5/BM25) and a semantic leg (cosine over per-passage f32 vectors) in parallel and fuse the two ranked lists via Reciprocal Rank Fusion (`k = 60`). When no embedder is wired the path falls back to BM25-only — every consumer can call the hybrid API unconditionally. Embedder identity is recorded in a per-DB `embedding_models` lookup table; mismatched dim or unrecorded model is a hard error, preventing silent quality regressions when a user re-opens a DB with a different embedder. Opt-in via `--embedder-backend none|stub|fastembed|ollama` (default `none`); `fastembed` uses BGE-M3 (1024-dim multilingual, ~570 MB on first run) behind the `embedding` cargo feature.
+- **Knowledge-base bootstrapping (partial)** — a small hand-drafted CC0 seed corpus (~55 passages in the "space" cluster: sun, moon, planets, stars, galaxies, black holes, comets, eclipses, tides, the universe) ships in-repo at `data/seed/seed_passages.en.jsonl` and auto-loads on first run when the KB is empty. A standalone `primer-kb-load` binary supports JSONL ingestion and `--reembed` backfill for re-embedding passages under a new model. A retrieval-quality integration test asserts canonical child queries surface passages with the expected key terms, so corpus edits that regress retrieval get caught in CI. More clusters (earth/weather, life, body, how-things-work) and a Wikipedia ingestion path are still ahead.
 - **Graceful inference-error handling** — typed `InferenceError` variants, bounded jittered retry on transient conditions (rate limits, 5xx, network flap), single i18n-ready render boundary. A child whose API key is wrong sees an actionable message instead of a raw 401.
 - **Learner-model persistence** — profile, concept-mastery state, learning preferences, and latest engagement snapshot persist across sessions via a `LearnerStore` trait + schema v4. A returning child carries forward their identity and progress.
 - **Voice round-trip POC** (`--speech`, behind a Cargo feature) — full LISTEN → THINK → SPEAK → LISTEN loop wired end-to-end: Silero VAD opens the mic, Whisper transcribes, the dialogue manager generates the response, Piper synthesises it phrase-by-phrase. No barge-in by design (the Primer never speaks over the child and the child never speaks over the Primer); cancel-on-resume preserves Socratic etiquette without freezing the loop.
 
-**Phase 0.3 is now complete.** The only remaining Phase 0 work is knowledge-base bootstrapping (Phase 0.2). Still ahead (see [ROADMAP.md](ROADMAP.md)): knowledge-base bootstrapping (Phase 0.2), local llama.cpp inference, hardening of the speech loop, hardware integration.
+**Phase 0.3 is now complete.** Phase 0.2 (knowledge-base bootstrapping) is partially complete: the ingestion + retrieval infrastructure and an initial seed corpus are in place; broader topic coverage and a Wikipedia ingestion path remain. Still ahead (see [ROADMAP.md](ROADMAP.md)): finishing the corpus, local llama.cpp inference, hardening of the speech loop, hardware integration.
 
 ## Architecture
 
-The codebase is a Rust workspace under `src/`, organised into ten crates. The core design principle is **trait-based hardware abstraction**: the pedagogical engine doesn't know or care whether it's talking to a local 7B model on a phone's NPU, llama.cpp on a laptop, or Claude over the network. Backend selection is a runtime config choice, not a code change.
+The codebase is a Rust workspace under `src/`, organised into twelve crates. The core design principle is **trait-based hardware abstraction**: the pedagogical engine doesn't know or care whether it's talking to a local 7B model on a phone's NPU, llama.cpp on a laptop, or Claude over the network. Backend selection is a runtime config choice, not a code change.
 
 ```
 src/
@@ -59,11 +61,13 @@ src/
     ├── primer-core/            # traits + shared types (everyone depends on this)
     ├── primer-inference/       # LLM backends (stub, cloud, ollama; later: llama.cpp, QNN, RKNN)
     ├── primer-speech/          # VAD + STT + TTS backends (Silero, Whisper, Piper, cpal)
-    ├── primer-knowledge/       # SQLite FTS5 knowledge base for RAG retrieval
+    ├── primer-knowledge/       # SQLite FTS5 + dense-vector hybrid knowledge base
     ├── primer-storage/         # SQLite session + learner-model persistence
     ├── primer-classifier/      # per-turn engagement classifier (LLM-backed + stub)
     ├── primer-extractor/       # per-exchange concept extractor (LLM-backed + stub)
     ├── primer-comprehension/   # per-exchange comprehension classifier (LLM-backed + stub)
+    ├── primer-embedding/       # embedder backends (stub, fastembed/BGE-M3, ollama)
+    ├── primer-kb-load/         # JSONL ingestion + auto-seed-on-empty + --reembed backfill
     ├── primer-pedagogy/        # Socratic dialogue engine (prompt builder + dialogue manager)
     └── primer-cli/             # text-mode REPL binary
 ```
@@ -73,7 +77,8 @@ src/
 Defines the trait contracts that all backends implement:
 
 - `InferenceBackend` — text generation (streaming and non-streaming)
-- `KnowledgeBase` — passage retrieval with BM25 ranking
+- `KnowledgeBase` — passage retrieval with BM25 ranking + optional hybrid (BM25 + dense-vector RRF) when an `Embedder` is wired
+- `Embedder` — text → fixed-dimension f32 vector for the dense-vector retrieval leg
 - `VoiceActivityDetector` — frame-by-frame speech-vs-silence classification
 - `SpeechToText` / `StreamingSpeechToText` — audio → text (one-shot or chunked)
 - `TextToSpeech` / `StreamingTextToSpeech` — text → audio (one-shot or phrase-by-phrase)
@@ -101,7 +106,15 @@ The Socratic engine — where the Primer's personality lives. Two modules:
 
 ### primer-knowledge
 
-SQLite FTS5-backed knowledge base. Stores passages from Wikipedia, curated encyclopedias, and curriculum materials. Retrieves relevant passages via full-text search with BM25 ranking. The pedagogical engine uses retrieved passages to ground the LLM's responses in verified information.
+SQLite-backed hybrid knowledge base. The lexical leg is FTS5 with BM25 ranking; the semantic leg is an in-Rust cosine over per-passage f32 vectors (1:1 with FTS5 `content_rowid`, BLOB column). When an `Embedder` is wired, `KnowledgeBase::retrieve_hybrid` runs both legs in parallel and fuses the ranked lists via Reciprocal Rank Fusion (`primer_core::rrf::fuse`, `k = 60`); when no embedder is wired, the same call falls back transparently to BM25-only. Tables are per-locale so BM25 statistics stay locale-pure and tokenizers can diverge per language. Schema v3 added an `embedding_models` lookup table that records `(model_name, dim)` on first vector write — subsequent writes that report a different dim under the same name fail loudly, so silently swapping embedders on an existing DB is impossible. The pedagogical engine uses retrieved passages to ground the LLM's responses in verified information.
+
+### primer-embedding
+
+Concrete `Embedder` backends. `StubEmbedder` (deterministic FNV+xorshift hash → L2-normalised f32 vector; default dim 384; model id `"stub-fxhash-v1"`) is always built and is the runtime fallback when a real-model download fails. Behind the `fastembed` cargo feature: `FastEmbedBackend` wraps `fastembed-rs` with BGE-M3 as the default model (1024-dim multilingual, ~570 MB int8 — covers EN/DE/JA/HI in one model so the initial test cohort never hits a model swap). Behind the `ollama` cargo feature: `OllamaEmbedder` calls `/api/embeddings`. All three implement the `Embedder` trait and report a stable model name for the per-DB identity check.
+
+### primer-kb-load
+
+JSONL ingestion + auto-seed-on-empty + `--reembed` backfill for the knowledge base. `load_jsonl(kb, path)` ingests passages (idempotent: skips already-present ids). `auto_seed_if_empty(kb, locale)` discovers `seed_passages.<pack_id>.jsonl` via `$PRIMER_SEED_DIR` → `$XDG_DATA_HOME/primer/seed/` → walking up from `CARGO_MANIFEST_DIR` and loads it on a freshly-empty KB. `reembed_kb(kb, embedder, force, batch_size)` backfills embeddings for passages missing one, or re-embeds everything under a new model when `force` is set. A standalone binary `primer-kb-load --reembed --knowledge-db <path> --locale <pack>` is feature-gated on `fastembed`. A retrieval-quality integration test asserts that canonical child queries surface passages with the expected key terms — corpus edits that regress retrieval get caught in CI.
 
 ### primer-storage
 
@@ -248,6 +261,15 @@ Project-local `.env` wins over the home file. Both are gitignored. See `.env.exa
 --verbose                       Print pedagogical decisions ([intent], [classifier], [extractor]) to
                                 stderr alongside the conversation. Stdout stays clean.
 --session-break-after-mins N    Minutes between break-suggestion nudges (default 30; must be ≥1).
+--embedder-backend <name>       Embedder backend for hybrid retrieval: none|stub|fastembed|ollama
+                                (default: none = BM25-only, the pre-Phase-0.2.5 behaviour). `stub`
+                                is for testing the hybrid pipeline only; `fastembed` requires
+                                --features primer-cli/embedding (downloads BGE-M3, ~570 MB on
+                                first run); `ollama` requires --features primer-cli/ollama-embedding.
+--embedder-model <id>           Embedder model name. Defaults: `bge-m3` for fastembed,
+                                `nomic-embed-text` for ollama.
+--embedder-ollama-url <url>     Ollama endpoint for `--embedder-backend ollama`
+                                (default: http://localhost:11434).
 ```
 
 Voice-mode flags (only when built with `--features primer-cli/speech`):
