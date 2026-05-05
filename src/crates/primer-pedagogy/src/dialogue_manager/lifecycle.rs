@@ -63,6 +63,9 @@ impl<'a> DialogueManager<'a> {
             comprehension_settings: subsystems.comprehension_settings,
             vocab_settings: subsystems.vocab_settings,
             last_comprehension: None,
+            last_break_suggested_at: None,
+            #[cfg(test)]
+            clock_override: None,
             config,
             last_extraction: None,
             learner_dirty: false,
@@ -121,6 +124,7 @@ impl<'a> DialogueManager<'a> {
     pub async fn resume_session(&mut self, loaded: Session) -> Result<()> {
         self.session = loaded;
         self.session.ended_at = None;
+        self.last_break_suggested_at = None;
         self.refresh_summary_if_stale().await;
 
         // Rehydrate recent_assessments + current_engagement from persisted

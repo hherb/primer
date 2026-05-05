@@ -147,6 +147,14 @@ pub struct DialogueManager<'a> {
     /// Most recent comprehension result applied to the learner. Cleared
     /// on session lifecycle events. Used by `--verbose`.
     last_comprehension: Option<primer_core::comprehension::ComprehensionResult>,
+    /// In-memory timestamp of the last `SuggestBreak` fire. Reset on
+    /// `new` and `resume_session`. Not persisted across `--resume`
+    /// — see the design spec's non-goals for the rationale.
+    pub(super) last_break_suggested_at: Option<chrono::DateTime<chrono::Utc>>,
+    /// Test-only clock override. When `Some`, `now()` returns this value
+    /// instead of `chrono::Utc::now()`. Production paths never set this.
+    #[cfg(test)]
+    pub(super) clock_override: Option<chrono::DateTime<chrono::Utc>>,
     /// Pedagogical configuration.
     config: PedagogyConfig,
     /// Most recent extractor output applied to the learner. Cleared on
@@ -210,6 +218,38 @@ type PostResponseOutcome = Option<
         tokio::time::error::Elapsed,
     >,
 >;
+
+impl<'a> DialogueManager<'a> {
+    /// Returns the current wallclock for break-gate decisions. Tests
+    /// can override via `clock_override`; production always reads
+    /// `chrono::Utc::now()`.
+    #[allow(dead_code)] // Used by Task 9 (respond_to_streaming gate).
+    pub(super) fn now(&self) -> chrono::DateTime<chrono::Utc> {
+        #[cfg(test)]
+        if let Some(t) = self.clock_override {
+            return t;
+        }
+        chrono::Utc::now()
+    }
+
+    #[cfg(test)]
+    pub fn last_break_suggested_at_for_test(&self) -> Option<chrono::DateTime<chrono::Utc>> {
+        self.last_break_suggested_at
+    }
+
+    #[cfg(test)]
+    pub fn set_last_break_suggested_at_for_test(
+        &mut self,
+        v: Option<chrono::DateTime<chrono::Utc>>,
+    ) {
+        self.last_break_suggested_at = v;
+    }
+
+    #[cfg(test)]
+    pub fn set_clock_for_test(&mut self, t: chrono::DateTime<chrono::Utc>) {
+        self.clock_override = Some(t);
+    }
+}
 
 #[cfg(test)]
 mod tests {
