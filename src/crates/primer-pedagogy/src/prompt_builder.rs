@@ -66,6 +66,7 @@ pub fn build_system_prompt_with_pack(
         summary,
         retrieved_older,
         &[],
+        0,
     )
 }
 
@@ -90,6 +91,7 @@ pub fn build_system_prompt_with_pack_and_vocab(
     summary: &str,
     retrieved_older: &[Turn],
     due_vocab: &[&ConceptState],
+    break_minutes: u32,
 ) -> String {
     let age = learner.profile.age;
     let name = &learner.profile.name;
@@ -102,6 +104,13 @@ pub fn build_system_prompt_with_pack_and_vocab(
         String::new()
     } else {
         format!("\n\n{engagement_note_body}")
+    };
+
+    let break_suggestion_section = if intent == PedagogicalIntent::SuggestBreak {
+        let intro = pack.break_suggestion_intro(break_minutes);
+        format!("\n\n{intro}")
+    } else {
+        String::new()
     };
 
     let knowledge_section = if knowledge_context.is_empty() {
@@ -167,7 +176,7 @@ pub fn build_system_prompt_with_pack_and_vocab(
     };
 
     format!(
-        "{base}\n\n{intent_instruction}{engagement_note}\
+        "{base}\n\n{intent_instruction}{engagement_note}{break_suggestion_section}\
          {summary_section}{retrieved_section}{vocab_section}{knowledge_section}"
     )
 }
@@ -269,6 +278,7 @@ pub fn build_prompt_with_pack_and_vocab(
             summary,
             retrieved_older,
             due_vocab,
+            0, // TODO Task 9: pass config.break_suggest_after_minutes
         ),
         messages: build_messages(session, context_turns),
     }
@@ -1451,6 +1461,7 @@ factual_prefixes = []
             "",
             &[],
             &due_refs,
+            0,
         );
         assert!(
             prompt.contains("topically relevant"),
@@ -1477,6 +1488,7 @@ factual_prefixes = []
             "",
             &[],
             &[],
+            0,
         );
         assert!(
             !prompt.contains("topically relevant"),
@@ -1619,6 +1631,7 @@ factual_prefixes = []
             "Earlier we talked about water cycles.",
             &retrieved,
             &due_refs,
+            0,
         );
         let retrieved_idx = prompt
             .find("clouds")
@@ -1636,6 +1649,52 @@ factual_prefixes = []
         assert!(
             vocab_idx < knowledge_idx,
             "vocab must precede knowledge: {prompt}"
+        );
+    }
+
+    #[test]
+    fn build_system_prompt_includes_break_suggestion_section_when_intent_is_suggest_break() {
+        let learner = learner_with(EngagementState::Engaged, vec![]);
+        let prompt = build_system_prompt_with_pack_and_vocab(
+            english_pack(),
+            &learner,
+            PedagogicalIntent::SuggestBreak,
+            &[],
+            "",
+            &[],
+            &[],
+            30,
+        );
+        assert!(
+            prompt.contains("30"),
+            "rendered prompt should contain the substituted minutes value: {prompt:?}"
+        );
+        assert!(
+            prompt.to_lowercase().contains("break"),
+            "rendered prompt should contain a break-related word: {prompt:?}"
+        );
+        assert!(
+            !prompt.contains("{minutes}"),
+            "{{minutes}} placeholder must be substituted: {prompt:?}"
+        );
+    }
+
+    #[test]
+    fn build_system_prompt_omits_break_suggestion_section_for_other_intents() {
+        let learner = learner_with(EngagementState::Engaged, vec![]);
+        let prompt = build_system_prompt_with_pack_and_vocab(
+            english_pack(),
+            &learner,
+            PedagogicalIntent::SocraticQuestion,
+            &[],
+            "",
+            &[],
+            &[],
+            30,
+        );
+        assert!(
+            !prompt.contains("phrase it as their choice"),
+            "non-SuggestBreak intent should NOT include the break section: {prompt:?}"
         );
     }
 }
