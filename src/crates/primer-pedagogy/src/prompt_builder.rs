@@ -437,6 +437,7 @@ mod tests {
             encounter_count: 1,
             last_encountered: Some(Utc::now()),
             notes: vec![],
+            box_level: 0,
         }
     }
 

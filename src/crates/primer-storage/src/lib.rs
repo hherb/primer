@@ -1218,6 +1218,7 @@ impl primer_core::storage::LearnerStore for SqliteSessionStore {
                 encounter_count: i64_to_u32(encounter_count, "learner_concepts.encounter_count")?,
                 last_encountered,
                 notes,
+                box_level: 0,
             });
         }
 
@@ -3450,6 +3451,7 @@ mod learner_store_tests {
                     encounter_count: 3,
                     last_encountered: Some(Utc::now()),
                     notes: vec!["mass vs weight confusion".into()],
+                    box_level: 0,
                 },
                 ConceptState {
                     concept_id: "biology:photosynthesis".into(),
@@ -3458,6 +3460,7 @@ mod learner_store_tests {
                     encounter_count: 1,
                     last_encountered: None,
                     notes: vec![],
+                    box_level: 0,
                 },
             ],
             preferences: LearningPreferences {
@@ -3653,6 +3656,7 @@ mod learner_store_tests {
                 encounter_count: 1,
                 last_encountered: None,
                 notes: vec![],
+                box_level: 0,
             });
         }
         store.save_learner(&l).await.unwrap();

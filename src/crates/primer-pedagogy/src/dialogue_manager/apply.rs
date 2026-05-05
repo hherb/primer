@@ -87,6 +87,7 @@ pub(super) fn apply_extraction(
                 encounter_count: 1,
                 last_encountered: Some(now),
                 notes: vec![],
+                box_level: 0,
             });
             changed = true;
         }
@@ -305,6 +306,7 @@ mod tests {
             encounter_count: 1,
             last_encountered: None,
             notes: vec![],
+            box_level: 0,
         });
 
         let result = ComprehensionResult {
@@ -343,6 +345,7 @@ mod tests {
             encounter_count: 5,
             last_encountered: None,
             notes: vec![],
+            box_level: 0,
         });
         let result = ComprehensionResult {
             assessments: vec![ComprehensionAssessment {
@@ -380,6 +383,7 @@ mod tests {
             encounter_count: 1,
             last_encountered: None,
             notes: vec![],
+            box_level: 0,
         });
         let result = ComprehensionResult {
             assessments: vec![ComprehensionAssessment {

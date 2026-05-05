@@ -122,6 +122,12 @@ pub struct ConceptState {
     /// Notes from the dialogue manager (e.g., "struggled with the
     /// distinction between mass and weight").
     pub notes: Vec<String>,
+    /// Spaced-repetition box level. 0 = freshly encountered or recently
+    /// failed; up to `crate::consts::vocab::MAX_BOX_LEVEL` = 4 (30-day
+    /// interval). `#[serde(default)]` so old serialised profiles
+    /// deserialise cleanly with `box_level = 0`.
+    #[serde(default)]
+    pub box_level: u8,
 }
 
 /// Observed learning style preferences — updated over time.
