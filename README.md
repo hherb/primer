@@ -41,11 +41,12 @@ The learner model (what the child knows, how deeply they understand it, what top
 - **Concept extractor** — runs after each completed exchange (configurable via `--extractor-backend` / `--extractor-model`), extracts the topics the child surfaced and the topics the Primer introduced, and writes them atomically to `turn_concepts` while updating the in-memory learner model.
 - **Comprehension classifier** — chained after the concept extractor (configurable via `--comprehension-backend` / `--comprehension-model`), assesses the depth of the child's understanding for each concept the exchange touched. Per-concept `{depth, confidence, evidence}` rows persist to `turn_comprehensions`; the in-memory `LearnerModel.concepts.depth` is promoted via monotonic max (threshold-gated, never demoted by a single weak exchange).
 - **Spaced-repetition vocabulary review** — concepts the child has previously encountered are gently surfaced back into the conversation at expanding intervals (1d / 3d / 7d / 14d / 30d) via a Leitner-box scheduler driven by the existing comprehension classifier (no extra LLM call). Strong re-confirmation advances the box; an `Aware` reading or sub-confidence resets it. The Primer's system prompt receives a passive hint list — the LLM weaves words in only if topically relevant; no drilling, no quizzing. Configurable via `--vocab-max-per-prompt N` (default 4). Schema v7 persists `box_level` alongside the existing depth/confidence/last-encountered state.
+- **Session break suggestions** — after a configurable wallclock interval (default 30 minutes), the Primer's next utterance is phrased as a gentle, in-character break suggestion. Cadence resets on each suggestion so nudges stay gentle and spaced. Engagement-state overrides win: a frustrated child past the threshold gets `Scaffolding` or `Encouragement`, not a break nudge. The Primer never enforces a session halt — children can keep going through any number of suggestions. Configurable via `--session-break-after-mins N`.
 - **Graceful inference-error handling** — typed `InferenceError` variants, bounded jittered retry on transient conditions (rate limits, 5xx, network flap), single i18n-ready render boundary. A child whose API key is wrong sees an actionable message instead of a raw 401.
 - **Learner-model persistence** — profile, concept-mastery state, learning preferences, and latest engagement snapshot persist across sessions via a `LearnerStore` trait + schema v4. A returning child carries forward their identity and progress.
 - **Voice round-trip POC** (`--speech`, behind a Cargo feature) — full LISTEN → THINK → SPEAK → LISTEN loop wired end-to-end: Silero VAD opens the mic, Whisper transcribes, the dialogue manager generates the response, Piper synthesises it phrase-by-phrase. No barge-in by design (the Primer never speaks over the child and the child never speaks over the Primer); cancel-on-resume preserves Socratic etiquette without freezing the loop.
 
-**Still ahead** (see [ROADMAP.md](ROADMAP.md)): knowledge-base bootstrapping (Phase 0.2), session-time-based break suggestions (rest of Phase 0.3), local llama.cpp inference, hardening of the speech loop, hardware integration.
+**Phase 0.3 is now complete.** The only remaining Phase 0 work is knowledge-base bootstrapping (Phase 0.2). Still ahead (see [ROADMAP.md](ROADMAP.md)): knowledge-base bootstrapping (Phase 0.2), local llama.cpp inference, hardening of the speech loop, hardware integration.
 
 ## Architecture
 
@@ -246,6 +247,7 @@ Project-local `.env` wins over the home file. Both are gitignored. See `.env.exa
 --extractor-timeout-ms <ms>     Bounded wait for the previous turn's extraction (default: 1500ms).
 --verbose                       Print pedagogical decisions ([intent], [classifier], [extractor]) to
                                 stderr alongside the conversation. Stdout stays clean.
+--session-break-after-mins N    Minutes between break-suggestion nudges (default 30; must be ≥1).
 ```
 
 Voice-mode flags (only when built with `--features primer-cli/speech`):
