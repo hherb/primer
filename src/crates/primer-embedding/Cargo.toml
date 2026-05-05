@@ -1,0 +1,29 @@
+[package]
+name = "primer-embedding"
+description = "Embedding backends for the Primer's hybrid retrieval"
+version.workspace = true
+edition.workspace = true
+
+[features]
+# Stubs are always built. Real backends (fastembed, ollama) come behind
+# their own feature flags so default-feature builds and hermetic tests
+# don't pull the model-runtime dep tree.
+#
+# `fastembed` and `ollama` are introduced as empty placeholders for now;
+# the actual implementations land in subsequent steps of the hybrid-
+# retrieval design (steps 7 and 8). Keeping the feature names stable
+# from day one means downstream crates (`primer-cli`, future tests)
+# can already declare their dependency surface.
+default = []
+fastembed = []
+ollama = []
+
+[dependencies]
+primer-core.workspace = true
+async-trait.workspace = true
+tokio.workspace = true
+tracing.workspace = true
+thiserror.workspace = true
+
+[dev-dependencies]
+tempfile.workspace = true

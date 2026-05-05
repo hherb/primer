@@ -1895,6 +1895,18 @@ dependencies = [
 ]
 
 [[package]]
+name = "primer-embedding"
+version = "0.1.0"
+dependencies = [
+ "async-trait",
+ "primer-core",
+ "tempfile",
+ "thiserror 2.0.18",
+ "tokio",
+ "tracing",
+]
+
+[[package]]
 name = "primer-extractor"
 version = "0.1.0"
 dependencies = [

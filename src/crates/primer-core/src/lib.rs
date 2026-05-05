@@ -17,6 +17,7 @@ pub mod comprehension;
 pub mod config;
 pub mod consts;
 pub mod conversation;
+pub mod embedder;
 pub mod error;
 pub mod extractor;
 pub mod i18n;
