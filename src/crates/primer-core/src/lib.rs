@@ -25,6 +25,7 @@ pub mod knowledge;
 pub mod learner;
 pub mod llm_util;
 pub mod retry;
+pub mod session_timing;
 pub mod speech;
 pub mod storage;
 pub mod vocab;
