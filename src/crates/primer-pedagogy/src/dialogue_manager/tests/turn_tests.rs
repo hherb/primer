@@ -476,3 +476,97 @@ async fn save_learner_failure_does_not_propagate_through_respond_to() {
         "dirty must remain set when save_learner errors so a future save still runs"
     );
 }
+
+// ─── Vocab spaced-repetition end-to-end ─────────────────────────────────
+
+#[tokio::test]
+async fn build_turn_prompt_includes_vocab_section_when_concept_is_overdue() {
+    use chrono::{Duration, Utc};
+    use primer_core::conversation::PedagogicalIntent;
+    use primer_core::learner::{ConceptState, UnderstandingDepth};
+
+    // Scripted backend isn't even called by build_turn_prompt — we drive
+    // the prompt-build path directly. EmptyKnowledge keeps the knowledge
+    // section empty so the assertion lands cleanly.
+    let backend = ScriptedBackend::new(vec![Ok(chunk("", true))]);
+    let knowledge = EmptyKnowledge;
+    let mut dm = DialogueManager::new(
+        test_learner(),
+        &backend,
+        &knowledge,
+        DialogueManagerStores::default(),
+        default_subsystems(),
+        PedagogyConfig::default(),
+    );
+
+    // Inject a concept with a back-dated last_encountered: 10 days ago,
+    // box_level=1 (interval = 3 days). Overdue by 7 days.
+    dm.learner.concepts.push(ConceptState {
+        concept_id: "physics:gravity".into(),
+        depth: UnderstandingDepth::Comprehension,
+        confidence: 0.85,
+        encounter_count: 2,
+        last_encountered: Some(Utc::now() - Duration::days(10)),
+        notes: vec![],
+        box_level: 1,
+    });
+
+    let prompt = dm
+        .build_turn_prompt("tell me a story", PedagogicalIntent::SocraticQuestion)
+        .await;
+
+    assert!(
+        prompt.system.contains("topically relevant"),
+        "vocab intro should appear in prompt: {}",
+        prompt.system
+    );
+    assert!(
+        prompt.system.contains("physics:gravity"),
+        "physics:gravity should appear in vocab list: {}",
+        prompt.system
+    );
+    assert!(
+        prompt.system.contains("10 days ago"),
+        "expected '10 days ago' phrasing in vocab list: {}",
+        prompt.system
+    );
+}
+
+#[tokio::test]
+async fn build_turn_prompt_omits_vocab_section_when_no_concept_is_due() {
+    use chrono::{Duration, Utc};
+    use primer_core::conversation::PedagogicalIntent;
+    use primer_core::learner::{ConceptState, UnderstandingDepth};
+
+    let backend = ScriptedBackend::new(vec![Ok(chunk("", true))]);
+    let knowledge = EmptyKnowledge;
+    let mut dm = DialogueManager::new(
+        test_learner(),
+        &backend,
+        &knowledge,
+        DialogueManagerStores::default(),
+        default_subsystems(),
+        PedagogyConfig::default(),
+    );
+
+    // 12h ago, box 0 = 1-day interval → not due.
+    dm.learner.concepts.push(ConceptState {
+        concept_id: "physics:gravity".into(),
+        depth: UnderstandingDepth::Aware,
+        confidence: 0.7,
+        encounter_count: 1,
+        last_encountered: Some(Utc::now() - Duration::hours(12)),
+        notes: vec![],
+        box_level: 0,
+    });
+
+    let prompt = dm
+        .build_turn_prompt("what is gravity", PedagogicalIntent::SocraticQuestion)
+        .await;
+
+    assert!(
+        !prompt.system.contains("topically relevant"),
+        "vocab intro should NOT appear when no concept is due: {}",
+        prompt.system
+    );
+}

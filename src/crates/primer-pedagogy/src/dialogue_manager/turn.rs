@@ -134,7 +134,11 @@ impl<'a> DialogueManager<'a> {
     /// builder along with the active intent. `decide_intent_with_pack`
     /// stays with the caller so the orchestrator can hold the intent
     /// for use in step 4.
-    async fn build_turn_prompt(&self, child_input: &str, intent: PedagogicalIntent) -> Prompt {
+    pub(super) async fn build_turn_prompt(
+        &self,
+        child_input: &str,
+        intent: PedagogicalIntent,
+    ) -> Prompt {
         let knowledge_context = self.retrieve_knowledge(child_input).await;
         let (summary, retrieved_older) = self.retrieve_long_term_memory(child_input).await;
         // Compute due-vocab once per turn. Wallclock dependency is
