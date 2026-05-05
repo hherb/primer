@@ -95,6 +95,38 @@ const QUERIES: &[(&str, &[&str], usize)] = &[
     ("what is a frog", &["amphibian", "tadpole"], 5),
     ("how many legs does an insect have", &["six", "thorax"], 5),
     ("where do babies come from", &["egg", "sperm"], 5),
+    // Earth and weather cluster
+    (
+        "what makes rain fall from clouds",
+        &["droplet", "condens"],
+        5,
+    ),
+    (
+        "how do snowflakes form six arms",
+        &["hexagon", "crystal"],
+        5,
+    ),
+    ("why are clouds white or grey", &["scatter", "droplet"], 5),
+    ("what causes wind to blow", &["pressure", "air"], 5),
+    ("why does lightning make thunder", &["spark", "shock"], 5),
+    (
+        "why do rainbows have colours",
+        &["refract", "wavelength"],
+        5,
+    ),
+    (
+        "water cycle evaporation precipitation",
+        &["evapora", "condens"],
+        5,
+    ),
+    ("how do volcanoes erupt magma", &["magma", "tectonic"], 5),
+    ("what causes earthquakes faults", &["fault", "tectonic"], 5),
+    ("how do mountains form collide", &["plate", "collid"], 5),
+    (
+        "difference between climate and weather",
+        &["climate", "average"],
+        5,
+    ),
 ];
 
 #[tokio::test]
