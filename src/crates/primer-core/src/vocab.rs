@@ -39,20 +39,23 @@ pub fn apply_box_transition(current_box: u8, depth: UnderstandingDepth, confiden
 /// True if a concept is due for review now.
 ///
 /// Returns false for concepts never encountered (`last_encountered = None`).
-/// Returns true for concepts with `last_encountered` older than the box's
-/// interval. Out-of-range `box_level` (defensive — should never happen)
-/// clamps to `MAX_BOX_LEVEL`.
+/// Returns true for concepts with `now - last_encountered >= interval`
+/// (Leitner convention: a concept reviewed N days ago is due *on* day N,
+/// not the day after). Out-of-range `box_level` (defensive — should never
+/// happen) clamps to `MAX_BOX_LEVEL`.
 pub fn is_due(concept: &ConceptState, now: chrono::DateTime<chrono::Utc>) -> bool {
     let Some(last) = concept.last_encountered else {
         return false;
     };
     let box_idx = (concept.box_level as usize).min(BOX_INTERVALS_DAYS.len() - 1);
     let interval = chrono::Duration::days(BOX_INTERVALS_DAYS[box_idx] as i64);
-    now - last > interval
+    now - last >= interval
 }
 
 /// Top `max_count` due concepts from the learner model, sorted by
-/// overdue-ness descending (most overdue first).
+/// overdue-ness descending (most overdue first), with `concept_id`
+/// as a stable tiebreaker so the top-K selection is reproducible
+/// across resumes (storage rows have no defined order).
 ///
 /// Pure — borrows from the learner; returns at most `max_count` references.
 /// Fewer if the learner has fewer due concepts. `max_count = 0` short-circuits
@@ -69,7 +72,9 @@ pub fn due_concepts(
     due.sort_by(|a, b| {
         let a_over = overdue_amount(a, now);
         let b_over = overdue_amount(b, now);
-        b_over.cmp(&a_over)
+        b_over
+            .cmp(&a_over)
+            .then_with(|| a.concept_id.cmp(&b.concept_id))
     });
     due.truncate(max_count);
     due
@@ -211,6 +216,22 @@ mod tests {
     }
 
     #[test]
+    fn is_due_true_at_exact_box0_boundary() {
+        // Leitner convention: due ON day N, not the day after.
+        // 24h gap with box 0 (1d interval) → due.
+        let now = fixed_now();
+        let c = concept_with(0, Some(now - Duration::hours(24)));
+        assert!(is_due(&c, now));
+    }
+
+    #[test]
+    fn is_due_true_at_exact_box4_boundary() {
+        let now = fixed_now();
+        let c = concept_with(4, Some(now - Duration::days(30)));
+        assert!(is_due(&c, now));
+    }
+
+    #[test]
     fn is_due_clamps_out_of_range_box_level() {
         // box_level = 99 should clamp to box 4 (interval 30d). 31d gap → due.
         let now = fixed_now();
@@ -308,6 +329,30 @@ mod tests {
             .collect();
         // Expected order by overdue desc: c=13d, a=9d, d=4d, b=1d. e is not due.
         assert_eq!(result, vec!["c", "a", "d", "b"]);
+    }
+
+    #[test]
+    fn due_concepts_breaks_overdue_ties_by_concept_id_for_reproducibility() {
+        // Two concepts with identical overdue amount must sort by
+        // concept_id ascending so top-K selection is reproducible
+        // across resumes (storage rows have no defined order).
+        let now = fixed_now();
+        let mut learner = empty_learner();
+        let mut z = concept_with(0, Some(now - Duration::days(5)));
+        z.concept_id = "z".into();
+        learner.concepts.push(z);
+        let mut a = concept_with(0, Some(now - Duration::days(5)));
+        a.concept_id = "a".into();
+        learner.concepts.push(a);
+        let mut m = concept_with(0, Some(now - Duration::days(5)));
+        m.concept_id = "m".into();
+        learner.concepts.push(m);
+
+        let result: Vec<&str> = due_concepts(&learner, now, 3)
+            .iter()
+            .map(|c| c.concept_id.as_str())
+            .collect();
+        assert_eq!(result, vec!["a", "m", "z"]);
     }
 
     #[test]

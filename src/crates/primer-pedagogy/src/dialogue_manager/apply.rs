@@ -141,12 +141,15 @@ pub(super) fn apply_comprehension(
             // of whether depth moved. Successful re-confirmation at the same
             // depth is the SR mechanism for expanding intervals — without
             // this, a concept stuck at Comprehension would never advance
-            // even after years of confident re-engagement. Note that
-            // MIN_CONF_FOR_BOX_PROMOTION (0.6) numerically equals the outer
-            // confidence_threshold today, so the inner reset branch is
-            // currently dead code in the default config. The constants are
-            // namespaced apart so a future researcher can tune them
-            // independently. See docs/superpowers/specs/2026-05-05-vocabulary-spaced-repetition-design.md
+            // even after years of confident re-engagement. The inner
+            // `confidence < MIN_CONF_FOR_BOX_PROMOTION` reset branch in
+            // `apply_box_transition` is redundant in the default config
+            // (numerically equal to the outer `confidence_threshold` of
+            // 0.6), but stays load-bearing if a future researcher lowers
+            // `comprehension_settings.confidence_threshold` below 0.6 to
+            // accept noisier comprehension signal — the const-keyed inner
+            // guard then prevents weak signal from driving box promotion.
+            // See docs/superpowers/specs/2026-05-05-vocabulary-spaced-repetition-design.md
             // ("Subtle but deliberate") for the policy split.
             let new_box =
                 primer_core::vocab::apply_box_transition(c.box_level, a.depth, a.confidence);

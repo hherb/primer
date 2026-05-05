@@ -2524,8 +2524,8 @@ mod tests {
     }
 
     #[test]
-    fn user_version_is_six() {
-        assert_eq!(schema::USER_VERSION, 6);
+    fn user_version_is_seven() {
+        assert_eq!(schema::USER_VERSION, 7);
     }
 
     // ─── save_classification / load_recent_assessments ───────────────
