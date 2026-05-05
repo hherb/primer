@@ -32,7 +32,12 @@ use rusqlite::Connection;
 /// column (default `'en'`) that back the i18n / multi-locale prompt-pack
 /// architecture (Phase 0.1 i18n). Schema-only — adopting a non-default
 /// locale for an existing learner is the CLI's responsibility.
-pub const USER_VERSION: i64 = 6;
+///
+/// Bumped to 7 when we added the `learner_concepts.box_level` column
+/// (INTEGER NOT NULL DEFAULT 0) backing the spaced-repetition
+/// vocabulary feature (Phase 0.3). Existing rows default to box 0 — no
+/// backfill needed at this stage (Phase 0.3 has no field-deployed users).
+pub const USER_VERSION: i64 = 7;
 
 /// Idempotent CREATE statements for the base (v1) schema. Run on every
 /// `open()`. v2-specific objects are added by `apply_v2_migrations`.
@@ -457,6 +462,43 @@ pub(crate) fn apply_v6_migrations(conn: &Connection) -> Result<()> {
     Ok(())
 }
 
+// ─── v7 schema strings ──────────────────────────────────────────────────────
+//
+// v7 adds `learner_concepts.box_level` for the Leitner-box spaced-repetition
+// schedule. INTEGER NOT NULL DEFAULT 0 means existing rows upgrade cleanly:
+// their box_level becomes 0, which (combined with their `last_encountered`)
+// schedules them for review 1 day after their old `last_encountered` —
+// effectively treating pre-v7 data as freshly-encountered. Acceptable for
+// Phase 0.3 with no field-deployed users.
+
+/// Apply v7 migrations idempotently. Safe to run on a fresh DB (after v6
+/// objects exist), on a v6 DB being upgraded, and on a v7 DB being
+/// re-opened.
+///
+/// All steps run inside a single transaction so a partial failure rolls
+/// back to the pre-migration state.
+pub(crate) fn apply_v7_migrations(conn: &Connection) -> Result<()> {
+    let tx = conn
+        .unchecked_transaction()
+        .map_err(|e| PrimerError::Storage(format!("v7 migration: failed to begin tx: {e}")))?;
+
+    if !column_exists(&tx, "learner_concepts", "box_level")? {
+        tx.execute_batch(
+            "ALTER TABLE learner_concepts \
+             ADD COLUMN box_level INTEGER NOT NULL DEFAULT 0;",
+        )
+        .map_err(|e| {
+            PrimerError::Storage(format!(
+                "v7 migration: ALTER learner_concepts ADD box_level: {e}"
+            ))
+        })?;
+    }
+
+    tx.commit()
+        .map_err(|e| PrimerError::Storage(format!("v7 migration: commit: {e}")))?;
+    Ok(())
+}
+
 fn column_exists(conn: &Connection, table: &str, column: &str) -> Result<bool> {
     let sql = format!("SELECT COUNT(*) FROM pragma_table_info('{table}') WHERE name = ?1");
     let count: i64 = conn
@@ -623,8 +665,8 @@ mod v4_tests {
     }
 
     #[test]
-    fn user_version_constant_is_six() {
-        assert_eq!(USER_VERSION, 6);
+    fn user_version_constant_is_seven() {
+        assert_eq!(USER_VERSION, 7);
     }
 
     #[test]
@@ -782,6 +824,103 @@ mod v4_tests {
             &conn,
             "concepts",
             "concept_language_tag",
+        ));
+    }
+
+    fn fresh_v6_conn() -> Connection {
+        let conn = Connection::open_in_memory().unwrap();
+        conn.execute_batch("PRAGMA foreign_keys = ON;").unwrap();
+        conn.execute_batch(SCHEMA_SQL).unwrap();
+        apply_v2_migrations(&conn).unwrap();
+        apply_v3_migrations(&conn).unwrap();
+        apply_v4_migrations(&conn).unwrap();
+        apply_v5_migrations(&conn).unwrap();
+        apply_v6_migrations(&conn).unwrap();
+        conn
+    }
+
+    #[test]
+    fn v7_migration_adds_learner_concepts_box_level_column() {
+        let conn = fresh_v6_conn();
+        assert!(!column_exists_in_test(
+            &conn,
+            "learner_concepts",
+            "box_level"
+        ));
+        apply_v7_migrations(&conn).unwrap();
+        assert!(column_exists_in_test(
+            &conn,
+            "learner_concepts",
+            "box_level"
+        ));
+    }
+
+    #[test]
+    fn v7_migration_defaults_existing_rows_to_zero() {
+        let conn = fresh_v6_conn();
+        // Pre-seed a learners + concepts + learner_concepts row before v7.
+        conn.execute(
+            "INSERT INTO engagement_states (id, name) VALUES (1, 'Engaged')",
+            [],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO understanding_depths (id, name) VALUES (1, 'Aware')",
+            [],
+        )
+        .unwrap();
+        let learner_id = uuid::Uuid::new_v4().to_string();
+        conn.execute(
+            "INSERT INTO learners (
+                 id, name, age, languages, created_at, last_active,
+                 pref_narrative, pref_socratic, pref_visual, pref_kinesthetic,
+                 typical_session_minutes, high_engagement_topics,
+                 early_disengagement_secs, current_engagement_state_id, locale
+             ) VALUES (?1, 'Tester', 8, '[]', '2026-01-01T00:00:00Z',
+                      '2026-01-01T00:00:00Z', 0.5, 0.5, 0.5, 0.5, 20.0,
+                      '[]', 300, 1, 'en')",
+            rusqlite::params![learner_id],
+        )
+        .unwrap();
+        conn.execute("INSERT INTO concepts (name) VALUES ('photosynthesis')", [])
+            .unwrap();
+        let concept_id: i64 = conn
+            .query_row(
+                "SELECT id FROM concepts WHERE name = 'photosynthesis'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        conn.execute(
+            "INSERT INTO learner_concepts (
+                 learner_id, concept_id, depth_id, confidence,
+                 encounter_count, last_encountered, notes
+             ) VALUES (?1, ?2, 1, 0.5, 1, NULL, '[]')",
+            rusqlite::params![learner_id, concept_id],
+        )
+        .unwrap();
+
+        apply_v7_migrations(&conn).unwrap();
+
+        let box_level: i64 = conn
+            .query_row(
+                "SELECT box_level FROM learner_concepts WHERE learner_id = ?1",
+                rusqlite::params![learner_id],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(box_level, 0);
+    }
+
+    #[test]
+    fn v7_migration_is_idempotent() {
+        let conn = fresh_v6_conn();
+        apply_v7_migrations(&conn).unwrap();
+        apply_v7_migrations(&conn).unwrap(); // re-run must be a no-op
+        assert!(column_exists_in_test(
+            &conn,
+            "learner_concepts",
+            "box_level"
         ));
     }
 }

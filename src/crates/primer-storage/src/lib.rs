@@ -110,6 +110,11 @@ impl SqliteSessionStore {
         // (default 'en' for pre-v6 rows) for the i18n architecture.
         schema::apply_v6_migrations(&conn)?;
 
+        // v7 migrations: idempotent on every open. Adds
+        // learner_concepts.box_level (default 0 for pre-v7 rows) for
+        // the Leitner-box spaced-repetition vocabulary feature.
+        schema::apply_v7_migrations(&conn)?;
+
         if existing_version != schema::USER_VERSION {
             conn.execute_batch(&format!("PRAGMA user_version = {};", schema::USER_VERSION))
                 .map_err(|e| PrimerError::Storage(format!("set user_version failed: {e}")))?;
