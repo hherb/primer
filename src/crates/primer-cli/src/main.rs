@@ -1929,9 +1929,6 @@ mod tests {
         // 0 is a valid usize value but is meaningless for this flag —
         // clap's range(1..) rejects it with a clear error.
         let result = Cli::try_parse_from(["primer", "--vocab-max-per-prompt", "0"]);
-        assert!(
-            result.is_err(),
-            "0 should be rejected; got: {result:?}"
-        );
+        assert!(result.is_err(), "0 should be rejected; got: {result:?}");
     }
 }

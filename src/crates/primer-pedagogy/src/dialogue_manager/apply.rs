@@ -148,7 +148,8 @@ pub(super) fn apply_comprehension(
             // namespaced apart so a future researcher can tune them
             // independently. See docs/superpowers/specs/2026-05-05-vocabulary-spaced-repetition-design.md
             // ("Subtle but deliberate") for the policy split.
-            let new_box = primer_core::vocab::apply_box_transition(c.box_level, a.depth, a.confidence);
+            let new_box =
+                primer_core::vocab::apply_box_transition(c.box_level, a.depth, a.confidence);
             if new_box != c.box_level {
                 c.box_level = new_box;
                 changed = true;
@@ -574,8 +575,7 @@ mod tests {
                 evidence: None,
             }],
         };
-        let changed =
-            apply_comprehension(&mut learner, &result, &ComprehensionSettings::default());
+        let changed = apply_comprehension(&mut learner, &result, &ComprehensionSettings::default());
         // Sub-threshold → outer guard skips entirely. depth, confidence,
         // and box stay as they were; returns false.
         assert!(!changed);

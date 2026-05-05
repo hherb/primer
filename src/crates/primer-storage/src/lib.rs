@@ -3816,7 +3816,11 @@ mod learner_store_tests {
         }];
         store.save_learner(&learner).await.unwrap();
 
-        let loaded = store.load_learner().await.unwrap().expect("learner present");
+        let loaded = store
+            .load_learner()
+            .await
+            .unwrap()
+            .expect("learner present");
         let concept = loaded
             .concepts
             .iter()

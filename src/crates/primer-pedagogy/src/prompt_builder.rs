@@ -1406,9 +1406,13 @@ factual_prefixes = []
     #[test]
     fn build_system_prompt_includes_vocab_section_when_due_vocab_non_empty() {
         let learner = learner_with(EngagementState::Engaged, vec![]);
-        let due_vocab = vec![
+        let due_vocab = [
             vocab_concept("physics:gravity", UnderstandingDepth::Recall, 5),
-            vocab_concept("biology:photosynthesis", UnderstandingDepth::Comprehension, 12),
+            vocab_concept(
+                "biology:photosynthesis",
+                UnderstandingDepth::Comprehension,
+                12,
+            ),
         ];
         let due_refs: Vec<&ConceptState> = due_vocab.iter().collect();
         let prompt = build_system_prompt_with_pack_and_vocab(
@@ -1468,7 +1472,7 @@ factual_prefixes = []
             source: "test".into(),
             score: 1.0,
         }];
-        let due_vocab = vec![vocab_concept(
+        let due_vocab = [vocab_concept(
             "weather:cloud",
             UnderstandingDepth::Recall,
             5,

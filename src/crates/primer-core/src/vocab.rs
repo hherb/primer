@@ -26,11 +26,7 @@ use crate::learner::{ConceptState, LearnerModel, UnderstandingDepth};
 ///
 /// Pure — returns the new box level. The caller decides whether to write
 /// it back to [`ConceptState`].
-pub fn apply_box_transition(
-    current_box: u8,
-    depth: UnderstandingDepth,
-    confidence: f32,
-) -> u8 {
+pub fn apply_box_transition(current_box: u8, depth: UnderstandingDepth, confidence: f32) -> u8 {
     if confidence < MIN_CONF_FOR_BOX_PROMOTION {
         return 0;
     }
@@ -61,19 +57,15 @@ pub fn is_due(concept: &ConceptState, now: chrono::DateTime<chrono::Utc>) -> boo
 /// Pure — borrows from the learner; returns at most `max_count` references.
 /// Fewer if the learner has fewer due concepts. `max_count = 0` short-circuits
 /// to an empty Vec.
-pub fn due_concepts<'a>(
-    learner: &'a LearnerModel,
+pub fn due_concepts(
+    learner: &LearnerModel,
     now: chrono::DateTime<chrono::Utc>,
     max_count: usize,
-) -> Vec<&'a ConceptState> {
+) -> Vec<&ConceptState> {
     if max_count == 0 {
         return Vec::new();
     }
-    let mut due: Vec<&ConceptState> = learner
-        .concepts
-        .iter()
-        .filter(|c| is_due(c, now))
-        .collect();
+    let mut due: Vec<&ConceptState> = learner.concepts.iter().filter(|c| is_due(c, now)).collect();
     due.sort_by(|a, b| {
         let a_over = overdue_amount(a, now);
         let b_over = overdue_amount(b, now);
@@ -86,10 +78,7 @@ pub fn due_concepts<'a>(
 /// How far past due a concept is. Zero for not-yet-due (callers should have
 /// filtered already, but safe regardless). Out-of-range `box_level` clamps to
 /// `MAX_BOX_LEVEL` mirroring [`is_due`].
-fn overdue_amount(
-    concept: &ConceptState,
-    now: chrono::DateTime<chrono::Utc>,
-) -> chrono::Duration {
+fn overdue_amount(concept: &ConceptState, now: chrono::DateTime<chrono::Utc>) -> chrono::Duration {
     let Some(last) = concept.last_encountered else {
         return chrono::Duration::zero();
     };
@@ -146,7 +135,10 @@ mod tests {
             apply_box_transition(3, UnderstandingDepth::Comprehension, 0.4),
             0
         );
-        assert_eq!(apply_box_transition(4, UnderstandingDepth::Analysis, 0.59), 0);
+        assert_eq!(
+            apply_box_transition(4, UnderstandingDepth::Analysis, 0.59),
+            0
+        );
     }
 
     #[test]
