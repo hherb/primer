@@ -1059,6 +1059,7 @@ knowledge_intro = ""
 summary_intro = ""
 retrieved_intro = ""
 vocab_review_intro = ""
+break_suggestion_intro = ""
 
 [labels]
 child = "Child"

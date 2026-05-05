@@ -170,6 +170,7 @@ knowledge_intro = "Relevanter Sachkontext (zur Begründung deiner Antworten — 
 summary_intro = "Früher in diesem Gespräch (Langzeitgedächtnis über viele Wendungen hinweg):"
 retrieved_intro = "Relevante frühere Momente aus dieser Sitzung (nach Thema gefunden, nicht in Reihenfolge — als Hintergrund verstehen, nicht als aktuelles Gespräch):"
 vocab_review_intro = "Konzepte, die das Kind bereits kennengelernt hat. Greife sie nur dann auf, wenn sie thematisch passen — keine Abfrage, kein Drillen. Die Liste ist ein Hinweis, kein Skript."
+break_suggestion_intro = "Das Kind ist jetzt seit etwa {minutes} Minuten dabei. Schlage in deiner nächsten Antwort behutsam eine Pause vor — formuliere es als ihre Wahl, nicht als Anweisung. Wenn du mitten in einer Erklärung bist, kannst du den Gedanken erst zu Ende führen. Halte keinen Vortrag über Bildschirmzeit, sei nicht entschuldigend. Das Kind kann weitermachen, wenn es möchte."
 
 # --- SPRECHER-LABELS ---
 # Werden in „[Kind] ..." / „[Primer] ..." in den abgerufenen früheren

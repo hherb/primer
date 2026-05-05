@@ -155,6 +155,7 @@ knowledge_intro = "Relevant factual context (use to ground your responses, but d
 summary_intro = "Earlier in this conversation (long-term memory across many turns):"
 retrieved_intro = "Relevant prior moments from this same session (retrieved by topic, not in time order; use as background, not as the active conversation):"
 vocab_review_intro = "Concepts the child has previously encountered. Weave them in only if topically relevant to what they bring up — don't drill or quiz. The list is a hint, not a script."
+break_suggestion_intro = "The child has been working for ~{minutes} minutes. In your next response, gently suggest they take a break — phrase it as their choice, not a directive. You can finish a thought naturally first if you're mid-explanation. Don't lecture about screen time, don't be apologetic. The child can keep going if they want to."
 
 # --- SPEAKER LABELS ---
 # Used in the retrieved-prior-moments section for "[Child]" / "[Primer]".
