@@ -1072,6 +1072,7 @@ async fn async_main() -> anyhow::Result<()> {
         extractor_settings,
         comprehension,
         comprehension_settings,
+        vocab_settings: primer_pedagogy::VocabSettings::default(),
     };
     let mut dm = DialogueManager::new(
         learner,

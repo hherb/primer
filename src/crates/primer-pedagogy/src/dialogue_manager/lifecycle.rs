@@ -62,6 +62,7 @@ impl<'a> DialogueManager<'a> {
             post_response_task: None,
             comprehension: subsystems.comprehension,
             comprehension_settings: subsystems.comprehension_settings,
+            vocab_settings: subsystems.vocab_settings,
             last_comprehension: None,
             config,
             last_extraction: None,
