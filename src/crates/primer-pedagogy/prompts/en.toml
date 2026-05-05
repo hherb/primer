@@ -152,6 +152,7 @@ break or pivoting to a topic they find more engaging.\
 knowledge_intro = "Relevant factual context (use to ground your responses, but do not quote directly — rephrase for a {age}-year-old):"
 summary_intro = "Earlier in this conversation (long-term memory across many turns):"
 retrieved_intro = "Relevant prior moments from this same session (retrieved by topic, not in time order; use as background, not as the active conversation):"
+vocab_review_intro = "Concepts the child has previously encountered. Weave them in only if topically relevant to what they bring up — don't drill or quiz. The list is a hint, not a script."
 
 # --- SPEAKER LABELS ---
 # Used in the retrieved-prior-moments section for "[Child]" / "[Primer]".

@@ -167,6 +167,7 @@ spannender findet.\
 knowledge_intro = "Relevanter Sachkontext (zur Begründung deiner Antworten — nicht direkt zitieren, sondern für ein {age}-jähriges Kind umformulieren):"
 summary_intro = "Früher in diesem Gespräch (Langzeitgedächtnis über viele Wendungen hinweg):"
 retrieved_intro = "Relevante frühere Momente aus dieser Sitzung (nach Thema gefunden, nicht in Reihenfolge — als Hintergrund verstehen, nicht als aktuelles Gespräch):"
+vocab_review_intro = "Konzepte, die das Kind bereits kennengelernt hat. Greife sie nur dann auf, wenn sie thematisch passen — keine Abfrage, kein Drillen. Die Liste ist ein Hinweis, kein Skript."
 
 # --- SPRECHER-LABELS ---
 # Werden in „[Kind] ..." / „[Primer] ..." in den abgerufenen früheren
