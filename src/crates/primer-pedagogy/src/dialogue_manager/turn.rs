@@ -74,11 +74,23 @@ impl<'a> DialogueManager<'a> {
 
         // 2. Decide intent and assemble the prompt (knowledge + long-term
         //    memory + system-prompt construction).
-        let intent = prompt_builder::decide_intent_with_pack(
+        let now = self.now();
+        let break_gate = primer_core::session_timing::BreakGate {
+            interval_minutes: self.config.break_suggest_after_minutes,
+            last_suggested_at: self.last_break_suggested_at,
+        };
+        let intent = prompt_builder::decide_intent_at_with_pack(
             &*self.prompt_pack,
             &self.learner,
             &self.session,
+            now,
+            break_gate,
         );
+
+        if intent == primer_core::conversation::PedagogicalIntent::SuggestBreak {
+            self.last_break_suggested_at = Some(now);
+        }
+
         let prompt = self.build_turn_prompt(child_input, intent).await;
 
         // 3. Stream the response, accumulating into a single String.
@@ -161,6 +173,7 @@ impl<'a> DialogueManager<'a> {
             &retrieved_older,
             self.config.context_window_turns,
             &due_vocab,
+            self.config.break_suggest_after_minutes,
         )
     }
 

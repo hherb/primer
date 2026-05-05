@@ -570,3 +570,66 @@ async fn build_turn_prompt_omits_vocab_section_when_no_concept_is_due() {
         prompt.system
     );
 }
+
+// ─── Break-gate end-to-end tests ────────────────────────────────────────
+
+#[tokio::test]
+async fn respond_after_threshold_yields_suggest_break_intent() {
+    let backend = ScriptedBackend::new(vec![Ok(chunk("Hello", false)), Ok(chunk("", true))]);
+    let knowledge = EmptyKnowledge;
+    let mut dm = DialogueManager::new(
+        test_learner(),
+        &backend,
+        &knowledge,
+        DialogueManagerStores::default(),
+        default_subsystems(),
+        primer_core::config::PedagogyConfig::default(),
+    );
+
+    // Fast-forward 31 minutes from session start (default
+    // break_suggest_after_minutes is 30).
+    let advanced = dm.session.started_at + chrono::Duration::minutes(31);
+    dm.set_clock_for_test(advanced);
+
+    let _response = dm.respond_to("hello").await.unwrap();
+
+    assert_eq!(
+        dm.last_intent(),
+        Some(primer_core::conversation::PedagogicalIntent::SuggestBreak),
+        "intent should be SuggestBreak after 31 minutes"
+    );
+    assert!(
+        dm.last_break_suggested_at_for_test().is_some(),
+        "last_break_suggested_at should be recorded"
+    );
+}
+
+#[tokio::test]
+async fn cadence_resets_after_suggest_break_fires() {
+    // Use RepeatingBackend so the same backend can handle both turns
+    // (ScriptedBackend can only emit its script once).
+    let backend = RepeatingBackend;
+    let knowledge = EmptyKnowledge;
+    let mut dm = DialogueManager::new(
+        test_learner(),
+        &backend,
+        &knowledge,
+        DialogueManagerStores::default(),
+        default_subsystems(),
+        primer_core::config::PedagogyConfig::default(),
+    );
+
+    let advanced = dm.session.started_at + chrono::Duration::minutes(31);
+    dm.set_clock_for_test(advanced);
+    dm.respond_to("hello").await.unwrap();
+
+    // Second turn at the same wallclock — cadence should still be
+    // active (last_suggested_at == now), so should NOT re-fire SuggestBreak.
+    dm.respond_to("ok").await.unwrap();
+
+    assert_ne!(
+        dm.last_intent(),
+        Some(primer_core::conversation::PedagogicalIntent::SuggestBreak),
+        "second turn at the same wallclock should fall through to natural intent"
+    );
+}

@@ -61,6 +61,9 @@ pub enum PedagogicalIntent {
     AnswerThenPivot,
     /// Suggesting the session end (the Primer never tries to maximise engagement).
     SessionClose,
+    /// Gentle nudge to take a break — the child can keep going. Fired
+    /// by the wallclock-based break-suggestion gate; never a forced halt.
+    SuggestBreak,
 }
 
 impl PedagogicalIntent {
@@ -75,6 +78,7 @@ impl PedagogicalIntent {
         Self::DirectAnswer,
         Self::AnswerThenPivot,
         Self::SessionClose,
+        Self::SuggestBreak,
     ];
 }
 
@@ -139,9 +143,10 @@ mod tests {
 
     #[test]
     fn pedagogical_intent_all_lists_every_variant() {
-        assert_eq!(PedagogicalIntent::ALL.len(), 8);
+        assert_eq!(PedagogicalIntent::ALL.len(), 9);
         // Spot-check a few representatives.
         assert!(PedagogicalIntent::ALL.contains(&PedagogicalIntent::SocraticQuestion));
         assert!(PedagogicalIntent::ALL.contains(&PedagogicalIntent::SessionClose));
+        assert!(PedagogicalIntent::ALL.contains(&PedagogicalIntent::SuggestBreak));
     }
 }

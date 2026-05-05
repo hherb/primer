@@ -66,6 +66,7 @@ pub fn build_system_prompt_with_pack(
         summary,
         retrieved_older,
         &[],
+        0,
     )
 }
 
@@ -90,6 +91,7 @@ pub fn build_system_prompt_with_pack_and_vocab(
     summary: &str,
     retrieved_older: &[Turn],
     due_vocab: &[&ConceptState],
+    break_minutes: u32,
 ) -> String {
     let age = learner.profile.age;
     let name = &learner.profile.name;
@@ -102,6 +104,13 @@ pub fn build_system_prompt_with_pack_and_vocab(
         String::new()
     } else {
         format!("\n\n{engagement_note_body}")
+    };
+
+    let break_suggestion_section = if intent == PedagogicalIntent::SuggestBreak {
+        let intro = pack.break_suggestion_intro(break_minutes);
+        format!("\n\n{intro}")
+    } else {
+        String::new()
     };
 
     let knowledge_section = if knowledge_context.is_empty() {
@@ -167,7 +176,7 @@ pub fn build_system_prompt_with_pack_and_vocab(
     };
 
     format!(
-        "{base}\n\n{intent_instruction}{engagement_note}\
+        "{base}\n\n{intent_instruction}{engagement_note}{break_suggestion_section}\
          {summary_section}{retrieved_section}{vocab_section}{knowledge_section}"
     )
 }
@@ -242,12 +251,14 @@ pub fn build_prompt_with_pack(
         retrieved_older,
         context_turns,
         &[],
+        0,
     )
 }
 
-/// Like [`build_prompt_with_pack`] but threads `due_vocab` through to
-/// the system-prompt builder. The dialogue manager uses this variant;
-/// every other caller can keep using the no-vocab wrapper.
+/// Like [`build_prompt_with_pack`] but threads `due_vocab` and
+/// `break_minutes` through to the system-prompt builder. The dialogue
+/// manager uses this variant; every other caller can keep using the
+/// no-vocab wrapper.
 #[allow(clippy::too_many_arguments)]
 pub fn build_prompt_with_pack_and_vocab(
     pack: &dyn PromptPack,
@@ -259,6 +270,7 @@ pub fn build_prompt_with_pack_and_vocab(
     retrieved_older: &[Turn],
     context_turns: usize,
     due_vocab: &[&ConceptState],
+    break_minutes: u32,
 ) -> Prompt {
     Prompt {
         system: build_system_prompt_with_pack_and_vocab(
@@ -269,6 +281,7 @@ pub fn build_prompt_with_pack_and_vocab(
             summary,
             retrieved_older,
             due_vocab,
+            break_minutes,
         ),
         messages: build_messages(session, context_turns),
     }
@@ -366,7 +379,13 @@ pub fn decide_intent_with_pack(
     learner: &LearnerModel,
     session: &Session,
 ) -> PedagogicalIntent {
-    decide_intent_at_with_pack(pack, learner, session, chrono::Utc::now())
+    decide_intent_at_with_pack(
+        pack,
+        learner,
+        session,
+        chrono::Utc::now(),
+        primer_core::session_timing::BreakGate::disabled(),
+    )
 }
 
 /// Time-aware core of [`decide_intent`].
@@ -375,7 +394,13 @@ pub fn decide_intent_at(
     session: &Session,
     now: chrono::DateTime<chrono::Utc>,
 ) -> PedagogicalIntent {
-    decide_intent_at_with_pack(english_pack(), learner, session, now)
+    decide_intent_at_with_pack(
+        english_pack(),
+        learner,
+        session,
+        now,
+        primer_core::session_timing::BreakGate::disabled(),
+    )
 }
 
 /// Time-aware, locale-aware core. Accepts an explicit `now` so tests
@@ -388,6 +413,7 @@ pub fn decide_intent_at_with_pack(
     learner: &LearnerModel,
     session: &Session,
     now: chrono::DateTime<chrono::Utc>,
+    break_gate: primer_core::session_timing::BreakGate,
 ) -> PedagogicalIntent {
     use primer_core::learner::EngagementState;
     // Engagement-state overrides fire before turn analysis.
@@ -406,6 +432,19 @@ pub fn decide_intent_at_with_pack(
         }
         EngagementState::Engaged | EngagementState::Reflecting | EngagementState::Unknown => { /* fall through to turn analysis */
         }
+    }
+
+    // Break-suggestion gate: fires after engagement-state overrides
+    // (a frustrated child past 30 minutes still gets Scaffolding,
+    // not SuggestBreak — fix the frustration first) but before turn
+    // analysis so it overrides the natural Socratic flow.
+    if primer_core::session_timing::should_suggest_break_now(
+        now,
+        session.started_at,
+        break_gate.last_suggested_at,
+        break_gate.interval_minutes,
+    ) {
+        return PedagogicalIntent::SuggestBreak;
     }
 
     // Look at the last turn — if it was a child's response, decide
@@ -1048,6 +1087,7 @@ extension = "x"
 direct_answer = "x"
 answer_then_pivot = "x"
 session_close = "x"
+suggest_break = "x"
 
 [engagement]
 frustrated = ""
@@ -1058,6 +1098,7 @@ knowledge_intro = ""
 summary_intro = ""
 retrieved_intro = ""
 vocab_review_intro = ""
+break_suggestion_intro = ""
 
 [labels]
 child = "Child"
@@ -1423,6 +1464,7 @@ factual_prefixes = []
             "",
             &[],
             &due_refs,
+            0,
         );
         assert!(
             prompt.contains("topically relevant"),
@@ -1449,11 +1491,117 @@ factual_prefixes = []
             "",
             &[],
             &[],
+            0,
         );
         assert!(
             !prompt.contains("topically relevant"),
             "vocab intro should not appear when due_vocab is empty: {prompt}"
         );
+    }
+
+    // ─── Break-gate tests for decide_intent_at_with_pack ──────────────
+    //
+    // These tests reuse the existing `learner_with(engagement, concepts)`
+    // helper at `prompt_builder.rs:478` and the existing `english_pack()`
+    // helper. New helper for break-gate tests:
+
+    fn session_started_at(when: chrono::DateTime<chrono::Utc>) -> Session {
+        let mut s = Session::new(Uuid::new_v4());
+        s.started_at = when;
+        s
+    }
+
+    fn fixed_now(min: i64) -> chrono::DateTime<chrono::Utc> {
+        use chrono::TimeZone;
+        chrono::Utc.with_ymd_and_hms(2026, 5, 5, 12, 0, 0).unwrap() + chrono::Duration::minutes(min)
+    }
+
+    #[test]
+    fn pre_threshold_engaged_does_not_fire_suggest_break() {
+        let session = session_started_at(fixed_now(0));
+        let learner = learner_with(EngagementState::Engaged, vec![]);
+        let gate = primer_core::session_timing::BreakGate {
+            interval_minutes: 30,
+            last_suggested_at: None,
+        };
+        let intent =
+            decide_intent_at_with_pack(english_pack(), &learner, &session, fixed_now(5), gate);
+        assert_ne!(intent, PedagogicalIntent::SuggestBreak);
+    }
+
+    #[test]
+    fn post_threshold_engaged_fires_suggest_break() {
+        let session = session_started_at(fixed_now(0));
+        let learner = learner_with(EngagementState::Engaged, vec![]);
+        let gate = primer_core::session_timing::BreakGate {
+            interval_minutes: 30,
+            last_suggested_at: None,
+        };
+        let intent =
+            decide_intent_at_with_pack(english_pack(), &learner, &session, fixed_now(31), gate);
+        assert_eq!(intent, PedagogicalIntent::SuggestBreak);
+    }
+
+    #[test]
+    fn frustrated_stuck_wins_over_break_gate() {
+        // Engagement-state overrides fire BEFORE the break gate.
+        // Past threshold AND FrustratedStuck → Scaffolding (fix
+        // the frustration first), not SuggestBreak.
+        let session = session_started_at(fixed_now(0));
+        let learner = learner_with(EngagementState::FrustratedStuck, vec![]);
+        let gate = primer_core::session_timing::BreakGate {
+            interval_minutes: 30,
+            last_suggested_at: None,
+        };
+        let intent =
+            decide_intent_at_with_pack(english_pack(), &learner, &session, fixed_now(45), gate);
+        assert_eq!(intent, PedagogicalIntent::Scaffolding);
+    }
+
+    #[test]
+    fn disengaging_sustained_wins_over_break_gate() {
+        let session = session_started_at(fixed_now(0));
+        let mut learner = learner_with(EngagementState::Disengaging, vec![]);
+        learner.preferences.early_disengagement_threshold = std::time::Duration::from_secs(60);
+        let gate = primer_core::session_timing::BreakGate {
+            interval_minutes: 30,
+            last_suggested_at: None,
+        };
+        let intent =
+            decide_intent_at_with_pack(english_pack(), &learner, &session, fixed_now(45), gate);
+        assert_eq!(intent, PedagogicalIntent::SessionClose);
+    }
+
+    #[test]
+    fn disabled_gate_never_fires_suggest_break() {
+        let session = session_started_at(fixed_now(0));
+        let learner = learner_with(EngagementState::Engaged, vec![]);
+        let gate = primer_core::session_timing::BreakGate::disabled();
+        let intent =
+            decide_intent_at_with_pack(english_pack(), &learner, &session, fixed_now(120), gate);
+        assert_ne!(intent, PedagogicalIntent::SuggestBreak);
+    }
+
+    #[test]
+    fn post_threshold_with_recent_prior_falls_through_to_natural_intent() {
+        // Started 60 min ago, suggested 5 min ago, 30 min interval —
+        // not yet due again; should fall through to turn-analysis path.
+        let mut session = session_started_at(fixed_now(0));
+        session.add_turn(Turn {
+            speaker: Speaker::Child,
+            text: "what's gravity".into(),
+            timestamp: fixed_now(60),
+            intent: None,
+            concepts: vec![],
+        });
+        let learner = learner_with(EngagementState::Engaged, vec![]);
+        let gate = primer_core::session_timing::BreakGate {
+            interval_minutes: 30,
+            last_suggested_at: Some(fixed_now(55)),
+        };
+        let intent =
+            decide_intent_at_with_pack(english_pack(), &learner, &session, fixed_now(60), gate);
+        assert_ne!(intent, PedagogicalIntent::SuggestBreak);
     }
 
     #[test]
@@ -1486,6 +1634,7 @@ factual_prefixes = []
             "Earlier we talked about water cycles.",
             &retrieved,
             &due_refs,
+            0,
         );
         let retrieved_idx = prompt
             .find("clouds")
@@ -1503,6 +1652,52 @@ factual_prefixes = []
         assert!(
             vocab_idx < knowledge_idx,
             "vocab must precede knowledge: {prompt}"
+        );
+    }
+
+    #[test]
+    fn build_system_prompt_includes_break_suggestion_section_when_intent_is_suggest_break() {
+        let learner = learner_with(EngagementState::Engaged, vec![]);
+        let prompt = build_system_prompt_with_pack_and_vocab(
+            english_pack(),
+            &learner,
+            PedagogicalIntent::SuggestBreak,
+            &[],
+            "",
+            &[],
+            &[],
+            30,
+        );
+        assert!(
+            prompt.contains("30"),
+            "rendered prompt should contain the substituted minutes value: {prompt:?}"
+        );
+        assert!(
+            prompt.to_lowercase().contains("break"),
+            "rendered prompt should contain a break-related word: {prompt:?}"
+        );
+        assert!(
+            !prompt.contains("{minutes}"),
+            "{{minutes}} placeholder must be substituted: {prompt:?}"
+        );
+    }
+
+    #[test]
+    fn build_system_prompt_omits_break_suggestion_section_for_other_intents() {
+        let learner = learner_with(EngagementState::Engaged, vec![]);
+        let prompt = build_system_prompt_with_pack_and_vocab(
+            english_pack(),
+            &learner,
+            PedagogicalIntent::SocraticQuestion,
+            &[],
+            "",
+            &[],
+            &[],
+            30,
+        );
+        assert!(
+            !prompt.contains("phrase it as their choice"),
+            "non-SuggestBreak intent should NOT include the break section: {prompt:?}"
         );
     }
 }

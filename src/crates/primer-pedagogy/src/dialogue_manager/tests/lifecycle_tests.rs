@@ -412,3 +412,44 @@ async fn close_session_drains_extractor_task() {
 }
 
 // ─── Chained post-response (extraction → comprehension) ──────────
+
+// ─── Task 8: last_break_suggested_at + clock seam ────────────────
+
+#[tokio::test]
+async fn new_initialises_last_break_suggested_at_to_none() {
+    let backend = ScriptedBackend::new(vec![Ok(chunk("", true))]);
+    let knowledge = EmptyKnowledge;
+    let dm = DialogueManager::new(
+        test_learner(),
+        &backend,
+        &knowledge,
+        DialogueManagerStores::default(),
+        default_subsystems(),
+        primer_core::config::PedagogyConfig::default(),
+    );
+    assert!(dm.last_break_suggested_at_for_test().is_none());
+}
+
+#[tokio::test]
+async fn resume_session_clears_last_break_suggested_at() {
+    let backend = ScriptedBackend::new(vec![Ok(chunk("", true))]);
+    let knowledge = EmptyKnowledge;
+    let mut dm = DialogueManager::new(
+        test_learner(),
+        &backend,
+        &knowledge,
+        DialogueManagerStores::default(),
+        default_subsystems(),
+        primer_core::config::PedagogyConfig::default(),
+    );
+    dm.set_last_break_suggested_at_for_test(Some(chrono::Utc::now()));
+    assert!(dm.last_break_suggested_at_for_test().is_some());
+
+    let session_to_resume = primer_core::conversation::Session::new(dm.learner.profile.id);
+    dm.resume_session(session_to_resume).await.unwrap();
+
+    assert!(
+        dm.last_break_suggested_at_for_test().is_none(),
+        "resume_session should clear last_break_suggested_at"
+    );
+}

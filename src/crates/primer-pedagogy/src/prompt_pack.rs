@@ -57,6 +57,11 @@ pub trait PromptPack: Send + Sync {
     /// Single-line intro for the spaced-repetition vocabulary review
     /// section. Renders only when `due_vocab` is non-empty. Locale-keyed.
     fn vocab_review_intro(&self) -> &str;
+    /// Render the break-suggestion guidance section with `{minutes}`
+    /// substituted. Renders only when the per-turn intent is `SuggestBreak`.
+    /// Locale-keyed: each pack's TOML template owns its unit word
+    /// ("minutes" / "Minuten") so adding a new locale is purely additive.
+    fn break_suggestion_intro(&self, minutes: u32) -> String;
     fn child_label(&self) -> &str;
     fn primer_label(&self) -> &str;
     /// Lowercased prefixes that mark a child's input as a direct
@@ -163,6 +168,7 @@ pub struct TomlPromptPack {
     summary_intro: String,
     retrieved_intro: String,
     vocab_review_intro: String,
+    break_suggestion_intro_template: String,
     child_label: String,
     primer_label: String,
     factual_prefixes: Vec<String>,
@@ -251,6 +257,16 @@ impl TomlPromptPack {
             &raw.sections.retrieved_intro,
             &[],
         )?;
+        validate_placeholders(
+            "sections.vocab_review_intro",
+            &raw.sections.vocab_review_intro,
+            &[],
+        )?;
+        validate_placeholders(
+            "sections.break_suggestion_intro",
+            &raw.sections.break_suggestion_intro,
+            &["minutes"],
+        )?;
         validate_placeholders("labels.child", &raw.labels.child, &[])?;
         validate_placeholders("labels.primer", &raw.labels.primer, &[])?;
 
@@ -294,6 +310,7 @@ impl TomlPromptPack {
             summary_intro: raw.sections.summary_intro,
             retrieved_intro: raw.sections.retrieved_intro,
             vocab_review_intro: raw.sections.vocab_review_intro,
+            break_suggestion_intro_template: raw.sections.break_suggestion_intro,
             child_label: raw.labels.child,
             primer_label: raw.labels.primer,
             factual_prefixes: raw.question_detection.factual_prefixes,
@@ -356,6 +373,10 @@ impl PromptPack for TomlPromptPack {
     fn vocab_review_intro(&self) -> &str {
         &self.vocab_review_intro
     }
+    fn break_suggestion_intro(&self, minutes: u32) -> String {
+        self.break_suggestion_intro_template
+            .replace("{minutes}", &minutes.to_string())
+    }
     fn child_label(&self) -> &str {
         &self.child_label
     }
@@ -417,6 +438,7 @@ struct SectionsSection {
     summary_intro: String,
     retrieved_intro: String,
     vocab_review_intro: String,
+    break_suggestion_intro: String,
 }
 
 #[derive(Deserialize)]
@@ -441,6 +463,7 @@ const ALL_INTENTS: &[PedagogicalIntent] = &[
     PedagogicalIntent::DirectAnswer,
     PedagogicalIntent::AnswerThenPivot,
     PedagogicalIntent::SessionClose,
+    PedagogicalIntent::SuggestBreak,
 ];
 
 fn intent_key(intent: PedagogicalIntent) -> &'static str {
@@ -453,6 +476,7 @@ fn intent_key(intent: PedagogicalIntent) -> &'static str {
         PedagogicalIntent::DirectAnswer => "direct_answer",
         PedagogicalIntent::AnswerThenPivot => "answer_then_pivot",
         PedagogicalIntent::SessionClose => "session_close",
+        PedagogicalIntent::SuggestBreak => "suggest_break",
     }
 }
 
@@ -660,6 +684,7 @@ knowledge_intro = ""
 summary_intro = ""
 retrieved_intro = ""
 vocab_review_intro = ""
+break_suggestion_intro = ""
 
 [labels]
 child = "Kind"
@@ -805,6 +830,7 @@ knowledge_intro = ""
 summary_intro = ""
 retrieved_intro = ""
 vocab_review_intro = ""
+break_suggestion_intro = ""
 
 [labels]
 child = "Child"
@@ -853,6 +879,7 @@ knowledge_intro = ""
 summary_intro = ""
 retrieved_intro = ""
 vocab_review_intro = ""
+break_suggestion_intro = ""
 
 [labels]
 child = "Child"
@@ -911,6 +938,7 @@ knowledge_intro = ""
 summary_intro = ""
 retrieved_intro = ""
 vocab_review_intro = ""
+break_suggestion_intro = ""
 
 [labels]
 child = "Child"
@@ -1027,5 +1055,63 @@ factual_prefixes = {factual_prefixes_array}
             intro.contains("thematisch passen"),
             "expected German intro to contain 'thematisch passen', got: {intro}"
         );
+    }
+
+    #[test]
+    fn english_pack_exposes_break_suggestion_intro() {
+        let pack = load(Locale::English).unwrap();
+        let rendered = pack.break_suggestion_intro(30);
+        assert!(
+            !rendered.is_empty(),
+            "break_suggestion_intro must not be empty"
+        );
+        assert!(
+            rendered.contains("30"),
+            "rendered intro should contain the minutes value: {rendered:?}"
+        );
+        assert!(
+            !rendered.contains("{minutes}"),
+            "{{minutes}} placeholder must be substituted: {rendered:?}"
+        );
+    }
+
+    #[test]
+    fn german_pack_exposes_break_suggestion_intro() {
+        let pack = load(Locale::German).unwrap();
+        let rendered = pack.break_suggestion_intro(30);
+        assert!(
+            !rendered.is_empty(),
+            "German break_suggestion_intro must not be empty"
+        );
+        assert!(
+            rendered.contains("30"),
+            "rendered intro should contain the minutes value: {rendered:?}"
+        );
+        assert!(
+            rendered.contains("Minuten"),
+            "German rendered intro should contain 'Minuten': {rendered:?}"
+        );
+        assert!(
+            !rendered.contains("{minutes}"),
+            "{{minutes}} placeholder must be substituted: {rendered:?}"
+        );
+    }
+
+    #[test]
+    fn break_suggestion_intro_substitutes_arbitrary_minutes() {
+        let pack = load(Locale::English).unwrap();
+        let rendered = pack.break_suggestion_intro(45);
+        assert!(rendered.contains("45"), "{rendered:?}");
+    }
+
+    #[test]
+    fn break_suggestion_intro_with_zero_minutes_renders_zero() {
+        // Even though zero is the "disabled" sentinel at the gate level,
+        // the trait method itself should faithfully substitute whatever
+        // it's given. The dialogue manager's gate prevents zero from
+        // ever reaching the trait method in production.
+        let pack = load(Locale::English).unwrap();
+        let rendered = pack.break_suggestion_intro(0);
+        assert!(rendered.contains('0'), "{rendered:?}");
     }
 }
