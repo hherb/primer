@@ -1100,6 +1100,9 @@ async fn async_main() -> anyhow::Result<()> {
         comprehension,
         comprehension_settings,
         vocab_settings,
+        // Wired in step 9 of the hybrid-retrieval design — until then,
+        // the CLI runs BM25-only via the `None` branch.
+        embedder: None,
     };
     let mut dm = DialogueManager::new(
         learner,

@@ -53,6 +53,7 @@ pub(super) fn default_subsystems() -> DialogueManagerSubsystems {
         comprehension: stub_comprehension(),
         comprehension_settings: primer_comprehension::ComprehensionSettings::default(),
         vocab_settings: crate::vocab::VocabSettings::default(),
+        embedder: None,
     }
 }
 
@@ -69,6 +70,7 @@ pub(super) fn subsystems_with_extractor(
         comprehension: stub_comprehension(),
         comprehension_settings: primer_comprehension::ComprehensionSettings::default(),
         vocab_settings: crate::vocab::VocabSettings::default(),
+        embedder: None,
     }
 }
 
@@ -86,6 +88,7 @@ pub(super) fn subsystems_with_comprehension(
         comprehension,
         comprehension_settings: primer_comprehension::ComprehensionSettings::default(),
         vocab_settings: crate::vocab::VocabSettings::default(),
+        embedder: None,
     }
 }
 

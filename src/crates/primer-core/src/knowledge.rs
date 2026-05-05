@@ -71,6 +71,47 @@ impl Default for RetrievalParams {
     }
 }
 
+/// Parameters for hybrid (BM25 + vector) retrieval.
+///
+/// The hybrid path runs the existing BM25 leg with `top_k = bm25_top_k`,
+/// runs a vector-cosine leg with `top_k = vector_top_k`, fuses the two
+/// ranked lists via Reciprocal Rank Fusion (`rrf_k`), and returns the
+/// top `final_top_k` by combined score after applying `min_score`.
+///
+/// `bm25_top_k` and `vector_top_k` are intentionally larger than
+/// `final_top_k` — fusion benefits from a wider candidate pool from
+/// each leg before re-ranking.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct HybridParams {
+    /// Top-K from the BM25 leg before fusion.
+    pub bm25_top_k: usize,
+    /// Top-K from the vector leg before fusion.
+    pub vector_top_k: usize,
+    /// Number of passages returned to the caller after fusion.
+    pub final_top_k: usize,
+    /// RRF constant `k`. The industry-standard default is 60; smaller
+    /// values weight the very top of each list more heavily, larger
+    /// values flatten the curve.
+    pub rrf_k: f64,
+    /// Post-fusion score floor; passages below this are dropped.
+    pub min_score: f64,
+    /// Restrict to specific sources (empty = search all).
+    pub source_filter: Vec<String>,
+}
+
+impl Default for HybridParams {
+    fn default() -> Self {
+        Self {
+            bm25_top_k: 20,
+            vector_top_k: 20,
+            final_top_k: 5,
+            rrf_k: 60.0,
+            min_score: 0.0,
+            source_filter: vec![],
+        }
+    }
+}
+
 /// The knowledge base backend.
 #[async_trait]
 pub trait KnowledgeBase: Send + Sync {
@@ -100,5 +141,28 @@ pub trait KnowledgeBase: Send + Sync {
     /// Default impl returns an empty vec.
     async fn list_sources(&self) -> Result<Vec<SourceMeta>> {
         Ok(vec![])
+    }
+
+    /// Hybrid (BM25 + dense-vector cosine) retrieval. Backends with a
+    /// vector index override this; the default impl falls back to the
+    /// BM25-only `retrieve` path with `final_top_k`, so callers can
+    /// always invoke it. Mismatched embedder dim → typically a backend
+    /// error; the default impl ignores the embedder entirely.
+    async fn retrieve_hybrid(
+        &self,
+        query: &str,
+        embedder: &dyn crate::embedder::Embedder,
+        params: &HybridParams,
+    ) -> Result<Vec<Passage>> {
+        let _ = embedder;
+        self.retrieve(
+            query,
+            &RetrievalParams {
+                top_k: params.final_top_k,
+                min_score: params.min_score,
+                source_filter: params.source_filter.clone(),
+            },
+        )
+        .await
     }
 }

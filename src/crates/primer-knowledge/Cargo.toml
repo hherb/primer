@@ -14,4 +14,5 @@ thiserror.workspace = true
 serde.workspace = true
 
 [dev-dependencies]
+primer-embedding = { path = "../primer-embedding" }
 tempfile.workspace = true

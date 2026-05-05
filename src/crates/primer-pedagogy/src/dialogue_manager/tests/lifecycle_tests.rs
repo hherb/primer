@@ -312,6 +312,7 @@ async fn resume_session_rehydrates_recent_assessments() {
             comprehension: stub_comprehension(),
             comprehension_settings: primer_comprehension::ComprehensionSettings::default(),
             vocab_settings: crate::VocabSettings::default(),
+            embedder: None,
         },
         PedagogyConfig::default(),
     );
