@@ -166,6 +166,14 @@ struct Cli {
     #[arg(long, default_value_t = primer_comprehension::consts::DEFAULT_BLOCKING_TIMEOUT_MS)]
     comprehension_timeout_ms: u64,
 
+    /// Maximum number of overdue/due concepts to inject into the system
+    /// prompt per turn for spaced-repetition vocabulary review. Higher =
+    /// more review pressure, more prompt bloat. Must be ≥ 1; 0 is rejected
+    /// at parse time. Defaults to
+    /// `primer_core::consts::vocab::DEFAULT_VOCAB_MAX_PER_PROMPT` (4).
+    #[arg(long, value_name = "N", value_parser = clap::value_parser!(u64).range(1..))]
+    vocab_max_per_prompt: Option<u64>,
+
     /// Print pedagogical decisions (intent chosen, classifier output,
     /// extractor output, comprehension output) alongside the conversation,
     /// on stderr. Stdout stays clean.
@@ -1065,6 +1073,12 @@ async fn async_main() -> anyhow::Result<()> {
         session: Some(Arc::clone(&session_store) as Arc<dyn SessionStore>),
         learner: Some(Arc::clone(&session_store) as Arc<dyn LearnerStore>),
     };
+    let vocab_settings = primer_pedagogy::VocabSettings {
+        max_per_prompt: cli
+            .vocab_max_per_prompt
+            .map(|n| n as usize)
+            .unwrap_or(primer_core::consts::vocab::DEFAULT_VOCAB_MAX_PER_PROMPT),
+    };
     let subsystems = primer_pedagogy::DialogueManagerSubsystems {
         classifier,
         classifier_settings,
@@ -1072,7 +1086,7 @@ async fn async_main() -> anyhow::Result<()> {
         extractor_settings,
         comprehension,
         comprehension_settings,
-        vocab_settings: primer_pedagogy::VocabSettings::default(),
+        vocab_settings,
     };
     let mut dm = DialogueManager::new(
         learner,
@@ -1894,5 +1908,30 @@ mod tests {
         assert_eq!(result.profile.name, "Binti");
         assert_eq!(result.profile.id, original_id);
         assert_eq!(result.profile.age, 9);
+    }
+
+    // ─── --vocab-max-per-prompt parse tests ─────────────────────────────
+
+    #[test]
+    fn parses_vocab_max_per_prompt_explicit_value() {
+        let cli = Cli::try_parse_from(["primer", "--vocab-max-per-prompt", "6"]).unwrap();
+        assert_eq!(cli.vocab_max_per_prompt, Some(6));
+    }
+
+    #[test]
+    fn vocab_max_per_prompt_defaults_to_none_when_not_passed() {
+        let cli = Cli::try_parse_from(["primer"]).unwrap();
+        assert_eq!(cli.vocab_max_per_prompt, None);
+    }
+
+    #[test]
+    fn vocab_max_per_prompt_zero_is_rejected_at_parse() {
+        // 0 is a valid usize value but is meaningless for this flag —
+        // clap's range(1..) rejects it with a clear error.
+        let result = Cli::try_parse_from(["primer", "--vocab-max-per-prompt", "0"]);
+        assert!(
+            result.is_err(),
+            "0 should be rejected; got: {result:?}"
+        );
     }
 }
