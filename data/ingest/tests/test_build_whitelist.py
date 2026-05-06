@@ -30,3 +30,22 @@ def test_skips_anchor_only_links():
     # `[^\]\|#]+?` excludes anything containing #.
     wikitext = "[[#references]] [[Photosynthesis]]"
     assert extract_titles(wikitext) == ["Photosynthesis"]
+
+
+def test_strips_leading_colon_before_namespace_check():
+    # `[[:Category:Foo]]` is the "linked-as-text, not categorised"
+    # form. The leading colon must be stripped before namespace
+    # filtering so `:Category:Foo` and `Category:Foo` both get rejected.
+    wikitext = "[[:Category:Astronomy|astronomy]] [[Photosynthesis]]"
+    assert extract_titles(wikitext) == ["Photosynthesis"]
+
+
+def test_filters_interwiki_and_special_prefixes():
+    # Interwiki prefixes (m:, meta:, s:, etc.) point to sister wikis
+    # and are never article candidates. `Special:` is the special
+    # namespace. None should leak through.
+    wikitext = (
+        "[[Photosynthesis]] [[m:List of articles]] "
+        "[[Special:Recentchanges]] [[meta:Hub]] [[Black hole]]"
+    )
+    assert extract_titles(wikitext) == ["Photosynthesis", "Black hole"]
