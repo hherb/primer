@@ -3,7 +3,7 @@ talks to the real network."""
 import json
 from pathlib import Path
 import pytest
-from simple_wikipedia import fetch_lead
+from simple_wikipedia import fetch_lead, fetch_leads
 
 
 FIXTURES = Path(__file__).parent / "fixtures"
@@ -120,3 +120,19 @@ def test_fetch_lead_disambiguation_page_raises_may_refer_to():
     client = FakeHttpClient({"Saturn": payload})
     with pytest.raises(RuntimeError, match="disambiguation page"):
         fetch_lead("Saturn", http_client=client)
+
+
+def test_fetch_leads_rejects_oversized_batch():
+    # Single-batch contract: caller is responsible for chunking. The API
+    # would silently truncate a 21-title query, so we surface the bug
+    # loudly here.
+    titles = [f"Title{i}" for i in range(21)]
+    with pytest.raises(ValueError, match="exceeds API cap"):
+        fetch_leads(titles, http_client=FakeHttpClient({}))
+
+
+def test_fetch_leads_empty_input_returns_empty_dict_no_http_call():
+    client = FakeHttpClient({})
+    out = fetch_leads([], http_client=client)
+    assert out == {}
+    assert client.calls == [], "empty input must not trigger an HTTP request"

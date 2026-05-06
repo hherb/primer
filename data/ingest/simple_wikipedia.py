@@ -3,7 +3,9 @@
 Pure functions where possible; network injected via `http_client` so the
 unit tests can substitute a fake. See `data/ingest/README.md` for usage.
 """
+import json
 import re
+import time
 import unicodedata
 from pathlib import Path
 
@@ -38,6 +40,28 @@ def slugify(title: str) -> str:
     if not slug:
         raise ValueError(f"slugify: no alphanumerics in title: {title!r}")
     return slug
+
+
+def _assert_unique_slugs(titles: list[str]) -> None:
+    """Reject whitelists where two distinct titles slugify to the same id.
+
+    `read_whitelist` already rejects byte-exact duplicates, but two
+    different surface forms can collide post-slugify (e.g. ``"Foo bar"``
+    and ``"foo-bar"``, or ``"DNA"`` and ``"dna"`` — the latter sneaks
+    past the whitelist parser's exact-string check). A collision would
+    silently drop the second passage at load time because the loader's
+    idempotent-id-skip rule treats the second `id` as already-present.
+    Better to catch it loudly here, before any HTTP traffic.
+    """
+    seen: dict[str, str] = {}
+    for title in titles:
+        slug = slugify(title)
+        if slug in seen:
+            raise ValueError(
+                f"slug collision: {title!r} and {seen[slug]!r} both "
+                f"produce id slug {slug!r}; rename one in the whitelist"
+            )
+        seen[slug] = title
 
 
 def read_whitelist(path: Path) -> list[str]:
@@ -115,10 +139,6 @@ def _strip_math_artifacts(text: str) -> str:
     return "\n\n".join(kept).strip()
 
 
-import json as _json
-import time as _time
-
-
 WIKIPEDIA_API_URL = "https://simple.wikipedia.org/w/api.php"
 
 # Phrases that mark a Wikipedia article as a disambiguation page (i.e. a
@@ -194,59 +214,76 @@ _BATCH_SIZE = 20
 
 
 def fetch_leads(titles: list[str], *, http_client) -> dict[str, dict]:
-    """Batch-fetch leads for all titles. Returns a dict keyed by the
-    INPUT title (not the canonical title — redirects are resolved via
-    the API's redirect map and normalisation map).
+    """Batch-fetch leads for up to `_BATCH_SIZE` titles in a SINGLE HTTP
+    request. Returns a dict keyed by the INPUT title (not the canonical
+    title — redirects are resolved via the API's redirect map and
+    normalisation map).
 
     Each value is the same `{title, lead_text, canonical_url}` shape
     `fetch_lead` returns. Disambiguation, missing, and empty-extract
     pages still raise `RuntimeError` — the bad title is reported in
     the message so the developer can fix the whitelist.
 
-    Strictly better than calling `fetch_lead` in a loop: 1-2 requests
-    instead of N, well under MediaWiki's per-IP rate-limit thresholds.
-    """
-    out: dict[str, dict] = {}
-    for i in range(0, len(titles), _BATCH_SIZE):
-        batch = titles[i : i + _BATCH_SIZE]
-        params = {
-            "action": "query",
-            "prop": "extracts|info",
-            "exintro": 1,
-            "explaintext": 1,
-            "inprop": "url",
-            "titles": "|".join(batch),
-            "format": "json",
-            "redirects": 1,
-            "exlimit": "max",
-        }
-        resp = http_client.get(WIKIPEDIA_API_URL, params=params, timeout=60.0)
-        resp.raise_for_status()
-        data = resp.json()
-        normalized = {n["from"]: n["to"] for n in data.get("query", {}).get("normalized", [])}
-        redirects = {n["from"]: n["to"] for n in data.get("query", {}).get("redirects", [])}
-        pages_by_title = {p.get("title"): p for p in data.get("query", {}).get("pages", {}).values()}
+    The caller (`main`) is responsible for chunking longer lists into
+    `_BATCH_SIZE`-sized slices and inserting any inter-request delay;
+    keeping that policy in one place avoids the previous double-batched
+    shape (loop in `main` *and* loop here) where the throttle could only
+    be enforced at the outer boundary.
 
-        for title in batch:
-            resolved = normalized.get(title, title)
-            resolved = redirects.get(resolved, resolved)
-            page = pages_by_title.get(resolved, {"missing": ""})
-            if "missing" in page:
-                raise RuntimeError(f"fetch_leads: article not found: {title!r}")
-            extract = page.get("extract", "")
-            if not extract.strip():
-                raise RuntimeError(f"fetch_leads: empty extract for {title!r}")
-            head = extract[:300]
-            if any(p.search(head) for p in _DISAMBIGUATION_PATTERNS):
-                raise RuntimeError(
-                    f"fetch_leads: {title!r} returned a disambiguation page; "
-                    f"use a more specific title. Lead starts: {head[:120]!r}"
-                )
-            out[title] = {
-                "title": page["title"],
-                "lead_text": extract.strip(),
-                "canonical_url": page["fullurl"],
-            }
+    Strictly better than calling `fetch_lead` in a loop: 1 request per
+    batch of 20 titles, well under MediaWiki's per-IP rate-limit
+    thresholds.
+
+    Raises:
+        ValueError: when `titles` exceeds `_BATCH_SIZE` — the API would
+        silently truncate, which is a class of bug we'd rather catch.
+    """
+    if len(titles) > _BATCH_SIZE:
+        raise ValueError(
+            f"fetch_leads: batch of {len(titles)} exceeds API cap "
+            f"of {_BATCH_SIZE}; chunk in the caller"
+        )
+    if not titles:
+        return {}
+    params = {
+        "action": "query",
+        "prop": "extracts|info",
+        "exintro": 1,
+        "explaintext": 1,
+        "inprop": "url",
+        "titles": "|".join(titles),
+        "format": "json",
+        "redirects": 1,
+        "exlimit": "max",
+    }
+    resp = http_client.get(WIKIPEDIA_API_URL, params=params, timeout=60.0)
+    resp.raise_for_status()
+    data = resp.json()
+    normalized = {n["from"]: n["to"] for n in data.get("query", {}).get("normalized", [])}
+    redirects = {n["from"]: n["to"] for n in data.get("query", {}).get("redirects", [])}
+    pages_by_title = {p.get("title"): p for p in data.get("query", {}).get("pages", {}).values()}
+
+    out: dict[str, dict] = {}
+    for title in titles:
+        resolved = normalized.get(title, title)
+        resolved = redirects.get(resolved, resolved)
+        page = pages_by_title.get(resolved, {"missing": ""})
+        if "missing" in page:
+            raise RuntimeError(f"fetch_leads: article not found: {title!r}")
+        extract = page.get("extract", "")
+        if not extract.strip():
+            raise RuntimeError(f"fetch_leads: empty extract for {title!r}")
+        head = extract[:300]
+        if any(p.search(head) for p in _DISAMBIGUATION_PATTERNS):
+            raise RuntimeError(
+                f"fetch_leads: {title!r} returned a disambiguation page; "
+                f"use a more specific title. Lead starts: {head[:120]!r}"
+            )
+        out[title] = {
+            "title": page["title"],
+            "lead_text": extract.strip(),
+            "canonical_url": page["fullurl"],
+        }
     return out
 
 
@@ -285,11 +322,12 @@ def main(
         http_client.headers.update({"User-Agent": _DEFAULT_USER_AGENT})
 
     titles = read_whitelist(whitelist_path)
+    _assert_unique_slugs(titles)
 
     records: dict[str, dict] = {}
     for i in range(0, len(titles), _BATCH_SIZE):
         if i > 0:
-            _time.sleep(inter_batch_sleep_s)
+            time.sleep(inter_batch_sleep_s)
         batch = titles[i : i + _BATCH_SIZE]
         records.update(fetch_leads(batch, http_client=http_client))
 
@@ -311,7 +349,7 @@ def main(
         for p in passages:
             # ensure_ascii=True so the file is portable across editors
             # and the diff is stable regardless of locale settings.
-            f.write(_json.dumps(p, ensure_ascii=True))
+            f.write(json.dumps(p, ensure_ascii=True))
             f.write("\n")
 
 

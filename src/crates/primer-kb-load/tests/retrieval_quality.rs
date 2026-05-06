@@ -10,21 +10,8 @@
 
 use primer_core::i18n::Locale;
 use primer_core::knowledge::{KnowledgeBase, RetrievalParams};
-use primer_kb_load::{auto_seed_if_empty, load_jsonl};
+use primer_kb_load::auto_seed_if_empty;
 use primer_knowledge::SqliteKnowledgeBase;
-use std::path::PathBuf;
-
-fn seed_path() -> PathBuf {
-    // CARGO_MANIFEST_DIR = src/crates/primer-kb-load. Walk up to repo root.
-    let manifest = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
-    manifest
-        .ancestors()
-        .find_map(|d| {
-            let p = d.join("data/seed/seed_passages.en.jsonl");
-            p.is_file().then_some(p)
-        })
-        .expect("could not locate data/seed/seed_passages.en.jsonl from CARGO_MANIFEST_DIR")
-}
 
 /// Each entry: (query, required_substring_terms_in_top_k, top_k).
 /// The query is what a child might actually ask. The required terms are
@@ -192,14 +179,30 @@ async fn seed_corpus_satisfies_canonical_queries() {
 
 #[tokio::test]
 async fn seed_corpus_registers_sources_for_attribution() {
+    // Use auto_seed_if_empty so every shipped *.en.jsonl layer is
+    // attribution-validated (CC0 hand-drafted seed AND the Wikipedia
+    // CC-BY-SA-3.0 layer). The earlier load_jsonl(seed_path()) shape only
+    // covered the first file and would silently pass a wiki-layer
+    // regression where to_passage forgot to set license/attribution.
     let db = tempfile::NamedTempFile::new().unwrap();
     let kb = SqliteKnowledgeBase::open_for_locale(db.path(), Locale::English).unwrap();
-    load_jsonl(&kb, &seed_path()).await.unwrap();
+    let stats = auto_seed_if_empty(&kb, Locale::English)
+        .await
+        .unwrap()
+        .expect("seed dir must contain at least one *.en.jsonl");
+    assert!(
+        stats.sources_seen >= 2,
+        "expected sources from at least two seed files, got {}",
+        stats.sources_seen
+    );
+
     let sources = kb.list_sources().await.unwrap();
     assert!(
         !sources.is_empty(),
         "every passage must register its source"
     );
+    let mut seen_cc0 = false;
+    let mut seen_cc_by_sa = false;
     for src in &sources {
         assert!(!src.license.is_empty(), "source {} missing license", src.id);
         assert!(
@@ -207,5 +210,19 @@ async fn seed_corpus_registers_sources_for_attribution() {
             "source {} missing attribution",
             src.id
         );
+        if src.license == "CC0-1.0" {
+            seen_cc0 = true;
+        }
+        if src.license == "CC-BY-SA-3.0" {
+            seen_cc_by_sa = true;
+        }
     }
+    assert!(
+        seen_cc0,
+        "expected at least one CC0-1.0 source (seed corpus)"
+    );
+    assert!(
+        seen_cc_by_sa,
+        "expected at least one CC-BY-SA-3.0 source (wiki layer)"
+    );
 }

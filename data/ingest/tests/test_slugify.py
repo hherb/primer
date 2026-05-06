@@ -1,6 +1,6 @@
 """Tests for slugify — pure function, no I/O."""
 import pytest
-from simple_wikipedia import slugify
+from simple_wikipedia import _assert_unique_slugs, slugify
 
 
 def test_ascii_lowercase():
@@ -57,3 +57,34 @@ def test_only_punctuation_raises():
         slugify("---")
     with pytest.raises(ValueError):
         slugify("!@#")
+
+
+def test_assert_unique_slugs_passes_for_distinct_titles():
+    # No collisions; should not raise.
+    _assert_unique_slugs(["Photosynthesis", "Gravity", "Black hole"])
+
+
+def test_assert_unique_slugs_rejects_case_only_collision():
+    # `read_whitelist` only catches byte-exact dups, so two case-different
+    # entries pass through to the slug-collision check. Both produce "dna".
+    with pytest.raises(ValueError, match="slug collision"):
+        _assert_unique_slugs(["DNA", "dna"])
+
+
+def test_assert_unique_slugs_rejects_punctuation_collision():
+    # "Foo bar" and "foo-bar" both collapse to "foo-bar".
+    with pytest.raises(ValueError, match="slug collision"):
+        _assert_unique_slugs(["Foo bar", "foo-bar"])
+
+
+def test_assert_unique_slugs_error_message_names_both_titles():
+    # Use a slug-only collision (different surface form, different slug
+    # casing) so the message is discriminable: both titles AND the
+    # produced slug appear, helping the developer find the offending
+    # whitelist entries.
+    with pytest.raises(ValueError) as ei:
+        _assert_unique_slugs(["Foo bar", "foo-bar"])
+    msg = str(ei.value)
+    assert "'Foo bar'" in msg
+    assert "'foo-bar'" in msg
+    assert "slug collision" in msg
