@@ -5,9 +5,17 @@
 # whole file is original under CC0-1.0 and can be redistributed without
 # restriction.
 #
-# Topics covered so far: Space cluster (sun, moon, planets, stars,
-# galaxies, black holes, comets, eclipses, tides, the universe). More
-# clusters to follow: earth/weather, life, body, how-things-work.
+# Topics covered: all five planned clusters — space (sun, moon,
+# planets, stars, galaxies, black holes, comets, eclipses, tides,
+# universe), body (heart, lungs, brain, digestion, skeleton, muscles,
+# skin, immune system, eyes, ears, sleep, where babies come from),
+# how-things-work (magnets, electricity, batteries, simple machines,
+# sound, light, mirrors/lenses, fire, ice/water, salt, soap), life
+# (photosynthesis, seeds, food chains, cells, evolution, dinosaurs,
+# mammals, birds, reptiles/amphibians, insects), and earth/weather
+# (rain, snow, clouds, wind, lightning, rainbows, water cycle,
+# volcanoes, earthquakes, mountains, climate vs weather). 55 passages
+# total.
 #
 # Lines starting with `#` are ignored by the loader.
 {"id":"seed:en:sun","source":"seed:en:sun","license":"CC0-1.0","attribution":"The Primer seed corpus","text":"The Sun is the star at the centre of our solar system. It is a giant ball of very hot gas, mostly hydrogen and helium, held together by its own gravity. Deep inside the Sun, the pressure is so great and the temperature so high — about 15 million degrees Celsius — that hydrogen atoms squash together to make helium. This process is called nuclear fusion, and it releases enormous amounts of energy. The energy travels outward through the Sun for hundreds of thousands of years before reaching the surface, and from there it shines into space as light and heat.\n\nThe Sun is much bigger than the Earth. About 1.3 million Earths could fit inside it. Even though it looks small in the sky, the Sun is so far away — about 150 million kilometres — that its light takes around eight minutes to reach us. When you look at the sunset, you are seeing light that left the Sun eight minutes earlier.\n\nThe Sun is the reason life on Earth is possible. Plants use sunlight to make their food in a process called photosynthesis. Animals (including us) eat the plants, or eat other animals that ate plants, so almost every living thing on Earth depends on the Sun's energy. The Sun also drives the weather: it heats the air and the oceans, which makes wind, clouds, and rain.\n\nLike all stars, the Sun has a life cycle. It formed about 4.6 billion years ago from a cloud of gas and dust, and it has enough hydrogen left to keep shining for about another 5 billion years. Eventually it will swell up into a kind of star called a red giant, then shed its outer layers and become a small, dense remnant called a white dwarf. That is a long time away — far longer than humans have existed.","topics":["space","sun","stars","fusion","solar system"]}

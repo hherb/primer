@@ -1,117 +1,68 @@
 # Primer — Next Session Brief
 
 **Audience:** future Claude Code session continuing work on this repo.
-**Last updated:** 2026-05-05 (after a full implementation session for the session-time-based break-suggestion feature on `feature/session-break-suggestion`).
+**Last updated:** 2026-05-06 (after a doc-correctness sweep on `main` correcting stale claims about the seed corpus).
 
 ## First moves when you start
 
 1. Read [CLAUDE.md](CLAUDE.md) — repo conventions, gotchas, build commands. **Workspace root is `src/`, not the repo root.** Every cargo command runs from `src/`. Always invoke as `~/.cargo/bin/cargo` (Homebrew rust shadows PATH and silently downgrades to 1.86, breaking silero).
-2. From `src/`: `~/.cargo/bin/cargo build && ~/.cargo/bin/cargo test --workspace`. Should be green: **506 tests** across the workspace (was 474 before this session — +32 new for break-suggestion).
+2. From `src/`: `~/.cargo/bin/cargo build && ~/.cargo/bin/cargo test --workspace`. Should be green: **548 tests** across the workspace as of this writing.
 3. **Don't assume nothing changed since this brief was written.** Read the current state of files you intend to touch first — Horst may have made interim changes.
 
 ## Branch status
 
-Working branch: **`feature/session-break-suggestion`**, branched from `main` at `b13b83f`. **Implementation complete and ready for review / merge.** 14 commits since the branch point (3 planning + 10 implementation + 1 docs):
-
-| Commit | Type | What |
-|---|---|---|
-| `81dde54` | spec | Design for session-time-based break suggestion (Phase 0.3 close-out) |
-| `ce88e30` | spec | Bring locale-aware `{minutes}` interpolation in scope (multilingual is first-class) |
-| `f3c99fc` | plan | 12-task TDD implementation plan |
-| `edeb564` | feat | core: add `consts::break_suggest::DEFAULT_INTERVAL_MINUTES` |
-| `71049ed` | feat | core: add `session_timing` module — `should_suggest_break_now` + `BreakGate` (8 tests) |
-| `6ff5c67` | feat | add `PedagogicalIntent::SuggestBreak` variant (id=9) + storage catalog + round-trip test |
-| `7085293` | refactor | rename `max_session_minutes` → `break_suggest_after_minutes`; delete dead `should_suggest_break()` accessor + hardcoded `println!` banner |
-| `6ff102d` | feat | prompt-pack: `break_suggestion_intro(minutes)` trait method + en/de locale templates (4 tests) |
-| `bb47efe` | feat | decide_intent: wire `BreakGate` into post-engagement override (6 tests) |
-| `f483c84` | feat | prompt-builder: inject `break_suggestion_intro` section on `SuggestBreak` (2 tests) |
-| `30ef76f` | feat | dialogue-manager: in-memory `last_break_suggested_at` + `#[cfg(test)]` clock seam (2 tests) |
-| `b6114b4` | feat | dialogue-manager: real `BreakGate` in `respond_to_streaming` + record on fire (2 end-to-end tests) |
-| `c005b93` | feat | cli: `--session-break-after-mins N` flag (default 30, min 1) (3 tests) |
-| `7f3d174` | docs | README + ROADMAP + CLAUDE.md for break-suggestion (Phase 0.3 close) |
+`main`, clean working tree (after the doc-correctness sweep is committed). The previous session (per the prior NEXT_SESSION.md) shipped Phase 0.3 close on `feature/session-break-suggestion`; in the interim PR #34 (hybrid retrieval + KB ingestion infrastructure), PR #35 (the Phase 0.3 close), and the `101a5d3` doc commit have all merged to `main`.
 
 ## What we shipped this session
 
-**Session-time-based break suggestions (Phase 0.3 close-out).** Spec `81dde54` and plan `f3c99fc` implemented end-to-end across 11 commits. All 12 plan tasks completed.
+A documentation-correctness sweep. The previous brief and several in-tree docs still claimed the seed corpus was "55 passages in the 'space' cluster" with "more clusters to follow" — but in reality the corpus has expanded to all five planned clusters (space, body, how-things-work, life, earth/weather), the retrieval-quality test has 50+ canonical queries spanning every cluster, and that all shipped in PR #34 / commit 101a5d3.
 
-The shipped feature:
+Files updated:
 
-- **Pure scheduling function** in `primer-core::session_timing`: `should_suggest_break_now(now, started_at, last_suggested_at, interval_minutes) -> bool` — deterministic, takes `now` as a parameter, no async, no I/O.
-- **`BreakGate` carrier struct** — `{ interval_minutes: u32, last_suggested_at: Option<DateTime<Utc>> }` with `disabled()` no-op constructor used by the pre-existing characterization tests.
-- **New `PedagogicalIntent::SuggestBreak`** (lookup-table id=9) — auto-seeded into existing DBs on next open via `validate_and_seed_lookup`. No schema migration needed.
-- **`decide_intent_at_with_pack` leading override**: after engagement-state arms (frustration wins), before turn analysis. A frustrated child past 30 minutes still gets `Scaffolding`, not `SuggestBreak` — fix the frustration first.
-- **Locale-aware `{minutes}` template** in `prompt_pack::break_suggestion_intro(minutes) -> String`. Each locale's TOML template owns its own unit word (`minutes` / `Minuten`). Adding a new locale is purely additive; no shared Rust formatter, no `chrono::format` localization dependency.
-- **System-prompt section injection** when `intent == SuggestBreak`, placed right after `engagement_note` (groups with the "what should you do" guidance at the top of the prompt body).
-- **In-memory `DialogueManager.last_break_suggested_at`** field — reset on `new()` and `resume_session()`. Not persisted across `--resume` (a resumed session might cause one extra suggestion if timing aligns badly; intentional per the spec's non-goals).
-- **`#[cfg(test)] clock_override`** test seam with zero production cost. End-to-end tests fast-forward past the 30-min threshold without sleeping via `dm.set_clock_for_test(...)`.
-- **CLI flag `--session-break-after-mins N`** (default `consts::break_suggest::DEFAULT_INTERVAL_MINUTES = 30`, must be ≥1; clap's `value_parser!(u32).range(1..)` rejects 0 at parse time).
-- **Field rename** `PedagogyConfig.max_session_minutes` → `break_suggest_after_minutes`. The semantic shifted when we adopted intent-based suggestion; the old name implied a hard ceiling. Dead `should_suggest_break()` accessor and the hardcoded `println!` banner that called it were both deleted.
-- **32 new tests** across the workspace (8 pure-function in primer-core, 1 variant-count update in primer-core, 4 prompt-pack template, 6 decide-intent break-gate, 2 system-prompt section, 2 dialogue-manager lifecycle, 2 dialogue-manager turn end-to-end, 2 storage round-trip, 3 CLI parse, +2 ripple updates). **Pre-feature baseline 474 → now 506 tests**, all green.
+- `data/seed/seed_passages.en.jsonl` — header comment now reflects the actual five-cluster coverage (no more "to follow" in the corpus that already has them)
+- `README.md` — KB bootstrapping bullet (line ~46) corrected; Phase status line corrected to reflect 5-cluster coverage
+- `ROADMAP.md` — Phase 0.2 line for the seed corpus is now `✅` and describes all five clusters; the previously-unchecked `[ ] Expand the seed corpus` bullet was removed (the work is done); Phase 0 exit-criteria paragraph corrected
+- `CLAUDE.md` — project-shape paragraph upgraded from "Phase 0.1 + 0.3 done" to "+ Phase 0.2 partially done"; the bullet now correctly enumerates what's still ahead in Phase 0.2 (Wikipedia ingestion + retrieval-params tuning)
 
-**Architectural decisions honoured:**
+The seed file's header edit is a comment block (`#`-prefixed lines) which the loader already skips; the retrieval-quality integration tests were re-run and still pass.
 
-- Pure function in `primer-core` for the algorithmic core (no async, no I/O, takes `now` as a parameter).
-- No new schema version; lookup-table seeding alone propagates the new variant.
-- `#[cfg(test)]` test seam — zero production cost, no runtime config switch needed.
-- Engagement-state overrides win over the timer.
-- Locale-keyed `{minutes}` substitution per locale; no shared formatter.
-- Constants in `consts::break_suggest`; no magic numbers.
-- File-size hygiene: `session_timing.rs` is ~120 lines; modifications kept under 500-line ceilings.
-- One commit per task with TDD discipline: tests first, watch them fail, implement to green, commit.
+**No code changes.** Doc-only.
 
-## Final verification gauntlet (all green)
+## What's next — Phase 0.2 remaining work
 
-- `~/.cargo/bin/cargo test --workspace` → **506 passed**, 0 failed (was 474; +32 new).
-- `~/.cargo/bin/cargo clippy --workspace --all-targets` → clean.
-- `~/.cargo/bin/cargo fmt --all -- --check` → clean.
-- `~/.cargo/bin/cargo build --workspace --features primer-cli/speech` → clean.
-- `cargo run --bin primer -- --backend stub --name SmokeTester --age 9 --no-persist --session-break-after-mins 15 --verbose` → REPL starts, flag accepted, no panics.
-- Independent end-of-branch reviewer ran final spec-compliance + quality audit: **APPROVE FOR MERGE**, no anti-patterns, no remaining TODOs, all non-goals respected.
+Two genuine open items remain in Phase 0.2:
 
-## What's next
+### Option A — Simple English Wikipedia ingestion script (recommended; meaty)
 
-Two reasonable directions. **Recommended:** open a PR for the break-suggestion work and merge it; that closes Phase 0.3 entirely and the next session can pick up Phase 0.2 (knowledge-base bootstrapping) on a fresh branch.
-
-### Option A — open a PR for the break-suggestion work, then merge
+A standalone tool that downloads a Simple English Wikipedia dump, filters/cleans articles, splits into ~200-word passages with age tags, and emits JSONL compatible with `primer-kb-load`. Python is fine per the ROADMAP.
 
 Concrete acceptance criteria:
 
-1. Push the branch: `git push -u origin feature/session-break-suggestion`
-2. Open a GitHub PR with title summarising the feature; reference the spec at `docs/superpowers/specs/2026-05-05-session-break-suggestion-design.md`.
-3. CI green (once CI is set up — currently no CI).
-4. Real-LLM smoke test (post-PR or pre-merge) per the command sequence below.
-5. Merge to `main`, delete `feature/session-break-suggestion`. With this, Phase 0.3 is fully complete.
+1. New script under `data/ingest/` (e.g. `data/ingest/simple_wikipedia.py`).
+2. Produces JSONL with the schema `primer-kb-load` already accepts: `{ "id": "...", "source": "...", "license": "...", "attribution": "...", "text": "...", "topics": [...] }`. Each passage's `id` is namespaced (e.g. `wiki-simple:en:<slug>`); `source` and `attribution` are filled correctly per CC-BY-SA; the `license` field is set to `CC-BY-SA-3.0`.
+3. Article selection rule documented (e.g. "all articles in selected children's-curriculum portals" or "articles with at least N pageviews"). Multi-session work.
+4. Chunking strategy documented (paragraph-based, with a soft 200-word target and never breaking mid-sentence).
+5. Smoke run produces ≥500 passages and `primer-kb-load --knowledge-db /tmp/wiki.db --locale en data/ingest/output.jsonl` ingests them without errors.
+6. The retrieval-quality integration test continues to pass when the Wikipedia corpus is layered on top of the hand-drafted seed corpus (canonical queries should still surface the curated passages — at minimum, the BM25 leg should not be drowned).
+7. ROADMAP.md and CLAUDE.md updated.
 
-### Option B — Phase 0.2: knowledge-base bootstrapping (fresh feature branch)
+Caveats / decisions to make in-session:
 
-The remaining open Phase 0 work. The infrastructure is there (`SqliteKnowledgeBase`, FTS5, locale-keyed tables) but the corpus is empty by default. Phase 0.2 is about:
+- **License compliance:** Simple English Wikipedia is CC-BY-SA-3.0 (and a contributor-attribution file is required). The script must record per-passage attribution metadata and the codebase must already preserve it through retrieval — `passages.<pack>_meta.attribution` already exists per the schema, but verify it's surfaced where it needs to be for any downstream display.
+- **Privacy / safety filter:** Children's-product context. Some Wikipedia articles cover violence, sex, drugs, etc. inappropriately for the Phase 0 audience. The first cut should restrict to a curated portal list (Science, Geography, Biology, History) rather than dumping everything.
+- **Storage size:** A useful Simple English Wikipedia subset is multi-GB after embedding. The default `--knowledge-db` path doesn't exist yet (CLI defaults to `:memory:`). Decide whether the Wikipedia corpus auto-loads on first run (likely no — opt-in via a flag or a separate bootstrap subcommand).
 
-1. Picking a small starter corpus (children's encyclopedia style, or curated science/curiosity passages).
-2. A bootstrap CLI command or script that ingests passages into `~/.primer/knowledge.db` (or a similar default path).
-3. Per-locale support (English first, German second).
-4. Basic age-gating in the corpus (passages tagged with min/max age band).
+### Option B — Tune `RetrievalParams` / `HybridParams` defaults
 
-Concrete acceptance criteria:
+This is gated on Option A landing — there isn't enough corpus yet to tell whether the current defaults (`top_k=3`, `bm25_top_k=20`, `vector_top_k=20`, `final_top_k=5`, `rrf_k=60`) are well-chosen. Once the Wikipedia corpus is in:
 
-1. New CLI subcommand or standalone binary (`primer-bootstrap` or `primer ingest`) that takes a directory of source files (markdown? JSONL?) and populates `passages_<pack_id>` tables.
-2. ~50-100 curated passages for the first locale to validate the retrieval flow.
-3. A test that confirms `KnowledgeBase::retrieve` returns sensible passages for a few sample queries.
-4. Documentation in CLAUDE.md and ROADMAP.md.
-
-This is a meaty multi-session piece. Estimate 3-5 sessions depending on corpus curation effort.
+1. Add benchmark queries that span the wider corpus (e.g. children's questions where the right answer is a Wikipedia article rather than a hand-drafted seed passage).
+2. Sweep `top_k`, `min_score`, and `rrf_k`. Lower `rrf_k` weighs the very top of each ranked list more; higher flattens. Industry default is 60; the spec at `docs/superpowers/specs/2026-05-05-hybrid-retrieval-design.md` calls this out.
+3. Land the chosen defaults; update `primer_core::consts::retrieval` accordingly.
 
 ## Open decisions / risks
 
-Carried forward from the spec and not blocking merge:
-
-1. **`last_break_suggested_at` is in-memory.** A resumed session might cause one extra suggestion if timing aligns badly. Intentional; if real users complain, we can add a persisted `sessions.last_break_suggested_at` column behind a schema v8 migration.
-2. **The cadence is purely wallclock.** A child who says "no thanks" to a break still gets nudged again `interval_minutes` later. If field testing shows this is too pushy, a future change can layer "back off N turns on decline" using the comprehension classifier's read of the child's response.
-3. **The break-suggestion may interrupt a coherent topic.** The prompt-pack guidance explicitly tells the LLM "you can finish a thought naturally first if you're mid-explanation" — phrasing is the LLM's call.
-4. **No anti-spam if the child asks "what?".** A `ComprehensionCheck` follow-up after `SuggestBreak` is fine; cadence is cooldown-only on `SuggestBreak` itself.
-5. **CLI flag rejects 0 but the `BreakGate` itself supports a disabled state** (`interval_minutes == 0`). The disabled path is reachable only via direct `PedagogyConfig` construction (e.g. tests). This is by design; the CLI rejects 0 so a typo doesn't accidentally disable break suggestions.
-6. **English template uses "~{minutes} minutes"; switching to "hours" past 60 min** is deferred — if intervals routinely exceed 60 minutes, revisit per-locale.
-
-**Carried-forward open items** (not specific to this feature, still relevant from prior sessions):
+Carried-forward open items (still relevant from prior sessions):
 
 - Smoke #6 (Ollama daemon down) deferred verification.
 - `is_request()` heuristic conflates config errors with network errors.
@@ -126,30 +77,32 @@ Carried forward from the spec and not blocking merge:
 - Background-task spawn order is load-bearing on serialized backends.
 - "I just don't want to see this word" escape valve for vocab not yet implemented.
 
+New (this session): none. The doc-correctness sweep didn't surface any code-level issues.
+
 ## Patterns to reuse, not reinvent
 
-(All inherited from prior sessions and confirmed by this session's work.)
+(All inherited from prior sessions and confirmed standing.)
 
-- **Pure functions in `primer-core`** for algorithmic cores — tested by injection of `now`, no async, no I/O. Same shape as `vocab::apply_box_transition` from the prior session.
-- **`#[cfg(test)]` test seams with `pub` accessor methods** — zero production cost, no runtime branches. Pattern used here for `clock_override` and the `last_break_suggested_at_for_test` accessors.
-- **Locale-keyed templates in TOML packs** with `{placeholder}` substitution at trait method level. Pattern set by `vocab_review_intro` (no placeholder) and now extended by `break_suggestion_intro(minutes)` (with placeholder). Each locale's template owns its own unit word.
-- **Carrier structs (`BreakGate`) for parameter bundling** with a `disabled()` no-op constructor for the wrappers that don't need it. Lets new parameters land without disrupting pre-existing characterization tests.
-- **Lookup-table seeding for new closed-enum variants** — no schema migration needed; `validate_and_seed_lookup` auto-INSERTs new rows on next open.
+- **Pure functions in `primer-core`** for algorithmic cores — tested by injection of `now`, no async, no I/O.
+- **`#[cfg(test)]` test seams with `pub` accessor methods** — zero production cost.
+- **Locale-keyed templates in TOML packs** with `{placeholder}` substitution at trait method level.
+- **Carrier structs with `disabled()` no-op constructors** for parameter bundles that not all callers need to configure.
+- **Lookup-table seeding for new closed-enum variants** — no schema migration needed.
 - **Constants in `consts.rs` submodules.** No magic numbers anywhere.
-- **TDD discipline.** Tests first; watch them fail; implement to green. (This session's dialogue-manager end-to-end tests benefited especially from this — without them, the time-machine test seam might have been missed.)
-- **File-size hygiene.** New files came in well under 500 lines.
+- **TDD discipline.** Tests first; watch them fail; implement to green.
+- **File-size hygiene.** Keep modules under 500 lines.
 
 ## Exact commands needed to resume
 
 ```bash
-# Resume on this session's branch (implementation complete):
+# Resume on main (the doc-correctness sweep is either committed or about to be):
 cd /Users/hherb/src/primer
-git checkout feature/session-break-suggestion
-git log --oneline main..HEAD     # should show 14 commits
+git status                       # confirm where you are
+git log --oneline -10            # recent activity
 
 cd src
 ~/.cargo/bin/cargo build --workspace && ~/.cargo/bin/cargo test --workspace
-# Expected: 506 passed, 0 failed.
+# Expected: 548 passed, 0 failed (as of 2026-05-06).
 
 ~/.cargo/bin/cargo clippy --workspace --all-targets
 ~/.cargo/bin/cargo fmt --all -- --check
@@ -160,38 +113,23 @@ For real-LLM smoke testing (Anthropic):
 ```bash
 cd /Users/hherb/src/primer/src
 RUST_LOG=debug ~/.cargo/bin/cargo run --bin primer -- \
-    --backend cloud --name SmokeTester --age 9 --no-persist \
-    --session-break-after-mins 5 --verbose 2>&1 | tee /tmp/break-smoke.log
-# Then converse for ~5 minutes; the next turn should fire SuggestBreak.
-# (Setting --session-break-after-mins 5 makes the smoke testable in a real session.)
+    --backend cloud --name SmokeTester --age 9 --no-persist --verbose 2>&1 | tee /tmp/smoke.log
 ```
 
 For the speech build path: `~/.cargo/bin/cargo build --workspace --features primer-cli/speech`.
 
-To open a PR (Option A above):
-
+For the embedding feature build path:
 ```bash
-git push -u origin feature/session-break-suggestion
-gh pr create --title "Phase 0.3 close: session-time-based break suggestion" --body "$(cat <<'EOF'
-## Summary
+~/.cargo/bin/cargo build --workspace --features primer-cli/embedding
+~/.cargo/bin/cargo run --bin primer -- --embedder-backend fastembed ...
+# First run downloads BGE-M3 (~570 MB) into ~/.cache/primer/models/.
+```
 
-- New `PedagogicalIntent::SuggestBreak` (id=9) driven by a wallclock gate; cadence resets each fire.
-- Locale-aware `{minutes}` interpolation in en.toml + de.toml; pattern reusable for future i18n durations.
-- `--session-break-after-mins N` parental tunable (default 30, ≥1).
-- Field rename `max_session_minutes` → `break_suggest_after_minutes` to reflect actual semantics.
-- Spec at `docs/superpowers/specs/2026-05-05-session-break-suggestion-design.md`.
-
-## Test plan
-
-- [x] Workspace tests green: 506 passed (was 474; +32 new).
-- [x] Clippy clean.
-- [x] Fmt clean.
-- [x] Speech feature build clean.
-- [ ] Manual smoke test with `--session-break-after-mins 5` against the cloud backend.
-
-🤖 Generated with [Claude Code](https://claude.com/claude-code)
-EOF
-)"
+For inspecting the seed corpus + running the retrieval-quality test:
+```bash
+~/.cargo/bin/cargo test -p primer-kb-load
+# 7 unit tests + 2 integration tests should pass; the canonical-queries
+# test exercises 50+ queries across all five clusters.
 ```
 
 ## Reporting back
