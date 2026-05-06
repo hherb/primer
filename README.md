@@ -29,7 +29,7 @@ The learner model (what the child knows, how deeply they understand it, what top
 
 ## Status
 
-**Phase 0.1 done; Phase 0.3 done; Phase 0.2 partially done.** The trait architecture and module boundaries are in place, the text REPL holds real Socratic conversations against either the Anthropic Claude API or a local Ollama model, and a small hand-drafted seed corpus + hybrid (BM25 + dense-vector) retrieval pipeline are now wired through.
+**Phase 0.1 done; Phase 0.2 (MVP) done; Phase 0.3 done.** The trait architecture and module boundaries are in place, the text REPL holds real Socratic conversations against either the Anthropic Claude API or a local Ollama model, a hand-drafted CC0 seed corpus plus a 35-article Simple-English-Wikipedia layer (CC-BY-SA-3.0) auto-load on a fresh KB, and the hybrid (BM25 + dense-vector) retrieval pipeline is wired through. The remaining Phase 0.2 task is tuning of `RetrievalParams` / `HybridParams` defaults against the broader corpus.
 
 **What works today:**
 

@@ -1,64 +1,77 @@
 # Primer — Next Session Brief
 
 **Audience:** future Claude Code session continuing work on this repo.
-**Last updated:** 2026-05-06 (after a doc-correctness sweep on `main` correcting stale claims about the seed corpus).
+**Last updated:** 2026-05-06 (after PR #36 merged: Phase 0.2 MVP — Simple English Wikipedia ingestion).
 
 ## First moves when you start
 
 1. Read [CLAUDE.md](CLAUDE.md) — repo conventions, gotchas, build commands. **Workspace root is `src/`, not the repo root.** Every cargo command runs from `src/`. Always invoke as `~/.cargo/bin/cargo` (Homebrew rust shadows PATH and silently downgrades to 1.86, breaking silero).
-2. From `src/`: `~/.cargo/bin/cargo build && ~/.cargo/bin/cargo test --workspace`. Should be green: **548 tests** across the workspace as of this writing.
+2. From `src/`: `~/.cargo/bin/cargo build && ~/.cargo/bin/cargo test --workspace`. Should be green: **550 Rust tests** across the workspace plus **43 Python tests** in `data/ingest/` (pytest from a venv set up per `data/ingest/README.md`).
 3. **Don't assume nothing changed since this brief was written.** Read the current state of files you intend to touch first — Horst may have made interim changes.
 
 ## Branch status
 
-`main`, clean working tree (after the doc-correctness sweep is committed). The previous session (per the prior NEXT_SESSION.md) shipped Phase 0.3 close on `feature/session-break-suggestion`; in the interim PR #34 (hybrid retrieval + KB ingestion infrastructure), PR #35 (the Phase 0.3 close), and the `101a5d3` doc commit have all merged to `main`.
+`main`, clean working tree. PR #36 merged at commit `44a70b8` (Phase 0.2 MVP — Simple English Wikipedia ingestion); the post-review cleanup commit `6435960` was folded into the same merge. The `feature/wikipedia-ingestion` branch can be deleted from the remote at the user's discretion.
 
 ## What we shipped this session
 
-A documentation-correctness sweep. The previous brief and several in-tree docs still claimed the seed corpus was "55 passages in the 'space' cluster" with "more clusters to follow" — but in reality the corpus has expanded to all five planned clusters (space, body, how-things-work, life, earth/weather), the retrieval-quality test has 50+ canonical queries spanning every cluster, and that all shipped in PR #34 / commit 101a5d3.
+Phase 0.2 MVP — Wikipedia ingestion + retrieval expansion + post-review cleanups.
 
-Files updated:
+**New code (Python):**
 
-- `data/seed/seed_passages.en.jsonl` — header comment now reflects the actual five-cluster coverage (no more "to follow" in the corpus that already has them)
-- `README.md` — KB bootstrapping bullet (line ~46) corrected; Phase status line corrected to reflect 5-cluster coverage
-- `ROADMAP.md` — Phase 0.2 line for the seed corpus is now `✅` and describes all five clusters; the previously-unchecked `[ ] Expand the seed corpus` bullet was removed (the work is done); Phase 0 exit-criteria paragraph corrected
-- `CLAUDE.md` — project-shape paragraph upgraded from "Phase 0.1 + 0.3 done" to "+ Phase 0.2 partially done"; the bullet now correctly enumerates what's still ahead in Phase 0.2 (Wikipedia ingestion + retrieval-params tuning)
+- `data/ingest/simple_wikipedia.py` — pure-functional Python pipeline that ingests Simple English Wikipedia Science articles via the MediaWiki extracts API. Lead-only chunking; batched 20-titles-per-request fetch (1-2 API calls instead of N); disambiguation-page detection; `_strip_math_artifacts` sanitiser for MathJax fallback blocks; `_assert_unique_slugs` guards against post-slugify collisions before any HTTP traffic.
+- `data/ingest/build_whitelist.py` — one-time helper that scrapes Wikipedia Vital Articles Level 4 sub-lists (follows redirects; aggregates from Physical sciences + Biological/health sciences) and prints candidate titles for hand-curation.
+- `data/ingest/simple_wikipedia_whitelist.txt` — 34-entry curated list seeded from `build_whitelist.py` and trimmed by topic relevance to the children's-curriculum audience.
+- `data/ingest/tests/` — 43 pytest cases covering slugify, the whitelist parser, `to_passage`, `fetch_lead`/`fetch_leads` (with injected fake HTTP client), `build_whitelist`, and the byte-exact end-to-end pipeline.
 
-The seed file's header edit is a comment block (`#`-prefixed lines) which the loader already skips; the retrieval-quality integration tests were re-run and still pass.
+**New data:**
 
-**No code changes.** Doc-only.
+- `data/seed/wiki_passages.en.jsonl` — 35 lead passages (CC-BY-SA-3.0; per-passage `source_url` carrying the canonical Wikipedia URL). Auto-loads on a fresh KB alongside the existing 55-passage CC0 hand-drafted seed corpus, giving 90 passages total in the Phase 0.2 MVP corpus.
 
-## What's next — Phase 0.2 remaining work
+**New code (Rust):**
 
-Two genuine open items remain in Phase 0.2:
+- `primer-kb-load::auto_seed_if_empty` was extended to load **all** `*.<pack>.jsonl` files in the seed dir (not just `seed_passages.<pack>.jsonl`). This is what wires the wiki layer through. New `discover_seed_files(locale) -> Vec<PathBuf>` is the general API; the existing `discover_seed_jsonl` is preserved as a backward-compat shim.
+- The retrieval-quality integration test grew 8 wiki-targeted canonical queries (gravity, atom, virus, climate change, DNA, vaccines, friction, plants — concepts the seed corpus does not cover) and now switches its load step from `load_jsonl(seed_path())` to `auto_seed_if_empty` so attribution validation also exercises the wiki layer.
 
-### Option A — Simple English Wikipedia ingestion script (recommended; meaty)
+**Post-review cleanups (commit `6435960`):**
 
-A standalone tool that downloads a Simple English Wikipedia dump, filters/cleans articles, splits into ~200-word passages with age tags, and emits JSONL compatible with `primer-kb-load`. Python is fine per the ROADMAP.
+- `simple_wikipedia.py` mid-file imports hoisted to the top; `fetch_leads` switched to a single-batch contract (raises `ValueError` on > 20 titles, returns empty for empty input); slug-collision detection runs before any HTTP traffic; the attribution test now asserts both `CC0-1.0` and `CC-BY-SA-3.0` licences are present.
+
+**Documentation:**
+
+- `README.md`, `ROADMAP.md`, `CLAUDE.md` updated to reflect Phase 0.2 (MVP) done. Spec at [docs/superpowers/specs/2026-05-06-wikipedia-ingestion-design.md](docs/superpowers/specs/2026-05-06-wikipedia-ingestion-design.md). Plan at [docs/superpowers/plans/2026-05-06-wikipedia-ingestion.md](docs/superpowers/plans/2026-05-06-wikipedia-ingestion.md).
+
+**Test counts after merge:** 550 Rust (no net new — the existing retrieval-quality test absorbed the wiki-layer assertions) + 43 Python (37 in PR + 6 added in the post-review cleanup: 4 slug-collision + 2 fetch_leads contract).
+
+## What's next — Phase 0.2 final task + deferred follow-ups
+
+### The remaining Phase 0.2 task: tune `RetrievalParams` / `HybridParams` defaults
+
+This was gated on having a corpus broad enough to evaluate against; the wiki layer plus the hand-drafted seed now gives 90 passages spanning every cluster, which is the floor.
 
 Concrete acceptance criteria:
 
-1. New script under `data/ingest/` (e.g. `data/ingest/simple_wikipedia.py`).
-2. Produces JSONL with the schema `primer-kb-load` already accepts: `{ "id": "...", "source": "...", "license": "...", "attribution": "...", "text": "...", "topics": [...] }`. Each passage's `id` is namespaced (e.g. `wiki-simple:en:<slug>`); `source` and `attribution` are filled correctly per CC-BY-SA; the `license` field is set to `CC-BY-SA-3.0`.
-3. Article selection rule documented (e.g. "all articles in selected children's-curriculum portals" or "articles with at least N pageviews"). Multi-session work.
-4. Chunking strategy documented (paragraph-based, with a soft 200-word target and never breaking mid-sentence).
-5. Smoke run produces ≥500 passages and `primer-kb-load --knowledge-db /tmp/wiki.db --locale en data/ingest/output.jsonl` ingests them without errors.
-6. The retrieval-quality integration test continues to pass when the Wikipedia corpus is layered on top of the hand-drafted seed corpus (canonical queries should still surface the curated passages — at minimum, the BM25 leg should not be drowned).
-7. ROADMAP.md and CLAUDE.md updated.
-
-Caveats / decisions to make in-session:
-
-- **License compliance:** Simple English Wikipedia is CC-BY-SA-3.0 (and a contributor-attribution file is required). The script must record per-passage attribution metadata and the codebase must already preserve it through retrieval — `passages.<pack>_meta.attribution` already exists per the schema, but verify it's surfaced where it needs to be for any downstream display.
-- **Privacy / safety filter:** Children's-product context. Some Wikipedia articles cover violence, sex, drugs, etc. inappropriately for the Phase 0 audience. The first cut should restrict to a curated portal list (Science, Geography, Biology, History) rather than dumping everything.
-- **Storage size:** A useful Simple English Wikipedia subset is multi-GB after embedding. The default `--knowledge-db` path doesn't exist yet (CLI defaults to `:memory:`). Decide whether the Wikipedia corpus auto-loads on first run (likely no — opt-in via a flag or a separate bootstrap subcommand).
-
-### Option B — Tune `RetrievalParams` / `HybridParams` defaults
-
-This is gated on Option A landing — there isn't enough corpus yet to tell whether the current defaults (`top_k=3`, `bm25_top_k=20`, `vector_top_k=20`, `final_top_k=5`, `rrf_k=60`) are well-chosen. Once the Wikipedia corpus is in:
-
-1. Add benchmark queries that span the wider corpus (e.g. children's questions where the right answer is a Wikipedia article rather than a hand-drafted seed passage).
-2. Sweep `top_k`, `min_score`, and `rrf_k`. Lower `rrf_k` weighs the very top of each ranked list more; higher flattens. Industry default is 60; the spec at `docs/superpowers/specs/2026-05-05-hybrid-retrieval-design.md` calls this out.
+1. Add benchmark queries that span the wider corpus (children's questions where the right answer is a wiki article rather than a hand-drafted seed passage). Many already exist in `primer-kb-load/tests/retrieval_quality.rs`; adding more targeted sweeps is welcome.
+2. Sweep `top_k`, `min_score`, and `rrf_k`. Industry default for `rrf_k` is 60 (lower weighs the very top of each ranked list more, higher flattens). Spec at `docs/superpowers/specs/2026-05-05-hybrid-retrieval-design.md`.
 3. Land the chosen defaults; update `primer_core::consts::retrieval` accordingly.
+4. Optional but valuable: add a hybrid-leg version of the canonical-query test (filed as #39).
+
+### Deferred follow-ups from PR #36 review (filed as GitHub issues)
+
+These are real-but-not-blocking improvements to the ingest pipeline and the test surface:
+
+- **#37** — replace placeholder User-Agent contact identifier (`PrimerSeedBuilder/0.1 (contact: see-repo-readme)`) with a real contact string before any further live runs.
+- **#38** — add 429 / 5xx backoff (with `Retry-After` honouring) to `fetch_leads`. The Rust side already has `primer_core::retry::retry_with_backoff` as a conceptual template; the Python pipeline currently aborts on first non-2xx, which is fine for one-time runs but won't scale to scheduled or wider ingests.
+- **#39** — add a hybrid-retrieval (BM25 + vector RRF) version of the canonical-query test. The current test is BM25-only; a hybrid leg using `StubEmbedder` (no model download in CI) plus an opt-in real-`fastembed` variant would surface vector-leg regressions.
+- **#40** — aggregate per-source attribution. Every wiki passage today has its own `sources` row; an umbrella "Simple English Wikipedia" parent source would make UI-side attribution simpler. Not urgent for 35 passages; matters at scale.
+- **#41** — consider scoping the disambiguation regex more tightly if false positives appear. Today's `\b(can mean|may refer to|...)\b` over `head[:300]` works for the curated 34-entry set; a wider whitelist might trip it on a real article.
+
+### Larger things still in the queue (carried forward from prior sessions)
+
+- Local llama.cpp inference (Phase 1.1).
+- Voice-loop hardening (echo cancellation, ambient-noise robustness; Phase 2 is at POC quality, not production).
+- Hardware integration (Phase 3 — display, audio, enclosure).
+- Hindi (`hi`) and German (`de`) locale pack rollout — the locale-keyed schema is in place; only the templates and per-locale wiki layers need to be added.
 
 ## Open decisions / risks
 
@@ -77,7 +90,7 @@ Carried-forward open items (still relevant from prior sessions):
 - Background-task spawn order is load-bearing on serialized backends.
 - "I just don't want to see this word" escape valve for vocab not yet implemented.
 
-New (this session): none. The doc-correctness sweep didn't surface any code-level issues.
+New in this session: items now tracked as #37, #38, #39, #40, #41 above. None of them are blocking the next Phase 0.2 task.
 
 ## Patterns to reuse, not reinvent
 
@@ -91,21 +104,32 @@ New (this session): none. The doc-correctness sweep didn't surface any code-leve
 - **Constants in `consts.rs` submodules.** No magic numbers anywhere.
 - **TDD discipline.** Tests first; watch them fail; implement to green.
 - **File-size hygiene.** Keep modules under 500 lines.
+- **Network-injection test seam.** New in this session for the Python pipeline: `http_client` is a parameter on every fetch helper, so the unit tests substitute a `FakeHttpClient` and never touch the real API. Use the same shape if you add another data-ingest pipeline.
 
 ## Exact commands needed to resume
 
 ```bash
-# Resume on main (the doc-correctness sweep is either committed or about to be):
+# Resume on main:
 cd /Users/hherb/src/primer
-git status                       # confirm where you are
-git log --oneline -10            # recent activity
+git status                       # confirm clean
+git log --oneline -10            # recent activity (44a70b8 should be at the top of the Phase 0.2 work)
 
 cd src
 ~/.cargo/bin/cargo build --workspace && ~/.cargo/bin/cargo test --workspace
-# Expected: 548 passed, 0 failed (as of 2026-05-06).
+# Expected: 550 passed, 0 failed (as of 2026-05-06).
 
 ~/.cargo/bin/cargo clippy --workspace --all-targets
 ~/.cargo/bin/cargo fmt --all -- --check
+```
+
+For the Python ingestion pipeline tests:
+
+```bash
+cd /Users/hherb/src/primer/data/ingest
+python3 -m venv .venv
+.venv/bin/pip install -r requirements.txt pytest
+.venv/bin/pytest tests/
+# Expected: 43 passed.
 ```
 
 For real-LLM smoke testing (Anthropic):
@@ -128,8 +152,17 @@ For the embedding feature build path:
 For inspecting the seed corpus + running the retrieval-quality test:
 ```bash
 ~/.cargo/bin/cargo test -p primer-kb-load
-# 7 unit tests + 2 integration tests should pass; the canonical-queries
-# test exercises 50+ queries across all five clusters.
+# 9 unit tests + 2 integration tests should pass; the canonical-queries
+# test exercises 58+ queries across all six layers (5 hand-drafted clusters
+# + the wiki layer).
+```
+
+For re-running the Wikipedia ingest (rare; only when the whitelist changes):
+```bash
+cd /Users/hherb/src/primer/data/ingest
+.venv/bin/python simple_wikipedia.py
+# Writes ../seed/wiki_passages.en.jsonl. Commit any diff that reflects
+# real upstream article-content changes.
 ```
 
 ## Reporting back
