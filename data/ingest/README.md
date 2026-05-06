@@ -2,6 +2,11 @@
 
 One-time tooling that ingests Simple English Wikipedia Science articles into the Primer's hybrid knowledge base.
 
+## Prerequisites
+
+- Internet access — the ingest scripts fetch from the live Simple English Wikipedia API. There is no offline mode.
+- A populated whitelist at `simple_wikipedia_whitelist.txt` before running `simple_wikipedia.py`. The whitelist is hand-curated; use `build_whitelist.py` to seed candidates from Wikipedia's Vital Articles list, then trim by hand.
+
 ## Setup
 
 ```bash
