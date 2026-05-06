@@ -75,6 +75,12 @@ def to_passage(record: dict) -> dict:
     title is preserved in the human-readable `attribution` string. The
     canonical URL is structured into `source_url` (carried through to the
     `sources` table) rather than embedded in `attribution`.
+
+    Raises:
+        ValueError: propagated from `slugify` when the title is empty or
+        has no alphanumeric chars. The caller is responsible for ensuring
+        the record dict's keys exist and are non-null — `to_passage` is
+        an internal pipeline function and does not validate input shape.
     """
     title = record["title"]
     slug = slugify(title)
