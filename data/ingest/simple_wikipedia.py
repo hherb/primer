@@ -96,3 +96,50 @@ def to_passage(record: dict) -> dict:
         "text": record["lead_text"],
         "topics": ["wikipedia", "simple-english", "science", slug],
     }
+
+
+WIKIPEDIA_API_URL = "https://simple.wikipedia.org/w/api.php"
+
+
+def fetch_lead(title: str, *, http_client) -> dict:
+    """Fetch the lead section of a Simple English Wikipedia article.
+
+    Uses the MediaWiki extracts API with `exintro=1&explaintext=1` so the
+    server returns the lead as plain text — no wikitext parser needed
+    on our side.
+
+    Returns:
+        `{"title": str, "lead_text": str, "canonical_url": str}`.
+
+    Raises:
+        RuntimeError: when the article doesn't exist (API returns the
+        "missing" page sentinel) or returns an empty extract. Both are
+        whitelist bugs that the developer should notice immediately.
+    """
+    params = {
+        "action": "query",
+        "prop": "extracts|info",
+        "exintro": 1,
+        "explaintext": 1,
+        "inprop": "url",
+        "titles": title,
+        "format": "json",
+        "redirects": 1,
+    }
+    resp = http_client.get(WIKIPEDIA_API_URL, params=params, timeout=30.0)
+    resp.raise_for_status()
+    data = resp.json()
+    pages = data.get("query", {}).get("pages", {})
+    if not pages:
+        raise RuntimeError(f"fetch_lead: empty response for {title!r}")
+    page = next(iter(pages.values()))
+    if "missing" in page:
+        raise RuntimeError(f"fetch_lead: article not found: {title!r}")
+    extract = page.get("extract", "")
+    if not extract.strip():
+        raise RuntimeError(f"fetch_lead: empty extract for {title!r}")
+    return {
+        "title": page["title"],
+        "lead_text": extract.strip(),
+        "canonical_url": page["fullurl"],
+    }
