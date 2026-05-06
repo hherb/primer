@@ -62,3 +62,31 @@ def read_whitelist(path: Path) -> list[str]:
         seen.add(stripped)
         titles.append(stripped)
     return titles
+
+
+def to_passage(record: dict) -> dict:
+    """Convert a fetched-article record to a SeedPassage-compatible dict.
+
+    Input shape: `{"title": str, "lead_text": str, "canonical_url": str}`.
+    Output shape: matches `primer_kb_load::SeedPassage` exactly so the
+    JSONL drops into the existing loader without modification.
+
+    The slug (lowercased) goes into `id` and `source`; the original-cased
+    title is preserved in the human-readable `attribution` string. The
+    canonical URL is structured into `source_url` (carried through to the
+    `sources` table) rather than embedded in `attribution`.
+    """
+    title = record["title"]
+    slug = slugify(title)
+    return {
+        "id": f"wiki-simple:en:{slug}",
+        "source": f"wiki-simple:en:{slug}",
+        "license": "CC-BY-SA-3.0",
+        "attribution": (
+            f"'{title}' from Simple English Wikipedia, "
+            f"licensed under CC-BY-SA-3.0"
+        ),
+        "source_url": record["canonical_url"],
+        "text": record["lead_text"],
+        "topics": ["wikipedia", "simple-english", "science", slug],
+    }
