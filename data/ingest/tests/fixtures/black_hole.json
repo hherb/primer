@@ -1,0 +1,14 @@
+{
+  "batchcomplete": "",
+  "query": {
+    "pages": {
+      "23456": {
+        "pageid": 23456,
+        "ns": 0,
+        "title": "Black hole",
+        "extract": "A black hole is a region of spacetime where gravity is so strong that nothing — not even light or other electromagnetic waves — has enough energy to escape it. The theory of general relativity predicts that a sufficiently compact mass can deform spacetime to form a black hole.",
+        "fullurl": "https://simple.wikipedia.org/wiki/Black_hole"
+      }
+    }
+  }
+}

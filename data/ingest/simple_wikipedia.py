@@ -98,6 +98,10 @@ def to_passage(record: dict) -> dict:
     }
 
 
+import json as _json
+import time as _time
+
+
 WIKIPEDIA_API_URL = "https://simple.wikipedia.org/w/api.php"
 
 
@@ -143,3 +147,71 @@ def fetch_lead(title: str, *, http_client) -> dict:
         "lead_text": extract.strip(),
         "canonical_url": page["fullurl"],
     }
+
+
+# Default user-agent for live runs. Per Wikipedia API etiquette, this
+# must include the tool name, version, and a contact identifier. The
+# contact placeholder will be replaced at first live-run time once we
+# decide what to expose publicly.
+_DEFAULT_USER_AGENT = "PrimerSeedBuilder/0.1 (contact: see-repo-readme)"
+
+
+def main(
+    whitelist_path: Path,
+    output_path: Path,
+    *,
+    http_client=None,
+    inter_request_sleep_s: float = 0.1,
+) -> None:
+    """Run the full pipeline: whitelist → fetch → JSONL.
+
+    The output JSONL is sorted by `id` for deterministic diffs.
+
+    Args:
+        whitelist_path: path to the whitelist text file.
+        output_path: where to write the JSONL.
+        http_client: optional HTTP client (must implement `get(url, params,
+            timeout=...)` and return a response with `.json()` and
+            `.raise_for_status()`). If `None`, a `requests.Session` is
+            constructed with the default User-Agent.
+        inter_request_sleep_s: seconds to wait between fetches when using
+            a real network client. Set to 0 in tests.
+    """
+    if http_client is None:
+        import requests
+        http_client = requests.Session()
+        http_client.headers.update({"User-Agent": _DEFAULT_USER_AGENT})
+
+    titles = read_whitelist(whitelist_path)
+    passages: list[dict] = []
+    for i, title in enumerate(titles):
+        if i > 0:
+            _time.sleep(inter_request_sleep_s)
+        record = fetch_lead(title, http_client=http_client)
+        passage = to_passage(record)
+        word_count = len(passage["text"].split())
+        if word_count < 30:
+            print(
+                f"warning: lead for {title!r} has only {word_count} words "
+                "— review whether the article was misnamed",
+                flush=True,
+            )
+        passages.append(passage)
+
+    passages.sort(key=lambda p: p["id"])
+
+    with output_path.open("w", encoding="utf-8") as f:
+        for p in passages:
+            # ensure_ascii=True so the file is portable across editors
+            # and the diff is stable regardless of locale settings.
+            f.write(_json.dumps(p, ensure_ascii=True))
+            f.write("\n")
+
+
+if __name__ == "__main__":
+    # Default paths assume the script is run from data/ingest/.
+    here = Path(__file__).resolve().parent
+    whitelist = here / "simple_wikipedia_whitelist.txt"
+    output = here.parent / "seed" / "wiki_passages.en.jsonl"
+    main(whitelist_path=whitelist, output_path=output)
+    print(f"wrote {output}")
