@@ -1,0 +1,14 @@
+{
+  "batchcomplete": "",
+  "query": {
+    "pages": {
+      "12345": {
+        "pageid": 12345,
+        "ns": 0,
+        "title": "Photosynthesis",
+        "extract": "Photosynthesis is a process used by plants and other organisms to convert light energy into chemical energy that, through cellular respiration, can later be released to fuel the organism's activities. This chemical energy is stored in carbohydrate molecules, such as sugars, which are made from carbon dioxide and water.",
+        "fullurl": "https://simple.wikipedia.org/wiki/Photosynthesis"
+      }
+    }
+  }
+}

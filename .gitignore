@@ -30,3 +30,11 @@ target
 
 # Git worktrees for parallel feature development (subagent-driven-development)
 .worktrees/
+
+# Python virtualenvs (per-developer; data/ingest/ creates one for the
+# Wikipedia ingestion pipeline, but never commit it)
+.venv/
+
+# Python bytecode caches
+__pycache__/
+*.pyc

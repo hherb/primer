@@ -1,0 +1,55 @@
+# Simple English Wikipedia ingestion whitelist (Science portal, English).
+# Lines starting with `#` and blank lines are ignored.
+# Hand-curated 2026-05-06 from build_whitelist.py output (2603 candidates
+# from Vital Articles Level 4 Physical sciences + Biological & health
+# sciences). Goal: BREADTH — concepts the hand-drafted seed corpus
+# (data/seed/seed_passages.en.jsonl) does not cover. The seed corpus
+# already has: sun, moon, planets, photosynthesis, heart, brain, eyes,
+# magnets, electricity, sound, light, fire, evolution, dinosaurs,
+# mammals, birds, rain, clouds, water cycle, volcanoes, etc. The wiki
+# layer adds the next-level-up scientific vocabulary.
+
+# Physics — fundamental concepts
+Atom
+Molecule
+Chemical element
+Gravity
+Force
+Movement
+Friction
+Pressure
+Temperature
+Density
+
+# Chemistry
+Water
+Acid
+Base (chemistry)
+Oxygen
+Carbon
+Metal
+
+# Biology — life beyond the seed corpus
+Virus
+Bacteria
+Fungus
+Microorganism
+Gene
+DNA
+Heredity
+Ecosystem
+Plant
+Animal
+
+# Earth & environmental science
+Ocean
+Atmosphere
+Climate change
+Soil
+Mineral
+Crystal
+Volcano
+
+# Health
+Vaccine
+Antibiotic
