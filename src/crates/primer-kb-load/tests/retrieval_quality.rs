@@ -10,7 +10,7 @@
 
 use primer_core::i18n::Locale;
 use primer_core::knowledge::{KnowledgeBase, RetrievalParams};
-use primer_kb_load::load_jsonl;
+use primer_kb_load::{auto_seed_if_empty, load_jsonl};
 use primer_knowledge::SqliteKnowledgeBase;
 use std::path::PathBuf;
 
@@ -127,13 +127,29 @@ const QUERIES: &[(&str, &[&str], usize)] = &[
         &["climate", "average"],
         5,
     ),
+    // ----- Wikipedia layer (Phase 0.2 MVP) -----
+    // These queries target concepts the hand-drafted seed corpus does
+    // NOT cover, so they exercise the wiki_passages.en.jsonl layer
+    // specifically. Required terms are case-insensitive substrings
+    // chosen from the actual lead text of each wiki article.
+    ("what is gravity", &["gravity", "attraction"], 5),
+    ("what is an atom", &["atom", "matter"], 5),
+    ("what is a virus", &["virus", "parasite"], 5),
+    ("what is climate change", &["climate", "temperature"], 5),
+    ("what is DNA", &["dna", "genetic"], 5),
+    ("how do vaccines work", &["vaccine"], 5),
+    ("what is friction", &["friction", "force"], 5),
+    ("what makes a plant a plant", &["plant", "autotroph"], 5),
 ];
 
 #[tokio::test]
 async fn seed_corpus_satisfies_canonical_queries() {
     let db = tempfile::NamedTempFile::new().unwrap();
     let kb = SqliteKnowledgeBase::open_for_locale(db.path(), Locale::English).unwrap();
-    let stats = load_jsonl(&kb, &seed_path()).await.unwrap();
+    let stats = auto_seed_if_empty(&kb, Locale::English)
+        .await
+        .unwrap()
+        .expect("seed dir must contain at least one *.en.jsonl");
     assert!(
         stats.inserted >= 10,
         "seed corpus must contain at least 10 passages, got {}",
