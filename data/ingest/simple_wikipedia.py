@@ -93,9 +93,26 @@ def to_passage(record: dict) -> dict:
             f"licensed under CC-BY-SA-3.0"
         ),
         "source_url": record["canonical_url"],
-        "text": record["lead_text"],
+        "text": _strip_math_artifacts(record["lead_text"]),
         "topics": ["wikipedia", "simple-english", "science", slug],
     }
+
+
+def _strip_math_artifacts(text: str) -> str:
+    """Remove MediaWiki MathJax fallback blocks from extract text.
+
+    The extracts API returns LaTeX placeholders like
+    ``{\\displaystyle \\rho ={\\frac {m}{V}}}`` plus several lines of
+    indented unicode math layout when an article contains formulas.
+    These render as garbage in plain-text retrieval. We split on blank
+    lines and drop any resulting paragraph that contains the
+    ``\\displaystyle`` marker — a deliberately coarse rule that strips
+    both the LaTeX line and the surrounding unicode preview block in
+    one cut.
+    """
+    parts = text.split("\n\n")
+    kept = [p for p in parts if "\\displaystyle" not in p]
+    return "\n\n".join(kept).strip()
 
 
 import json as _json

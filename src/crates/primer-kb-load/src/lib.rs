@@ -449,18 +449,21 @@ mod tests {
         assert_eq!(n2, 0);
     }
 
+    /// Serialise the three tests that mutate `PRIMER_SEED_DIR`. Cargo's
+    /// default test harness runs `#[test]` functions in parallel; without
+    /// this guard, two tests racing on the same env var would produce
+    /// flaky failures. `#[tokio::test]` defaults to a single-threaded
+    /// runtime, so holding this guard across `.await` is safe — the
+    /// runtime cannot suspend onto a different thread mid-test.
+    static ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
     #[test]
     fn discover_seed_jsonl_finds_file_under_env_dir() {
-        // Process env is tested in isolation here so we don't fight tokio's
-        // multi-test scheduling. The real auto-seed flow is exercised in
-        // the integration test (data/seed in the repo + a real CLI run).
+        let _guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         let seed_dir = tempfile::tempdir().unwrap();
         let path = seed_dir.path().join("seed_passages.en.jsonl");
         std::fs::write(&path, "{}").unwrap();
 
-        // SAFETY: this test does not run concurrently with other tests
-        // that touch PRIMER_SEED_DIR; the `auto_seed` async tests above
-        // use explicit paths instead of env vars.
         unsafe {
             std::env::set_var("PRIMER_SEED_DIR", seed_dir.path());
         }
@@ -471,6 +474,11 @@ mod tests {
         assert_eq!(found.as_deref(), Some(path.as_path()));
     }
 
+    // The std Mutex is held across .await, which clippy normally flags.
+    // It is safe here: #[tokio::test] defaults to current_thread, so the
+    // runtime cannot suspend onto another thread mid-test, and the lock
+    // serialises env-var-touching tests against each other.
+    #[allow(clippy::await_holding_lock)]
     #[tokio::test]
     async fn auto_seed_loads_all_matching_jsonl_files_in_dir() {
         // Two seed files in the same dir → both load.
@@ -497,11 +505,7 @@ mod tests {
         let db = tempfile::NamedTempFile::new().unwrap();
         let kb = SqliteKnowledgeBase::open_for_locale(db.path(), Locale::English).unwrap();
 
-        // SAFETY: this test does not run concurrently with other tests
-        // that touch PRIMER_SEED_DIR; the other discovery test uses
-        // the same env var and would conflict if run in parallel, but
-        // tokio's default scheduler serialises async tests within one
-        // process and these env-touching tests are intentionally rare.
+        let _guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         unsafe {
             std::env::set_var("PRIMER_SEED_DIR", seed_dir.path());
         }
@@ -517,6 +521,7 @@ mod tests {
 
     #[test]
     fn discover_seed_files_returns_only_matching_locale() {
+        let _guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         let seed_dir = tempfile::tempdir().unwrap();
         std::fs::write(seed_dir.path().join("seed_passages.en.jsonl"), "{}").unwrap();
         std::fs::write(seed_dir.path().join("wiki_passages.en.jsonl"), "{}").unwrap();

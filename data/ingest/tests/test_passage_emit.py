@@ -58,3 +58,49 @@ def test_short_lead_raises():
     p = to_passage(record)
     assert p["text"] == "Short."
     assert p["id"] == "wiki-simple:en:test"
+
+
+def test_math_artifacts_stripped_from_density_passage():
+    # Real-world example: Simple English Wikipedia "Density" lead
+    # includes a multi-line MathJax fallback block that the extracts
+    # API leaves as garbage in the plain-text output. The math
+    # paragraph (containing `\\displaystyle`) must be dropped; the
+    # neighbouring prose paragraphs must survive intact.
+    record = {
+        "title": "Density",
+        "lead_text": (
+            "Density is a measurement that compares the amount of matter an "
+            "object has to its volume.\n\n"
+            "Density is found by dividing the mass of an object by its volume:\n\n"
+            "  \n    \n      \n        ρ\n        =\n        \n          "
+            "\n            m\n            V\n          \n        \n      \n    \n"
+            "    {\\displaystyle \\rho ={\\frac {m}{V}}}\n  \n\n"
+            "where ρ is the density."
+        ),
+        "canonical_url": "https://simple.wikipedia.org/wiki/Density",
+    }
+    p = to_passage(record)
+    assert "\\displaystyle" not in p["text"]
+    assert "Density is a measurement" in p["text"]
+    assert "where ρ is the density." in p["text"]
+
+
+def test_math_artifacts_stripper_leaves_plain_text_untouched():
+    # No `\\displaystyle` marker → text passes through unchanged
+    # (modulo trailing whitespace stripping).
+    record = {
+        "title": "Photosynthesis",
+        "lead_text": (
+            "Photosynthesis is a process used by plants.\n\n"
+            "It converts light energy into chemical energy.\n\n"
+            "This is how plants make food."
+        ),
+        "canonical_url": "https://simple.wikipedia.org/wiki/Photosynthesis",
+    }
+    p = to_passage(record)
+    expected = (
+        "Photosynthesis is a process used by plants.\n\n"
+        "It converts light energy into chemical energy.\n\n"
+        "This is how plants make food."
+    )
+    assert p["text"] == expected
