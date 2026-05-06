@@ -5,6 +5,7 @@ unit tests can substitute a fake. See `data/ingest/README.md` for usage.
 """
 import re
 import unicodedata
+from pathlib import Path
 
 
 _NON_ALNUM = re.compile(r"[^a-z0-9]+")
@@ -37,3 +38,27 @@ def slugify(title: str) -> str:
     if not slug:
         raise ValueError(f"slugify: no alphanumerics in title: {title!r}")
     return slug
+
+
+def read_whitelist(path: Path) -> list[str]:
+    """Parse a whitelist file: one article title per line, comments OK.
+
+    - Lines starting with `#` (after stripping) are ignored.
+    - Blank lines are ignored.
+    - Leading/trailing whitespace is stripped per line.
+    - Order is preserved (so hand edits diff cleanly).
+
+    Raises:
+        ValueError: if any title appears more than once.
+    """
+    titles: list[str] = []
+    seen: set[str] = set()
+    for line in Path(path).read_text(encoding="utf-8").splitlines():
+        stripped = line.strip()
+        if not stripped or stripped.startswith("#"):
+            continue
+        if stripped in seen:
+            raise ValueError(f"read_whitelist: duplicate title: {stripped!r}")
+        seen.add(stripped)
+        titles.append(stripped)
+    return titles
