@@ -142,48 +142,83 @@ fn existing_passage_ids(kb: &SqliteKnowledgeBase) -> Result<std::collections::Ha
 
 /// Search known locations for `seed_passages.<pack_id>.jsonl`, in order:
 ///
-/// 1. `$PRIMER_SEED_DIR/seed_passages.<pack_id>.jsonl` (env override; useful
-///    for tests and for users who want to point at a release-downloaded
-///    JSONL without copying it into the default location).
-/// 2. `$XDG_DATA_HOME/primer/seed/seed_passages.<pack_id>.jsonl`
-///    (or `$HOME/.local/share/primer/seed/...` on systems without XDG).
-/// 3. Cargo dev path: `<workspace_root>/data/seed/seed_passages.<pack_id>.jsonl`,
-///    discovered by walking up from `CARGO_MANIFEST_DIR` if set.
+/// 1. `$PRIMER_SEED_DIR/seed_passages.<pack_id>.jsonl` (env override).
+/// 2. `$XDG_DATA_HOME/primer/seed/seed_passages.<pack_id>.jsonl`.
+/// 3. Cargo dev path: `<workspace_root>/data/seed/seed_passages.<pack_id>.jsonl`.
 ///
-/// Returns `None` if no candidate exists.
+/// Returns the canonical-named file, if any. Use [`discover_seed_files`]
+/// to discover *all* matching files (the path that `auto_seed_if_empty`
+/// uses).
 pub fn discover_seed_jsonl(locale: Locale) -> Option<PathBuf> {
+    let canonical = format!("seed_passages.{}.jsonl", locale.pack_id());
+    discover_seed_files(locale)
+        .into_iter()
+        .find(|p| p.file_name().and_then(|n| n.to_str()) == Some(&canonical))
+}
+
+/// Discover ALL seed JSONL files for `locale` in the first search-path
+/// directory that contains any. The search order matches
+/// [`discover_seed_jsonl`] (env override → XDG → cargo dev path); whichever
+/// directory yields at least one matching file wins, and all matching
+/// files in that directory are returned.
+///
+/// "Matching" means a regular file whose name ends with `.<pack>.jsonl`,
+/// where `<pack>` is `locale.pack_id()`. This lets the in-repo seed dir
+/// hold both `seed_passages.en.jsonl` (CC0 hand-drafted) and
+/// `wiki_passages.en.jsonl` (CC-BY-SA-3.0 wiki layer) side by side, while
+/// `wiki_passages.de.jsonl` is correctly ignored when the locale is
+/// English.
+///
+/// Returns an empty `Vec` if no candidate directory exists.
+pub fn discover_seed_files(locale: Locale) -> Vec<PathBuf> {
     let pack = locale.pack_id();
-    let filename = format!("seed_passages.{pack}.jsonl");
+    let suffix = format!(".{pack}.jsonl");
 
-    if let Ok(dir) = std::env::var("PRIMER_SEED_DIR") {
-        let p = PathBuf::from(dir).join(&filename);
-        if p.is_file() {
-            return Some(p);
+    for dir in candidate_seed_dirs() {
+        let mut hits = Vec::new();
+        let Ok(entries) = std::fs::read_dir(&dir) else {
+            continue;
+        };
+        for entry in entries.flatten() {
+            let path = entry.path();
+            if !path.is_file() {
+                continue;
+            }
+            let Some(name) = path.file_name().and_then(|n| n.to_str()) else {
+                continue;
+            };
+            if name.ends_with(&suffix) {
+                hits.push(path);
+            }
+        }
+        if !hits.is_empty() {
+            hits.sort();
+            return hits;
         }
     }
+    Vec::new()
+}
 
+/// The ordered list of directories to look for seed files in. Mirrors
+/// the existing [`discover_seed_jsonl`] precedence.
+fn candidate_seed_dirs() -> Vec<PathBuf> {
+    let mut dirs = Vec::new();
+    if let Ok(d) = std::env::var("PRIMER_SEED_DIR") {
+        dirs.push(PathBuf::from(d));
+    }
     if let Some(data_home) = xdg_data_home() {
-        let p = data_home.join("primer/seed").join(&filename);
-        if p.is_file() {
-            return Some(p);
-        }
+        dirs.push(data_home.join("primer/seed"));
     }
-
     if let Ok(manifest_dir) = std::env::var("CARGO_MANIFEST_DIR") {
-        // crates/primer-kb-load/ → walk up to repo root, look in data/seed/.
         let mut p = PathBuf::from(manifest_dir);
         for _ in 0..5 {
-            let candidate = p.join("data/seed").join(&filename);
-            if candidate.is_file() {
-                return Some(candidate);
-            }
+            dirs.push(p.join("data/seed"));
             if !p.pop() {
                 break;
             }
         }
     }
-
-    None
+    dirs
 }
 
 fn xdg_data_home() -> Option<PathBuf> {
@@ -253,13 +288,17 @@ pub async fn reembed_kb(
     Ok(done)
 }
 
-/// Auto-seed `kb` from the discovered JSONL if `kb` is empty.
+/// Auto-seed `kb` from the discovered JSONL file(s) if `kb` is empty.
+///
+/// All `*.<pack>.jsonl` files in the first matching search-path directory
+/// are loaded in lexicographic order (e.g. both `seed_passages.en.jsonl`
+/// and `wiki_passages.en.jsonl` will load on a fresh English KB). The
+/// returned `LoadStats` aggregates inserts/skips across all loaded files.
 ///
 /// Returns:
-/// - `Ok(Some(stats))` if a seed file was found and loaded.
-/// - `Ok(None)` if either the KB already has passages or no seed file
-///   could be located. Both are valid runtime states — empty KB is
-///   explicitly supported by the rest of the system.
+/// - `Ok(Some(stats))` if at least one seed file was found and loaded.
+/// - `Ok(None)` if either the KB already has passages or no seed files
+///   could be located.
 ///
 /// Errors propagate from the loader; discovery itself never errors.
 pub async fn auto_seed_if_empty(
@@ -269,22 +308,29 @@ pub async fn auto_seed_if_empty(
     if kb.passage_count()? > 0 {
         return Ok(None);
     }
-    let Some(path) = discover_seed_jsonl(locale) else {
+    let files = discover_seed_files(locale);
+    if files.is_empty() {
         tracing::info!(
             target = "primer-kb-load",
             locale = locale.pack_id(),
             "no seed corpus found; knowledge base starts empty"
         );
         return Ok(None);
-    };
-    tracing::info!(
-        target = "primer-kb-load",
-        locale = locale.pack_id(),
-        path = %path.display(),
-        "loading seed corpus into empty knowledge base"
-    );
-    let stats = load_jsonl(kb, &path).await?;
-    Ok(Some(stats))
+    }
+    let mut total = LoadStats::default();
+    for path in &files {
+        tracing::info!(
+            target = "primer-kb-load",
+            locale = locale.pack_id(),
+            path = %path.display(),
+            "loading seed corpus into empty knowledge base"
+        );
+        let stats = load_jsonl(kb, path).await?;
+        total.inserted += stats.inserted;
+        total.skipped_existing += stats.skipped_existing;
+        total.sources_seen += stats.sources_seen;
+    }
+    Ok(Some(total))
 }
 
 #[cfg(test)]
@@ -423,6 +469,79 @@ mod tests {
             std::env::remove_var("PRIMER_SEED_DIR");
         }
         assert_eq!(found.as_deref(), Some(path.as_path()));
+    }
+
+    #[tokio::test]
+    async fn auto_seed_loads_all_matching_jsonl_files_in_dir() {
+        // Two seed files in the same dir → both load.
+        let seed_dir = tempfile::tempdir().unwrap();
+        std::fs::write(
+            seed_dir.path().join("seed_passages.en.jsonl"),
+            r#"{"id":"hand-1","source":"seed:en:hand-1","license":"CC0-1.0","attribution":"hand","text":"hand-drafted passage one"}"#,
+        )
+        .unwrap();
+        std::fs::write(
+            seed_dir.path().join("wiki_passages.en.jsonl"),
+            r#"{"id":"wiki-1","source":"wiki-simple:en:wiki-1","license":"CC-BY-SA-3.0","attribution":"wiki","text":"wikipedia passage one"}"#,
+        )
+        .unwrap();
+        // Distractor: a different-locale file must NOT be loaded.
+        std::fs::write(
+            seed_dir.path().join("wiki_passages.de.jsonl"),
+            r#"{"id":"de-1","source":"wiki-simple:de:de-1","license":"CC-BY-SA-3.0","attribution":"de","text":"deutsche passage"}"#,
+        )
+        .unwrap();
+        // Distractor: a non-jsonl file must NOT be loaded.
+        std::fs::write(seed_dir.path().join("README.md"), "not jsonl").unwrap();
+
+        let db = tempfile::NamedTempFile::new().unwrap();
+        let kb = SqliteKnowledgeBase::open_for_locale(db.path(), Locale::English).unwrap();
+
+        // SAFETY: this test does not run concurrently with other tests
+        // that touch PRIMER_SEED_DIR; the other discovery test uses
+        // the same env var and would conflict if run in parallel, but
+        // tokio's default scheduler serialises async tests within one
+        // process and these env-touching tests are intentionally rare.
+        unsafe {
+            std::env::set_var("PRIMER_SEED_DIR", seed_dir.path());
+        }
+        let result = auto_seed_if_empty(&kb, Locale::English).await.unwrap();
+        unsafe {
+            std::env::remove_var("PRIMER_SEED_DIR");
+        }
+
+        let stats = result.expect("auto-seed should have loaded files");
+        assert_eq!(stats.inserted, 2, "expected both en files to load");
+        assert_eq!(kb.passage_count().unwrap(), 2);
+    }
+
+    #[test]
+    fn discover_seed_files_returns_only_matching_locale() {
+        let seed_dir = tempfile::tempdir().unwrap();
+        std::fs::write(seed_dir.path().join("seed_passages.en.jsonl"), "{}").unwrap();
+        std::fs::write(seed_dir.path().join("wiki_passages.en.jsonl"), "{}").unwrap();
+        std::fs::write(seed_dir.path().join("wiki_passages.de.jsonl"), "{}").unwrap();
+        std::fs::write(seed_dir.path().join("README.md"), "x").unwrap();
+
+        unsafe {
+            std::env::set_var("PRIMER_SEED_DIR", seed_dir.path());
+        }
+        let mut found = discover_seed_files(Locale::English);
+        unsafe {
+            std::env::remove_var("PRIMER_SEED_DIR");
+        }
+        found.sort();
+        assert_eq!(found.len(), 2);
+        assert!(
+            found[0].file_name().unwrap() == "seed_passages.en.jsonl",
+            "expected first match to be seed_passages.en.jsonl, got {:?}",
+            found[0]
+        );
+        assert!(
+            found[1].file_name().unwrap() == "wiki_passages.en.jsonl",
+            "expected second match to be wiki_passages.en.jsonl, got {:?}",
+            found[1]
+        );
     }
 
     #[tokio::test]
