@@ -104,6 +104,18 @@ import time as _time
 
 WIKIPEDIA_API_URL = "https://simple.wikipedia.org/w/api.php"
 
+# Phrases that mark a Wikipedia article as a disambiguation page (i.e. a
+# list of meanings, not a definition). Detected against the start of the
+# extract because disambiguation leads always announce themselves up
+# front. Caught at fetch time so a typo'd or ambiguous whitelist entry
+# raises loudly instead of silently producing garbage passages.
+_DISAMBIGUATION_PATTERNS = (
+    re.compile(r"\bcan mean\b", re.IGNORECASE),
+    re.compile(r"\bmay refer to\b", re.IGNORECASE),
+    re.compile(r"\bcan refer to\b", re.IGNORECASE),
+    re.compile(r"\bis a disambiguation\b", re.IGNORECASE),
+)
+
 
 def fetch_lead(title: str, *, http_client) -> dict:
     """Fetch the lead section of a Simple English Wikipedia article.
@@ -117,8 +129,11 @@ def fetch_lead(title: str, *, http_client) -> dict:
 
     Raises:
         RuntimeError: when the article doesn't exist (API returns the
-        "missing" page sentinel) or returns an empty extract. Both are
-        whitelist bugs that the developer should notice immediately.
+        "missing" page sentinel), returns an empty extract, or appears to
+        be a disambiguation page (lead matches `_DISAMBIGUATION_PATTERNS`).
+        All three are whitelist bugs that the developer should notice
+        immediately — the cure is a more specific title (e.g.
+        `Base (chemistry)` rather than `Base`).
     """
     params = {
         "action": "query",
@@ -142,11 +157,80 @@ def fetch_lead(title: str, *, http_client) -> dict:
     extract = page.get("extract", "")
     if not extract.strip():
         raise RuntimeError(f"fetch_lead: empty extract for {title!r}")
+    head = extract[:300]
+    if any(p.search(head) for p in _DISAMBIGUATION_PATTERNS):
+        raise RuntimeError(
+            f"fetch_lead: {title!r} returned a disambiguation page; "
+            f"use a more specific title (e.g. {title!r} → "
+            f"{title!r} (specific topic)). Lead starts: {head[:120]!r}"
+        )
     return {
         "title": page["title"],
         "lead_text": extract.strip(),
         "canonical_url": page["fullurl"],
     }
+
+
+# MediaWiki's `extracts` API caps batched queries at 20 titles per call.
+# Honoured here; larger batches return only the first 20 extracts.
+_BATCH_SIZE = 20
+
+
+def fetch_leads(titles: list[str], *, http_client) -> dict[str, dict]:
+    """Batch-fetch leads for all titles. Returns a dict keyed by the
+    INPUT title (not the canonical title — redirects are resolved via
+    the API's redirect map and normalisation map).
+
+    Each value is the same `{title, lead_text, canonical_url}` shape
+    `fetch_lead` returns. Disambiguation, missing, and empty-extract
+    pages still raise `RuntimeError` — the bad title is reported in
+    the message so the developer can fix the whitelist.
+
+    Strictly better than calling `fetch_lead` in a loop: 1-2 requests
+    instead of N, well under MediaWiki's per-IP rate-limit thresholds.
+    """
+    out: dict[str, dict] = {}
+    for i in range(0, len(titles), _BATCH_SIZE):
+        batch = titles[i : i + _BATCH_SIZE]
+        params = {
+            "action": "query",
+            "prop": "extracts|info",
+            "exintro": 1,
+            "explaintext": 1,
+            "inprop": "url",
+            "titles": "|".join(batch),
+            "format": "json",
+            "redirects": 1,
+            "exlimit": "max",
+        }
+        resp = http_client.get(WIKIPEDIA_API_URL, params=params, timeout=60.0)
+        resp.raise_for_status()
+        data = resp.json()
+        normalized = {n["from"]: n["to"] for n in data.get("query", {}).get("normalized", [])}
+        redirects = {n["from"]: n["to"] for n in data.get("query", {}).get("redirects", [])}
+        pages_by_title = {p.get("title"): p for p in data.get("query", {}).get("pages", {}).values()}
+
+        for title in batch:
+            resolved = normalized.get(title, title)
+            resolved = redirects.get(resolved, resolved)
+            page = pages_by_title.get(resolved, {"missing": ""})
+            if "missing" in page:
+                raise RuntimeError(f"fetch_leads: article not found: {title!r}")
+            extract = page.get("extract", "")
+            if not extract.strip():
+                raise RuntimeError(f"fetch_leads: empty extract for {title!r}")
+            head = extract[:300]
+            if any(p.search(head) for p in _DISAMBIGUATION_PATTERNS):
+                raise RuntimeError(
+                    f"fetch_leads: {title!r} returned a disambiguation page; "
+                    f"use a more specific title. Lead starts: {head[:120]!r}"
+                )
+            out[title] = {
+                "title": page["title"],
+                "lead_text": extract.strip(),
+                "canonical_url": page["fullurl"],
+            }
+    return out
 
 
 # Default user-agent for live runs. Per Wikipedia API etiquette, this
@@ -161,9 +245,9 @@ def main(
     output_path: Path,
     *,
     http_client=None,
-    inter_request_sleep_s: float = 0.1,
+    inter_batch_sleep_s: float = 1.0,
 ) -> None:
-    """Run the full pipeline: whitelist → fetch → JSONL.
+    """Run the full pipeline: whitelist → batched fetch → JSONL.
 
     The output JSONL is sorted by `id` for deterministic diffs.
 
@@ -174,8 +258,9 @@ def main(
             timeout=...)` and return a response with `.json()` and
             `.raise_for_status()`). If `None`, a `requests.Session` is
             constructed with the default User-Agent.
-        inter_request_sleep_s: seconds to wait between fetches when using
-            a real network client. Set to 0 in tests.
+        inter_batch_sleep_s: seconds to wait between batches when using a
+            real network client. Each batch fetches up to 20 titles in
+            one request. Set to 0 in tests.
     """
     if http_client is None:
         import requests
@@ -183,12 +268,17 @@ def main(
         http_client.headers.update({"User-Agent": _DEFAULT_USER_AGENT})
 
     titles = read_whitelist(whitelist_path)
-    passages: list[dict] = []
-    for i, title in enumerate(titles):
+
+    records: dict[str, dict] = {}
+    for i in range(0, len(titles), _BATCH_SIZE):
         if i > 0:
-            _time.sleep(inter_request_sleep_s)
-        record = fetch_lead(title, http_client=http_client)
-        passage = to_passage(record)
+            _time.sleep(inter_batch_sleep_s)
+        batch = titles[i : i + _BATCH_SIZE]
+        records.update(fetch_leads(batch, http_client=http_client))
+
+    passages: list[dict] = []
+    for title in titles:
+        passage = to_passage(records[title])
         word_count = len(passage["text"].split())
         if word_count < 30:
             print(

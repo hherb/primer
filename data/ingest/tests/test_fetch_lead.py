@@ -81,3 +81,42 @@ def test_fetch_lead_empty_extract_raises():
     client = FakeHttpClient({"Stub": payload})
     with pytest.raises(RuntimeError, match="empty extract"):
         fetch_lead("Stub", http_client=client)
+
+
+def test_fetch_lead_disambiguation_page_raises_can_mean():
+    # Real-world example: Simple English Wikipedia "Base" article is a
+    # disambiguation page whose extract starts with "Base can mean: ...".
+    # The pipeline must reject this loudly so the developer fixes the
+    # whitelist (e.g. to `Base (chemistry)`).
+    payload = {
+        "query": {
+            "pages": {
+                "111": {
+                    "title": "Base",
+                    "extract": "Base can mean various things in different fields including mathematics, sport, architecture, biology, and chemistry. See specific articles for each meaning.",
+                    "fullurl": "https://simple.wikipedia.org/wiki/Base",
+                }
+            }
+        }
+    }
+    client = FakeHttpClient({"Base": payload})
+    with pytest.raises(RuntimeError, match="disambiguation page"):
+        fetch_lead("Base", http_client=client)
+
+
+def test_fetch_lead_disambiguation_page_raises_may_refer_to():
+    # Variant disambiguation marker. Simple Wiki uses both phrasings.
+    payload = {
+        "query": {
+            "pages": {
+                "222": {
+                    "title": "Saturn",
+                    "extract": "Saturn may refer to: the planet, the Roman god, the rocket family, or the Saturn computer game console.",
+                    "fullurl": "https://simple.wikipedia.org/wiki/Saturn",
+                }
+            }
+        }
+    }
+    client = FakeHttpClient({"Saturn": payload})
+    with pytest.raises(RuntimeError, match="disambiguation page"):
+        fetch_lead("Saturn", http_client=client)

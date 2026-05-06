@@ -22,12 +22,25 @@ class FakeResponse:
 
 
 class FakeHttpClient:
+    """Handles both single-title queries (legacy fetch_lead path) and the
+    pipe-separated batched titles `main` sends via fetch_leads. For a
+    batched query, merges the per-title canned payloads into a single
+    response shaped like the real MediaWiki batched response."""
+
     def __init__(self, responses: dict[str, dict]):
         self.responses = responses
 
     def get(self, url, params, timeout=None):
-        title = params["titles"]
-        return FakeResponse(self.responses[title])
+        titles_param = params["titles"]
+        if "|" not in titles_param:
+            return FakeResponse(self.responses[titles_param])
+        # Batched query: merge per-title pages into one response.
+        merged_pages: dict[str, dict] = {}
+        for title in titles_param.split("|"):
+            payload = self.responses[title]
+            for pageid, page in payload["query"]["pages"].items():
+                merged_pages[pageid] = page
+        return FakeResponse({"batchcomplete": "", "query": {"pages": merged_pages}})
 
 
 def _load(name: str) -> dict:
@@ -45,7 +58,7 @@ def test_pipeline_three_articles_byte_exact(tmp_path: Path):
         "Gravity": _load("gravity.json"),
     })
 
-    main(whitelist_path=whitelist, output_path=output, http_client=client, inter_request_sleep_s=0.0)
+    main(whitelist_path=whitelist, output_path=output, http_client=client, inter_batch_sleep_s=0.0)
 
     actual = output.read_text(encoding="utf-8")
     expected = (FIXTURES / "expected_output.jsonl").read_text(encoding="utf-8")
@@ -68,7 +81,7 @@ def test_pipeline_output_sorted_by_id(tmp_path: Path):
         "Gravity": _load("gravity.json"),
     })
 
-    main(whitelist_path=whitelist, output_path=output, http_client=client, inter_request_sleep_s=0.0)
+    main(whitelist_path=whitelist, output_path=output, http_client=client, inter_batch_sleep_s=0.0)
     lines = output.read_text(encoding="utf-8").strip().splitlines()
     ids = [json.loads(line)["id"] for line in lines]
     assert ids == [
