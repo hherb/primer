@@ -89,7 +89,7 @@ def main() -> int:
 
     import requests
     sess = requests.Session()
-    sess.headers.update({"User-Agent": "PrimerSeedBuilder/0.1 (contact: see-repo-readme)"})
+    sess.headers.update({"User-Agent": "PrimerSeedBuilder/0.1 (contact: my.list.subscriptions@gmail.com)"})
 
     aggregated: list[str] = []
     seen: set[str] = set()
