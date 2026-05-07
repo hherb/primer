@@ -3,12 +3,13 @@
 //! Two halves: connection-bound functions (`validate_storage_embedder`,
 //! `upsert_storage_embedding_model`) that interact with the
 //! `embedding_models` lookup table, and pure functions
-//! (`vec_to_blob`, `blob_to_vec`, `cosine`) that operate on byte buffers
-//! and float slices only.
+//! (`vec_to_blob`, `blob_to_vec`, `dot_product`) that operate on byte
+//! buffers and float slices only.
 //!
-//! TODO: lift `vec_to_blob`, `blob_to_vec`, and `cosine` to
-//! `primer-core::vector` — these are duplicated verbatim in
-//! `primer-knowledge/src/lib.rs` (~lines 551-577).
+//! TODO: lift `vec_to_blob`, `blob_to_vec`, and `dot_product` to
+//! `primer-core::vector` — the two former are duplicated verbatim in
+//! `primer-knowledge/src/lib.rs` (~lines 551-577); the latter lives there
+//! under the legacy name `cosine` and should be unified at the same time.
 
 use primer_core::error::{PrimerError, Result};
 use rusqlite::Connection;
@@ -103,7 +104,19 @@ pub(super) fn blob_to_vec(blob: &[u8]) -> Result<Vec<f32>> {
     Ok(out)
 }
 
-pub(super) fn cosine(a: &[f32], b: &[f32]) -> f32 {
+/// Inner product of two equal-length f32 slices. Equivalent to cosine
+/// similarity **only when both inputs are L2-normalized** — the function
+/// does not normalize. The hybrid retrieval path relies on this: every
+/// `Embedder` in `primer-embedding` (stub, fastembed/BGE-M3, ollama)
+/// returns L2-normalized vectors, so dot product = cosine similarity for
+/// the on-disk + query-side combination. If a future embedder ever
+/// returns non-normalized vectors, the caller must normalize before
+/// invoking this function (or switch to a true cosine helper).
+///
+/// Slices of unequal length: `iter().zip()` stops at the shorter slice,
+/// matching the historical behaviour. Pinned by the `dot_product_zips_to_shorter_vector`
+/// test below.
+pub(super) fn dot_product(a: &[f32], b: &[f32]) -> f32 {
     a.iter().zip(b.iter()).map(|(x, y)| x * y).sum()
 }
 
@@ -133,22 +146,23 @@ mod tests {
     }
 
     #[test]
-    fn cosine_of_orthogonal_vectors_is_zero() {
-        assert_eq!(cosine(&[1.0, 0.0], &[0.0, 1.0]), 0.0);
+    fn dot_product_of_orthogonal_vectors_is_zero() {
+        assert_eq!(dot_product(&[1.0, 0.0], &[0.0, 1.0]), 0.0);
     }
 
     #[test]
-    fn cosine_of_aligned_unit_vectors_is_one() {
+    fn dot_product_of_aligned_unit_vectors_is_one() {
+        // For L2-normalized inputs, dot product equals cosine similarity.
         let v = [0.6_f32, 0.8];
-        assert!((cosine(&v, &v) - 1.0).abs() < 1e-6);
+        assert!((dot_product(&v, &v) - 1.0).abs() < 1e-6);
     }
 
     #[test]
-    fn cosine_zips_to_shorter_vector() {
+    fn dot_product_zips_to_shorter_vector() {
         // Mirrors the production behaviour: zip stops at the shorter
         // slice. Documented here so future changes don't silently
         // diverge.
-        assert_eq!(cosine(&[1.0, 1.0, 1.0], &[2.0, 0.5]), 2.0 + 0.5);
+        assert_eq!(dot_product(&[1.0, 1.0, 1.0], &[2.0, 0.5]), 2.0 + 0.5);
     }
 
     #[test]
