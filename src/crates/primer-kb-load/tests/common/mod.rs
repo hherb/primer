@@ -633,6 +633,24 @@ mod sanity_tests {
         );
     }
 
+    #[test]
+    fn known_failing_queries_all_appear_in_queries() {
+        // Defensive: a typo in KNOWN_FAILING_QUERIES would silently
+        // disable nothing — the regression test would still iterate
+        // every BenchQuery in QUERIES because no string would match.
+        // This test fails loudly if a known-failing entry doesn't
+        // correspond to a real benchmark query (e.g. after a query
+        // is reworded in QUERIES without updating KNOWN_FAILING).
+        for failing in KNOWN_FAILING_QUERIES {
+            let found = QUERIES.iter().any(|q| q.query == *failing);
+            assert!(
+                found,
+                "KNOWN_FAILING_QUERIES entry {:?} does not appear in QUERIES — typo or stale entry",
+                failing
+            );
+        }
+    }
+
     #[tokio::test]
     async fn strict_subset_canonical_ids_exist_in_corpus() {
         // Defensive: every canonical_id we declare must exist in the
