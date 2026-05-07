@@ -112,4 +112,64 @@ pub const QUERIES: &[BenchQuery] = &[
     BenchQuery { query: "how do vaccines work", required: &["vaccine"], canonical_id: None, cluster: Cluster::Wiki },
     BenchQuery { query: "what is friction", required: &["friction", "force"], canonical_id: None, cluster: Cluster::Wiki },
     BenchQuery { query: "what makes a plant a plant", required: &["plant", "autotroph"], canonical_id: None, cluster: Cluster::Wiki },
+    // ----- Child-language paraphrases (Task 2 expansion) -----
+    BenchQuery { query: "why does my heart go thump thump", required: &["heart", "ventric"], canonical_id: None, cluster: Cluster::Body },
+    BenchQuery { query: "why are bones hard but bendy", required: &["skeleton", "206"], canonical_id: None, cluster: Cluster::Body },
+    BenchQuery { query: "where does the rain come from", required: &["droplet", "condens"], canonical_id: None, cluster: Cluster::EarthWeather },
+    BenchQuery { query: "why is the sky blue and not green", required: &["scatter", "wavelength"], canonical_id: None, cluster: Cluster::HowThingsWork },
+    BenchQuery { query: "why do volcanoes get angry and erupt", required: &["magma", "tectonic"], canonical_id: None, cluster: Cluster::EarthWeather },
+    BenchQuery { query: "how does my dog see in the dark", required: &["retina", "lens"], canonical_id: None, cluster: Cluster::Body },
+    BenchQuery { query: "what makes lightning so bright", required: &["spark", "shock"], canonical_id: None, cluster: Cluster::EarthWeather },
+    // ----- Cross-cluster questions (Task 2 expansion) -----
+    BenchQuery { query: "why do stars twinkle but planets do not", required: &["atmosphere"], canonical_id: None, cluster: Cluster::Space },
+    BenchQuery { query: "how does the moon make the sea move", required: &["moon", "gravity"], canonical_id: None, cluster: Cluster::Space },
+    BenchQuery { query: "why does the sun help plants grow", required: &["photosynthesis", "chlorophyll"], canonical_id: None, cluster: Cluster::Life },
+    BenchQuery { query: "how do volcanoes change the weather", required: &["magma"], canonical_id: None, cluster: Cluster::EarthWeather },
+    BenchQuery { query: "what makes a baby grow inside its mum", required: &["egg", "sperm"], canonical_id: None, cluster: Cluster::Life },
+    BenchQuery { query: "how does electricity travel through wires made of metal", required: &["electron"], canonical_id: None, cluster: Cluster::HowThingsWork },
+    BenchQuery { query: "why does ice cool a drink", required: &["density", "molecule"], canonical_id: None, cluster: Cluster::HowThingsWork },
+    BenchQuery { query: "how do mountains and earthquakes both come from plates moving", required: &["plate"], canonical_id: None, cluster: Cluster::EarthWeather },
+    BenchQuery { query: "why do mammals breathe air but fish breathe in water", required: &["oxygen"], canonical_id: None, cluster: Cluster::Body },
+    // ----- Additional wiki queries (Task 2 expansion) -----
+    BenchQuery { query: "what is a chemical element", required: &["element", "atom"], canonical_id: None, cluster: Cluster::Wiki },
+    BenchQuery { query: "what is a molecule", required: &["molecule", "atom"], canonical_id: None, cluster: Cluster::Wiki },
+    BenchQuery { query: "what is a gene", required: &["gene"], canonical_id: None, cluster: Cluster::Wiki },
+    BenchQuery { query: "what is bacteria", required: &["bacteria"], canonical_id: None, cluster: Cluster::Wiki },
+    BenchQuery { query: "what is the ocean", required: &["ocean"], canonical_id: None, cluster: Cluster::Wiki },
+    BenchQuery { query: "what is an ecosystem", required: &["ecosystem"], canonical_id: None, cluster: Cluster::Wiki },
+    BenchQuery { query: "what is soil", required: &["soil"], canonical_id: None, cluster: Cluster::Wiki },
 ];
+
+#[cfg(test)]
+mod sanity_tests {
+    use super::*;
+
+    #[test]
+    fn queries_have_expected_size_floor() {
+        // Defensive lower bound — catches accidental truncation.
+        assert!(
+            QUERIES.len() >= 80,
+            "expected at least 80 benchmark queries, got {}",
+            QUERIES.len()
+        );
+    }
+
+    #[test]
+    fn every_cluster_has_at_least_three_queries() {
+        for cluster in [
+            Cluster::Space,
+            Cluster::Body,
+            Cluster::HowThingsWork,
+            Cluster::Life,
+            Cluster::EarthWeather,
+            Cluster::Wiki,
+        ] {
+            let count = QUERIES.iter().filter(|q| q.cluster == cluster).count();
+            assert!(
+                count >= 3,
+                "cluster {:?} has only {} queries; need at least 3 for per-cluster recall to be meaningful",
+                cluster, count
+            );
+        }
+    }
+}
