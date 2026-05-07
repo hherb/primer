@@ -43,7 +43,7 @@ pub struct BenchQuery {
 /// additional wiki queries. Annotated with `canonical_id` in Task 3.
 pub const QUERIES: &[BenchQuery] = &[
     // Space cluster
-    BenchQuery { query: "how does the sun shine", required: &["fus", "hydrogen"], canonical_id: None, cluster: Cluster::Space },
+    BenchQuery { query: "how does the sun shine", required: &["fus", "hydrogen"], canonical_id: Some("seed:en:sun"), cluster: Cluster::Space },
     BenchQuery { query: "why does the moon change shape", required: &["phase", "sunlight"], canonical_id: None, cluster: Cluster::Space },
     BenchQuery { query: "why is it day and night", required: &["spin", "axis"], canonical_id: None, cluster: Cluster::Space },
     BenchQuery { query: "how big is jupiter", required: &["jupiter"], canonical_id: None, cluster: Cluster::Space },
@@ -54,9 +54,9 @@ pub const QUERIES: &[BenchQuery] = &[
     BenchQuery { query: "why do eclipses happen", required: &["shadow", "moon"], canonical_id: None, cluster: Cluster::Space },
     BenchQuery { query: "what causes ocean tides", required: &["moon", "gravity"], canonical_id: None, cluster: Cluster::Space },
     BenchQuery { query: "how did the universe begin", required: &["big bang", "expand"], canonical_id: None, cluster: Cluster::Space },
-    BenchQuery { query: "why are there seasons", required: &["tilt", "axis"], canonical_id: None, cluster: Cluster::Space },
+    BenchQuery { query: "why are there seasons", required: &["tilt", "axis"], canonical_id: Some("seed:en:earth-orbit-day-night"), cluster: Cluster::Space },
     // Body cluster
-    BenchQuery { query: "how does the heart pump blood", required: &["heart", "ventric"], canonical_id: None, cluster: Cluster::Body },
+    BenchQuery { query: "how does the heart pump blood", required: &["heart", "ventric"], canonical_id: Some("seed:en:heart"), cluster: Cluster::Body },
     BenchQuery { query: "why do we breathe", required: &["oxygen", "alveoli"], canonical_id: None, cluster: Cluster::Body },
     BenchQuery { query: "what does the brain do", required: &["neuron", "cortex"], canonical_id: None, cluster: Cluster::Body },
     BenchQuery { query: "how does food get digested", required: &["stomach", "intestine"], canonical_id: None, cluster: Cluster::Body },
@@ -68,7 +68,7 @@ pub const QUERIES: &[BenchQuery] = &[
     BenchQuery { query: "how do ears hear", required: &["cochlea", "vibrat"], canonical_id: None, cluster: Cluster::Body },
     BenchQuery { query: "why do we sleep and dream", required: &["rem", "memor"], canonical_id: None, cluster: Cluster::Body },
     // How-things-work cluster
-    BenchQuery { query: "how do magnets work", required: &["magnetic field", "pole"], canonical_id: None, cluster: Cluster::HowThingsWork },
+    BenchQuery { query: "how do magnets work", required: &["magnetic field", "pole"], canonical_id: Some("seed:en:magnets"), cluster: Cluster::HowThingsWork },
     BenchQuery { query: "what is electricity", required: &["electron", "circuit"], canonical_id: None, cluster: Cluster::HowThingsWork },
     BenchQuery { query: "how does a battery store energy", required: &["chemical", "anode"], canonical_id: None, cluster: Cluster::HowThingsWork },
     BenchQuery { query: "how does a lever work", required: &["fulcrum", "force"], canonical_id: None, cluster: Cluster::HowThingsWork },
@@ -80,7 +80,7 @@ pub const QUERIES: &[BenchQuery] = &[
     BenchQuery { query: "why does salt melt ice", required: &["freezing", "sodium"], canonical_id: None, cluster: Cluster::HowThingsWork },
     BenchQuery { query: "how does soap clean", required: &["oil", "molecule"], canonical_id: None, cluster: Cluster::HowThingsWork },
     // Life cluster
-    BenchQuery { query: "how do plants make food", required: &["photosynthesis", "chlorophyll"], canonical_id: None, cluster: Cluster::Life },
+    BenchQuery { query: "how do plants make food", required: &["photosynthesis", "chlorophyll"], canonical_id: Some("seed:en:photosynthesis"), cluster: Cluster::Life },
     BenchQuery { query: "how do seeds sprout germinate", required: &["germinat", "root"], canonical_id: None, cluster: Cluster::Life },
     BenchQuery { query: "what is a food chain", required: &["producer", "consumer"], canonical_id: None, cluster: Cluster::Life },
     BenchQuery { query: "what are cells", required: &["cell", "nucleus"], canonical_id: None, cluster: Cluster::Life },
@@ -104,14 +104,14 @@ pub const QUERIES: &[BenchQuery] = &[
     BenchQuery { query: "how do mountains form collide", required: &["plate", "collid"], canonical_id: None, cluster: Cluster::EarthWeather },
     BenchQuery { query: "difference between climate and weather", required: &["climate", "average"], canonical_id: None, cluster: Cluster::EarthWeather },
     // Wikipedia layer (Phase 0.2 MVP)
-    BenchQuery { query: "what is gravity", required: &["gravity", "attraction"], canonical_id: None, cluster: Cluster::Wiki },
-    BenchQuery { query: "what is an atom", required: &["atom", "matter"], canonical_id: None, cluster: Cluster::Wiki },
-    BenchQuery { query: "what is a virus", required: &["virus", "parasite"], canonical_id: None, cluster: Cluster::Wiki },
-    BenchQuery { query: "what is climate change", required: &["climate", "temperature"], canonical_id: None, cluster: Cluster::Wiki },
-    BenchQuery { query: "what is DNA", required: &["dna", "genetic"], canonical_id: None, cluster: Cluster::Wiki },
-    BenchQuery { query: "how do vaccines work", required: &["vaccine"], canonical_id: None, cluster: Cluster::Wiki },
-    BenchQuery { query: "what is friction", required: &["friction", "force"], canonical_id: None, cluster: Cluster::Wiki },
-    BenchQuery { query: "what makes a plant a plant", required: &["plant", "autotroph"], canonical_id: None, cluster: Cluster::Wiki },
+    BenchQuery { query: "what is gravity", required: &["gravity", "attraction"], canonical_id: Some("wiki-simple:en:gravity"), cluster: Cluster::Wiki },
+    BenchQuery { query: "what is an atom", required: &["atom", "matter"], canonical_id: Some("wiki-simple:en:atom"), cluster: Cluster::Wiki },
+    BenchQuery { query: "what is a virus", required: &["virus", "parasite"], canonical_id: Some("wiki-simple:en:virus"), cluster: Cluster::Wiki },
+    BenchQuery { query: "what is climate change", required: &["climate", "temperature"], canonical_id: Some("wiki-simple:en:climate-change"), cluster: Cluster::Wiki },
+    BenchQuery { query: "what is DNA", required: &["dna", "genetic"], canonical_id: Some("wiki-simple:en:dna"), cluster: Cluster::Wiki },
+    BenchQuery { query: "how do vaccines work", required: &["vaccine"], canonical_id: Some("wiki-simple:en:vaccine"), cluster: Cluster::Wiki },
+    BenchQuery { query: "what is friction", required: &["friction", "force"], canonical_id: Some("wiki-simple:en:friction"), cluster: Cluster::Wiki },
+    BenchQuery { query: "what makes a plant a plant", required: &["plant", "autotroph"], canonical_id: Some("wiki-simple:en:plant"), cluster: Cluster::Wiki },
     // ----- Child-language paraphrases (Task 2 expansion) -----
     BenchQuery { query: "why does my heart go thump thump", required: &["heart", "ventric"], canonical_id: None, cluster: Cluster::Body },
     BenchQuery { query: "why are bones hard but bendy", required: &["skeleton", "206"], canonical_id: None, cluster: Cluster::Body },
@@ -131,13 +131,13 @@ pub const QUERIES: &[BenchQuery] = &[
     BenchQuery { query: "how do mountains and earthquakes both come from plates moving", required: &["plate"], canonical_id: None, cluster: Cluster::EarthWeather },
     BenchQuery { query: "why do mammals breathe air but fish breathe in water", required: &["oxygen"], canonical_id: None, cluster: Cluster::Body },
     // ----- Additional wiki queries (Task 2 expansion) -----
-    BenchQuery { query: "what is a chemical element", required: &["element", "atom"], canonical_id: None, cluster: Cluster::Wiki },
-    BenchQuery { query: "what is a molecule", required: &["molecule", "atom"], canonical_id: None, cluster: Cluster::Wiki },
-    BenchQuery { query: "what is a gene", required: &["gene"], canonical_id: None, cluster: Cluster::Wiki },
-    BenchQuery { query: "what is bacteria", required: &["bacteria"], canonical_id: None, cluster: Cluster::Wiki },
-    BenchQuery { query: "what is the ocean", required: &["ocean"], canonical_id: None, cluster: Cluster::Wiki },
-    BenchQuery { query: "what is an ecosystem", required: &["ecosystem"], canonical_id: None, cluster: Cluster::Wiki },
-    BenchQuery { query: "what is soil", required: &["soil"], canonical_id: None, cluster: Cluster::Wiki },
+    BenchQuery { query: "what is a chemical element", required: &["element", "atom"], canonical_id: Some("wiki-simple:en:chemical-element"), cluster: Cluster::Wiki },
+    BenchQuery { query: "what is a molecule", required: &["molecule", "atom"], canonical_id: Some("wiki-simple:en:molecule"), cluster: Cluster::Wiki },
+    BenchQuery { query: "what is a gene", required: &["gene"], canonical_id: Some("wiki-simple:en:gene"), cluster: Cluster::Wiki },
+    BenchQuery { query: "what is bacteria", required: &["bacteria"], canonical_id: Some("wiki-simple:en:bacteria"), cluster: Cluster::Wiki },
+    BenchQuery { query: "what is the ocean", required: &["ocean"], canonical_id: Some("wiki-simple:en:ocean"), cluster: Cluster::Wiki },
+    BenchQuery { query: "what is an ecosystem", required: &["ecosystem"], canonical_id: Some("wiki-simple:en:ecosystem"), cluster: Cluster::Wiki },
+    BenchQuery { query: "what is soil", required: &["soil"], canonical_id: Some("wiki-simple:en:soil"), cluster: Cluster::Wiki },
 ];
 
 #[cfg(test)]
@@ -170,6 +170,54 @@ mod sanity_tests {
                 "cluster {:?} has only {} queries; need at least 3 for per-cluster recall to be meaningful",
                 cluster, count
             );
+        }
+    }
+
+    #[test]
+    fn strict_subset_meets_floor() {
+        let strict_count = QUERIES.iter().filter(|q| q.canonical_id.is_some()).count();
+        assert!(
+            strict_count >= 15,
+            "strict subset has only {} entries; need at least 15 for the sweep's strict-recall signal",
+            strict_count
+        );
+    }
+
+    #[tokio::test]
+    async fn strict_subset_canonical_ids_exist_in_corpus() {
+        // Defensive: every canonical_id we declare must exist in the
+        // shipped seed corpus, otherwise the strict-recall metric is
+        // measuring against ghost ids. We open a temp KB, seed it, and
+        // probe each canonical_id.
+        use primer_core::i18n::Locale;
+        use primer_core::knowledge::{KnowledgeBase, RetrievalParams};
+        use primer_kb_load::auto_seed_if_empty;
+        use primer_knowledge::SqliteKnowledgeBase;
+
+        let db = tempfile::NamedTempFile::new().unwrap();
+        let kb = SqliteKnowledgeBase::open_for_locale(db.path(), Locale::English).unwrap();
+        auto_seed_if_empty(&kb, Locale::English).await.unwrap().unwrap();
+
+        for q in QUERIES.iter().filter_map(|q| q.canonical_id.map(|id| (q.query, id))) {
+            // Probe by replacing every non-alphanumeric in the id with
+            // whitespace, so the FTS5 sanitizer (which splits on
+            // whitespace and then strips non-alphanumerics from each
+            // token) ends up with the id's word-parts as separate
+            // OR-joined tokens. Querying the raw id directly fails
+            // because `:` and `-` are not whitespace, leaving the
+            // sanitizer with a single blob like "seedensun" or
+            // "earthorbitdaynight" that matches nothing. With top_k=200
+            // (well above the ~90-passage corpus) the canonical row is
+            // guaranteed to surface when it exists.
+            let probe: String = q
+                .1
+                .chars()
+                .map(|c| if c.is_alphanumeric() { c } else { ' ' })
+                .collect();
+            let params = RetrievalParams { top_k: 200, min_score: f64::NEG_INFINITY, source_filter: vec![] };
+            let hits = kb.retrieve(&probe, &params).await.unwrap();
+            let found = hits.iter().any(|p| p.id == q.1);
+            assert!(found, "canonical_id {:?} for query {:?} not found in seed corpus (probed with {:?})", q.1, q.0, probe);
         }
     }
 }
