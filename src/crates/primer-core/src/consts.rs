@@ -90,7 +90,19 @@ pub mod retrieval {
     /// Number of fused passages handed to the prompt builder per turn.
     /// Matches the BM25-only fallback path's top-K so the system prompt
     /// stays the same shape regardless of which retrieval mode is live.
-    pub const KB_FINAL_TOP_K: usize = 3;
+    /// Tuned against the 90-passage seed corpus via the sweep at
+    /// `tests/retrieval_sweep.rs` — see
+    /// `docs/superpowers/specs/2026-05-06-retrieval-tuning-design.md`.
+    /// At top_k=5 the BM25 path achieves 100% loose recall and 95%
+    /// strict recall on the 87-query benchmark; top_k=3 plateaued at
+    /// 95% loose. Going beyond 5 added no further gains.
+    ///
+    /// **Cost note:** Each retrieved passage is injected into the system
+    /// prompt every turn. The 3 → 5 bump adds ~67% more retrieval payload
+    /// per turn (~200–500 extra tokens at typical passage length).
+    /// Comfortable for cloud Anthropic; revisit when the local llama.cpp
+    /// path lands and the context window gets tighter.
+    pub const KB_FINAL_TOP_K: usize = 5;
 
     /// Post-fusion score floor for the KB hybrid path. Zero rather than
     /// `f64::NEG_INFINITY` so the fused list stays positive (RRF
@@ -118,6 +130,13 @@ pub mod retrieval {
 
     /// Minimum BM25 score for the BM25-only knowledge-base path
     /// (the fallback when no embedder is wired). Higher = stricter,
-    /// fewer noisy hits.
+    /// fewer noisy hits. The sweep at `tests/retrieval_sweep.rs`
+    /// against the 90-passage seed corpus showed every value in
+    /// {0.0, 0.25, 0.5, 0.75, 1.0, 1.5} produces identical recall —
+    /// every BM25 score in this corpus comfortably exceeds 1.5.
+    /// Kept at 0.5 as a defensive floor: a no-op today, but bites
+    /// if a future larger corpus dilutes term frequencies and pushes
+    /// scores down. See
+    /// `docs/superpowers/specs/2026-05-06-retrieval-tuning-design.md`.
     pub const KB_BM25_ONLY_MIN_SCORE: f64 = 0.5;
 }

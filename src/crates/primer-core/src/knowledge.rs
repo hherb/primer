@@ -64,8 +64,8 @@ pub struct RetrievalParams {
 impl Default for RetrievalParams {
     fn default() -> Self {
         Self {
-            top_k: 5,
-            min_score: 0.0,
+            top_k: crate::consts::retrieval::KB_FINAL_TOP_K,
+            min_score: crate::consts::retrieval::KB_BM25_ONLY_MIN_SCORE,
             source_filter: vec![],
         }
     }
@@ -164,5 +164,29 @@ pub trait KnowledgeBase: Send + Sync {
             },
         )
         .await
+    }
+}
+
+#[cfg(test)]
+mod retrieval_params_tests {
+    use super::*;
+
+    #[test]
+    fn default_mirrors_consts() {
+        let d = RetrievalParams::default();
+        assert_eq!(
+            d.top_k,
+            crate::consts::retrieval::KB_FINAL_TOP_K,
+            "RetrievalParams::default().top_k must equal KB_FINAL_TOP_K — drift means production callers using `Default` get untuned values"
+        );
+        assert_eq!(
+            d.min_score,
+            crate::consts::retrieval::KB_BM25_ONLY_MIN_SCORE,
+            "RetrievalParams::default().min_score must equal KB_BM25_ONLY_MIN_SCORE"
+        );
+        assert!(
+            d.source_filter.is_empty(),
+            "default source_filter must be empty (no source restriction)"
+        );
     }
 }
