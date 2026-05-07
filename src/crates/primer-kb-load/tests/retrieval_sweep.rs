@@ -143,8 +143,16 @@ fn print_header() {
     println!("\n=== retrieval-parameter sweep ===\n");
     println!(
         "{:>5} {:>10} {:>14} {:>15} | {:>5} {:>5} {:>5} {:>5} {:>5} {:>5}",
-        "top_k", "min_score", "loose_recall", "strict_recall",
-        "Spc", "Bod", "How", "Lif", "Erw", "Wik"
+        "top_k",
+        "min_score",
+        "loose_recall",
+        "strict_recall",
+        "Spc",
+        "Bod",
+        "How",
+        "Lif",
+        "Erw",
+        "Wik"
     );
     println!("{}", "-".repeat(96));
 }
@@ -178,7 +186,10 @@ fn print_row(m: &CellMetrics) {
 }
 
 fn print_failures_for_winner(m: &CellMetrics, all: &[(BenchQuery, bool, Option<bool>)]) {
-    println!("\n=== Per-query results at winning cell (top_k={}, min_score={:.2}) ===", m.top_k, m.min_score);
+    println!(
+        "\n=== Per-query results at winning cell (top_k={}, min_score={:.2}) ===",
+        m.top_k, m.min_score
+    );
     let mut any = false;
     for (q, loose, strict) in all {
         let strict_str = match strict {
@@ -202,7 +213,10 @@ fn print_failures_for_winner(m: &CellMetrics, all: &[(BenchQuery, bool, Option<b
 async fn sweep_retrieval_params() {
     let db = tempfile::NamedTempFile::new().unwrap();
     let kb = SqliteKnowledgeBase::open_for_locale(db.path(), Locale::English).unwrap();
-    auto_seed_if_empty(&kb, Locale::English).await.unwrap().unwrap();
+    auto_seed_if_empty(&kb, Locale::English)
+        .await
+        .unwrap()
+        .unwrap();
 
     let mut cells: Vec<CellMetrics> = Vec::with_capacity(TOP_K_GRID.len() * MIN_SCORE_GRID.len());
     for &top_k in TOP_K_GRID {
@@ -243,9 +257,7 @@ async fn sweep_retrieval_params() {
             .required
             .iter()
             .all(|term| combined.contains(&term.to_lowercase()));
-        let strict = q
-            .canonical_id
-            .map(|id| hits.iter().any(|p| p.id == id));
+        let strict = q.canonical_id.map(|id| hits.iter().any(|p| p.id == id));
         per_q.push((
             BenchQuery {
                 query: q.query,

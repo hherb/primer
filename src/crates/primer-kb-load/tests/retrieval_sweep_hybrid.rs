@@ -134,7 +134,10 @@ async fn sweep_retrieval_params_hybrid() {
 
     let db = tempfile::NamedTempFile::new().unwrap();
     let kb = SqliteKnowledgeBase::open_for_locale(db.path(), Locale::English).unwrap();
-    auto_seed_if_empty(&kb, Locale::English).await.unwrap().unwrap();
+    auto_seed_if_empty(&kb, Locale::English)
+        .await
+        .unwrap()
+        .unwrap();
 
     let embedder: Arc<dyn Embedder> =
         Arc::new(FastEmbedBackend::new().expect("BGE-M3 init failed"));

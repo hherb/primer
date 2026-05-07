@@ -126,6 +126,12 @@ async fn seed_corpus_registers_sources_for_attribution() {
             seen_cc_by_sa = true;
         }
     }
-    assert!(seen_cc0, "expected at least one CC0-1.0 source (seed corpus)");
-    assert!(seen_cc_by_sa, "expected at least one CC-BY-SA-3.0 source (wiki layer)");
+    assert!(
+        seen_cc0,
+        "expected at least one CC0-1.0 source (seed corpus)"
+    );
+    assert!(
+        seen_cc_by_sa,
+        "expected at least one CC-BY-SA-3.0 source (wiki layer)"
+    );
 }
