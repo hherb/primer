@@ -146,7 +146,7 @@ pub const QUERIES: &[BenchQuery] = &[
 /// against them. The regression test in `retrieval_quality.rs`
 /// excludes these from its assertion.
 ///
-/// **Tracked in:** GitHub issue #<TBD-Task-9>.
+/// **Tracked in:** GitHub issue #42.
 pub const KNOWN_FAILING_QUERIES: &[&str] = &[
     // strict:FAIL at top_k=5, min_score=0.5 — canonical seed:en:sun
     // is not in top-5 even though loose terms (fus*/hydrogen) appear
