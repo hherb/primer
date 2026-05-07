@@ -96,6 +96,12 @@ pub mod retrieval {
     /// At top_k=5 the BM25 path achieves 100% loose recall and 95%
     /// strict recall on the 87-query benchmark; top_k=3 plateaued at
     /// 95% loose. Going beyond 5 added no further gains.
+    ///
+    /// **Cost note:** Each retrieved passage is injected into the system
+    /// prompt every turn. The 3 → 5 bump adds ~67% more retrieval payload
+    /// per turn (~200–500 extra tokens at typical passage length).
+    /// Comfortable for cloud Anthropic; revisit when the local llama.cpp
+    /// path lands and the context window gets tighter.
     pub const KB_FINAL_TOP_K: usize = 5;
 
     /// Post-fusion score floor for the KB hybrid path. Zero rather than

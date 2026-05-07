@@ -23,7 +23,7 @@
 
 mod common;
 
-use common::{BenchQuery, Cluster, QUERIES};
+use common::{BenchQuery, QUERIES};
 use primer_core::embedder::Embedder;
 use primer_core::i18n::Locale;
 use primer_core::knowledge::HybridParams;
@@ -214,7 +214,4 @@ async fn sweep_retrieval_params_hybrid() {
         winner.loose_recall() * 100.0,
     );
     println!(">>> Hybrid defaults remain unchanged this session — see plan Task 10.");
-
-    // Avoid suppressing unused-arg warnings for Cluster.
-    let _ = Cluster::Space;
 }

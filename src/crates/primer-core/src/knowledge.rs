@@ -179,8 +179,9 @@ mod retrieval_params_tests {
             crate::consts::retrieval::KB_FINAL_TOP_K,
             "RetrievalParams::default().top_k must equal KB_FINAL_TOP_K — drift means production callers using `Default` get untuned values"
         );
-        assert!(
-            (d.min_score - crate::consts::retrieval::KB_BM25_ONLY_MIN_SCORE).abs() < f64::EPSILON,
+        assert_eq!(
+            d.min_score,
+            crate::consts::retrieval::KB_BM25_ONLY_MIN_SCORE,
             "RetrievalParams::default().min_score must equal KB_BM25_ONLY_MIN_SCORE"
         );
         assert!(

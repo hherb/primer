@@ -125,16 +125,37 @@ async fn evaluate_cell(
 
 /// Lexicographic selection: maximise strict_recall, then loose_recall,
 /// then minimise top_k, then maximise min_score.
+///
+/// Note: the algorithmic winner of this rule on the current 90-passage
+/// corpus is `top_k=5, min_score=1.50`. Production deliberately ships
+/// `min_score=0.5` because every cell at fixed `top_k` produced
+/// identical recall — landing 1.50 would be brittle against a future
+/// corpus expansion that dilutes BM25 scores. See the override
+/// rationale in `consts::retrieval::KB_BM25_ONLY_MIN_SCORE` and the
+/// design spec at
+/// `docs/superpowers/specs/2026-05-06-retrieval-tuning-design.md`.
 fn pick_winner(cells: &[CellMetrics]) -> &CellMetrics {
+    use std::cmp::Ordering;
     cells
         .iter()
         .max_by(|a, b| {
+            // Defensive: NaN is unreachable on this grid (every total > 0)
+            // but treat it as Equal rather than panicking, so a future
+            // empty-corpus run prints the table instead of crashing.
             a.strict_recall()
                 .partial_cmp(&b.strict_recall())
-                .unwrap()
-                .then(a.loose_recall().partial_cmp(&b.loose_recall()).unwrap())
+                .unwrap_or(Ordering::Equal)
+                .then(
+                    a.loose_recall()
+                        .partial_cmp(&b.loose_recall())
+                        .unwrap_or(Ordering::Equal),
+                )
                 .then(b.top_k.cmp(&a.top_k)) // smaller top_k wins → reverse
-                .then(a.min_score.partial_cmp(&b.min_score).unwrap())
+                .then(
+                    a.min_score
+                        .partial_cmp(&b.min_score)
+                        .unwrap_or(Ordering::Equal),
+                )
         })
         .expect("non-empty grid")
 }
