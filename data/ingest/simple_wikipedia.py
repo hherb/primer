@@ -288,10 +288,8 @@ def fetch_leads(titles: list[str], *, http_client) -> dict[str, dict]:
 
 
 # Default user-agent for live runs. Per Wikipedia API etiquette, this
-# must include the tool name, version, and a contact identifier. The
-# contact placeholder will be replaced at first live-run time once we
-# decide what to expose publicly.
-_DEFAULT_USER_AGENT = "PrimerSeedBuilder/0.1 (contact: see-repo-readme)"
+# must include the tool name, version, and a contact identifier.
+_DEFAULT_USER_AGENT = "PrimerSeedBuilder/0.1 (contact: my.list.subscriptions@gmail.com)"
 
 
 def main(

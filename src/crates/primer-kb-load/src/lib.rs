@@ -364,7 +364,14 @@ mod tests {
         assert_eq!(stats.sources_seen, 2);
 
         let got = kb
-            .retrieve("photosynthesis", &RetrievalParams::default())
+            .retrieve(
+                "photosynthesis",
+                &RetrievalParams {
+                    top_k: 5,
+                    min_score: f64::NEG_INFINITY,
+                    source_filter: vec![],
+                },
+            )
             .await
             .unwrap();
         assert_eq!(got.len(), 1);
