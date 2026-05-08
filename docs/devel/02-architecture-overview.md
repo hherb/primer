@@ -14,7 +14,7 @@ The workspace is twelve crates organised in three layers: a binary at the top, a
 
 Why does this matter to you? Because almost every contribution touches one of these crates, and the dependency arrows tell you what you can change in isolation and what ripples outward. A new inference backend is a self-contained PR inside `primer-inference`. A change to the `KnowledgeBase` trait signature, by contrast, ripples through every consumer. The diagram below is your map for the rest of this manual — subsequent chapters drill into individual crates, and each one assumes you know roughly where it sits.
 
-> **Legend:** blue = trait/interface (defined in `primer-core`); green = concrete implementation; amber = external boundary (HTTP, filesystem, vendor); grey = stub / test-only.
+> **Legend:** blue = trait/interface (defined in `primer-core`); green = concrete implementation. Subsequent chapters introduce amber (external boundary) and grey (stub / test-only) for diagrams that need them.
 
 ```mermaid
 %%{init: {
@@ -66,13 +66,15 @@ ASCII fallback for environments where mermaid does not render:
 primer-cli  →  primer-pedagogy  →  primer-core  ←  primer-inference, primer-speech, primer-knowledge, primer-storage, primer-classifier, primer-comprehension, primer-extractor, primer-embedding, primer-kb-load
 ```
 
+`primer-cli` additionally depends on every concrete impl crate (`primer-inference`, `primer-knowledge`, `primer-embedding`, `primer-storage`, `primer-classifier`, `primer-extractor`, `primer-comprehension`, `primer-kb-load`, `primer-speech`) so it can construct the trait objects at startup — but it never imports their internals; it only uses them through the traits in `primer-core`.
+
 The arrows point toward dependencies. `primer-core` is the hub: it defines `InferenceBackend`, `KnowledgeBase`, `SessionStore`, `LearnerStore`, `Embedder`, the speech traits, and the shared types they exchange (`Session`, `Turn`, `PedagogicalIntent`, `LearnerModel`, …). Every other crate either depends on `primer-core` to implement one of its traits, or depends on `primer-pedagogy` (and transitively `primer-core`) to consume the engine. There is no path from `primer-core` back out to a concrete implementation, which is what keeps the abstraction honest.
 
 ## Crate-by-crate
 
 | Crate | Owns | Chapter |
 |---|---|---|
-| `primer-core` | every trait + shared types + consts + i18n + retry | §3-§7 |
+| `primer-core` | every trait + shared types + consts + i18n + retry | shared by all chapters |
 | `primer-inference` | `InferenceBackend` impls (stub, cloud, ollama) | [03](03-inference-and-pedagogy.md) |
 | `primer-pedagogy` | `DialogueManager`, `prompt_builder`, `decide_intent` | [03](03-inference-and-pedagogy.md) |
 | `primer-knowledge` | `SqliteKnowledgeBase`, FTS5 + hybrid retrieval | [04](04-knowledge-and-retrieval.md) |
