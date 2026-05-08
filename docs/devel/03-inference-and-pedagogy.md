@@ -128,10 +128,10 @@ Worked example: adding a hypothetical `OpenAIBackend`.
 
 Worked example: adding `Celebrate` (acknowledge a breakthrough moment, then pivot back to inquiry).
 
-1. **Add the variant to the enum.** Edit the `PedagogicalIntent` definition in [primer-core](src/crates/primer-core/):
+1. **Add the variant to the enum.** Edit the `PedagogicalIntent` definition in [conversation.rs](src/crates/primer-core/src/conversation.rs):
 
    ```rust
-   // src/crates/primer-core/src/intent.rs
+   // src/crates/primer-core/src/conversation.rs
    pub enum PedagogicalIntent {
        // ...existing variants...
        Celebrate = 10,
