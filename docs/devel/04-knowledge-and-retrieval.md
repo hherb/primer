@@ -235,7 +235,7 @@ If a previously-failing hybrid query now passes, remove its entry from `KNOWN_FA
 
 Adding a new locale means picking a stable pack id, writing a translation pack, providing a seed corpus, and exercising the locale-guard on resume. There are no schema migrations involved — locale-scoped tables are created on demand the first time `open_for_locale` sees the new pack.
 
-**1. Add the variant to `Locale`.** Edit [primer-core/src/i18n.rs](src/crates/primer-core/src/i18n.rs). Pick a stable pack id (`"de"`, `"ja"`, `"hi"` — ISO 639-1 where applicable). The pack id is what every per-locale file and table is keyed by, so it should not change once you start using it.
+**1. Add the variant to `Locale`.** Edit [primer-core/src/i18n.rs](src/crates/primer-core/src/i18n.rs). At time of writing, `English` and `German` already exist; this recipe uses Japanese (`"ja"`) as a fresh worked example. Pick a stable ISO 639-1 pack id (`"ja"`, `"hi"`, `"fr"`, …); it is what every per-locale file and table is keyed by, so it should not change once you start using it.
 
 **2. Add the TOML pack.** Mirror `primer-core/i18n/en.toml` at `primer-core/i18n/<pack_id>.toml`. Every locale-specific user-visible string lives there, including `break_suggestion_intro` with the `{minutes}` substitution token. The pattern is reusable for any future locale-aware unit substitution — the locale's TOML owns its own unit word ("minutes" / "Minuten" / etc).
 
@@ -244,10 +244,10 @@ Adding a new locale means picking a stable pack id, writing a translation pack, 
 **4. Open the KB for the new locale.** No code change beyond the call site:
 
 ```rust
-let kb = SqliteKnowledgeBase::open_for_locale(path, Locale::German)?;
+let kb = SqliteKnowledgeBase::open_for_locale(path, Locale::Japanese)?;
 ```
 
-The first open creates `passages_de`, `passages_de_content`, and `embeddings_de` automatically. Existing locale tables in the same file are untouched.
+The first open creates `passages_ja`, `passages_ja_content`, and `embeddings_ja` automatically. Existing locale tables in the same file are untouched. Subsequent opens re-check via `CREATE IF NOT EXISTS`, so the operation is idempotent.
 
 **5. Test the resume guard.** Open a session under the new locale, save it, then try to resume with `--language` set to a different pack. The CLI must error with the two-resolution hint (drop `--language`, or pass `--language <stored>`); the longitudinal vocabulary record depends on this. Without the guard, `concepts.concept_language_tag` would silently start tagging new rows under the wrong locale.
 
