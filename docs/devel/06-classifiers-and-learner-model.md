@@ -6,7 +6,7 @@ If you read chapter 3 you already saw the dialogue manager's turn loop spawn the
 
 ## The structured-output trio
 
-Three crates, each with the same four files (`lib.rs`, `llm.rs`, `stub.rs`, `settings.rs`) and the same export pattern:
+Three crates, each with the same five files (`lib.rs`, `llm.rs`, `stub.rs`, `settings.rs`, `consts.rs`) and the same export pattern:
 
 | Crate | Trait | LLM impl | Stub | Output |
 |---|---|---|---|---|
@@ -142,11 +142,19 @@ let raw = match self.backend.generate(&prompt, &params).await {
     }
 };
 let truncated = truncate_to_chars(&raw, self.settings.max_output_chars);
-let json = extract_first_json_object(truncated);
-let assessment = json
-    .and_then(|s| serde_json::from_str::<ToneOutput>(s).ok())
-    .map(Into::into)
-    .unwrap_or_else(|| ToneAssessment::unknown_low_confidence("parse error".into()));
+let assessment = match extract_first_json_object(truncated) {
+    Some(s) => match serde_json::from_str::<ToneOutput>(s) {
+        Ok(out) => out.into(),
+        Err(e) => {
+            tracing::warn!(target: "primer::tone", "parse error: {e}");
+            ToneAssessment::unknown_low_confidence(format!("parse error: {e}"))
+        }
+    },
+    None => {
+        tracing::warn!(target: "primer::tone", "no JSON object in LLM output");
+        ToneAssessment::unknown_low_confidence("no JSON object".into())
+    }
+};
 Ok(assessment)
 ```
 
