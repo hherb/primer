@@ -80,12 +80,24 @@ pub mod break_suggest {
 /// [`crate::knowledge::HybridParams`] and feed into it directly.
 pub mod retrieval {
     /// BM25 leg top-K for knowledge-base retrieval. Wider than the
-    /// final K so RRF has a real candidate pool to fuse over.
-    pub const KB_BM25_TOP_K: usize = 20;
+    /// final K so RRF has a real candidate pool to fuse over. Tuned
+    /// against the 90-passage seed corpus + 87-query benchmark via
+    /// the 54-cell hybrid sweep at `tests/retrieval_sweep_hybrid.rs`
+    /// (run with `--features fastembed`). Every cell with
+    /// `bm25_top_k ∈ {20, 30}` and `final_top_k = 5` achieved 100%
+    /// loose / 100% strict recall (lifting the BM25-only strict
+    /// miss for "how does the sun shine"). 30 was picked as the
+    /// final value to leave headroom for corpus growth — the 50%
+    /// candidate-pool bump over the BM25-baseline 20 costs almost
+    /// nothing on a corpus this size.
+    pub const KB_BM25_TOP_K: usize = 30;
 
     /// Dense-vector leg top-K for knowledge-base retrieval. Same
-    /// rationale as `KB_BM25_TOP_K`.
-    pub const KB_VECTOR_TOP_K: usize = 20;
+    /// rationale as `KB_BM25_TOP_K` — tuned via the hybrid sweep.
+    /// Every cell with `bm25_top_k ≥ 20` and `final_top_k = 5` hit
+    /// 100/100 across `vector_top_k ∈ {10, 20, 30}`; 30 chosen for
+    /// symmetry with the BM25 leg and corpus-growth headroom.
+    pub const KB_VECTOR_TOP_K: usize = 30;
 
     /// Number of fused passages handed to the prompt builder per turn.
     /// Matches the BM25-only fallback path's top-K so the system prompt
@@ -125,7 +137,10 @@ pub mod retrieval {
     /// Reciprocal Rank Fusion constant `k`. The published default from
     /// Cormack et al. 2009; works well across many IR domains. Smaller
     /// values weight the very top of each list more, larger values
-    /// flatten the curve.
+    /// flatten the curve. Confirmed by the 54-cell hybrid sweep:
+    /// at `bm25_top_k ≥ 20, final_top_k = 5`, recall is invariant
+    /// across `rrf_k ∈ {30, 60, 90}` on this corpus — the canonical
+    /// 60 stays.
     pub const RRF_K: f64 = 60.0;
 
     /// Minimum BM25 score for the BM25-only knowledge-base path

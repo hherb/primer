@@ -102,11 +102,11 @@ pub struct HybridParams {
 impl Default for HybridParams {
     fn default() -> Self {
         Self {
-            bm25_top_k: 20,
-            vector_top_k: 20,
-            final_top_k: 5,
-            rrf_k: 60.0,
-            min_score: 0.0,
+            bm25_top_k: crate::consts::retrieval::KB_BM25_TOP_K,
+            vector_top_k: crate::consts::retrieval::KB_VECTOR_TOP_K,
+            final_top_k: crate::consts::retrieval::KB_FINAL_TOP_K,
+            rrf_k: crate::consts::retrieval::RRF_K,
+            min_score: crate::consts::retrieval::KB_MIN_SCORE,
             source_filter: vec![],
         }
     }
@@ -183,6 +183,40 @@ mod retrieval_params_tests {
             d.min_score,
             crate::consts::retrieval::KB_BM25_ONLY_MIN_SCORE,
             "RetrievalParams::default().min_score must equal KB_BM25_ONLY_MIN_SCORE"
+        );
+        assert!(
+            d.source_filter.is_empty(),
+            "default source_filter must be empty (no source restriction)"
+        );
+    }
+
+    #[test]
+    fn hybrid_default_mirrors_consts() {
+        let d = HybridParams::default();
+        assert_eq!(
+            d.bm25_top_k,
+            crate::consts::retrieval::KB_BM25_TOP_K,
+            "HybridParams::default().bm25_top_k must equal KB_BM25_TOP_K"
+        );
+        assert_eq!(
+            d.vector_top_k,
+            crate::consts::retrieval::KB_VECTOR_TOP_K,
+            "HybridParams::default().vector_top_k must equal KB_VECTOR_TOP_K"
+        );
+        assert_eq!(
+            d.final_top_k,
+            crate::consts::retrieval::KB_FINAL_TOP_K,
+            "HybridParams::default().final_top_k must equal KB_FINAL_TOP_K"
+        );
+        assert_eq!(
+            d.rrf_k,
+            crate::consts::retrieval::RRF_K,
+            "HybridParams::default().rrf_k must equal RRF_K"
+        );
+        assert_eq!(
+            d.min_score,
+            crate::consts::retrieval::KB_MIN_SCORE,
+            "HybridParams::default().min_score must equal KB_MIN_SCORE"
         );
         assert!(
             d.source_filter.is_empty(),
