@@ -4,9 +4,9 @@ This chapter walks through the two halves of the Primer's "thinking" pipeline: t
 
 ## The InferenceBackend trait
 
-Every LLM in the system — cloud-hosted Claude, a local Ollama daemon, a future llama.cpp build, the canned-response stub used in tests — sits behind a single trait. The pedagogical engine holds a `&dyn InferenceBackend` and never knows which one it is talking to. Three required methods make up the contract: `generate` returns a complete response, `generate_stream` returns an asynchronous stream of token chunks, and `summarize` condenses a slice of conversation turns into a paragraph of long-term memory. The trait provides default impls for `generate` (collects from `generate_stream`) and `summarize` (builds a one-shot prompt and dispatches to `generate`), so a real backend usually only has to implement `generate_stream`.
+Every LLM in the system — cloud-hosted Claude, a local Ollama daemon, a future llama.cpp build, the canned-response stub used in tests — sits behind a single trait. The pedagogical engine holds a `&dyn InferenceBackend` and never knows which one it is talking to. The contract is five methods, of which three are required (no default impl): `name` (the human-readable backend identifier), `is_available` (a runtime readiness check), and `generate_stream` (an asynchronous stream of token chunks). The remaining two — `generate` (one-shot collected response) and `summarize` (condense a slice of turns into a paragraph of long-term memory) — ship with default impls that delegate down to `generate_stream`, so a real backend usually only has to override `generate_stream` plus the two `name` / `is_available` methods.
 
-Streaming is the primary interface. The non-streaming wrapper exists because some flows (the rolling-summary refresh, classifier/extractor/comprehension prompts) want a complete string and don't benefit from incremental delivery. Everywhere else — including the REPL — the dialogue manager consumes chunks as they arrive so the TTS pipeline (Phase 2) can begin speaking before generation is complete.
+`generate_stream` is the canonical surface because it's the one the conversation loop actually drives: streaming lets the TTS pipeline (Phase 2) begin speaking before generation is complete, and a chunk-at-a-time REPL feels less laggy than a wait-for-the-whole-paragraph one. The non-streaming `generate` exists only because some flows — the rolling-summary refresh, the structured-output classifier / extractor / comprehension prompts — want a complete string and don't benefit from incremental delivery, so the trait provides them a default that collects the stream once it lands.
 
 ```rust
 // src/crates/primer-core/src/inference.rs
@@ -74,14 +74,14 @@ It lives at [src/crates/primer-pedagogy/src/dialogue_manager/](src/crates/primer
 
 - `mod.rs` — struct, type aliases, and module glue
 - `lifecycle.rs` — `new` / `open_session` / `resume_session` / `close_session` plus accessors
-- `turn.rs` — the `respond_to_streaming` orchestrator and its seven private helpers
+- `turn.rs` — the `respond_to_streaming` orchestrator and its private helpers for child-turn recording, prompt assembly, inference streaming, primer-turn recording, persistence, and the spawn-task helpers (embedding, classification, post-response)
 - `background.rs` — await / drain / apply for the classifier, extractor, and comprehension tasks
 - `retrieval.rs` — knowledge-base and long-term-memory retrieval
 - `summary.rs` — the two summary-refresh cadences (active vs. resume)
 - `learner_update.rs` — the engagement-state heuristic (still a placeholder, word-count-based)
 - `apply.rs` — pure free functions plus their unit tests
 
-> **Note:** When adding a new method to `DialogueManager`, place it in the file matching its responsibility and use `pub(super)` visibility for cross-module access. Tests follow the same axis split — `tests/lifecycle_tests.rs`, `tests/turn_tests.rs`, `tests/background_tests.rs`, with shared mocks and builders in `tests/test_support.rs`.
+> **Note:** When adding a new method to `DialogueManager`, place it in the file matching its responsibility and use `pub(super)` visibility for cross-module access. Tests follow the same axis split — `tests/lifecycle_tests.rs`, `tests/turn_tests.rs`, `tests/background_tests.rs`, with shared mocks and builders in `dialogue_manager/test_support.rs` (sibling of `mod.rs`, not under the `tests/` subdir).
 
 ## decide_intent()
 
@@ -109,14 +109,16 @@ Worked example: adding a hypothetical `OpenAIBackend`.
    // src/crates/primer-inference/src/openai.rs (excerpt)
    let resp = retry_with_backoff(retry_settings, || async {
        let r = client.post(&url).headers(headers.clone()).json(&body).send().await?;
-       classify_openai_status(r.status()).map(|err| Err(err))?;
+       if !r.status().is_success() {
+           return Err(classify_openai_status(r.status()));
+       }
        Ok(r)
    }).await?;
    ```
 
    The retry helper handles `is_retryable()` and `Retry-After` honouring for you; you only have to do the status-to-variant mapping correctly.
 
-5. **Register in `primer-cli`.** Add an `OpenAi` variant to the `Backend` enum in `primer-cli/src/backend.rs` and wire construction in the factory function that turns CLI flags into a `Box<dyn InferenceBackend>`.
+5. **Wire into the CLI.** Backend selection lives in [main.rs](src/crates/primer-cli/src/main.rs). Find the dispatch site (search for `match cli.backend.as_str()`) and add an `"openai"` arm that constructs your new backend with the API key, model, and any other config. The CLI uses string-based dispatch, not a typed enum, so there's no separate `Backend` enum file.
 
 6. **Add the `--backend openai` clap variant.** Plus `--openai-api-key` (or env-var fallback) following the existing `--api-key` / `ANTHROPIC_API_KEY` pattern in [primer-cli](src/crates/primer-cli/).
 
@@ -128,23 +130,54 @@ Worked example: adding a hypothetical `OpenAIBackend`.
 
 Worked example: adding `Celebrate` (acknowledge a breakthrough moment, then pivot back to inquiry).
 
-1. **Add the variant to the enum.** Edit the `PedagogicalIntent` definition in [conversation.rs](src/crates/primer-core/src/conversation.rs):
+1. **Add the variant to the enum.** Edit the `PedagogicalIntent` definition in [conversation.rs](src/crates/primer-core/src/conversation.rs). The enum is unit-only (no explicit discriminants — IDs are assigned separately).
 
    ```rust
    // src/crates/primer-core/src/conversation.rs
    pub enum PedagogicalIntent {
        // ...existing variants...
-       Celebrate = 10,
+       Celebrate,
    }
    ```
 
-   The integer value is the lookup-table id stored in the session DB. Pick the next unused id — never reuse a retired one. See chapter 05 (storage) for why; the short version is that historical rows in `turns` and `turn_classifications` carry old ids and re-using a number silently rewrites history.
+2. **Add the variant to `PedagogicalIntent::ALL`.** Same file. The `ALL` array is the single source of truth that the storage layer's lookup-table seeder walks. A unit test (`assert_eq!(PedagogicalIntent::ALL.len(), N)`) will fail if you skip this — that's a feature.
 
-2. **Add a routing branch in `decide_intent`.** In [prompt_builder.rs](src/crates/primer-pedagogy/src/prompt_builder.rs), add the heuristic that routes to `Celebrate`. Keep it deterministic — engagement-state overrides should still win, and the time-driven `SuggestBreak` branch should still take precedence over a celebration when both apply.
+   ```rust
+   // src/crates/primer-core/src/conversation.rs
+   impl PedagogicalIntent {
+       pub const ALL: &'static [PedagogicalIntent] = &[
+           // ...existing variants...
+           PedagogicalIntent::Celebrate,
+       ];
+   }
+   ```
 
-3. **Extend the prompt builder.** In `build_system_prompt_with_pack_and_vocab`, add a section for the `Celebrate` intent describing how the Primer should celebrate (briefly acknowledge the breakthrough, then pivot back to inquiry — never break principle 2 of the pedagogical principles, which forbids engagement-maximising behaviour).
+3. **Bump the length assertion.** The test at `conversation.rs:146` pins the count. Change `assert_eq!(PedagogicalIntent::ALL.len(), 9);` to match your new total.
 
-4. **Add a characterization test.** Inside the `prompt_builder::tests` module:
+4. **Assign the integer ID.** Edit [catalog.rs](src/crates/primer-storage/src/catalog.rs). Add a match arm to BOTH `intent_id()` and `intent_name()` (they have to stay in sync — there's a unit test for that). Pick the next unused id; never reuse a retired one — historical rows in the session DB carry the old id, and reusing the integer would silently rewrite history.
+
+   ```rust
+   // src/crates/primer-storage/src/catalog.rs
+   pub fn intent_id(intent: PedagogicalIntent) -> i64 {
+       match intent {
+           // ...existing arms...
+           PedagogicalIntent::Celebrate => 10,
+       }
+   }
+
+   pub fn intent_name(intent: PedagogicalIntent) -> &'static str {
+       match intent {
+           // ...existing arms...
+           PedagogicalIntent::Celebrate => "celebrate",
+       }
+   }
+   ```
+
+5. **Add a routing branch in `decide_intent`.** In [prompt_builder.rs](src/crates/primer-pedagogy/src/prompt_builder.rs), add the heuristic that routes to `Celebrate`. Keep it deterministic — engagement-state overrides should still win, and the time-driven `SuggestBreak` branch should still take precedence over a celebration when both apply.
+
+6. **Extend the prompt builder.** In `build_system_prompt_with_pack_and_vocab`, add a section for the `Celebrate` intent describing how the Primer should celebrate (briefly, then pivot back to inquiry — never break principle 2).
+
+7. **Add a characterization test.** In `prompt_builder.rs`'s `tests` module:
 
    ```rust
    // src/crates/primer-pedagogy/src/prompt_builder.rs (tests module)
@@ -155,8 +188,4 @@ Worked example: adding `Celebrate` (acknowledge a breakthrough moment, then pivo
    }
    ```
 
-   Add it before the routing branch in step 2 lands — that's the discipline that catches regressions in this file.
-
-5. **Open any test session DB.** The lookup-table seeder in `primer-storage` validates the in-DB rows against the Rust enum on every `open()`; a new variant gets seeded automatically the next time you open a session DB. No migration step is required for the enum addition itself.
-
-6. **Update the [CLAUDE.md](CLAUDE.md) gotcha list** if the new intent has cross-cutting behaviour — for example, if `Celebrate` interacts with the break-suggestion cadence or the vocabulary review hints.
+8. **Open any test session DB.** The `validate_and_seed_lookup` helper in `primer-storage/src/catalog.rs` walks `PedagogicalIntent::ALL` on every `open()`; once steps 2-4 above are done, your new variant gets seeded automatically. No migration step required.
