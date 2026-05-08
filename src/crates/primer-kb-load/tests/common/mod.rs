@@ -585,9 +585,19 @@ pub const QUERIES: &[BenchQuery] = &[
 pub const KNOWN_FAILING_QUERIES: &[&str] = &[
     // strict:FAIL at top_k=5, min_score=0.5 — canonical seed:en:sun
     // is not in top-5 even though loose terms (fus*/hydrogen) appear
-    // in another top-5 passage. Tracked as a corpus gap.
+    // in another top-5 passage. Tracked as a corpus gap. Lifted by the
+    // hybrid path (see `KNOWN_FAILING_QUERIES_HYBRID` below).
     "how does the sun shine",
 ];
+
+/// Queries the hybrid (BM25 + dense-vector RRF) retrieval path with
+/// production `HybridParams::default()` cannot satisfy on the seed
+/// corpus. The 54-cell hybrid sweep at `tests/retrieval_sweep_hybrid.rs`
+/// achieved 100% loose / 100% strict at the chosen cell `(30, 30, 5,
+/// 60)`, so this list is empty today. New entries here mean either a
+/// real semantic regression or a corpus-coverage gap the dense leg
+/// can't bridge — investigate before adding.
+pub const KNOWN_FAILING_QUERIES_HYBRID: &[&str] = &[];
 
 #[cfg(test)]
 mod sanity_tests {
@@ -646,6 +656,14 @@ mod sanity_tests {
             assert!(
                 found,
                 "KNOWN_FAILING_QUERIES entry {:?} does not appear in QUERIES — typo or stale entry",
+                failing
+            );
+        }
+        for failing in KNOWN_FAILING_QUERIES_HYBRID {
+            let found = QUERIES.iter().any(|q| q.query == *failing);
+            assert!(
+                found,
+                "KNOWN_FAILING_QUERIES_HYBRID entry {:?} does not appear in QUERIES — typo or stale entry",
                 failing
             );
         }
