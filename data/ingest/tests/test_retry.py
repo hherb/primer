@@ -14,6 +14,7 @@ from retry import (
     RetryCapExceeded,
     RetrySettings,
     is_retryable_status,
+    parse_retry_after,
 )
 
 
@@ -73,3 +74,34 @@ def test_retry_cap_exceeded_carries_diagnostic_fields():
 )
 def test_is_retryable_status(code: int, expected: bool) -> None:
     assert is_retryable_status(code) is expected
+
+
+@pytest.mark.parametrize(
+    "value,expected",
+    [
+        # Delta-seconds form: integer.
+        ("5", 5.0),
+        ("0", 0.0),
+        ("120", 120.0),
+        # Delta-seconds form: float (servers occasionally emit fractional).
+        ("3.5", 3.5),
+        # Whitespace must be tolerated — some servers add it.
+        ("  12  ", 12.0),
+        # None header → None (caller falls back to compute_delay).
+        (None, None),
+        # Empty string → None.
+        ("", None),
+        # HTTP-date form is silently dropped (carry-forward known issue,
+        # documented in the spec). Caller falls back to compute_delay.
+        ("Wed, 21 Oct 2015 07:28:00 GMT", None),
+        # Malformed values fall back to None.
+        ("garbage", None),
+        ("--5", None),
+        ("3.5seconds", None),
+        # Negative values are not delta-seconds; servers emitting these
+        # are buggy. Treat as malformed.
+        ("-5", None),
+    ],
+)
+def test_parse_retry_after(value: str | None, expected: float | None) -> None:
+    assert parse_retry_after(value) == expected

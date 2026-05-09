@@ -116,3 +116,28 @@ def is_retryable_status(code: int) -> bool:
     won't help.
     """
     return code == 429 or 500 <= code < 600
+
+
+def parse_retry_after(value: str | None) -> float | None:
+    """Parse a ``Retry-After`` header value as delta-seconds.
+
+    Returns ``None`` for ``None``, empty, malformed, or HTTP-date
+    form (the carry-forward known limitation matching
+    ``primer_core::retry``). The caller's intent on ``None`` is to
+    fall back to the computed exponential delay.
+
+    Negative values are treated as malformed; the spec defines
+    Retry-After as a non-negative duration.
+    """
+    if value is None:
+        return None
+    stripped = value.strip()
+    if not stripped:
+        return None
+    try:
+        seconds = float(stripped)
+    except ValueError:
+        return None
+    if seconds < 0:
+        return None
+    return seconds
