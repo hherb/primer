@@ -573,6 +573,37 @@ pub const QUERIES: &[BenchQuery] = &[
         canonical_id: Some("wiki-simple:en:soil"),
         cluster: Cluster::Wiki,
     },
+    // ----- Paraphrases dropped during Phase 0.2 closeout, re-added (Issue #45) -----
+    // BM25-only at top_k=5 cannot surface the correct passage for any
+    // of these — the canonical passage uses different vocabulary than
+    // the child phrasing. Carried in `KNOWN_FAILING_QUERIES` so the
+    // BM25-only regression test still passes; the BM25 sweep diagnostic
+    // measures against them; the hybrid (BM25 + dense-vector RRF)
+    // recall test demonstrates the lift over BM25 by surfacing them.
+    BenchQuery {
+        query: "what makes my tummy growl when I am hungry",
+        required: &["stomach", "intestine"],
+        canonical_id: Some("seed:en:digestion"),
+        cluster: Cluster::Body,
+    },
+    BenchQuery {
+        query: "what is inside a tiny bug",
+        required: &["six", "thorax"],
+        canonical_id: Some("seed:en:insects"),
+        cluster: Cluster::Life,
+    },
+    BenchQuery {
+        query: "why do flowers smell nice",
+        required: &["plant", "autotroph"],
+        canonical_id: Some("wiki-simple:en:plant"),
+        cluster: Cluster::Wiki,
+    },
+    BenchQuery {
+        query: "why does the brain need oxygen from the lungs",
+        required: &["neuron", "cortex"],
+        canonical_id: Some("seed:en:brain"),
+        cluster: Cluster::Body,
+    },
 ];
 
 /// Benchmark queries that the production retrieval defaults
@@ -581,23 +612,53 @@ pub const QUERIES: &[BenchQuery] = &[
 /// against them. The regression test in `retrieval_quality.rs`
 /// excludes these from its assertion.
 ///
-/// **Tracked in:** GitHub issue #42.
+/// **Tracked in:** GitHub issues #42 (sun-shine) and #45 (paraphrases).
 pub const KNOWN_FAILING_QUERIES: &[&str] = &[
     // strict:FAIL at top_k=5, min_score=0.5 — canonical seed:en:sun
     // is not in top-5 even though loose terms (fus*/hydrogen) appear
     // in another top-5 passage. Tracked as a corpus gap. Lifted by the
     // hybrid path (see `KNOWN_FAILING_QUERIES_HYBRID` below).
     "how does the sun shine",
+    // Issue #45 paraphrases — BM25-only at top_k=5 picks lexically
+    // adjacent passages (brain/heart/photosynthesis) rather than the
+    // semantically correct one. Both loose and strict fail. Re-added
+    // to the dataset so the BM25 sweep diagnostic measures against
+    // them and the hybrid recall test demonstrates the lift.
+    "what makes my tummy growl when I am hungry",
+    "what is inside a tiny bug",
+    "why do flowers smell nice",
+    "why does the brain need oxygen from the lungs",
 ];
 
 /// Queries the hybrid (BM25 + dense-vector RRF) retrieval path with
 /// production `HybridParams::default()` cannot satisfy on the seed
-/// corpus. The 54-cell hybrid sweep at `tests/retrieval_sweep_hybrid.rs`
-/// achieved 100% loose / 100% strict at the chosen cell `(30, 30, 5,
-/// 60)`, so this list is empty today. New entries here mean either a
-/// real semantic regression or a corpus-coverage gap the dense leg
-/// can't bridge — investigate before adding.
-pub const KNOWN_FAILING_QUERIES_HYBRID: &[&str] = &[];
+/// corpus. New entries here mean either a real semantic regression or
+/// a corpus-coverage gap the dense leg can't bridge — investigate
+/// before adding.
+///
+/// **Tracked in:** GitHub issue #45 (paraphrase queries that BM25
+/// could not surface; hybrid lifts 2 of 4, the other 2 remain).
+pub const KNOWN_FAILING_QUERIES_HYBRID: &[&str] = &[
+    // Issue #45: hybrid (BGE-M3 dense + BM25 RRF) routes "tummy growl
+    // when hungry" to sleep-dreams/lungs/reptiles, missing the
+    // digestion passage. Even semantic embeddings cannot bridge "tummy
+    // growl" → "stomach growls when hungry" because the digestion
+    // passage never describes the symptom in those words. Corpus gap,
+    // not a retrieval bug. Cure: add a sentence to the digestion
+    // passage that names the growling symptom (the next seed-corpus
+    // expansion is the natural moment to do this).
+    "what makes my tummy growl when I am hungry",
+    // Issue #45: hybrid routes "flowers smell nice" to
+    // photosynthesis/soap/water, missing the wiki plant passage. The
+    // child-language framing centres on flowers and scent, neither of
+    // which maps to "autotroph" or the plant passage's lead. The top-1
+    // hit (photosynthesis) is a plausible Socratic answer in its own
+    // right but the strict canonical mapping says the plant page is
+    // the intended target. Corpus/canonical-mapping gap. Cure: either
+    // expand the plant passage to mention flowers + scent, or relax
+    // the canonical mapping to accept either passage.
+    "why do flowers smell nice",
+];
 
 #[cfg(test)]
 mod sanity_tests {
