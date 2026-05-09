@@ -16,6 +16,7 @@ from retry import (
     compute_delay,
     is_retryable_status,
     parse_retry_after,
+    retry_http_get,
 )
 
 
@@ -167,3 +168,111 @@ def test_compute_delay_zero_base_stays_zero():
     s = _settings(base_delay_s=0.0)
     assert compute_delay(s, attempt=0, jitter_seed=0.0) == 0.0
     assert compute_delay(s, attempt=2, jitter_seed=1.0) == 0.0
+
+
+# ── Test fakes for retry_http_get ────────────────────────────────────
+
+
+class _RetryFakeResponse:
+    """Test response with controllable status_code, headers, payload.
+
+    Mirrors the shape of ``requests.Response`` for the attributes the
+    helper actually reads.
+    """
+
+    def __init__(
+        self,
+        status_code: int,
+        headers: dict[str, str] | None = None,
+        payload: dict | None = None,
+    ) -> None:
+        self.status_code = status_code
+        self.headers = headers or {}
+        self._payload = payload or {}
+
+    def json(self) -> dict:
+        return self._payload
+
+    def raise_for_status(self) -> None:
+        if self.status_code >= 400:
+            raise RuntimeError(f"http {self.status_code}")
+
+
+class _RetryFakeHttpClient:
+    """Test client that returns a scripted sequence of responses.
+
+    Each ``get`` call consumes the next entry from ``script``;
+    ``calls`` records the (url, params, timeout) for each invocation.
+    """
+
+    def __init__(self, script: list[_RetryFakeResponse]) -> None:
+        self.script = list(script)
+        self.calls: list[dict] = []
+
+    def get(self, url: str, *, params: dict, timeout: float) -> _RetryFakeResponse:
+        self.calls.append({"url": url, "params": params, "timeout": timeout})
+        if not self.script:
+            raise AssertionError("_RetryFakeHttpClient: script exhausted")
+        return self.script.pop(0)
+
+
+def _no_jitter() -> float:
+    """Deterministic jitter source: returns 0.5 every time, which maps
+    via ``jitter_fn() * 2 - 1`` to 0.0. Keeps test delays exactly equal
+    to ``compute_delay(.., jitter_seed=0.0)``.
+    """
+    return 0.5
+
+
+def _record_sleep():
+    """Return a (sleep_fn, recorded) pair. ``sleep_fn`` records each
+    call's argument and returns immediately."""
+    recorded: list[float] = []
+
+    def sleep(seconds: float) -> None:
+        recorded.append(seconds)
+
+    return sleep, recorded
+
+
+def test_retry_http_get_happy_path_no_retry_no_sleep():
+    """200 first try → 1 call, 0 sleeps, returns the response."""
+    client = _RetryFakeHttpClient([_RetryFakeResponse(200, payload={"ok": True})])
+    sleep_fn, sleeps = _record_sleep()
+    resp = retry_http_get(
+        client,
+        "https://example/api",
+        params={"q": "x"},
+        timeout=10.0,
+        settings=RetrySettings.default(),
+        sleep=sleep_fn,
+        jitter_fn=_no_jitter,
+    )
+    assert resp.status_code == 200
+    assert resp.json() == {"ok": True}
+    assert len(client.calls) == 1
+    assert sleeps == []
+    # Verify the request shape was passed through unchanged.
+    assert client.calls[0]["url"] == "https://example/api"
+    assert client.calls[0]["params"] == {"q": "x"}
+    assert client.calls[0]["timeout"] == 10.0
+
+
+def test_retry_http_get_returns_4xx_unchanged_no_sleep():
+    """A non-retryable 404 is returned to the caller — the strategy's
+    own raise_for_status handles 404s. No sleep, 1 call.
+    """
+    client = _RetryFakeHttpClient([_RetryFakeResponse(404)])
+    sleep_fn, sleeps = _record_sleep()
+    resp = retry_http_get(
+        client,
+        "https://example/api",
+        params={},
+        timeout=10.0,
+        settings=RetrySettings.default(),
+        sleep=sleep_fn,
+        jitter_fn=_no_jitter,
+    )
+    assert resp.status_code == 404
+    assert len(client.calls) == 1
+    assert sleeps == []

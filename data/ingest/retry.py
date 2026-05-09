@@ -18,6 +18,7 @@ failed-batch persistence. See
 from __future__ import annotations
 
 from dataclasses import dataclass
+from typing import Any, Callable
 
 
 # ── Defaults (no magic numbers) ──────────────────────────────────────
@@ -166,3 +167,66 @@ def compute_delay(
         * (1.0 + settings.jitter_fraction * jitter_seed)
     )
     return max(0.0, raw)
+
+
+def retry_http_get(
+    http_client: Any,
+    url: str,
+    *,
+    params: dict,
+    timeout: float,
+    settings: RetrySettings,
+    sleep: Callable[[float], None],
+    jitter_fn: Callable[[], float],
+) -> Any:
+    """Call ``http_client.get(url, params=..., timeout=...)`` with
+    retry-on-429-or-5xx.
+
+    Network errors (``requests.exceptions.*``) propagate unchanged —
+    out of scope for issue #38.
+
+    The ``sleep`` and ``jitter_fn`` parameters are kwarg-injected so
+    tests can pass deterministic no-op equivalents (``lambda _: None``,
+    ``lambda: 0.5``). Production callers pass ``time.sleep`` and
+    ``random.random``.
+
+    ``jitter_fn`` returns a value in ``[0.0, 1.0)`` (matching
+    ``random.random``); we map to ``[-1.0, 1.0)`` internally before
+    feeding ``compute_delay``.
+
+    Returns the final ``Response`` (which may have a non-2xx but
+    non-retryable status — the caller's ``raise_for_status`` handles
+    that). Raises :class:`RetryCapExceeded` only when retries are
+    exhausted OR when ``Retry-After`` exceeds the budget.
+    """
+    attempt = 0
+    while True:
+        resp = http_client.get(url, params=params, timeout=timeout)
+        if not is_retryable_status(resp.status_code):
+            return resp
+        # Retryable. Decide if we have any attempts left.
+        attempts_made = attempt + 1
+        attempts_left = settings.max_attempts - attempts_made
+        retry_after_raw = getattr(resp, "headers", {}).get("Retry-After")
+        if attempts_left <= 0:
+            raise RetryCapExceeded(
+                attempts=attempts_made,
+                last_status=resp.status_code,
+                retry_after=retry_after_raw,
+            )
+        parsed = parse_retry_after(retry_after_raw)
+        if parsed is not None:
+            if parsed > settings.retry_after_budget_s:
+                # Don't sleep for longer than we're willing to wait.
+                # Surface the failure so the developer can re-run later.
+                raise RetryCapExceeded(
+                    attempts=attempts_made,
+                    last_status=resp.status_code,
+                    retry_after=retry_after_raw,
+                )
+            delay = parsed
+        else:
+            jitter_seed = jitter_fn() * 2.0 - 1.0
+            delay = compute_delay(settings, attempt=attempt, jitter_seed=jitter_seed)
+        sleep(delay)
+        attempt += 1
