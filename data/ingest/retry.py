@@ -141,3 +141,28 @@ def parse_retry_after(value: str | None) -> float | None:
     if seconds < 0:
         return None
     return seconds
+
+
+def compute_delay(
+    settings: RetrySettings,
+    *,
+    attempt: int,
+    jitter_seed: float,
+) -> float:
+    """Compute the delay before the next attempt.
+
+    ``delay = base_delay_s * backoff_factor ** attempt * (1 + jitter_fraction * jitter_seed)``
+
+    ``jitter_seed`` is in ``[-1.0, 1.0]``; the caller is responsible
+    for the mapping (in production, ``random.random() * 2 - 1``;
+    in tests, a constant). The result is clamped at 0 so a
+    pathological tuning can't produce a negative delay.
+
+    Pure: no I/O, no time read.
+    """
+    raw = (
+        settings.base_delay_s
+        * (settings.backoff_factor ** attempt)
+        * (1.0 + settings.jitter_fraction * jitter_seed)
+    )
+    return max(0.0, raw)

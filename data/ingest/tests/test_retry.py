@@ -13,6 +13,7 @@ from retry import (
     DEFAULT_RETRY_AFTER_BUDGET_S,
     RetryCapExceeded,
     RetrySettings,
+    compute_delay,
     is_retryable_status,
     parse_retry_after,
 )
@@ -105,3 +106,64 @@ def test_is_retryable_status(code: int, expected: bool) -> None:
 )
 def test_parse_retry_after(value: str | None, expected: float | None) -> None:
     assert parse_retry_after(value) == expected
+
+
+def _settings(
+    *,
+    base_delay_s: float = 0.5,
+    backoff_factor: int = 2,
+    jitter_fraction: float = 0.1,
+) -> RetrySettings:
+    """Builder used by compute_delay tests. The other settings fields
+    don't affect compute_delay — pin them to defaults for clarity.
+    """
+    return RetrySettings(
+        max_attempts=3,
+        base_delay_s=base_delay_s,
+        backoff_factor=backoff_factor,
+        jitter_fraction=jitter_fraction,
+        retry_after_budget_s=30.0,
+    )
+
+
+def test_compute_delay_attempt_zero_returns_base_delay():
+    """At attempt=0 with jitter_seed=0 the delay is exactly base_delay_s."""
+    s = _settings(base_delay_s=0.5)
+    assert compute_delay(s, attempt=0, jitter_seed=0.0) == 0.5
+
+
+def test_compute_delay_doubles_with_each_attempt():
+    """attempt=1 → base × factor; attempt=2 → base × factor²."""
+    s = _settings(base_delay_s=0.5, backoff_factor=2)
+    assert compute_delay(s, attempt=1, jitter_seed=0.0) == 1.0
+    assert compute_delay(s, attempt=2, jitter_seed=0.0) == 2.0
+
+
+def test_compute_delay_jitter_plus_one_adds_jitter_fraction():
+    """jitter_seed=+1 produces delay × (1 + jitter_fraction)."""
+    s = _settings(base_delay_s=1.0, jitter_fraction=0.1)
+    assert compute_delay(s, attempt=0, jitter_seed=1.0) == pytest.approx(1.1)
+
+
+def test_compute_delay_jitter_minus_one_subtracts_jitter_fraction():
+    """jitter_seed=-1 produces delay × (1 - jitter_fraction)."""
+    s = _settings(base_delay_s=1.0, jitter_fraction=0.1)
+    assert compute_delay(s, attempt=0, jitter_seed=-1.0) == pytest.approx(0.9)
+
+
+def test_compute_delay_never_negative():
+    """Pathological jitter_seed must not produce a negative delay
+    (sleep would raise ValueError in real code). Clamp at 0.
+    """
+    # jitter_fraction > 1.0 with jitter_seed=-1.0 would otherwise go
+    # negative. Clamp guards against accidentally pathological tunings.
+    s = _settings(base_delay_s=1.0, jitter_fraction=1.5)
+    assert compute_delay(s, attempt=0, jitter_seed=-1.0) == 0.0
+
+
+def test_compute_delay_zero_base_stays_zero():
+    """A 0 base (used in some tests to bypass real waits) stays 0
+    regardless of attempt or jitter."""
+    s = _settings(base_delay_s=0.0)
+    assert compute_delay(s, attempt=0, jitter_seed=0.0) == 0.0
+    assert compute_delay(s, attempt=2, jitter_seed=1.0) == 0.0
