@@ -49,13 +49,15 @@ These are two different tools. Use the right one.
 
 ```
 [intent] Curious -> SocraticQuestion
-[classifier] Engaged conf=0.84 (cloud:claude-sonnet-4-6)
+[classifier] Engaged conf=0.84 (llm:claude-sonnet-4-6)
              — child asked a follow-up about gravity, building on the previous turn
-[extractor] child=["gravity", "weight"] primer=["mass", "force"] (cloud:claude-sonnet-4-6)
-[comprehension] gravity=Aware(0.55) mass=Familiar(0.78) (cloud:claude-sonnet-4-6)
+[extractor] child=["gravity", "weight"] primer=["mass", "force"] (llm:cloud:claude-sonnet-4-6)
+[comprehension] gravity=Aware(0.55) mass=Familiar(0.78) (llm:cloud:claude-sonnet-4-6)
 ```
 
 The lines are produced by the CLI directly from `dm.last_intent()`, `dm.last_assessment()`, `dm.last_extraction()`, and `dm.last_comprehension()` in [primer-cli/src/main.rs](../../src/crates/primer-cli/src/main.rs). They reflect the engine's view of the just-completed turn. Stdout stays clean — the child still sees only the Primer's response — so you can pipe stdout into a log file and read `--verbose` output live on the terminal.
+
+> **Note on identifier asymmetry:** the classifier emits `llm:{model}`, while the extractor and comprehension emit `llm:{backend}:{model}`. The classifier shipped first and predates the convention; if you grep stderr for an identifier, account for both shapes.
 
 **`RUST_LOG`** is the standard [`tracing-subscriber`](https://docs.rs/tracing-subscriber) env var. The CLI's default filter is `info,ort=warn,whisper_cpp_plus=warn,cpal=warn` — quiet enough for everyday use, but `info`-level events from the engine will print. Override with the usual idioms:
 
@@ -158,13 +160,13 @@ Most of these are direct mirrors of [CLAUDE.md](../../CLAUDE.md). They show up h
 
 > **Gotcha:** `[classifier]` line never prints in `--verbose` output, and `turn_classifications` is empty. The classifier is timing out; small models (e.g. `gemma3:4b`) often need >500 ms for the structured-output call. Increase `--classifier-timeout-ms` (default 3000) or follow the recipe below.
 
-> **Gotcha:** Session DB has the schema but no rows for a session you just ended. The dialogue manager saves on every turn, on `open_session`, on `resume_session`, and on `close_session`. Save failures `tracing::warn!` instead of propagating. Re-run with `RUST_LOG=primer_storage=warn` to see the failure.
+> **Gotcha:** Session DB has the schema but no rows for a session you just ended. The dialogue manager saves on every turn, on `open_session`, on `resume_session`, and on `close_session`. Save failures `tracing::warn!` instead of propagating. The warnings fire from `primer_pedagogy::dialogue_manager` (not `primer_storage` — the storage layer just returns the error; the warn happens at the call site). Because `warn` is already enabled by the default filter (`info,ort=warn,...`), these messages already surface on stderr at the default log level — no `RUST_LOG` override needed. If you want to scope the firehose, `RUST_LOG=primer_pedagogy=warn` is the right target.
 
 ## Debugging a streaming hang
 
 Symptom: the REPL waits indefinitely after sending a turn to the cloud or Ollama backend, no tokens printed, no error.
 
-The streaming pipeline is a `futures::channel::mpsc::unbounded` driven by a tokio task that reads bytes from the HTTP response, frames them via [`SseBuffer`](../../src/crates/primer-inference/src/cloud/sse.rs) (Anthropic) or [`NdjsonBuffer`](../../src/crates/primer-inference/src/ollama/ndjson.rs) (Ollama), and forwards parsed events as chunks. A hang means one of three things:
+The streaming pipeline is a `futures::channel::mpsc::unbounded` driven by a tokio task that reads bytes from the HTTP response, frames them via [`SseBuffer`](../../src/crates/primer-inference/src/cloud.rs) (Anthropic; defined inline around line 147) or [`NdjsonBuffer`](../../src/crates/primer-inference/src/ollama.rs) (Ollama; defined inline around line 99), and forwards parsed events as chunks. A hang means one of three things:
 
 1. **The HTTP request never completed handshake.** Check `RUST_LOG=hyper=debug,reqwest=debug`. If you see no `Sending request` line, the issue is config (URL, port, TLS).
 2. **The response was 2xx but the body channel never delivered bytes.** This is the load-bearing case — Anthropic and Ollama can both legitimately keep a connection open with no data while the model warms up, but if it goes on past your retry budget, something is wrong server-side. Add a `tracing::trace!` inside `SseBuffer::push` / `NdjsonBuffer::push` to see whether bytes are arriving but failing to parse.
