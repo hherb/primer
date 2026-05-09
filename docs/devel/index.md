@@ -25,8 +25,8 @@ Three suggested orderings depending on why you are here:
 | 03 | [Inference and pedagogy](03-inference-and-pedagogy.md) | `InferenceBackend` impls, `DialogueManager`, `decide_intent`, retry, error i18n. |
 | 04 | [Knowledge and retrieval](04-knowledge-and-retrieval.md) | FTS5 + hybrid retrieval, embedders, seed corpus, locales. |
 | 05 | [Storage and sessions](05-storage-and-sessions.md) | Session/learner stores, schema migrations, long-term memory. |
-| 06 | [Classifiers and learner model](06-classifiers-and-learner-model.md) | Classifier/extractor/comprehension trio, vocab Leitner box. |
-| 07 | [Speech and voice loop](07-speech-and-voice-loop.md) | VAD/STT/TTS, vendored crates, speech_loop state machine. |
+| 06 | [Classifiers and the learner model](06-classifiers-and-learner-model.md) | Classifier/extractor/comprehension trio, vocab Leitner box. |
+| 07 | [Speech and the voice loop](07-speech-and-voice-loop.md) | VAD/STT/TTS, vendored crates, speech_loop state machine. |
 | 08 | [Testing and debugging](08-testing-and-debugging.md) | Test layout, RUST_LOG, common pitfalls, debugging recipes. |
 | 09 | [Contributing](09-contributing.md) | PR workflow, commits, style, where to find open work. |
 
@@ -71,3 +71,4 @@ Shell commands assume you are in `src/` unless explicitly noted, because the wor
 - [primer_technical_spec.md](../../primer_technical_spec.md) — long-form vision and design rationale.
 - [CLAUDE.md](../../CLAUDE.md) — agent-facing conventions and gotchas (terser, denser, same content as this manual).
 - [SPECULATIONS_AND_IDEAS.md](../../SPECULATIONS_AND_IDEAS.md) — open ideas that have not yet been planned.
+- [LICENSE](../../LICENSE) — AGPL-3.0; see chapter 09 for what that means for contributors.
