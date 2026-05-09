@@ -314,6 +314,19 @@ def test_klexikon_canonical_url_ascii_titles_unchanged():
     )
 
 
+def test_klexikon_canonical_url_namespace_colon_is_preserved_unencoded():
+    # MediaWiki canonical URLs leave namespace separators (`Datei:`,
+    # `Bild:`, `Kategorie:`) unescaped. The `safe=":"` flag passed to
+    # urllib.parse.quote is what preserves this — without it `:` would
+    # be percent-encoded to `%3A`. Pin that design choice here so a
+    # future "tighten the safe set" change can't silently break
+    # namespace-prefixed canonical URLs.
+    assert (
+        _klexikon_canonical_url(KLEXIKON, "Datei:Beispiel")
+        == "https://klexikon.zum.de/wiki/Datei:Beispiel"
+    )
+
+
 def test_fetch_lead_klexikon_disambiguation_steht_fuer_raises():
     # German disambiguation pages typically use "<title> steht für: ...".
     # Klexikon's curation makes this rare but possible; catch it.

@@ -308,8 +308,9 @@ class WikiSource:
         web_base_url: prefix for the user-facing wiki URL. Used by
             strategies (like ``klexikon_wikitext``) where the API
             response doesn't include a ``fullurl`` field — the
-            canonical URL is constructed as
-            ``web_base_url + title.replace(" ", "_")``.
+            canonical URL is built by :func:`_klexikon_canonical_url`,
+            which underscore-substitutes spaces and percent-encodes
+            non-ASCII bytes per RFC 3986.
         id_prefix: the source-family prefix in the passage id.
             Distinct per source family; ``wiki-simple`` for Simple
             English Wikipedia; ``wiki-klexikon`` for Klexikon.
