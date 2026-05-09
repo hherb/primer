@@ -17,8 +17,11 @@ failed-batch persistence. See
 """
 from __future__ import annotations
 
+import logging
 from dataclasses import dataclass
 from typing import Any, Callable
+
+logger = logging.getLogger(__name__)
 
 
 # ── Defaults (no magic numbers) ──────────────────────────────────────
@@ -31,8 +34,10 @@ DEFAULT_MAX_ATTEMPTS = 3
 # Initial delay before the second attempt, in seconds.
 DEFAULT_BASE_DELAY_S = 0.5
 
-# Multiplicative growth factor between attempts.
-DEFAULT_BACKOFF_FACTOR = 2
+# Multiplicative growth factor between attempts. Float-typed so a
+# fractional growth (e.g. 1.5) is a one-line config tweak rather than a
+# type-cast surprise.
+DEFAULT_BACKOFF_FACTOR = 2.0
 
 # Jitter as a fraction of the computed delay. ±10% noise so concurrent
 # runs (rare but possible during dev) don't lock-step their backoffs.
@@ -55,7 +60,7 @@ class RetrySettings:
 
     max_attempts: int
     base_delay_s: float
-    backoff_factor: int
+    backoff_factor: float
     jitter_fraction: float
     retry_after_budget_s: float
 
@@ -207,7 +212,7 @@ def retry_http_get(
         # Retryable. Decide if we have any attempts left.
         attempts_made = attempt + 1
         attempts_left = settings.max_attempts - attempts_made
-        retry_after_raw = getattr(resp, "headers", {}).get("Retry-After")
+        retry_after_raw = resp.headers.get("Retry-After")
         if attempts_left <= 0:
             raise RetryCapExceeded(
                 attempts=attempts_made,
@@ -228,5 +233,12 @@ def retry_http_get(
         else:
             jitter_seed = jitter_fn() * 2.0 - 1.0
             delay = compute_delay(settings, attempt=attempt, jitter_seed=jitter_seed)
+        logger.info(
+            "retry_http_get: status=%d attempt=%d delay=%.2fs url=%s",
+            resp.status_code,
+            attempts_made,
+            delay,
+            url,
+        )
         sleep(delay)
         attempt += 1

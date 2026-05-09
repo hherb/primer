@@ -112,7 +112,7 @@ def test_parse_retry_after(value: str | None, expected: float | None) -> None:
 def _settings(
     *,
     base_delay_s: float = 0.5,
-    backoff_factor: int = 2,
+    backoff_factor: float = 2.0,
     jitter_fraction: float = 0.1,
 ) -> RetrySettings:
     """Builder used by compute_delay tests. The other settings fields
@@ -388,3 +388,38 @@ def test_retry_http_get_retry_after_exceeds_budget_raises_immediately():
     assert exc_info.value.retry_after == "60"
     assert len(client.calls) == 1
     assert sleeps == []  # Immediate surface — no sleep.
+
+
+def test_retry_http_get_retry_after_exceeds_budget_on_second_attempt():
+    """Server returns a plain 503 first (no Retry-After) then a 429
+    with Retry-After=60 on the retry. Budget exceedance must raise on
+    the second response, with attempts=2 and exactly one prior sleep
+    (the computed-delay one before the second call). Pins that the
+    budget check is independent of which attempt the offending header
+    arrives on.
+    """
+    client = _RetryFakeHttpClient(
+        [
+            _RetryFakeResponse(503),
+            _RetryFakeResponse(429, headers={"Retry-After": "60"}),
+        ]
+    )
+    sleep_fn, sleeps = _record_sleep()
+    settings = RetrySettings.default()
+    with pytest.raises(RetryCapExceeded) as exc_info:
+        retry_http_get(
+            client,
+            "https://example/api",
+            params={},
+            timeout=10.0,
+            settings=settings,
+            sleep=sleep_fn,
+            jitter_fn=_no_jitter,
+        )
+    assert exc_info.value.attempts == 2
+    assert exc_info.value.last_status == 429
+    assert exc_info.value.retry_after == "60"
+    assert len(client.calls) == 2
+    # Exactly one sleep — the computed-delay one before the second call.
+    assert len(sleeps) == 1
+    assert sleeps[0] == compute_delay(settings, attempt=0, jitter_seed=0.0)
