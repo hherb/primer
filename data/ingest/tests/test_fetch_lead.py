@@ -146,7 +146,7 @@ def test_fetch_leads_empty_input_returns_empty_dict_no_http_call():
 # plain text.
 
 
-def _klexikon_parse_payload(title: str, wikitext: str, page_url: str) -> dict:
+def _klexikon_parse_payload(title: str, wikitext: str) -> dict:
     """Build a fake `action=parse` response shaped like the real
     Klexikon API output."""
     return {
@@ -187,7 +187,6 @@ def test_fetch_lead_klexikon_strategy_uses_parse_action_against_klexikon_zum_de(
             "Ähnliches, aber vom Wetter spricht man, wenn man an einen "
             "Tag oder wenige [[Woche]]n denkt."
         ),
-        page_url="https://klexikon.zum.de/wiki/Klima",
     )
     client = KlexikonFakeHttpClient({"Klima": payload})
     result = fetch_lead("Klima", http_client=client, source=KLEXIKON)
@@ -223,7 +222,6 @@ def test_fetch_lead_klexikon_strips_image_block():
             "Wenn man vom Klima spricht, ist gemeint, dass es irgendwo "
             "normalerweise warm oder kalt ist."
         ),
-        page_url="https://klexikon.zum.de/wiki/Klima",
     )
     client = KlexikonFakeHttpClient({"Klima": payload})
     result = fetch_lead("Klima", http_client=client, source=KLEXIKON)
@@ -240,7 +238,6 @@ def test_fetch_lead_klexikon_handles_titles_with_spaces():
     payload = _klexikon_parse_payload(
         title="Roter Riese",
         wikitext="Ein Roter Riese ist ein sehr großer [[Stern]].",
-        page_url="https://klexikon.zum.de/wiki/Roter_Riese",
     )
     client = KlexikonFakeHttpClient({"Roter Riese": payload})
     result = fetch_lead("Roter Riese", http_client=client, source=KLEXIKON)
@@ -267,7 +264,6 @@ def test_fetch_lead_klexikon_disambiguation_steht_fuer_raises():
             "Saturn steht für: den Planeten Saturn, den römischen Gott "
             "Saturn, oder verschiedene andere Bedeutungen."
         ),
-        page_url="https://klexikon.zum.de/wiki/Saturn",
     )
     client = KlexikonFakeHttpClient({"Saturn": payload})
     with pytest.raises(RuntimeError, match="disambiguation page"):
