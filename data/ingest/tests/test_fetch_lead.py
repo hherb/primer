@@ -16,9 +16,19 @@ FIXTURES = Path(__file__).parent / "fixtures"
 
 
 class FakeResponse:
-    def __init__(self, payload: dict, status_code: int = 200):
+    def __init__(
+        self,
+        payload: dict,
+        status_code: int = 200,
+        headers: dict[str, str] | None = None,
+    ):
         self._payload = payload
         self.status_code = status_code
+        # Default to empty dict so retry_http_get's
+        # ``getattr(resp, "headers", {}).get("Retry-After")`` finds an
+        # empty header set on the existing fixtures. Tests that need
+        # to set Retry-After pass an explicit ``headers={...}``.
+        self.headers = headers or {}
 
     def json(self) -> dict:
         return self._payload
