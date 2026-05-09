@@ -295,6 +295,6 @@ required-features = ["vosk"]
 
 The smoke example is what lets a contributor (and a future you, after a vendor-patch dependency bump) validate the backend in isolation in seconds.
 
-**7. Add system-dep installation notes** to [chapter 8](08-build-and-test-recipes.md) if your backend needs a system package. Piper's espeak-ng dependency lives there for exactly this reason; whisper.cpp's cmake/C++-toolchain requirement also belongs in chapter 8. If your backend is pure-Rust with no system deps, no chapter-8 entry is needed.
+**7. Add system-dep installation notes** to [chapter 8](08-testing-and-debugging.md) if your backend needs a system package. Piper's espeak-ng dependency lives there for exactly this reason; whisper.cpp's cmake/C++-toolchain requirement also belongs in chapter 8. If your backend is pure-Rust with no system deps, no chapter-8 entry is needed.
 
 When you're done: build with `--features primer-speech/<your-feature>`, run the smoke example, and verify it produces sensible output. Then build with `--features primer-cli/speech` — confirming that your new backend doesn't break the existing voice loop is the load-bearing integration test.
