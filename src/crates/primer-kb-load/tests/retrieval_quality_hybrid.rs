@@ -48,40 +48,40 @@ async fn hybrid_retrieval_structural_with_stub() {
 
     let params = HybridParams::default();
 
-    // Pick a representative spread of queries; we only check structural
-    // properties so the size of the loop is just a sanity ceiling.
-    for q in QUERIES.iter().take(10) {
-        let hits = kb
+    // Iterate over the full benchmark — structural checks are cheap
+    // (no model download, all in-process). Idempotency is verified
+    // per-query because tie-ordering nondeterminism in the fusion path
+    // would only surface on queries whose candidate sets contain ties.
+    for q in QUERIES {
+        let h1 = kb
             .retrieve_hybrid(q.query, &embedder, &params)
             .await
             .unwrap_or_else(|e| panic!("hybrid retrieval errored for {:?}: {e}", q.query));
         assert!(
-            !hits.is_empty(),
+            !h1.is_empty(),
             "hybrid retrieval returned no hits for {:?}; BM25 leg must always surface something",
             q.query
         );
         assert!(
-            hits.len() <= params.final_top_k,
+            h1.len() <= params.final_top_k,
             "hybrid retrieval returned {} hits for {:?}; final_top_k = {}",
-            hits.len(),
+            h1.len(),
             q.query,
             params.final_top_k
         );
-    }
 
-    // Idempotency: identical query + identical embedder + identical
-    // params must yield identical ordered ids. Catches any
-    // nondeterminism that creeps into the fusion or scoring path.
-    let q = QUERIES[0].query;
-    let h1 = kb.retrieve_hybrid(q, &embedder, &params).await.unwrap();
-    let h2 = kb.retrieve_hybrid(q, &embedder, &params).await.unwrap();
-    let ids1: Vec<&str> = h1.iter().map(|p| p.id.as_str()).collect();
-    let ids2: Vec<&str> = h2.iter().map(|p| p.id.as_str()).collect();
-    assert_eq!(
-        ids1, ids2,
-        "hybrid retrieval not idempotent for {:?}: {:?} vs {:?}",
-        q, ids1, ids2
-    );
+        let h2 = kb
+            .retrieve_hybrid(q.query, &embedder, &params)
+            .await
+            .unwrap();
+        let ids1: Vec<&str> = h1.iter().map(|p| p.id.as_str()).collect();
+        let ids2: Vec<&str> = h2.iter().map(|p| p.id.as_str()).collect();
+        assert_eq!(
+            ids1, ids2,
+            "hybrid retrieval not idempotent for {:?}: {:?} vs {:?}",
+            q.query, ids1, ids2
+        );
+    }
 }
 
 #[cfg(feature = "fastembed")]

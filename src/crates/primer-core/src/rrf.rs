@@ -32,15 +32,17 @@ use std::hash::Hash;
 /// - `k`: the RRF constant (60.0 is the published default).
 ///
 /// Returns: a vec of `(id, fused_score)` pairs sorted descending by
-/// fused score. Ties break by id-equality only — callers that need
-/// stable tie-breaking should sort the inputs first.
+/// fused score, with id-ascending as the deterministic tie-breaker.
+/// The output is fully deterministic across processes and runs — the
+/// internal `HashMap` is only used for accumulation; the final sort
+/// imposes a total order using `Id`'s `Ord` impl.
 ///
 /// Implementation note: ids are cloned into the output. This keeps
 /// the API simple and is fine for retrieval-time use (top-K of two
 /// 20-item lists is at most 40 ids of a few dozen bytes each).
 pub fn fuse<Id>(ranked_lists: &[&[Id]], k: f64) -> Vec<(Id, f64)>
 where
-    Id: Eq + Hash + Clone,
+    Id: Eq + Hash + Clone + Ord,
 {
     let mut scores: HashMap<Id, f64> = HashMap::new();
     for list in ranked_lists {
@@ -51,7 +53,11 @@ where
         }
     }
     let mut fused: Vec<(Id, f64)> = scores.into_iter().collect();
-    fused.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
+    fused.sort_by(|a, b| {
+        b.1.partial_cmp(&a.1)
+            .unwrap_or(std::cmp::Ordering::Equal)
+            .then_with(|| a.0.cmp(&b.0))
+    });
     fused
 }
 
@@ -136,5 +142,38 @@ mod tests {
         // 3 appears in both, should be first.
         assert_eq!(out[0].0, 3);
         assert_eq!(out.len(), 5);
+    }
+
+    #[test]
+    fn tied_scores_break_by_ascending_id() {
+        // Two items at the same rank in disjoint lists: identical
+        // contributions, identical fused scores. Output ordering must
+        // be id-ascending so the result is deterministic across runs.
+        let l1 = vec!["zebra".to_string()];
+        let l2 = vec!["apple".to_string()];
+        let out = fuse(&[&l1, &l2], 60.0);
+        let ids: Vec<&str> = out.iter().map(|(id, _)| id.as_str()).collect();
+        assert_eq!(
+            ids,
+            vec!["apple", "zebra"],
+            "tied fused scores must break by ascending id"
+        );
+    }
+
+    #[test]
+    fn fuse_is_deterministic_across_calls() {
+        // Repeating fuse() over the same inputs must yield byte-for-byte
+        // identical output, even when the internal HashMap's per-process
+        // RandomState varies. Without an explicit tie-breaker, equal
+        // scores would surface in HashMap iteration order.
+        let l1 = vec!["b".to_string(), "a".to_string(), "c".to_string()];
+        let l2 = vec!["d".to_string(), "e".to_string(), "f".to_string()];
+        let first = fuse(&[&l1, &l2], 60.0);
+        for _ in 0..32 {
+            let again = fuse(&[&l1, &l2], 60.0);
+            let first_ids: Vec<&str> = first.iter().map(|(id, _)| id.as_str()).collect();
+            let again_ids: Vec<&str> = again.iter().map(|(id, _)| id.as_str()).collect();
+            assert_eq!(first_ids, again_ids, "fuse output must be deterministic");
+        }
     }
 }
