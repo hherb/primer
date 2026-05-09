@@ -154,6 +154,55 @@ def test_fetch_leads_empty_input_returns_empty_dict_no_http_call():
     assert client.calls == [], "empty input must not trigger an HTTP request"
 
 
+# ─── retry wiring (issue #38) ────────────────────────────────────────
+# Pins that fetch_lead routes through retry.retry_http_get for the
+# 429 / 5xx path. One test is enough — every strategy fetcher uses
+# retry_http_get the same way, and the pure-helper coverage in
+# tests/test_retry.py is what defends behaviour at scale.
+
+
+class FlakyFakeHttpClient:
+    """Test fake that returns one 429 then the canned payload.
+
+    Distinct from ``FakeHttpClient`` because we need a status-code
+    sequence, not a static-by-title map. Used only by the integration
+    test that proves the strategy fetcher routes through retry_http_get.
+    """
+
+    def __init__(self, payload_after_one_429: dict):
+        self._payload = payload_after_one_429
+        self._calls_so_far = 0
+        self.calls: list[dict] = []
+
+    def get(self, url: str, params: dict, timeout: float | None = None):
+        self.calls.append({"url": url, "params": params})
+        self._calls_so_far += 1
+        if self._calls_so_far == 1:
+            return FakeResponse({}, status_code=429, headers={"Retry-After": "0"})
+        return FakeResponse(self._payload)
+
+
+def test_fetch_lead_retries_on_429_then_succeeds(monkeypatch):
+    """Integration test: a 429 on the first call is retried by
+    retry_http_get, and the second call's payload is returned. Pins
+    the wiring through the public fetch_lead API.
+
+    Stubs time.sleep via monkeypatch so the test runs at full speed
+    even though Retry-After=0 (which the helper would otherwise pass
+    to time.sleep(0) — harmless, but the monkeypatch is the standard
+    pytest pattern for any test that exercises a code path that
+    calls a real-world side effect).
+    """
+    monkeypatch.setattr("time.sleep", lambda _: None)
+    client = FlakyFakeHttpClient(
+        payload_after_one_429=_load_fixture("photosynthesis.json")
+    )
+    result = fetch_lead("Photosynthesis", http_client=client, source=SIMPLE_ENGLISH)
+    assert result["title"] == "Photosynthesis"
+    assert "Photosynthesis is a process" in result["lead_text"]
+    assert len(client.calls) == 2  # One 429, one success.
+
+
 # ─── Klexikon source (parse&prop=wikitext&section=0 strategy) ───────────
 # Klexikon's MediaWiki has no TextExtracts extension, so the pipeline
 # uses a different fetch shape: `action=parse` instead of

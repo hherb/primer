@@ -28,11 +28,14 @@ from __future__ import annotations
 import argparse
 import dataclasses
 import json
+import random
 import re
 import time
 import unicodedata
 import urllib.parse
 from pathlib import Path
+
+from retry import RetrySettings, retry_http_get
 
 
 # Slug character class. Lowercase ASCII alphanumerics survive; everything
@@ -523,7 +526,15 @@ def _fetch_lead_via_text_extracts(
         "format": "json",
         "redirects": 1,
     }
-    resp = http_client.get(source.api_url, params=params, timeout=30.0)
+    resp = retry_http_get(
+        http_client,
+        source.api_url,
+        params=params,
+        timeout=30.0,
+        settings=_RETRY_SETTINGS,
+        sleep=time.sleep,
+        jitter_fn=random.random,
+    )
     resp.raise_for_status()
     data = resp.json()
     pages = data.get("query", {}).get("pages", {})
@@ -570,7 +581,15 @@ def _fetch_leads_via_text_extracts(
         "redirects": 1,
         "exlimit": "max",
     }
-    resp = http_client.get(source.api_url, params=params, timeout=60.0)
+    resp = retry_http_get(
+        http_client,
+        source.api_url,
+        params=params,
+        timeout=60.0,
+        settings=_RETRY_SETTINGS,
+        sleep=time.sleep,
+        jitter_fn=random.random,
+    )
     resp.raise_for_status()
     data = resp.json()
     normalized = {n["from"]: n["to"] for n in data.get("query", {}).get("normalized", [])}
@@ -640,7 +659,15 @@ def _fetch_lead_via_klexikon(
         "format": "json",
         "redirects": 1,
     }
-    resp = http_client.get(source.api_url, params=params, timeout=30.0)
+    resp = retry_http_get(
+        http_client,
+        source.api_url,
+        params=params,
+        timeout=30.0,
+        settings=_RETRY_SETTINGS,
+        sleep=time.sleep,
+        jitter_fn=random.random,
+    )
     resp.raise_for_status()
     data = resp.json()
     if "error" in data:
@@ -761,6 +788,13 @@ def fetch_leads(
 # Default user-agent for live runs. Per Wikipedia API etiquette, this
 # must include the tool name, version, and a contact identifier.
 _DEFAULT_USER_AGENT = "PrimerSeedBuilder/0.1 (contact: my.list.subscriptions@gmail.com)"
+
+
+# Retry settings used by every strategy fetcher's HTTP-call wrapper.
+# Single source of truth so tuning is one constant edit, not three.
+# See ``retry.py`` for the underlying defaults; pin them here only if a
+# per-source override is ever needed.
+_RETRY_SETTINGS = RetrySettings.default()
 
 
 # Threshold below which a passage's word count triggers a hand-review
