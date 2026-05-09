@@ -148,10 +148,16 @@ pub mod retrieval {
     /// fewer noisy hits. The sweep at `tests/retrieval_sweep.rs`
     /// against the 90-passage seed corpus showed every value in
     /// {0.0, 0.25, 0.5, 0.75, 1.0, 1.5} produces identical recall —
-    /// every BM25 score in this corpus comfortably exceeds 1.5.
-    /// Kept at 0.5 as a defensive floor: a no-op today, but bites
-    /// if a future larger corpus dilutes term frequencies and pushes
-    /// scores down. See
+    /// every *correct* top-K hit comfortably exceeds 1.5, and the
+    /// sub-1.5 scores that exist are 5th-place noise on marginal
+    /// queries (no query's best hit drops anywhere near the floor;
+    /// the worst top-1 score across the 87-query benchmark is 3.35).
+    /// Kept at 0.5 as a defensive floor: a no-op for recall today,
+    /// but bites if a future larger corpus dilutes term frequencies
+    /// and pushes the marginal scores below 0.5. The tripwire at
+    /// `primer-kb-load/tests/bm25_floor_tripwire.rs` (run with
+    /// `--ignored`) probes the actual top-K score distribution and
+    /// fires loudly when the margin closes. See
     /// `docs/superpowers/specs/2026-05-06-retrieval-tuning-design.md`.
     pub const KB_BM25_ONLY_MIN_SCORE: f64 = 0.5;
 }
