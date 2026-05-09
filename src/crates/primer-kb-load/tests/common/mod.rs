@@ -600,7 +600,7 @@ pub const QUERIES: &[BenchQuery] = &[
     },
     BenchQuery {
         query: "why does the brain need oxygen from the lungs",
-        required: &["neuron", "cortex"],
+        required: &["oxygen", "blood"],
         canonical_id: Some("seed:en:brain"),
         cluster: Cluster::Body,
     },
@@ -620,10 +620,11 @@ pub const KNOWN_FAILING_QUERIES: &[&str] = &[
     // hybrid path (see `KNOWN_FAILING_QUERIES_HYBRID` below).
     "how does the sun shine",
     // Issue #45 paraphrases — BM25-only at top_k=5 picks lexically
-    // adjacent passages (brain/heart/photosynthesis) rather than the
-    // semantically correct one. Both loose and strict fail. Re-added
-    // to the dataset so the BM25 sweep diagnostic measures against
-    // them and the hybrid recall test demonstrates the lift.
+    // adjacent passages (brain/cells/lungs-breathing/photosynthesis)
+    // rather than the semantically correct one. Both loose and strict
+    // fail. Re-added to the dataset so the BM25 sweep diagnostic
+    // measures against them and the hybrid recall test demonstrates
+    // the lift.
     "what makes my tummy growl when I am hungry",
     "what is inside a tiny bug",
     "why do flowers smell nice",
