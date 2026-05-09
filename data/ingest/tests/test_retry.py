@@ -276,3 +276,115 @@ def test_retry_http_get_returns_4xx_unchanged_no_sleep():
     assert resp.status_code == 404
     assert len(client.calls) == 1
     assert sleeps == []
+
+
+def test_retry_http_get_succeeds_on_third_attempt_after_two_503s():
+    """Two 503 then 200: 3 calls, 2 sleeps with delays equal to the
+    pure-helper output for attempts 0 and 1."""
+    client = _RetryFakeHttpClient(
+        [
+            _RetryFakeResponse(503),
+            _RetryFakeResponse(503),
+            _RetryFakeResponse(200, payload={"ok": True}),
+        ]
+    )
+    sleep_fn, sleeps = _record_sleep()
+    settings = RetrySettings.default()
+    resp = retry_http_get(
+        client,
+        "https://example/api",
+        params={},
+        timeout=10.0,
+        settings=settings,
+        sleep=sleep_fn,
+        jitter_fn=_no_jitter,
+    )
+    assert resp.status_code == 200
+    assert len(client.calls) == 3
+    # Two sleeps, with delays exactly matching compute_delay for
+    # attempts 0 and 1 under jitter_seed=0.0 (since _no_jitter → 0.5
+    # → mapped to 0.0).
+    assert len(sleeps) == 2
+    assert sleeps[0] == compute_delay(settings, attempt=0, jitter_seed=0.0)
+    assert sleeps[1] == compute_delay(settings, attempt=1, jitter_seed=0.0)
+
+
+def test_retry_http_get_exhausts_attempts_then_raises_with_diagnostics():
+    """Three 503s: 3 calls, 2 sleeps (no sleep after the final
+    failure), RetryCapExceeded raised with attempts=3 and
+    last_status=503."""
+    client = _RetryFakeHttpClient(
+        [
+            _RetryFakeResponse(503),
+            _RetryFakeResponse(503),
+            _RetryFakeResponse(503),
+        ]
+    )
+    sleep_fn, sleeps = _record_sleep()
+    with pytest.raises(RetryCapExceeded) as exc_info:
+        retry_http_get(
+            client,
+            "https://example/api",
+            params={},
+            timeout=10.0,
+            settings=RetrySettings.default(),
+            sleep=sleep_fn,
+            jitter_fn=_no_jitter,
+        )
+    assert exc_info.value.attempts == 3
+    assert exc_info.value.last_status == 503
+    assert exc_info.value.retry_after is None
+    assert len(client.calls) == 3
+    assert len(sleeps) == 2  # No sleep after the final failure.
+
+
+def test_retry_http_get_honours_retry_after_within_budget():
+    """A 429 with Retry-After=1 (within the 30 s budget) sleeps
+    exactly 1.0 — not the computed exponential delay. compute_delay
+    for attempt=0 with default settings would be 0.5; this test pins
+    that the explicit Retry-After wins."""
+    client = _RetryFakeHttpClient(
+        [
+            _RetryFakeResponse(429, headers={"Retry-After": "1"}),
+            _RetryFakeResponse(200, payload={"ok": True}),
+        ]
+    )
+    sleep_fn, sleeps = _record_sleep()
+    resp = retry_http_get(
+        client,
+        "https://example/api",
+        params={},
+        timeout=10.0,
+        settings=RetrySettings.default(),
+        sleep=sleep_fn,
+        jitter_fn=_no_jitter,
+    )
+    assert resp.status_code == 200
+    assert len(client.calls) == 2
+    assert sleeps == [1.0]
+
+
+def test_retry_http_get_retry_after_exceeds_budget_raises_immediately():
+    """A 429 with Retry-After=60 (exceeds 30 s default budget):
+    immediate RetryCapExceeded, attempts=1, no sleep, no further
+    HTTP calls. Long waits surface immediately so the developer can
+    re-run later."""
+    client = _RetryFakeHttpClient(
+        [_RetryFakeResponse(429, headers={"Retry-After": "60"})]
+    )
+    sleep_fn, sleeps = _record_sleep()
+    with pytest.raises(RetryCapExceeded) as exc_info:
+        retry_http_get(
+            client,
+            "https://example/api",
+            params={},
+            timeout=10.0,
+            settings=RetrySettings.default(),
+            sleep=sleep_fn,
+            jitter_fn=_no_jitter,
+        )
+    assert exc_info.value.attempts == 1
+    assert exc_info.value.last_status == 429
+    assert exc_info.value.retry_after == "60"
+    assert len(client.calls) == 1
+    assert sleeps == []  # Immediate surface — no sleep.
