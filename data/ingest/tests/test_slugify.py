@@ -88,3 +88,56 @@ def test_assert_unique_slugs_error_message_names_both_titles():
     assert "'Foo bar'" in msg
     assert "'foo-bar'" in msg
     assert "slug collision" in msg
+
+
+# ─── German orthography ──────────────────────────────────────────────────
+# These tests pin the slugify behaviour for German titles. The previous
+# implementation used `str.lower()` + NFD-strip-combining, which silently
+# DROPPED ß (no NFD decomposition + non-ASCII → stripped by the
+# alphanumeric regex). `Straße` became `strae` — a silent corruption
+# that would have produced unfindable passage ids in a German seed
+# corpus. The cure is `str.casefold()` which performs proper Unicode
+# case folding (ß → ss, capital ẞ → ss, etc.).
+
+
+def test_slugify_eszett_becomes_ss():
+    # The standard German transliteration: ß → ss. Critical for the
+    # German Wikipedia ingest because many science article titles use ß
+    # (Größe, Maß, Schließe, etc.).
+    assert slugify("Straße") == "strasse"
+
+
+def test_slugify_capital_eszett_becomes_ss():
+    # The capital ẞ (U+1E9E, added to Unicode in 2008) is rare but
+    # exists in modern German typography. casefold() handles both.
+    assert slugify("STRAẞE") == "strasse"
+
+
+def test_slugify_umlauts_decompose_to_base_letter():
+    # ä → a, ö → o, ü → u via NFD + combining-strip.
+    # Note: the German "long form" transliteration would be ä→ae, ö→oe,
+    # ü→ue. We deliberately use the simpler base-letter form here for
+    # consistency with the existing English NFD path; the trade-off is
+    # that "Müller" and "Muller" would produce the same slug. For
+    # children's-curriculum article titles this is acceptable; the
+    # _assert_unique_slugs check would catch any real collision in the
+    # whitelist.
+    assert slugify("Ökologie") == "okologie"
+    assert slugify("Übermorgen") == "ubermorgen"
+    assert slugify("Ärger") == "arger"
+
+
+def test_slugify_compound_german_word_with_eszett_and_umlaut():
+    # "Größe" combines both: ö-umlaut + ß. casefold() folds ß → ss
+    # FIRST, then NFD strips the ö-combining mark.
+    assert slugify("Größe") == "grosse"
+
+
+def test_assert_unique_slugs_catches_eszett_post_fold_collision():
+    # `Straße` and `Strasse` are distinct German words (the latter is
+    # the spelling used in Switzerland and in pre-reform German), but
+    # they slugify to the same id under casefold(). Catch the collision
+    # loudly rather than silently dropping the second passage at load
+    # time.
+    with pytest.raises(ValueError, match="slug collision"):
+        _assert_unique_slugs(["Straße", "Strasse"])

@@ -3,7 +3,7 @@ talks to the real network."""
 import json
 from pathlib import Path
 import pytest
-from simple_wikipedia import fetch_lead, fetch_leads
+from simple_wikipedia import KLEXIKON, SIMPLE_ENGLISH, fetch_lead, fetch_leads
 
 
 FIXTURES = Path(__file__).parent / "fixtures"
@@ -46,7 +46,7 @@ def _load_fixture(name: str) -> dict:
 
 def test_fetch_lead_returns_title_text_url():
     client = FakeHttpClient({"Photosynthesis": _load_fixture("photosynthesis.json")})
-    result = fetch_lead("Photosynthesis", http_client=client)
+    result = fetch_lead("Photosynthesis", http_client=client, source=SIMPLE_ENGLISH)
     assert result["title"] == "Photosynthesis"
     assert "Photosynthesis is a process" in result["lead_text"]
     assert result["canonical_url"] == "https://simple.wikipedia.org/wiki/Photosynthesis"
@@ -54,7 +54,7 @@ def test_fetch_lead_returns_title_text_url():
 
 def test_fetch_lead_uses_correct_api_endpoint():
     client = FakeHttpClient({"Photosynthesis": _load_fixture("photosynthesis.json")})
-    fetch_lead("Photosynthesis", http_client=client)
+    fetch_lead("Photosynthesis", http_client=client, source=SIMPLE_ENGLISH)
     assert len(client.calls) == 1
     call = client.calls[0]
     assert "simple.wikipedia.org" in call["url"]
@@ -71,7 +71,7 @@ def test_fetch_lead_missing_article_raises():
     # "missing" sentinel structure, which fetch_lead must detect.
     client = FakeHttpClient({})
     with pytest.raises(RuntimeError, match="not found"):
-        fetch_lead("DoesNotExist", http_client=client)
+        fetch_lead("DoesNotExist", http_client=client, source=SIMPLE_ENGLISH)
 
 
 def test_fetch_lead_empty_extract_raises():
@@ -80,7 +80,7 @@ def test_fetch_lead_empty_extract_raises():
     }
     client = FakeHttpClient({"Stub": payload})
     with pytest.raises(RuntimeError, match="empty extract"):
-        fetch_lead("Stub", http_client=client)
+        fetch_lead("Stub", http_client=client, source=SIMPLE_ENGLISH)
 
 
 def test_fetch_lead_disambiguation_page_raises_can_mean():
@@ -101,7 +101,7 @@ def test_fetch_lead_disambiguation_page_raises_can_mean():
     }
     client = FakeHttpClient({"Base": payload})
     with pytest.raises(RuntimeError, match="disambiguation page"):
-        fetch_lead("Base", http_client=client)
+        fetch_lead("Base", http_client=client, source=SIMPLE_ENGLISH)
 
 
 def test_fetch_lead_disambiguation_page_raises_may_refer_to():
@@ -119,7 +119,7 @@ def test_fetch_lead_disambiguation_page_raises_may_refer_to():
     }
     client = FakeHttpClient({"Saturn": payload})
     with pytest.raises(RuntimeError, match="disambiguation page"):
-        fetch_lead("Saturn", http_client=client)
+        fetch_lead("Saturn", http_client=client, source=SIMPLE_ENGLISH)
 
 
 def test_fetch_leads_rejects_oversized_batch():
@@ -128,11 +128,143 @@ def test_fetch_leads_rejects_oversized_batch():
     # loudly here.
     titles = [f"Title{i}" for i in range(21)]
     with pytest.raises(ValueError, match="exceeds API cap"):
-        fetch_leads(titles, http_client=FakeHttpClient({}))
+        fetch_leads(titles, http_client=FakeHttpClient({}), source=SIMPLE_ENGLISH)
 
 
 def test_fetch_leads_empty_input_returns_empty_dict_no_http_call():
     client = FakeHttpClient({})
-    out = fetch_leads([], http_client=client)
+    out = fetch_leads([], http_client=client, source=SIMPLE_ENGLISH)
     assert out == {}
     assert client.calls == [], "empty input must not trigger an HTTP request"
+
+
+# ─── Klexikon source (parse&prop=wikitext&section=0 strategy) ───────────
+# Klexikon's MediaWiki has no TextExtracts extension, so the pipeline
+# uses a different fetch shape: `action=parse` instead of
+# `action=query`. The response carries `parse.wikitext.*` (raw
+# wikitext for the lead section), which the stripper converts to
+# plain text.
+
+
+def _klexikon_parse_payload(title: str, wikitext: str) -> dict:
+    """Build a fake `action=parse` response shaped like the real
+    Klexikon API output."""
+    return {
+        "parse": {
+            "title": title,
+            "wikitext": {"*": wikitext},
+        },
+    }
+
+
+class KlexikonFakeHttpClient:
+    """Fake HTTP client for the Klexikon `action=parse` flow.
+
+    The real Klexikon API returns a JSON envelope with `parse.title`
+    and `parse.wikitext.*`; canonical URLs are constructed by the
+    fetcher (the API doesn't return them inline for the parse action).
+    Maps the requested `page` query parameter to a canned payload.
+    """
+
+    def __init__(self, responses: dict[str, dict]):
+        self.responses = responses
+        self.calls: list[dict] = []
+
+    def get(self, url: str, params: dict, timeout: float | None = None):
+        self.calls.append({"url": url, "params": params})
+        page = params.get("page", "")
+        if page not in self.responses:
+            return FakeResponse({"error": {"code": "missingtitle", "info": f"{page} missing"}})
+        return FakeResponse(self.responses[page])
+
+
+def test_fetch_lead_klexikon_strategy_uses_parse_action_against_klexikon_zum_de():
+    payload = _klexikon_parse_payload(
+        title="Klima",
+        wikitext=(
+            "Wenn man vom Klima spricht, ist gemeint, dass es irgendwo "
+            "normalerweise warm oder kalt ist. Das [[Wetter]] ist etwas "
+            "Ähnliches, aber vom Wetter spricht man, wenn man an einen "
+            "Tag oder wenige [[Woche]]n denkt."
+        ),
+    )
+    client = KlexikonFakeHttpClient({"Klima": payload})
+    result = fetch_lead("Klima", http_client=client, source=KLEXIKON)
+    assert result["title"] == "Klima"
+    # Wiki links must be flattened.
+    assert "[[" not in result["lead_text"]
+    assert "Wetter" in result["lead_text"]
+    # The canonical URL is constructed deterministically from the
+    # source's web-page base + the title (URL-encoded with spaces →
+    # underscores per MediaWiki convention).
+    assert result["canonical_url"] == "https://klexikon.zum.de/wiki/Klima"
+    # Critical: the request must have gone to klexikon.zum.de.
+    assert len(client.calls) == 1
+    assert "klexikon.zum.de" in client.calls[0]["url"]
+    assert "simple.wikipedia.org" not in client.calls[0]["url"]
+    # And it must have used the parse action, not the query action.
+    assert client.calls[0]["params"]["action"] == "parse"
+    assert client.calls[0]["params"]["section"] == 0
+    assert client.calls[0]["params"]["page"] == "Klima"
+
+
+def test_fetch_lead_klexikon_strips_image_block():
+    # Real Klexikon "Klima" page lead opens with a Datei: image block
+    # whose caption itself contains [[link]]s. The fetcher must drop
+    # the entire image block; otherwise raw wikitext leaks into the
+    # passage.
+    payload = _klexikon_parse_payload(
+        title="Klima",
+        wikitext=(
+            "[[Datei:Thai_rain_forest.jpg|mini|[[Thailand]]: Hier im "
+            "[[Tropen|tropisch]]en [[Regenwald]] wachsen [[Pflanzen]] "
+            "sehr gut.]]\n"
+            "Wenn man vom Klima spricht, ist gemeint, dass es irgendwo "
+            "normalerweise warm oder kalt ist."
+        ),
+    )
+    client = KlexikonFakeHttpClient({"Klima": payload})
+    result = fetch_lead("Klima", http_client=client, source=KLEXIKON)
+    text = result["lead_text"]
+    assert "Datei:" not in text
+    assert "[[" not in text
+    assert "]]" not in text
+    assert text.startswith("Wenn man vom Klima spricht")
+
+
+def test_fetch_lead_klexikon_handles_titles_with_spaces():
+    # MediaWiki titles can contain spaces; the canonical URL uses
+    # underscores. Verify the URL construction handles both.
+    payload = _klexikon_parse_payload(
+        title="Roter Riese",
+        wikitext="Ein Roter Riese ist ein sehr großer [[Stern]].",
+    )
+    client = KlexikonFakeHttpClient({"Roter Riese": payload})
+    result = fetch_lead("Roter Riese", http_client=client, source=KLEXIKON)
+    assert result["title"] == "Roter Riese"
+    assert result["canonical_url"] == "https://klexikon.zum.de/wiki/Roter_Riese"
+
+
+def test_fetch_lead_klexikon_missing_page_raises():
+    # MediaWiki's parse action returns an `error.code=missingtitle`
+    # block when the page doesn't exist. The fetcher must surface
+    # that as a `RuntimeError` so a typo'd whitelist entry fails
+    # loudly during ingest, not silently as an empty passage.
+    client = KlexikonFakeHttpClient({})  # nothing in the map
+    with pytest.raises(RuntimeError, match="not found|missing"):
+        fetch_lead("DoesNotExist", http_client=client, source=KLEXIKON)
+
+
+def test_fetch_lead_klexikon_disambiguation_steht_fuer_raises():
+    # German disambiguation pages typically use "<title> steht für: ...".
+    # Klexikon's curation makes this rare but possible; catch it.
+    payload = _klexikon_parse_payload(
+        title="Saturn",
+        wikitext=(
+            "Saturn steht für: den Planeten Saturn, den römischen Gott "
+            "Saturn, oder verschiedene andere Bedeutungen."
+        ),
+    )
+    client = KlexikonFakeHttpClient({"Saturn": payload})
+    with pytest.raises(RuntimeError, match="disambiguation page"):
+        fetch_lead("Saturn", http_client=client, source=KLEXIKON)

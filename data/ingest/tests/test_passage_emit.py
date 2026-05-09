@@ -1,6 +1,6 @@
 """Tests for to_passage — record → SeedPassage-compatible dict."""
 import pytest
-from simple_wikipedia import to_passage
+from simple_wikipedia import KLEXIKON, SIMPLE_ENGLISH, to_passage
 
 
 def test_basic_record():
@@ -9,7 +9,7 @@ def test_basic_record():
         "lead_text": "Photosynthesis is a process used by plants and other organisms.",
         "canonical_url": "https://simple.wikipedia.org/wiki/Photosynthesis",
     }
-    p = to_passage(record)
+    p = to_passage(record, source=SIMPLE_ENGLISH)
     assert p == {
         "id": "wiki-simple:en:photosynthesis",
         "source": "wiki-simple:en:photosynthesis",
@@ -27,7 +27,7 @@ def test_multiword_title():
         "lead_text": "A black hole is a region of spacetime.",
         "canonical_url": "https://simple.wikipedia.org/wiki/Black_hole",
     }
-    p = to_passage(record)
+    p = to_passage(record, source=SIMPLE_ENGLISH)
     assert p["id"] == "wiki-simple:en:black-hole"
     assert p["topics"] == ["wikipedia", "simple-english", "science", "black-hole"]
 
@@ -39,7 +39,7 @@ def test_attribution_uses_original_title_capitalisation():
         "lead_text": "Deoxyribonucleic acid (DNA) is a molecule.",
         "canonical_url": "https://simple.wikipedia.org/wiki/DNA",
     }
-    p = to_passage(record)
+    p = to_passage(record, source=SIMPLE_ENGLISH)
     assert "'DNA'" in p["attribution"]
     assert p["id"] == "wiki-simple:en:dna"
 
@@ -55,7 +55,7 @@ def test_short_lead_raises():
         "lead_text": "Short.",
         "canonical_url": "https://example.com/Test",
     }
-    p = to_passage(record)
+    p = to_passage(record, source=SIMPLE_ENGLISH)
     assert p["text"] == "Short."
     assert p["id"] == "wiki-simple:en:test"
 
@@ -79,7 +79,7 @@ def test_math_artifacts_stripped_from_density_passage():
         ),
         "canonical_url": "https://simple.wikipedia.org/wiki/Density",
     }
-    p = to_passage(record)
+    p = to_passage(record, source=SIMPLE_ENGLISH)
     assert "\\displaystyle" not in p["text"]
     assert "Density is a measurement" in p["text"]
     assert "where ρ is the density." in p["text"]
@@ -97,10 +97,57 @@ def test_math_artifacts_stripper_leaves_plain_text_untouched():
         ),
         "canonical_url": "https://simple.wikipedia.org/wiki/Photosynthesis",
     }
-    p = to_passage(record)
+    p = to_passage(record, source=SIMPLE_ENGLISH)
     expected = (
         "Photosynthesis is a process used by plants.\n\n"
         "It converts light energy into chemical energy.\n\n"
         "This is how plants make food."
     )
     assert p["text"] == expected
+
+
+# ─── Klexikon-source emit ────────────────────────────────────────────────
+# The same `to_passage` flow with `source=KLEXIKON` produces ids and
+# attributions for the Klexikon (children's German wiki) layer,
+# auto-loaded as `wiki_passages.de.jsonl` for sessions started with
+# `--language de`.
+
+
+def test_to_passage_with_klexikon_source_uses_de_pack_id_and_label():
+    record = {
+        "title": "Klima",
+        "lead_text": (
+            "Wenn man vom Klima spricht, ist gemeint, dass es irgendwo "
+            "normalerweise warm oder kalt ist, dass es trocken oder "
+            "feucht ist. Das Klima einer Gegend ist so, wie man es "
+            "über Jahre beobachtet hat."
+        ),
+        "canonical_url": "https://klexikon.zum.de/wiki/Klima",
+    }
+    p = to_passage(record, source=KLEXIKON)
+    assert p["id"] == "wiki-klexikon:de:klima"
+    assert p["source"] == "wiki-klexikon:de:klima"
+    assert p["license"] == "CC-BY-SA-4.0"
+    assert p["attribution"] == (
+        "'Klima' from Klexikon, licensed under CC-BY-SA-4.0"
+    )
+    assert p["source_url"] == "https://klexikon.zum.de/wiki/Klima"
+    # Topics: ["wikipedia", *source.topic_tags, slug].
+    assert p["topics"] == ["wikipedia", "klexikon", "klima"]
+
+
+def test_to_passage_with_klexikon_source_handles_eszett_in_title():
+    # "Größe" combines umlaut + ß. casefold folds ß → ss; NFD strips
+    # the combining marks. Output slug: "grosse".
+    record = {
+        "title": "Größe",
+        "lead_text": (
+            "Eine Größe sagt aus, wie viel von etwas vorhanden ist."
+        ),
+        "canonical_url": "https://klexikon.zum.de/wiki/Größe",
+    }
+    p = to_passage(record, source=KLEXIKON)
+    assert p["id"] == "wiki-klexikon:de:grosse"
+    assert "'Größe'" in p["attribution"], (
+        "attribution must preserve the original title with diacritics"
+    )

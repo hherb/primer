@@ -1,0 +1,48 @@
+# Klexikon (German children's wiki) whitelist for the Primer.
+#
+# Each line is the canonical Klexikon article title. Lines starting
+# with `#` are ignored. Titles are case-sensitive and must match
+# Klexikon exactly (the API returns "missingtitle" for typos).
+#
+# This is a hand-curated starter set covering the same five clusters
+# the English seed corpus uses: space, body, how-things-work, life,
+# earth/weather. It is deliberately small (~20 titles) to keep the
+# initial ingest fast; expand by adding lines and re-running
+# `python3 simple_wikipedia.py --language de`.
+#
+# License: CC BY-SA 4.0 (Klexikon).
+# Source: https://klexikon.zum.de/
+
+# ─── Space ───
+Sonne
+Mond
+Erde
+Stern
+Planet
+Sonnensystem
+
+# ─── Earth & weather ───
+Wetter
+Klima
+Vulkan
+Erdbeben
+Regen
+Wolke
+
+# ─── Life ───
+Pflanze
+Tier
+Insekt
+Vogel
+
+# ─── Body (basic organs) ───
+Herz
+Lunge
+Gehirn
+Auge
+
+# ─── How things work ───
+Magnet
+Schall
+Licht
+Wasser
