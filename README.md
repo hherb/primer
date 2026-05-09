@@ -301,6 +301,10 @@ cargo run --bin primer -- --resume <uuid>
 
 When the resumed session has more than `context_window_turns` (default 20) turns, the Primer maintains long-term memory in two complementary ways: a rolling LLM-generated summary (refreshed on resume only when the loaded one is stale, then every 20 further pre-window turns during active conversation) and FTS5-based retrieval of relevant older turns based on the current child input. Both are injected into the system prompt — the chat-message timeline the model sees stays equal to the last 20 turns, so context budget is bounded even across hours of conversation.
 
+## Contributing
+
+**Developer manual:** see [docs/devel/](docs/devel/) for the full contributor manual — getting started, architecture, subsystem deep-dives, and how-to recipes (add a new backend, schema migration, locale, …).
+
 ## License
 
 AGPL-3.0 — see [LICENSE](LICENSE).
