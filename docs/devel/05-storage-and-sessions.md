@@ -1,6 +1,6 @@
 # Storage and sessions
 
-This chapter is about how the Primer remembers conversations. It covers the [SessionStore](src/crates/primer-core/src/storage.rs) and [LearnerStore](src/crates/primer-core/src/storage.rs) traits, the [SqliteSessionStore](src/crates/primer-storage/src/store/mod.rs) implementation, the schema-migration discipline that lets old DBs upgrade in place without ever running a destructive migration, the lookup-table normalisation rule that keeps every categorical text column in sync with its Rust enum, the append-only `save_session` invariant and the explicit backfill paths that work around it, the FTS5 sanitisation layer that lets raw child input drive search safely, and the long-term-memory + turn-embedding-on-save pipelines that surface relevant older turns into future system prompts. One recipe at the end walks through adding a new schema version end-to-end.
+This chapter is about how the Primer remembers conversations. It covers the [SessionStore](../../src/crates/primer-core/src/storage.rs) and [LearnerStore](../../src/crates/primer-core/src/storage.rs) traits, the [SqliteSessionStore](../../src/crates/primer-storage/src/store/mod.rs) implementation, the schema-migration discipline that lets old DBs upgrade in place without ever running a destructive migration, the lookup-table normalisation rule that keeps every categorical text column in sync with its Rust enum, the append-only `save_session` invariant and the explicit backfill paths that work around it, the FTS5 sanitisation layer that lets raw child input drive search safely, and the long-term-memory + turn-embedding-on-save pipelines that surface relevant older turns into future system prompts. One recipe at the end walks through adding a new schema version end-to-end.
 
 If you read chapter 3 you already saw the dialogue manager hand finished turns to a `SessionStore`; this chapter is what happens once it does.
 
@@ -14,7 +14,7 @@ The split exists because the two stores hold fundamentally different data. The s
 
 ## SessionStore and LearnerStore traits
 
-Two traits split the persistence surface, both defined in [storage.rs](src/crates/primer-core/src/storage.rs):
+Two traits split the persistence surface, both defined in [storage.rs](../../src/crates/primer-core/src/storage.rs):
 
 ```rust
 // src/crates/primer-core/src/storage.rs
@@ -58,13 +58,13 @@ pub trait LearnerStore: Send + Sync {
 }
 ```
 
-Both are implemented by [SqliteSessionStore](src/crates/primer-storage/src/store/mod.rs) — one type, two trait impls. The split is for testability and for the long-term shape: a future contributor who wants an alternative learner store (think a profile-only export tool) does not have to reimplement the much-larger session API. `SessionStore::save_turn_embedding` and `SessionStore::retrieve_session_turns_hybrid` carry default impls so that backends without vector support stay valid — the dialogue manager calls those methods unconditionally.
+Both are implemented by [SqliteSessionStore](../../src/crates/primer-storage/src/store/mod.rs) — one type, two trait impls. The split is for testability and for the long-term shape: a future contributor who wants an alternative learner store (think a profile-only export tool) does not have to reimplement the much-larger session API. `SessionStore::save_turn_embedding` and `SessionStore::retrieve_session_turns_hybrid` carry default impls so that backends without vector support stay valid — the dialogue manager calls those methods unconditionally.
 
 The `Result<Option<…>>` shape on `load_session`, `load_learner`, and `most_recent_session_learner_id` is deliberate. "Not found" is not an error — it's a normal first-run signal. Reserving `Err` for genuine I/O failures keeps the CLI free of "is this an expected miss or a real problem?" conditionals.
 
 ## Schema-migration pattern
 
-[primer-storage](src/crates/primer-storage/src/schema.rs) follows one shape across every migration. Read [schema.rs](src/crates/primer-storage/src/schema.rs) and you will see `apply_v2_migrations`, `apply_v3_migrations`, … `apply_v8_migrations` — eight migrations layered additively, each idempotent, each transaction-wrapped, each safe to run on a fresh DB or on any older DB being upgraded. The constant `USER_VERSION` lives at the top of that file (currently `8`). Open path lives in [store/mod.rs](src/crates/primer-storage/src/store/mod.rs) and runs every migration in order on every open.
+[primer-storage](../../src/crates/primer-storage/src/schema.rs) follows one shape across every migration. Read [schema.rs](../../src/crates/primer-storage/src/schema.rs) and you will see `apply_v2_migrations`, `apply_v3_migrations`, … `apply_v8_migrations` — eight migrations layered additively, each idempotent, each transaction-wrapped, each safe to run on a fresh DB or on any older DB being upgraded. The constant `USER_VERSION` lives at the top of that file (currently `8`). Open path lives in [store/mod.rs](../../src/crates/primer-storage/src/store/mod.rs) and runs every migration in order on every open.
 
 The pattern, distilled from `apply_v8_migrations`:
 
@@ -97,9 +97,9 @@ pub(crate) fn apply_v8_migrations(conn: &Connection) -> Result<()> {
 }
 ```
 
-Three things are doing all the work here. First, `conn.unchecked_transaction()` wraps the whole body so a partial failure (disk full halfway through, FK violation in step three) rolls back to the pre-migration state — no half-applied schema that subsequent saves would silently miswrite to. Second, every DDL is `CREATE … IF NOT EXISTS`, which makes the migration safe to re-run on an already-upgraded DB. Third, when a column add is needed instead of a new table, the helper `column_exists(&tx, "table", "column")` (also in [schema.rs](src/crates/primer-storage/src/schema.rs)) gates the `ALTER TABLE` so it runs once and only once. See `apply_v6_migrations` and `apply_v7_migrations` for the column-add shape.
+Three things are doing all the work here. First, `conn.unchecked_transaction()` wraps the whole body so a partial failure (disk full halfway through, FK violation in step three) rolls back to the pre-migration state — no half-applied schema that subsequent saves would silently miswrite to. Second, every DDL is `CREATE … IF NOT EXISTS`, which makes the migration safe to re-run on an already-upgraded DB. Third, when a column add is needed instead of a new table, the helper `column_exists(&tx, "table", "column")` (also in [schema.rs](../../src/crates/primer-storage/src/schema.rs)) gates the `ALTER TABLE` so it runs once and only once. See `apply_v6_migrations` and `apply_v7_migrations` for the column-add shape.
 
-After the migrations run, the open path also calls [validate_and_seed_lookup](src/crates/primer-storage/src/schema.rs) for every lookup table backed by a Rust enum — `speakers`, `pedagogical_intents`, `engagement_states`, `understanding_depths`. That helper compares what's on disk against the canonical `(id, name)` pairs from [catalog.rs](src/crates/primer-storage/src/catalog.rs) (which the Rust enums project into), inserts any missing rows, and **returns a hard error** if a known id has the wrong name or if the table has an id the build doesn't know about.
+After the migrations run, the open path also calls [validate_and_seed_lookup](../../src/crates/primer-storage/src/schema.rs) for every lookup table backed by a Rust enum — `speakers`, `pedagogical_intents`, `engagement_states`, `understanding_depths`. That helper compares what's on disk against the canonical `(id, name)` pairs from [catalog.rs](../../src/crates/primer-storage/src/catalog.rs) (which the Rust enums project into), inserts any missing rows, and **returns a hard error** if a known id has the wrong name or if the table has an id the build doesn't know about.
 
 > **Gotcha:** A schema `USER_VERSION` newer than this build is a hard error rejected at open. Older is silently upgraded. The reasoning: a newer-than-this-build DB might have rows the current code can't safely read, but an older DB is exactly what migrations are designed to bring forward.
 
@@ -107,31 +107,31 @@ After the migrations run, the open path also calls [validate_and_seed_lookup](sr
 
 Every categorical text column in this codebase is stored as an integer foreign key into a lookup table — never as inline text. That applies to `speakers`, `pedagogical_intents`, `engagement_states`, `understanding_depths`, `concepts`, `classifiers`, `comprehension_classifiers`, and the per-table `embedding_models` registries.
 
-For columns backed by a **closed** Rust enum (`Speaker`, `PedagogicalIntent`, `EngagementState`, `UnderstandingDepth`), the Rust source is the single source of truth. The DB lookup table is a derived projection — [catalog.rs](src/crates/primer-storage/src/catalog.rs) exposes `expected_speakers()`, `expected_intents()`, `expected_engagement_states()`, `expected_understanding_depths()`, all of which return `Vec<(i64, &'static str)>`. The open path runs `validate_and_seed_lookup` against each of those slices on every open. There is **no API for mutating lookup tables**. Adding a new enum variant means: edit the Rust enum, recompile, next open seeds the new row. Retired integer ids are never reused — once an id has had a meaning, that meaning is canonical.
+For columns backed by a **closed** Rust enum (`Speaker`, `PedagogicalIntent`, `EngagementState`, `UnderstandingDepth`), the Rust source is the single source of truth. The DB lookup table is a derived projection — [catalog.rs](../../src/crates/primer-storage/src/catalog.rs) exposes `expected_speakers()`, `expected_intents()`, `expected_engagement_states()`, `expected_understanding_depths()`, all of which return `Vec<(i64, &'static str)>`. The open path runs `validate_and_seed_lookup` against each of those slices on every open. There is **no API for mutating lookup tables**. Adding a new enum variant means: edit the Rust enum, recompile, next open seeds the new row. Retired integer ids are never reused — once an id has had a meaning, that meaning is canonical.
 
 For columns backed by an **open** vocabulary (`concepts`, `classifiers`, `comprehension_classifiers`), the row is created lazily on first reference. `update_turn_concepts` and friends use `INSERT OR IGNORE` patterns so that two parallel tasks racing to insert the same concept name end up with one row.
 
-A few text columns deliberately stay as JSON-in-TEXT rather than being normalised: `learners.languages`, `learners.high_engagement_topics`, `learner_concepts.notes`. Those are open-vocabulary, free-text lists owned by the learner; they're not FK targets, not queried by exact match, not shared across rows, and not bounded. Normalising them would buy nothing the `concepts` table doesn't already prove. See the long comment above `CREATE_LEARNERS_TABLE` in [schema.rs](src/crates/primer-storage/src/schema.rs) for the full reasoning.
+A few text columns deliberately stay as JSON-in-TEXT rather than being normalised: `learners.languages`, `learners.high_engagement_topics`, `learner_concepts.notes`. Those are open-vocabulary, free-text lists owned by the learner; they're not FK targets, not queried by exact match, not shared across rows, and not bounded. Normalising them would buy nothing the `concepts` table doesn't already prove. See the long comment above `CREATE_LEARNERS_TABLE` in [schema.rs](../../src/crates/primer-storage/src/schema.rs) for the full reasoning.
 
 > **Gotcha:** Drift in lookup tables is a hard error — `validate_and_seed_lookup` refuses to open a DB whose lookup-table state disagrees with the Rust enum. There is no API for mutating lookup tables. Adding a variant means recompile + reopen.
 
 ## The append-only invariant on save_session
 
-`save_session` is called after every turn, repeatedly, on the same session as it grows. To stay idempotent and cheap it does one specific thing on the `turns` table: it inserts only the turns that aren't already on disk (see the `.skip(persisted_count)` loop in [session_save.rs](src/crates/primer-storage/src/store/session_save.rs)). Turns already persisted are skipped without comparison.
+`save_session` is called after every turn, repeatedly, on the same session as it grows. To stay idempotent and cheap it does one specific thing on the `turns` table: it inserts only the turns that aren't already on disk (see the `.skip(persisted_count)` loop in [session_save.rs](../../src/crates/primer-storage/src/store/session_save.rs)). Turns already persisted are skipped without comparison.
 
 This is correct for the in-memory `Session` type, which is itself append-only — turns get added at the tail, never modified in place. But it has one consequence the dialogue manager has to work around: any data the post-response background tasks (the concept extractor, the comprehension classifier, the embedder) want to attach to a turn after `save_session` has already run cannot be attached through `save_session`. The skip rule would silently drop their writes.
 
-The fix is explicit backfill methods: [update_turn_concepts](src/crates/primer-core/src/storage.rs) and [update_exchange_concepts](src/crates/primer-core/src/storage.rs) for concept tags, [save_comprehensions](src/crates/primer-core/src/storage.rs) for per-concept depth assessments, [save_turn_embedding](src/crates/primer-core/src/storage.rs) for vectors. Each one resolves `(session_id, turn_index)` to a row id, does an `INSERT OR IGNORE` (or upsert, for embeddings) into the appropriate junction table, and returns. Calling them twice with the same data is a no-op.
+The fix is explicit backfill methods: [update_turn_concepts](../../src/crates/primer-core/src/storage.rs) and [update_exchange_concepts](../../src/crates/primer-core/src/storage.rs) for concept tags, [save_comprehensions](../../src/crates/primer-core/src/storage.rs) for per-concept depth assessments, [save_turn_embedding](../../src/crates/primer-core/src/storage.rs) for vectors. Each one resolves `(session_id, turn_index)` to a row id, does an `INSERT OR IGNORE` (or upsert, for embeddings) into the appropriate junction table, and returns. Calling them twice with the same data is a no-op.
 
 If you find yourself wanting to move concept persistence back into `save_session` because "it would be simpler" — don't. Doing so requires changing the skip rule, which breaks the append-only invariant, which then makes `save_session` non-idempotent on the turns table. The current shape is load-bearing.
 
 ## FTS5 query sanitisation
 
-`retrieve_session_turns` takes raw child input as its `query`. To pass that to FTS5's `MATCH` operator without letting punctuation, quotes, or reserved keywords crash the query parser, the storage layer runs everything through [sanitize_fts_phrase](src/crates/primer-storage/src/store/fts.rs) first.
+`retrieve_session_turns` takes raw child input as its `query`. To pass that to FTS5's `MATCH` operator without letting punctuation, quotes, or reserved keywords crash the query parser, the storage layer runs everything through [sanitize_fts_phrase](../../src/crates/primer-storage/src/store/fts.rs) first.
 
 The transformation is simple: split on whitespace, strip every non-alphanumeric character per token (kills `*`, `^`, `:`, `"`, `(`, `)`, slashes, etc.), drop the FTS5 reserved keywords `AND` / `OR` / `NOT` / `NEAR` (case-insensitive), wrap each surviving token in double quotes (so any character the tokenizer would otherwise see as special is inert), and OR-join the lot. An empty result short-circuits the query — FTS5 rejects `MATCH ''`, so the caller skips the search and returns an empty result.
 
-OR-joining (rather than implicit-AND) is a deliberate choice. If sanitization introduces noise tokens — say, a stripped contraction leaving a stray fragment — implicit-AND would torpedo the entire query. With OR, BM25 ranking + the caller's `LIMIT k` keep the result list focused on the most relevant matches and the noise tokens just don't contribute. The unit tests at the bottom of [fts.rs](src/crates/primer-storage/src/store/fts.rs) pin the behaviour for empty input, single token, multiple tokens, reserved keywords, FTS5-active punctuation, Unicode alphanumerics, and punctuation-only input.
+OR-joining (rather than implicit-AND) is a deliberate choice. If sanitization introduces noise tokens — say, a stripped contraction leaving a stray fragment — implicit-AND would torpedo the entire query. With OR, BM25 ranking + the caller's `LIMIT k` keep the result list focused on the most relevant matches and the noise tokens just don't contribute. The unit tests at the bottom of [fts.rs](../../src/crates/primer-storage/src/store/fts.rs) pin the behaviour for empty input, single token, multiple tokens, reserved keywords, FTS5-active punctuation, Unicode alphanumerics, and punctuation-only input.
 
 ## Long-term memory
 
@@ -153,7 +153,7 @@ There's one subtlety worth knowing. The just-saved turn may not have a vector ye
 
 ## Schema versions, in order
 
-Single source of truth for what each migration does is [schema.rs](src/crates/primer-storage/src/schema.rs). At a glance:
+Single source of truth for what each migration does is [schema.rs](../../src/crates/primer-storage/src/schema.rs). At a glance:
 
 | v | What it added |
 |---|---|
@@ -165,7 +165,7 @@ Single source of truth for what each migration does is [schema.rs](src/crates/pr
 | 7 | `learner_concepts.box_level` (Leitner-box scheduler, default `0`) |
 | 8 | `embedding_models` registry + `embeddings_turns` (per-turn f32 BLOB vectors for hybrid long-term memory) |
 
-If you find a discrepancy between this table and the `apply_vN_migrations` doc-comments in [schema.rs](src/crates/primer-storage/src/schema.rs), trust the source — that's the file the open path actually runs.
+If you find a discrepancy between this table and the `apply_vN_migrations` doc-comments in [schema.rs](../../src/crates/primer-storage/src/schema.rs), trust the source — that's the file the open path actually runs.
 
 ---
 
@@ -173,7 +173,7 @@ If you find a discrepancy between this table and the `apply_vN_migrations` doc-c
 
 You want to add a hypothetical "vibe" column to `turns` plus a `vibes` lookup table. The end-to-end change is six steps.
 
-**1. Bump `USER_VERSION` in [schema.rs](src/crates/primer-storage/src/schema.rs).** From `8` to `9`. While you're there, add a paragraph to the doc-comment on `USER_VERSION` describing what v9 adds — the comment block above the constant is the change-log readers turn to first.
+**1. Bump `USER_VERSION` in [schema.rs](../../src/crates/primer-storage/src/schema.rs).** From `8` to `9`. While you're there, add a paragraph to the doc-comment on `USER_VERSION` describing what v9 adds — the comment block above the constant is the change-log readers turn to first.
 
 **2. Add `apply_v9_migrations` following the `apply_v8_migrations` template.** Same shape: open `conn.unchecked_transaction()`, gate any `ALTER TABLE` on `column_exists`, use `CREATE TABLE IF NOT EXISTS` for new tables, commit, return.
 
@@ -207,12 +207,12 @@ pub(crate) fn apply_v9_migrations(conn: &Connection) -> Result<()> {
 }
 ```
 
-**3. Wire it into the open path.** In [store/mod.rs](src/crates/primer-storage/src/store/mod.rs), call `apply_v9_migrations(&conn)?` after the `apply_v8_migrations` line and before the `validate_and_seed_lookup` block. Order matters — validate-and-seed should see the post-migration schema.
+**3. Wire it into the open path.** In [store/mod.rs](../../src/crates/primer-storage/src/store/mod.rs), call `apply_v9_migrations(&conn)?` after the `apply_v8_migrations` line and before the `validate_and_seed_lookup` block. Order matters — validate-and-seed should see the post-migration schema.
 
-**4. Add a migration round-trip test.** Following the pattern in `v4_tests` at the bottom of [schema.rs](src/crates/primer-storage/src/schema.rs), add a test that builds a fresh v8 connection, asserts the new schema isn't there yet, runs `apply_v9_migrations`, and asserts the new column / table is present. Add an idempotency test (run the migration twice, assert no error and no duplicate rows). If you want full coverage, also add a fault-injection rollback test in the style of `apply_v4_migrations_rolls_back_on_failure`.
+**4. Add a migration round-trip test.** Following the pattern in `v4_tests` at the bottom of [schema.rs](../../src/crates/primer-storage/src/schema.rs), add a test that builds a fresh v8 connection, asserts the new schema isn't there yet, runs `apply_v9_migrations`, and asserts the new column / table is present. Add an idempotency test (run the migration twice, assert no error and no duplicate rows). If you want full coverage, also add a fault-injection rollback test in the style of `apply_v4_migrations_rolls_back_on_failure`.
 
-**5. If the migration touches an enum-backed lookup table**, extend [catalog.rs](src/crates/primer-storage/src/catalog.rs) with the new `expected_<table>()` function, add a `validate_and_seed_lookup` call in [store/mod.rs](src/crates/primer-storage/src/store/mod.rs) right after the existing four, and write a `expected_<table>_covers_all_variants` test that pins the projection against the Rust enum (the existing `expected_engagement_states_covers_all_variants` and `expected_understanding_depths_covers_all_variants` tests are the pattern). The "vibes" example above is open-vocabulary so this step doesn't apply, but if `Vibe` were a closed Rust enum it would.
+**5. If the migration touches an enum-backed lookup table**, extend [catalog.rs](../../src/crates/primer-storage/src/catalog.rs) with the new `expected_<table>()` function, add a `validate_and_seed_lookup` call in [store/mod.rs](../../src/crates/primer-storage/src/store/mod.rs) right after the existing four, and write a `expected_<table>_covers_all_variants` test that pins the projection against the Rust enum (the existing `expected_engagement_states_covers_all_variants` and `expected_understanding_depths_covers_all_variants` tests are the pattern). The "vibes" example above is open-vocabulary so this step doesn't apply, but if `Vibe` were a closed Rust enum it would.
 
-**6. Update [CLAUDE.md](CLAUDE.md).** There's a "Schema is at user_version 8." sentence in the `primer-storage` paragraph; bump it to 9 and add the new migration to the v2..v8 chain summary. The same paragraph notes that "the existing v2..v7 chain is the template" — extend that to v2..v8 (or whatever the current top is).
+**6. Update [CLAUDE.md](../../CLAUDE.md).** There's a "Schema is at user_version 8." sentence in the `primer-storage` paragraph; bump it to 9 and add the new migration to the v2..v8 chain summary. The same paragraph notes that "the existing v2..v7 chain is the template" — extend that to v2..v8 (or whatever the current top is).
 
 After all six steps, `cargo test -p primer-storage` should pass on a fresh DB and on every fixture from earlier versions. If any test breaks because it hardcoded an older `USER_VERSION` constant, that's the test telling you the version bump landed correctly — fix the hardcode to use `USER_VERSION` directly.
