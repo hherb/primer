@@ -3,7 +3,13 @@ talks to the real network."""
 import json
 from pathlib import Path
 import pytest
-from simple_wikipedia import KLEXIKON, SIMPLE_ENGLISH, fetch_lead, fetch_leads
+from simple_wikipedia import (
+    KLEXIKON,
+    SIMPLE_ENGLISH,
+    _klexikon_canonical_url,
+    fetch_lead,
+    fetch_leads,
+)
 
 
 FIXTURES = Path(__file__).parent / "fixtures"
@@ -253,6 +259,72 @@ def test_fetch_lead_klexikon_missing_page_raises():
     client = KlexikonFakeHttpClient({})  # nothing in the map
     with pytest.raises(RuntimeError, match="not found|missing"):
         fetch_lead("DoesNotExist", http_client=client, source=KLEXIKON)
+
+
+# ─── _klexikon_canonical_url unit tests (issue #55) ───────────────────
+# RFC 3986 reserves the URL path component to ASCII; non-ASCII octets
+# must be percent-encoded. Modern browsers handle either form, but the
+# canonical form is the percent-encoded one and that's what the
+# `source_url` field — which flows into the `sources` table and any
+# attribution UI — should carry.
+
+
+def test_klexikon_canonical_url_percent_encodes_diacritics():
+    # German titles routinely contain ä/ö/ü/é. The canonical form must
+    # percent-encode them: "Vögel" → "V%C3%B6gel".
+    assert (
+        _klexikon_canonical_url(KLEXIKON, "Vögel")
+        == "https://klexikon.zum.de/wiki/V%C3%B6gel"
+    )
+
+
+def test_klexikon_canonical_url_percent_encodes_eszett():
+    # ß is non-ASCII (U+00DF); must percent-encode to %C3%9F.
+    assert (
+        _klexikon_canonical_url(KLEXIKON, "Größe")
+        == "https://klexikon.zum.de/wiki/Gr%C3%B6%C3%9Fe"
+    )
+
+
+def test_klexikon_canonical_url_replaces_spaces_with_underscores_first():
+    # MediaWiki canonical paths use underscores for spaces; this rule
+    # is independent of percent-encoding and must still apply.
+    assert (
+        _klexikon_canonical_url(KLEXIKON, "Roter Riese")
+        == "https://klexikon.zum.de/wiki/Roter_Riese"
+    )
+
+
+def test_klexikon_canonical_url_underscore_is_preserved_unencoded():
+    # _ is an unreserved character (RFC 3986 §2.3) and must NOT be
+    # percent-encoded. urllib.parse.quote already handles this; this
+    # test pins the invariant against future regressions.
+    assert (
+        _klexikon_canonical_url(KLEXIKON, "Schwarzes Loch")
+        == "https://klexikon.zum.de/wiki/Schwarzes_Loch"
+    )
+
+
+def test_klexikon_canonical_url_ascii_titles_unchanged():
+    # Pure-ASCII titles must round-trip byte-for-byte; the change must
+    # not introduce churn in the Simple-English-style URL shape.
+    assert (
+        _klexikon_canonical_url(KLEXIKON, "Klima")
+        == "https://klexikon.zum.de/wiki/Klima"
+    )
+
+
+def test_klexikon_canonical_url_namespace_colon_is_preserved_unencoded():
+    # MediaWiki canonical URLs leave namespace separators (`Datei:`,
+    # `Bild:`, `Kategorie:`) unescaped. The `safe=":"` flag passed to
+    # urllib.parse.quote is what preserves this — without it `:` would
+    # be percent-encoded to `%3A`. Pin that design choice here so a
+    # future "tighten the safe set" change can't silently break
+    # namespace-prefixed canonical URLs.
+    assert (
+        _klexikon_canonical_url(KLEXIKON, "Datei:Beispiel")
+        == "https://klexikon.zum.de/wiki/Datei:Beispiel"
+    )
 
 
 def test_fetch_lead_klexikon_disambiguation_steht_fuer_raises():

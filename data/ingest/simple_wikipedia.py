@@ -31,6 +31,7 @@ import json
 import re
 import time
 import unicodedata
+import urllib.parse
 from pathlib import Path
 
 
@@ -307,8 +308,9 @@ class WikiSource:
         web_base_url: prefix for the user-facing wiki URL. Used by
             strategies (like ``klexikon_wikitext``) where the API
             response doesn't include a ``fullurl`` field — the
-            canonical URL is constructed as
-            ``web_base_url + title.replace(" ", "_")``.
+            canonical URL is built by :func:`_klexikon_canonical_url`,
+            which underscore-substitutes spaces and percent-encodes
+            non-ASCII bytes per RFC 3986.
         id_prefix: the source-family prefix in the passage id.
             Distinct per source family; ``wiki-simple`` for Simple
             English Wikipedia; ``wiki-klexikon`` for Klexikon.
@@ -601,12 +603,20 @@ def _klexikon_canonical_url(source: WikiSource, title: str) -> str:
     """Construct the canonical web URL for a Klexikon article.
 
     MediaWiki canonicalises article paths by replacing spaces with
-    underscores. Diacritics are preserved (``Ökologie`` →
-    ``Ökologie``, not transliterated). The ``parse`` API doesn't
-    return a ``fullurl`` field, so we construct it from the source's
-    ``web_base_url`` and the (possibly redirected) page title.
+    underscores. Non-ASCII characters in the title (e.g. ``ä``, ``ö``,
+    ``ü``, ``ß``) are percent-encoded per RFC 3986 — ``Vögel`` becomes
+    ``V%C3%B6gel``. The ``parse`` API doesn't return a ``fullurl``
+    field, so we construct it from the source's ``web_base_url`` and
+    the (possibly redirected) page title.
+
+    ``safe="/:"`` keeps the path separator unencoded for namespace
+    prefixes (e.g. ``Datei:Foo``) that MediaWiki canonical URLs leave
+    unescaped; underscores are already in the unreserved set so
+    :func:`urllib.parse.quote` leaves them alone.
     """
-    return source.web_base_url + title.replace(" ", "_")
+    return source.web_base_url + urllib.parse.quote(
+        title.replace(" ", "_"), safe="/:"
+    )
 
 
 def _fetch_lead_via_klexikon(
