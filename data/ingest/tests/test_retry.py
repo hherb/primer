@@ -3,6 +3,8 @@
 The helper is HTTP-shaped — it composes around an injected http_client.
 Tests use a scripted fake (no real network, no real sleeps).
 """
+import pytest
+
 from retry import (
     DEFAULT_BACKOFF_FACTOR,
     DEFAULT_BASE_DELAY_S,
@@ -11,6 +13,7 @@ from retry import (
     DEFAULT_RETRY_AFTER_BUDGET_S,
     RetryCapExceeded,
     RetrySettings,
+    is_retryable_status,
 )
 
 
@@ -39,3 +42,34 @@ def test_retry_cap_exceeded_carries_diagnostic_fields():
     assert err.retry_after is None
     # Also a RuntimeError so it lands inside the existing exception hierarchy.
     assert isinstance(err, RuntimeError)
+
+
+@pytest.mark.parametrize(
+    "code,expected",
+    [
+        # Retryable: 429 (rate-limited) and the entire 5xx range.
+        (429, True),
+        (500, True),
+        (502, True),
+        (503, True),
+        (504, True),
+        (599, True),
+        # Not retryable: success.
+        (200, False),
+        (201, False),
+        # Not retryable: redirects.
+        (301, False),
+        (302, False),
+        # Not retryable: client errors other than 429. A 401/403/404
+        # means re-running won't help — surface to the caller.
+        (400, False),
+        (401, False),
+        (403, False),
+        (404, False),
+        # Not retryable: out-of-band codes.
+        (199, False),
+        (600, False),
+    ],
+)
+def test_is_retryable_status(code: int, expected: bool) -> None:
+    assert is_retryable_status(code) is expected

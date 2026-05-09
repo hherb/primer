@@ -102,3 +102,17 @@ class RetryCapExceeded(RuntimeError):
             f"retry cap exceeded after {attempts} attempt(s); "
             f"last_status={last_status}, retry_after={retry_after!r}"
         )
+
+
+# ── Pure helpers ─────────────────────────────────────────────────────
+
+
+def is_retryable_status(code: int) -> bool:
+    """True iff ``code`` is a retryable HTTP status.
+
+    Retryable: 429 (Too Many Requests) and the full 5xx range. 4xx
+    errors other than 429 indicate a problem in the request itself
+    (auth, missing resource, malformed parameters) and re-running
+    won't help.
+    """
+    return code == 429 or 500 <= code < 600
