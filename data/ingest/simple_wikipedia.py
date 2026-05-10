@@ -1,27 +1,26 @@
-"""Wikipedia-shaped ingest pipeline (multi-source).
+"""Wikipedia-shaped ingest pipeline -- CLI entry point + pipeline glue.
 
-Pure functions where possible; network injected via ``http_client`` so
-the unit tests can substitute a fake. The :class:`WikiSource` dataclass
-bundles per-source ingest parameters (URL, license, fetch strategy,
-disambiguation patterns) so the same fetch / passage-emit / JSONL-write
-code path can serve any MediaWiki-shaped source. Two presets ship today:
+The implementation was split into three focused submodules under
+:mod:`wiki` (see ``wiki/__init__.py``); this module retains:
 
-- :data:`SIMPLE_ENGLISH` — Simple English Wikipedia. Uses MediaWiki's
-  TextExtracts extension (``exintro=1&explaintext=1``) for batched
-  20-titles-per-request lead fetches.
-- :data:`KLEXIKON` — German children's wiki at ``klexikon.zum.de``.
-  Selected over regular ``de.wikipedia.org`` because its hand-written
-  ages-8-13 vocabulary fits the Primer's audience the way Simple
-  English fits the English audience. The Klexikon MediaWiki has no
-  TextExtracts extension, so the fetch strategy is
-  ``action=parse&prop=wikitext&section=0`` (one request per article)
-  followed by :func:`strip_klexikon_wikitext` to convert wiki markup
-  to plain text.
+- :func:`main` -- the pipeline orchestrator (whitelist -> batched
+  fetch -> JSONL).
+- The argparse CLI helpers (:func:`_parse_args`,
+  :func:`_default_whitelist_path`, :func:`_default_output_path`) and
+  the ``if __name__ == "__main__"`` entry point.
+- Back-compat re-exports of every public/private name imported by the
+  test suite, so ``from simple_wikipedia import slugify`` etc. keep
+  resolving without a test edit.
 
-Adding a new source is purely additive: declare a ``WikiSource``
-preset, hand-author the whitelist, and run :func:`main` with
-``source=<preset>``. See ``data/ingest/README.md`` for the live-run
-workflow.
+To regenerate a JSONL seed corpus:
+
+.. code-block:: bash
+
+    python3 simple_wikipedia.py --language en   # Simple English Wikipedia
+    python3 simple_wikipedia.py --language de   # Klexikon (German children's wiki)
+
+See ``data/ingest/README.md`` for the full live-run workflow and
+``wiki/__init__.py`` for the submodule layout.
 """
 from __future__ import annotations
 
