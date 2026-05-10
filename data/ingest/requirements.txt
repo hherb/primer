@@ -1,2 +1,5 @@
 requests>=2.32,<3
 pytest>=8.0,<9
+# Type stubs for `requests` so mypy can resolve `import requests` in
+# simple_wikipedia.py without "Library stubs not installed" warnings.
+types-requests>=2.32,<3

@@ -1,7 +1,7 @@
 # Primer — Next Session Brief
 
 **Audience:** future Claude Code session continuing work on this repo.
-**Last updated:** 2026-05-10T1843+0800 (after closing #61 — back-compat shim dropped from `simple_wikipedia.py`; PR #62 open).
+**Last updated:** 2026-05-10T1843+0800 (after closing #61 — back-compat shim dropped from `simple_wikipedia.py`; PR #62 open. Also bundled an inline mypy stub fix: `types-requests` added to `requirements.txt` and the README setup steps switched from `pip` to `uv`).
 
 ## First moves when you start
 
@@ -17,10 +17,12 @@
 
 **Closed issue #61** — dropped the `simple_wikipedia.py` back-compat re-export shim that was added in PR #60. The shim re-exported underscore-prefixed private names (`_RETRY_SETTINGS`, `_NON_ALNUM`, `_DROP_BLOCK_PREFIX_LOOKAHEAD`, …) across module boundaries (broke the "underscore = don't reach in" social contract) and shim-name monkeypatches didn't reach the live submodule globals (a quiet correctness trap). Both traps are now gone because every test imports directly from the `wiki/` submodule that owns the name.
 
-**2 commits on `refactor/issue-61-drop-shim`:**
+**Commits on `refactor/issue-61-drop-shim`:**
 
 - `4778c2a` — `refactor(ingest): migrate ingest tests off simple_wikipedia shim (#61)`
 - `811732a` — `refactor(ingest): drop simple_wikipedia back-compat shim (closes #61)`
+- `63c80a1` — `docs(handoff): refresh NEXT_SESSION + archive timestamped copy`
+- (plus a follow-up commit for the inline mypy stub + uv-only README — sha-pending until committed)
 
 **Concrete deliverables:**
 
@@ -82,7 +84,8 @@ Carried-forward open items (still relevant from prior sessions):
 
 **New observations from this session (not risks per se):**
 
-- **Pre-existing mypy diagnostic on `import requests` is unrelated to test/shim work.** The diagnostic fires every time `simple_wikipedia.py` is edited regardless of what was edited. Filing it now would be a useful 1-line PR (`pip install types-requests` in `requirements.txt` or a `# type: ignore[import-untyped]` on the line); not worth bundling with #62.
+- **The pre-existing mypy diagnostic on `import requests` is fixed.** `types-requests>=2.32,<3` added to `data/ingest/requirements.txt`; installed into the existing venv via `uv pip install --python .venv/bin/python -r requirements.txt`. `mypy --python-executable .venv/bin/python simple_wikipedia.py wiki/ retry.py build_whitelist.py` now reports `Success: no issues found in 7 source files`. The fix was bundled into PR #62 per the new "implement quick fixes inline, don't defer" memory.
+- **`data/ingest/README.md` setup section now uses `uv` exclusively.** Replaced `python3 -m venv` + `pip install -r` with `uv venv .venv` + `uv pip install --python .venv/bin/python -r requirements.txt`, and added a one-line preface telling future readers that this project is uv-only (per the new memory). The existing venv was preserved (uv installs into it cleanly); only the documented commands changed.
 - **Two-commit split was the right granularity for #61.** Commit 1 (test imports) leaves the shim in place and 138 tests green — bisectable as a no-behavior-change checkpoint. Commit 2 (shim drop + delete tripwire + doc updates) is cleanly the "cleanup" commit. Mirrors the per-step reviewability principle from PR #60.
 - **The "leaving only `main` + argparse helpers + `__main__`" target lands at 186 lines, not the issue's aspirational ~70.** `main` and the 3 CLI helpers carry meaningful docstrings + body; trying to compress them further would be churn for no reader benefit. The 500-line guideline is the standing test, not "single-digit-percent of original."
 - **Issue #61 was clearly defined in PR #60's review comments, with explicit acceptance criteria and per-file import targets.** Following that file-by-file checklist made the work mechanical. Pattern worth reusing for any "follow-up cleanup" PR: write the issue body with concrete acceptance + a per-file checklist, so the next session can execute without re-deriving the plan.
@@ -132,13 +135,22 @@ cd src
 ~/.cargo/bin/cargo fmt --all -- --check
 ```
 
-For the Python ingestion pipeline tests:
+For the Python ingestion pipeline tests (uv-only — never invoke pip directly):
 
 ```bash
 cd /Users/hherb/src/primer/data/ingest
-# (venv was set up per data/ingest/README.md)
+# (venv was set up per data/ingest/README.md: `uv venv .venv` +
+# `uv pip install --python .venv/bin/python -r requirements.txt`)
 .venv/bin/pytest tests/
 # Expected: 135 passed.
+```
+
+For mypy on the ingest tree (cleanly green after #62):
+
+```bash
+cd /Users/hherb/src/primer/data/ingest
+mypy --python-executable .venv/bin/python simple_wikipedia.py wiki/ retry.py build_whitelist.py
+# Expected: Success: no issues found in 7 source files.
 ```
 
 For real-LLM smoke testing (Anthropic):

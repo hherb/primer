@@ -57,17 +57,21 @@ no longer carries back-compat re-exports.
 
 ## Setup
 
+This project uses [uv](https://docs.astral.sh/uv/) for Python tooling
+(virtualenv + dependency resolution); never invoke `pip` directly.
+
 ```bash
 cd data/ingest
-python3 -m venv .venv
-source .venv/bin/activate
-pip install -r requirements.txt
+uv venv .venv
+uv pip install --python .venv/bin/python -r requirements.txt
 ```
 
 ## Run the tests
 
 ```bash
-pytest
+.venv/bin/pytest
+# or, without activating the venv:
+uv run --python .venv/bin/python pytest
 ```
 
 ## Regenerate the English whitelist (rare; only when expanding coverage)
