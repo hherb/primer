@@ -1,35 +1,37 @@
 # Primer — Next Session Brief
 
 **Audience:** future Claude Code session continuing work on this repo.
-**Last updated:** 2026-05-10 (after the Klexikon corpus expansion 24 → 65; PR #59 open).
+**Last updated:** 2026-05-10 (after the Klexikon corpus expansion 24 → 66 + a follow-up commit on the same PR addressing review feedback; PR #59 open).
 
 ## First moves when you start
 
 1. Read [CLAUDE.md](CLAUDE.md) — repo conventions, gotchas, build commands. **Workspace root is `src/`, not the repo root.** Every cargo command runs from `src/`. Always invoke as `~/.cargo/bin/cargo` (Homebrew rust shadows PATH and silently downgrades to 1.86, breaking silero).
-2. From `src/`: `~/.cargo/bin/cargo build && ~/.cargo/bin/cargo test --workspace`. Should be green: **605 Rust tests** under default features (unchanged this session — corpus expansion was data-only). Add `--features primer-kb-load/fastembed` for the embedding-backed sweep + recall test (downloads BGE-M3 ~570 MB on first run; cached afterwards). Plus **132 Python tests** in `data/ingest/` (unchanged from prior session).
+2. From `src/`: `~/.cargo/bin/cargo build && ~/.cargo/bin/cargo test --workspace`. Should be green: **605 Rust tests** under default features (unchanged this session — corpus expansion was data-only on the Rust side). Add `--features primer-kb-load/fastembed` for the embedding-backed sweep + recall test (downloads BGE-M3 ~570 MB on first run; cached afterwards). Plus **135 Python tests** in `data/ingest/` (one new test was added during PR #59 review for the post-resolution duplicate-id check).
 3. **Don't assume nothing changed since this brief was written.** Read the current state of files you intend to touch first — Horst may have made interim changes.
 
 ## Branch status
 
-`feature/klexikon-corpus-expansion-24-to-65` carries 1 commit (`62faff5`), pushed, and on **PR #59** (https://github.com/hherb/primer/pull/59). Built off `origin/main` after the PR #58 (issue #45 full closure) merge. Once #59 merges, the branch can be deleted.
+`feature/klexikon-corpus-expansion-24-to-65` carries 2 commits (initial expansion + review-feedback follow-up), pushed, and on **PR #59** (https://github.com/hherb/primer/pull/59). Built off `origin/main` after the PR #58 (issue #45 full closure) merge. Branch name is fixed at "24-to-65"; after the follow-up commit the corpus is actually 66 (Jahreszeit was missed in the first pass and added during review). Once #59 merges, the branch can be deleted.
 
 ## What we shipped this session
 
-**Klexikon corpus expansion: 24 → 65 articles.** Hand-curated 41 additional German children's-curriculum titles spanning the same five clusters as the English seed corpus, lifting de-locale coverage from a starter set toward parity with the English seed (56 hand-drafted + 35 Simple English Wikipedia = 91).
+**Klexikon corpus expansion: 24 → 66 articles.** Hand-curated 42 additional German children's-curriculum titles spanning the same five clusters as the English seed corpus, lifting de-locale coverage from a starter set toward parity with the English seed (56 hand-drafted + 35 Simple English Wikipedia = 91).
 
-**1 commit on `feature/klexikon-corpus-expansion-24-to-65`:**
+**2 commits on `feature/klexikon-corpus-expansion-24-to-65`:**
 
-- `62faff5` — `feat(ingest): expand Klexikon corpus from 24 to 65 articles`
+- `62faff5` — `feat(ingest): expand Klexikon corpus from 24 to 65 articles` (initial expansion: 41 articles)
+- follow-up — `fix(ingest): address PR #59 review feedback` (added Jahreszeit; structural duplicate-id check; whitelist comment; doc count corrections)
 
 **Concrete deliverables:**
 
-- 41 new entries appended to `data/ingest/klexikon_whitelist.txt`, organised under the existing five cluster headers (Space, Earth & weather, Life, Body, How things work).
-- Regenerated `data/seed/wiki_passages.de.jsonl` (65 passages; 24 → 65) via the existing pipeline. Live HTTP to `klexikon.zum.de`, 1-per-second pacing (no batching for the `parse` strategy), ~65 s wallclock total. The PR #57 retry path (HTTP 429 / 5xx backoff) was active but not exercised — the run completed with no transient failures.
-- Pre-validation: every candidate was probed against Klexikon's `action=query` API before being staged in the whitelist (one-shot script at `/tmp/probe_klexikon.py`, not committed). Results: **0 missing**, **13 redirects to plural-canonical forms** (`Säugetier` → `Säugetiere`, `Atom` → `Atome und Moleküle`, etc.), **30 exist as-is**. The fetch path's `redirects=1` flag follows redirects transparently and writes the canonical title.
-- `Molekül` was deliberately omitted: it shares the canonical `Atome und Moleküle` redirect target with `Atom` and would have caused an id collision in the JSONL output.
-- Doc updates: `README.md` (status line + Phase 0.2 bootstrapping bullet, 24 → 65), `ROADMAP.md` (new ✅ bullet documenting the expansion + annotation on the existing Klexikon-rollout bullet), `CLAUDE.md` (`auto_seed_if_empty` bullet, 24 → 65).
-- No code changes; no test changes (no test depends on whitelist content — `KlexikonFakeHttpClient` fixtures in `tests/test_pipeline.py` cover the strategy paths with synthetic titles).
-- Verification: 65 unique ids, all schema-valid (`id`, `source`, `license`, `attribution`, `source_url`, `text`, `topics`), all `text` fields ≥50 chars. Python tests stay at 132/132. Rust workspace at 605/0/2.
+- 42 new entries appended to `data/ingest/klexikon_whitelist.txt`, organised under the existing five cluster headers (Space, Earth & weather, Life, Body, How things work).
+- Regenerated `data/seed/wiki_passages.de.jsonl` (66 passages; 24 → 66) via the existing pipeline. Live HTTP to `klexikon.zum.de`, 1-per-second pacing (no batching for the `parse` strategy). The PR #57 retry path (HTTP 429 / 5xx backoff) was active but not exercised — runs completed with no transient failures.
+- Pre-validation: every candidate was probed against Klexikon's `action=query` API before being staged in the whitelist. Results: **0 missing**, **14 redirects** to a canonical form (most often plural — `Säugetier` → `Säugetiere`, `Hunde`, `Bienen` etc. — sometimes a synonym/broader topic such as `Berg` → `Gebirge`, `Universum` → `Weltall`, `Atom` → `Atome und Moleküle`, `Jahreszeit` → `Jahreszeiten`). The fetch path's `redirects=1` flag follows redirects transparently and writes the canonical title.
+- `Molekül` was deliberately omitted: it shares the canonical `Atome und Moleküle` redirect target with `Atom` and would have caused an id collision in the JSONL output. The ingest path now hard-fails on post-resolution duplicate ids — the manual probe is no longer the only line of defence.
+- **Structural duplicate-id check** in `simple_wikipedia.py::_emit_passages` (review-feedback follow-up): after redirect resolution, a `dict[id -> title]` accumulator detects collisions and raises `RuntimeError` listing the colliding input titles. Replaces the manual probe-first habit; documented in the whitelist comment.
+- Doc updates: `README.md` (status line + Phase 0.2 bootstrapping bullet, 24 → 66), `ROADMAP.md` (new ✅ bullet documenting the expansion + annotation on the existing Klexikon-rollout bullet, 24 → 66), `CLAUDE.md` (`auto_seed_if_empty` bullet, 24 → 66), whitelist comment header rewritten to describe the redirect shapes accurately.
+- Code change: 1 (`_assert_unique_passage_ids` + wiring in `main`). Test changes: +3 Python tests (132 → 135) covering the passing case, the Atom/Molekül collision shape with synthetic redirects, and the actionable error-message contract.
+- Verification: 66 unique ids, all schema-valid (`id`, `source`, `license`, `attribution`, `source_url`, `text`, `topics`), all `text` fields ≥50 chars. Python tests at 135/135. Rust workspace at 605/0/2.
 
 **Cluster breakdown of the additions:**
 
@@ -37,19 +39,20 @@
 - **Body (10):** Skelett, Knochen, Muskel, Haut, Zahn, Ohr, Nase, Magen, Blut, Verdauung
 - **Life (12):** Säugetier, Reptil, Fisch, Dinosaurier, Hund, Katze, Biene, Schmetterling, Baum, Blume, Wald, Pilz
 - **Earth & weather (8):** Berg, Fluss, Meer, See, Wüste, Schnee, Wind, Jahreszeit
-- **How things work (6):** Atom, Schwerkraft, Energie, Elektrizität, Feuer, Luft, Temperatur
+- **How things work (7):** Atom, Schwerkraft, Energie, Elektrizität, Feuer, Luft, Temperatur
 
 **Course corrections during execution:**
 
 - The handoff I started from (NEXT_SESSION.md before this rewrite) was stale — written after PR #57 (#38 backoff) but before PR #58 (issue #45 full closure). Horst flagged it; I verified PR #58 was merged (commit `5f447aa` on origin/main) and `KNOWN_FAILING_QUERIES_HYBRID` was already empty. Took #45 off the candidate task list before re-asking direction.
-- Initial probe surfaced the `Atom`/`Molekül` collision risk before any HTTP for the actual ingest. The whitelist's `_assert_unique_slugs` check is on the input slugs (per-title, before resolution), so post-redirect collisions slip past it — caught only by the probe. This justifies the probe-first pattern for future expansions of any redirect-heavy source.
+- Initial probe surfaced the `Atom`/`Molekül` collision risk before any HTTP for the actual ingest. The whitelist's `_assert_unique_slugs` check is on the input slugs (per-title, before resolution), so post-redirect collisions slip past it — caught only by the probe. This justified the probe-first pattern for future expansions; the review-feedback follow-up turned it into a structural check inside the ingest so future contributors don't need the manual habit.
+- During code review, the cluster-header counts were spotted as inaccurate ("(8)" for Earth & weather but only 7 articles in whitelist; Jahreszeit was listed in the description but missing from whitelist). The fix was to actually add Jahreszeit, not edit the description down — it was a real intent slip from the first pass. Total corpus is now 66, not 65, after the follow-up.
 
 **Out of scope for this PR (intentional, deferred):**
 
 - License-claim spot-check on individual page footers (only the site-wide CC-BY-SA-4.0 has been verified; per-page divergence remains a low-priority audit item).
 - German retrieval-quality benchmark (`tests/retrieval_quality.rs` analog) — still not implemented for the de layer; expanded corpus makes it more valuable.
 - BGE-M3 retrieval validation in German (multilingual model covers de, but no smoke test exists).
-- Klexikon corpus expansion past 65 (the wiki has ~3000 articles; 65 is "rounded curriculum starter", not "comprehensive").
+- Klexikon corpus expansion past 66 (the wiki has ~3000 articles; 66 is "rounded curriculum starter", not "comprehensive").
 
 ## What's next
 
@@ -63,9 +66,9 @@
 
 ### Smaller-scope follow-ups still open
 
-- **German retrieval-quality benchmark.** No equivalent of `tests/retrieval_quality.rs` exists for the German layer yet. Concrete acceptance: hand-author a German equivalent of `tests/common/mod.rs::QUERIES` (~25-30 child-style German questions targeting specific Klexikon ids), wire a parallel test that runs against the de KB. Higher value now that the corpus is 65 articles deep — 24 was at the cusp where regression-protection cost-benefit was weak. **Suggested target: ~25 BM25-only loose queries + ~12 strict canonical-id mappings; an `--ignored` BGE-M3 hybrid recall test as a follow-up.**
-- **Klexikon license claim spot-check.** Site-wide CC BY-SA 4.0 is the canonical claim and is what the 65 passages now uniformly carry. Concrete acceptance: WebFetch a sample of ~5 article footers (e.g. `Sonne`, `Atom`/`Atome und Moleküle`, `Skelett`, `Bienen`, `Mondfinsternis`) and verify the footer license matches. If a per-page divergence appears, document the override path in `WikiSource` (probably needs a per-passage license override field). Low-priority.
-- **Klexikon corpus expansion past 65.** Klexikon has ~3000 articles. Concrete next-batch acceptance: pick 30-50 more titles in still-thin clusters — body could use Atmung-related topics; life could use Ökosystem, animal-specific (Affe, Pferd, Fledermaus); how-things-work could use Computer, Internet, Telefon, Maschine. Re-run pipeline. No code change.
+- **German retrieval-quality benchmark.** No equivalent of `tests/retrieval_quality.rs` exists for the German layer yet. Concrete acceptance: hand-author a German equivalent of `tests/common/mod.rs::QUERIES` (~25-30 child-style German questions targeting specific Klexikon ids), wire a parallel test that runs against the de KB. Higher value now that the corpus is 66 articles deep — 24 was at the cusp where regression-protection cost-benefit was weak. **Suggested target: ~25 BM25-only loose queries + ~12 strict canonical-id mappings; an `--ignored` BGE-M3 hybrid recall test as a follow-up.**
+- **Klexikon license claim spot-check.** Site-wide CC BY-SA 4.0 is the canonical claim and is what the 66 passages now uniformly carry. Concrete acceptance: WebFetch a sample of ~5 article footers (e.g. `Sonne`, `Atom`/`Atome und Moleküle`, `Skelett`, `Bienen`, `Mondfinsternis`) and verify the footer license matches. If a per-page divergence appears, document the override path in `WikiSource` (probably needs a per-passage license override field). Low-priority.
+- **Klexikon corpus expansion past 66.** Klexikon has ~3000 articles. Concrete next-batch acceptance: pick 30-50 more titles in still-thin clusters — body could use Atmung-related topics; life could use Ökosystem, animal-specific (Affe, Pferd, Fledermaus); how-things-work could use Computer, Internet, Telefon, Maschine. Re-run pipeline. No code change required (the structural duplicate-id check landed on PR #59 makes future redirect-collision risk a hard fail rather than a silent dup).
 - **#46** — explore post-RRF `min_score` as a fifth grid axis in the hybrid sweep.
 - **#40** — aggregate per-source attribution row for Wikipedia (and Klexikon).
 - **#41** — tighten disambiguation regex if false positives appear.
@@ -95,9 +98,10 @@ Carried-forward open items (still relevant from prior sessions):
 
 **New observations from this session (not risks per se):**
 
-- **Always probe a redirect-heavy API before staging the whitelist.** The `Atom` / `Molekül` collision was caught at probe time, not at ingest time. The whitelist's `_assert_unique_slugs` only inspects the input slugs (pre-resolution), so two distinct input titles that resolve to the same canonical title would silently produce duplicate JSONL ids. Cure: always run an existence + redirect probe first; drop or rename collision-prone candidates before the live ingest. Pattern is reusable for any future expansion of Klexikon, Simple English, or a third Wikipedia-shaped source.
+- **Manual probes are good but a structural ingest-time check is better.** The `Atom` / `Molekül` collision was caught at probe time on the first pass, but PR #59 review noted that without the structural defence, the next contributor adding a whitelist entry without manually probing could silently reintroduce the same bug. The fix landed in `simple_wikipedia.py::_emit_passages`: a `dict[id -> input_title]` accumulates as passages are emitted; a duplicate raises `RuntimeError` listing the colliding inputs. Manual probing is still cheap and catches the issue earlier in the workflow, but it's no longer load-bearing.
 - **The handoff is only as fresh as the moment it was written.** PR #58 merged hours after PR #57's brief was authored, so the brief described an open follow-up that was already closed. Recommendation: at session start, always verify the open-issue claims in the brief against `gh issue list --state open` and against a `git log origin/main` since the brief's "last updated" timestamp. Took 1 round-trip with Horst this session.
-- **Auto-seed loads everything that matches `*.<pack>.jsonl` — no schema bump or test change is needed when the corpus grows.** The 41 new passages picked up automatically on the next `--language de` session; this is the runtime contract `discover_seed_files` provides. Useful to remember when sizing future expansions: corpus growth is a data-only change as long as the JSONL schema doesn't move.
+- **Auto-seed loads everything that matches `*.<pack>.jsonl` — no schema bump or test change is needed when the corpus grows.** The 42 new passages picked up automatically on the next `--language de` session; this is the runtime contract `discover_seed_files` provides. Useful to remember when sizing future expansions: corpus growth is a data-only change as long as the JSONL schema doesn't move.
+- **Cluster-count typos in PR descriptions are cheap to introduce and worth catching at code-review time.** First-pass description claimed "Earth & weather (8)" but only 7 articles were in the whitelist (Jahreszeit slipped); "How things work (6)" but listed 7 names. These were spotted only because the reviewer cross-counted. Pattern: when a description enumerates additions, the count next to the cluster header should be a count of the items in the bullet list immediately after, not a vibe-check.
 
 ## Patterns to reuse, not reinvent
 
@@ -120,7 +124,7 @@ Carried-forward open items (still relevant from prior sessions):
 - **String discriminators for strategy selection, with allow-list validation.**
 - **Re-run the live ingest after changing any fetch-path helper.** Tiny expected diff = success, anything bigger = a flag worth investigating.
 - **Kwarg-injected side-effect functions for TDD seams in Python.**
-- **Probe a redirect-heavy API before staging a whitelist.** New pattern this session — see "New observations" above.
+- **Structural ingest-time defences beat manual probing habits.** Confirmed via PR #59 review feedback — see "New observations" above.
 
 ## Exact commands needed to resume
 
@@ -146,7 +150,7 @@ For the Python ingestion pipeline tests:
 cd /Users/hherb/src/primer/data/ingest
 # (venv was set up per data/ingest/README.md)
 .venv/bin/pytest tests/
-# Expected: 132 passed.
+# Expected: 135 passed.
 ```
 
 For real-LLM smoke testing (Anthropic):
@@ -157,13 +161,13 @@ RUST_LOG=debug ~/.cargo/bin/cargo run --bin primer -- \
     --backend cloud --name SmokeTester --age 9 --no-persist --verbose 2>&1 | tee /tmp/smoke.log
 ```
 
-For real-LLM smoke testing in German (now over 65 Klexikon passages):
+For real-LLM smoke testing in German (now 66 Klexikon passages):
 
 ```bash
 cd /Users/hherb/src/primer/src
 RUST_LOG=debug ~/.cargo/bin/cargo run --bin primer -- \
     --backend cloud --name Lukas --age 9 --language de --no-persist --verbose 2>&1 | tee /tmp/smoke_de.log
-# Expected: KB auto-loads 65 Klexikon passages on locale=de.
+# Expected: KB auto-loads 66 Klexikon passages on locale=de.
 ```
 
 For re-running the Klexikon ingest (rare; only when the whitelist changes or articles drift):
@@ -172,9 +176,10 @@ For re-running the Klexikon ingest (rare; only when the whitelist changes or art
 cd /Users/hherb/src/primer/data/ingest
 .venv/bin/python simple_wikipedia.py --language de
 # Writes ../seed/wiki_passages.de.jsonl. Commit any diff.
-# Live HTTP traffic to klexikon.zum.de; ~65 sequential requests with 1s pacing
-# (per-page parse strategy = no batching; takes ~65s on a warm network).
+# Live HTTP traffic to klexikon.zum.de; ~66 sequential requests with 1s pacing
+# (per-page parse strategy = no batching; takes ~66s on a warm network).
 # 429/5xx retried 3× with backoff (PR #57).
+# Post-resolution duplicate-id collisions raise RuntimeError (PR #59).
 ```
 
 For re-running the Simple English Wikipedia ingest:

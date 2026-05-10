@@ -6,9 +6,16 @@
 #
 # Hand-curated set covering the same five clusters the English seed
 # corpus uses: space, body, how-things-work, life, earth/weather.
-# Some titles redirect to a canonical plural form (e.g. `Säugetier`
-# -> `Säugetieren`); the script follows the redirect transparently
-# and stores the canonical title. To expand: add lines and re-run
+# Some titles redirect to a canonical form on Klexikon — sometimes a
+# plural (`Säugetier` -> `Säugetiere`, `Hund` -> `Hunde`), sometimes
+# a synonym or broader topic (`Berg` -> `Gebirge`, `Universum` ->
+# `Weltall`, `Atom` -> `Atome und Moleküle`). The script follows
+# the redirect transparently and stores the canonical title, so the
+# JSONL id is computed from the resolved title, not the input line.
+# Two distinct input titles whose redirects collapse to the same
+# canonical (e.g. `Atom` and `Molekül` both resolve to `Atome und
+# Moleküle`) would produce duplicate ids — the ingest now hard-fails
+# in that case. To expand: add lines and re-run
 # `python3 simple_wikipedia.py --language de`.
 #
 # License: CC BY-SA 4.0 (Klexikon).
@@ -31,6 +38,7 @@ Universum
 Berg
 Erdbeben
 Fluss
+Jahreszeit
 Klima
 Meer
 Regen

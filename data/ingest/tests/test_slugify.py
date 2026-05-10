@@ -1,6 +1,10 @@
 """Tests for slugify — pure function, no I/O."""
 import pytest
-from simple_wikipedia import _assert_unique_slugs, slugify
+from simple_wikipedia import (
+    _assert_unique_passage_ids,
+    _assert_unique_slugs,
+    slugify,
+)
 
 
 def test_ascii_lowercase():
@@ -141,3 +145,63 @@ def test_assert_unique_slugs_catches_eszett_post_fold_collision():
     # time.
     with pytest.raises(ValueError, match="slug collision"):
         _assert_unique_slugs(["Straße", "Strasse"])
+
+
+# ─── Post-resolution duplicate-id check ────────────────────────────────
+# `_assert_unique_passage_ids` complements `_assert_unique_slugs`:
+# the slug check runs on input titles BEFORE the API resolves redirects;
+# the passage-id check runs on the resolved passages AFTER the API
+# follows `redirects=1`. Two distinct input titles can collapse to the
+# same canonical title at fetch time (the Klexikon Atom/Molekül
+# scenario where both resolve to "Atome und Moleküle"); without this
+# check, the second passage silently overwrites or drops the first.
+
+
+def _passage_with_id(pid: str) -> dict:
+    """Test helper: minimal passage dict with the given id."""
+    return {"id": pid, "text": "x"}
+
+
+def test_assert_unique_passage_ids_passes_for_distinct_ids():
+    # No collisions; should not raise.
+    _assert_unique_passage_ids(
+        [
+            ("Photosynthesis", _passage_with_id("wiki:en:photosynthesis")),
+            ("Gravity", _passage_with_id("wiki:en:gravity")),
+            ("Black hole", _passage_with_id("wiki:en:black-hole")),
+        ]
+    )
+
+
+def test_assert_unique_passage_ids_catches_redirect_collision():
+    # The Atom/Molekül scenario: on Klexikon, both input titles resolve
+    # to the canonical "Atome und Moleküle" page, producing the same id.
+    # The pre-resolution slug check passes (atom != molekul), so this
+    # post-resolution check is the only line of defence.
+    colliding_id = "wiki-klexikon:de:atome-und-molekule"
+    with pytest.raises(RuntimeError, match="passage id collision"):
+        _assert_unique_passage_ids(
+            [
+                ("Atom", _passage_with_id(colliding_id)),
+                ("Molekül", _passage_with_id(colliding_id)),
+            ]
+        )
+
+
+def test_assert_unique_passage_ids_error_names_both_inputs_and_id():
+    # The error message should be actionable: it must let the developer
+    # find the offending whitelist entries by name AND see which
+    # canonical id they collapsed to.
+    colliding_id = "wiki-klexikon:de:atome-und-molekule"
+    with pytest.raises(RuntimeError) as ei:
+        _assert_unique_passage_ids(
+            [
+                ("Atom", _passage_with_id(colliding_id)),
+                ("Molekül", _passage_with_id(colliding_id)),
+            ]
+        )
+    msg = str(ei.value)
+    assert "'Atom'" in msg
+    assert "'Molekül'" in msg
+    assert colliding_id in msg
+    assert "redirect resolution" in msg
