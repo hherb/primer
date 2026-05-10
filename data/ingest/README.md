@@ -39,15 +39,11 @@ source means: declare a `WikiSource` preset (with the right
   (`fetch_lead`, `fetch_leads`) and per-strategy fetchers, plus the
   retry-settings constant (`_RETRY_SETTINGS`).
 
-`simple_wikipedia.py` re-exports every name imported by the existing
-test suite, so `from simple_wikipedia import slugify` etc. keep
-resolving. New code should import from the submodule directly
-(`from wiki.fetch import fetch_lead`).
-
-`wiki/__init__.py` deliberately exposes no re-exports — import from
-the specific submodule (`from wiki.source import KLEXIKON`,
-`from wiki.fetch import fetch_lead`), not from the package
-(`from wiki import KLEXIKON` will fail).
+Import from the specific submodule (`from wiki.source import KLEXIKON`,
+`from wiki.fetch import fetch_lead`, `from wiki.strip import
+strip_klexikon_wikitext`); `wiki/__init__.py` deliberately exposes no
+re-exports, and `simple_wikipedia.py` is the CLI entry point only — it
+no longer carries back-compat re-exports.
 
 ## Prerequisites
 
@@ -61,17 +57,21 @@ the specific submodule (`from wiki.source import KLEXIKON`,
 
 ## Setup
 
+This project uses [uv](https://docs.astral.sh/uv/) for Python tooling
+(virtualenv + dependency resolution); never invoke `pip` directly.
+
 ```bash
 cd data/ingest
-python3 -m venv .venv
-source .venv/bin/activate
-pip install -r requirements.txt
+uv venv .venv
+uv pip install --python .venv/bin/python -r requirements.txt
 ```
 
 ## Run the tests
 
 ```bash
-pytest
+.venv/bin/pytest
+# or, without activating the venv:
+uv run --python .venv/bin/python pytest
 ```
 
 ## Regenerate the English whitelist (rare; only when expanding coverage)

@@ -2,7 +2,8 @@
 import json
 from pathlib import Path
 import pytest
-from simple_wikipedia import KLEXIKON, SIMPLE_ENGLISH, main
+from simple_wikipedia import main
+from wiki.source import KLEXIKON, SIMPLE_ENGLISH
 
 
 FIXTURES = Path(__file__).parent / "fixtures"

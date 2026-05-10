@@ -1,6 +1,6 @@
 """Tests for to_passage — record → SeedPassage-compatible dict."""
 import pytest
-from simple_wikipedia import KLEXIKON, SIMPLE_ENGLISH, to_passage
+from wiki.source import KLEXIKON, SIMPLE_ENGLISH, to_passage
 
 
 def test_basic_record():

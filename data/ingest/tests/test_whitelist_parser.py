@@ -1,7 +1,7 @@
 """Tests for read_whitelist — reads a text file, returns ordered titles."""
 import pytest
 from pathlib import Path
-from simple_wikipedia import read_whitelist
+from wiki.source import read_whitelist
 
 
 def test_basic_titles(tmp_path: Path):

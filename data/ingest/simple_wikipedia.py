@@ -1,26 +1,13 @@
 """Wikipedia-shaped ingest pipeline -- CLI entry point + pipeline glue.
 
-The implementation was split into three focused submodules under
-:mod:`wiki` (see ``wiki/__init__.py``); this module retains:
+The implementation lives in three focused submodules under :mod:`wiki`
+(see ``wiki/__init__.py``); this module retains only:
 
 - :func:`main` -- the pipeline orchestrator (whitelist -> batched
   fetch -> JSONL).
 - The argparse CLI helpers (:func:`_parse_args`,
   :func:`_default_whitelist_path`, :func:`_default_output_path`) and
   the ``if __name__ == "__main__"`` entry point.
-- Back-compat re-exports of every public/private name imported by the
-  test suite, so ``from simple_wikipedia import slugify`` etc. keep
-  resolving without a test edit.
-
-The re-exported names are *bindings*, not the canonical home of the
-underlying objects. Patching ``simple_wikipedia.<name>`` (e.g. via
-``monkeypatch.setattr``) rebinds the shim's name only; the live code
-in ``wiki.<submodule>`` reads from its own module globals and will
-not see the patch. Test code that needs to mock a fetch-side constant
-(``_RETRY_SETTINGS``, ``_DEFAULT_USER_AGENT``) must patch the
-submodule attribute (``monkeypatch.setattr("wiki.fetch._RETRY_SETTINGS",
-...)``), not the shim attribute. Patching ``time.sleep`` continues to
-work as before because it is a module-global on ``time`` itself.
 
 To regenerate a JSONL seed corpus:
 
@@ -39,69 +26,16 @@ import json
 import time
 from pathlib import Path
 
-
-# ── Configuration + identity (moved to wiki.source) ──────────────────
-# Re-exported for back-compat: tests import slugify, WikiSource,
-# SIMPLE_ENGLISH, KLEXIKON, to_passage, etc. directly from
-# `simple_wikipedia`. The implementation now lives in wiki/source.py.
-from wiki.source import (  # noqa: E402,F401
+from wiki.fetch import _DEFAULT_USER_AGENT, fetch_leads
+from wiki.source import (
     KLEXIKON,
     SIMPLE_ENGLISH,
     WikiSource,
-    _DE_DISAMBIGUATION_PATTERNS,
-    _EN_DISAMBIGUATION_PATTERNS,
-    _NON_ALNUM,
     _SOURCES_BY_PACK_ID,
-    _VALID_FETCH_STRATEGIES,
     _assert_unique_passage_ids,
     _assert_unique_slugs,
-    _strip_math_artifacts,
     read_whitelist,
-    slugify,
     to_passage,
-)
-
-
-# ── Wikitext stripper (moved to wiki.strip) ──────────────────────────
-# Re-exported for back-compat: tests import `strip_klexikon_wikitext`
-# directly from `simple_wikipedia`. The implementation now lives in
-# wiki/strip.py; importing it here keeps `from simple_wikipedia import
-# strip_klexikon_wikitext` resolving without a test edit.
-from wiki.strip import (  # noqa: E402,F401
-    _BLANKLINE_RUN_RE,
-    _BOLD_RE,
-    _DROP_BLOCK_PREFIXES,
-    _DROP_BLOCK_PREFIX_LOOKAHEAD,
-    _GALLERY_RE,
-    _HTML_COMMENT_RE,
-    _INLINE_WS_RUN_RE,
-    _ITALIC_RE,
-    _REF_PAIR_RE,
-    _REF_SELF_RE,
-    _TEMPLATE_RE,
-    _WIKILINK_PIPED_RE,
-    _WIKILINK_PLAIN_RE,
-    _strip_balanced_drop_blocks,
-    strip_klexikon_wikitext,
-)
-
-
-# ── HTTP fetch dispatch (moved to wiki.fetch) ─────────────────────────
-# Re-exported for back-compat: tests import fetch_lead, fetch_leads,
-# _klexikon_canonical_url directly from `simple_wikipedia`. The
-# implementation now lives in wiki/fetch.py.
-from wiki.fetch import (  # noqa: E402,F401
-    _DEFAULT_USER_AGENT,
-    _DISAMBIGUATION_HEAD_CHARS,
-    _RETRY_SETTINGS,
-    _check_disambiguation,
-    _fetch_lead_via_klexikon,
-    _fetch_lead_via_text_extracts,
-    _fetch_leads_via_klexikon,
-    _fetch_leads_via_text_extracts,
-    _klexikon_canonical_url,
-    fetch_lead,
-    fetch_leads,
 )
 
 
