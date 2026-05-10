@@ -12,6 +12,9 @@ files focused and under the 500-line project guideline. Three modules:
   All network calls flow through here.
 
 The CLI entry point (``main`` orchestrator + argparse) stays in
-``simple_wikipedia.py``, which also re-exports every name the test
-suite reaches for so the split is invisible to existing tests.
+``simple_wikipedia.py``. Consumers (including the test suite) import
+from the specific submodule that owns the name (e.g.
+``from wiki.fetch import fetch_lead``); this package's ``__init__``
+deliberately exposes no re-exports, so ``from wiki import KLEXIKON``
+will fail.
 """
