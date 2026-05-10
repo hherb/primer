@@ -4,45 +4,95 @@
 # with `#` are ignored. Titles are case-sensitive and must match
 # Klexikon exactly (the API returns "missingtitle" for typos).
 #
-# This is a hand-curated starter set covering the same five clusters
-# the English seed corpus uses: space, body, how-things-work, life,
-# earth/weather. It is deliberately small (~20 titles) to keep the
-# initial ingest fast; expand by adding lines and re-running
+# Hand-curated set covering the same five clusters the English seed
+# corpus uses: space, body, how-things-work, life, earth/weather.
+# Some titles redirect to a canonical form on Klexikon — sometimes a
+# plural (`Säugetier` -> `Säugetiere`, `Hund` -> `Hunde`), sometimes
+# a synonym or broader topic (`Berg` -> `Gebirge`, `Universum` ->
+# `Weltall`, `Atom` -> `Atome und Moleküle`). The script follows
+# the redirect transparently and stores the canonical title, so the
+# JSONL id is computed from the resolved title, not the input line.
+# Two distinct input titles whose redirects collapse to the same
+# canonical (e.g. `Atom` and `Molekül` both resolve to `Atome und
+# Moleküle`) would produce duplicate ids — the ingest now hard-fails
+# in that case. To expand: add lines and re-run
 # `python3 simple_wikipedia.py --language de`.
 #
 # License: CC BY-SA 4.0 (Klexikon).
 # Source: https://klexikon.zum.de/
 
 # ─── Space ───
-Sonne
-Mond
 Erde
-Stern
+Galaxie
+Komet
+Mond
+Mondfinsternis
 Planet
+Sonne
 Sonnensystem
+Stern
+Sternbild
+Universum
 
 # ─── Earth & weather ───
-Wetter
-Klima
-Vulkan
+Berg
 Erdbeben
+Fluss
+Jahreszeit
+Klima
+Meer
 Regen
+Schnee
+See
+Vulkan
+Wetter
+Wind
 Wolke
+Wüste
 
 # ─── Life ───
-Pflanze
-Tier
+Baum
+Biene
+Blume
+Dinosaurier
+Fisch
+Hund
 Insekt
+Katze
+Pflanze
+Pilz
+Reptil
+Säugetier
+Schmetterling
+Tier
 Vogel
+Wald
 
-# ─── Body (basic organs) ───
-Herz
-Lunge
-Gehirn
+# ─── Body ───
 Auge
+Blut
+Gehirn
+Haut
+Herz
+Knochen
+Lunge
+Magen
+Muskel
+Nase
+Ohr
+Skelett
+Verdauung
+Zahn
 
 # ─── How things work ───
+Atom
+Elektrizität
+Energie
+Feuer
+Licht
+Luft
 Magnet
 Schall
-Licht
+Schwerkraft
+Temperatur
 Wasser

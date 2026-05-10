@@ -110,6 +110,32 @@ def _assert_unique_slugs(titles: list[str]) -> None:
         seen[slug] = title
 
 
+def _assert_unique_passage_ids(pairs: list[tuple[str, dict]]) -> None:
+    """Reject result sets where two input titles produce the same id.
+
+    Complements `_assert_unique_slugs`, which only inspects input slugs
+    (pre-resolution). Sources with `redirects=1` enabled (Klexikon and
+    Simple English MediaWiki both do) can collapse two distinct input
+    titles to the same canonical title at fetch time — e.g. on
+    Klexikon `Atom` and `Molekül` both resolve to `Atome und Moleküle`,
+    producing the same passage id `wiki-klexikon:de:atome-und-molekule`
+    for two whitelist lines. Without this check, the second passage
+    would silently overwrite the first in the JSONL (sorted-by-id
+    write loop) or be silently dropped at load time. We raise loudly
+    so the developer can drop or rename one of the colliding inputs.
+    """
+    seen: dict[str, str] = {}
+    for input_title, passage in pairs:
+        pid = passage["id"]
+        if pid in seen:
+            raise RuntimeError(
+                f"passage id collision: input titles {seen[pid]!r} and "
+                f"{input_title!r} both resolved to id {pid!r} after "
+                f"redirect resolution; drop or rename one in the whitelist"
+            )
+        seen[pid] = input_title
+
+
 def read_whitelist(path: Path) -> list[str]:
     """Parse a whitelist file: one article title per line, comments OK.
 
@@ -848,7 +874,7 @@ def main(
         batch = titles[i : i + step]
         records.update(fetch_leads(batch, http_client=http_client, source=source))
 
-    passages: list[dict] = []
+    pairs: list[tuple[str, dict]] = []
     for title in titles:
         passage = to_passage(records[title], source=source)
         word_count = len(passage["text"].split())
@@ -858,8 +884,11 @@ def main(
                 "— review whether the article was misnamed",
                 flush=True,
             )
-        passages.append(passage)
+        pairs.append((title, passage))
 
+    _assert_unique_passage_ids(pairs)
+
+    passages = [p for _, p in pairs]
     passages.sort(key=lambda p: p["id"])
 
     with output_path.open("w", encoding="utf-8") as f:
