@@ -6,7 +6,7 @@
 ## First moves when you start
 
 1. Read [CLAUDE.md](CLAUDE.md) — repo conventions, gotchas, build commands. **Workspace root is `src/`, not the repo root.** Every cargo command runs from `src/`. Always invoke as `~/.cargo/bin/cargo` (Homebrew rust shadows PATH and silently downgrades to 1.86, breaking silero).
-2. From `src/`: `~/.cargo/bin/cargo build && ~/.cargo/bin/cargo test --workspace`. Should be green: **605 Rust tests** under default features (unchanged from prior session — issue #45 partial closure is corpus-only). Add `--features primer-kb-load/fastembed` for the embedding-backed sweep + recall test (downloads BGE-M3 ~570 MB on first run; cached afterwards). Plus **131 Python tests** in `data/ingest/` (unchanged this session; pytest from a venv set up per `data/ingest/README.md`).
+2. From `src/`: `~/.cargo/bin/cargo build && ~/.cargo/bin/cargo test --workspace`. Should be green: **605 Rust tests** under default features (unchanged from prior session — issue #45 full closure is corpus-only). Add `--features primer-kb-load/fastembed` for the embedding-backed sweep + recall test (downloads BGE-M3 ~570 MB on first run; cached afterwards). Plus **131 Python tests** in `data/ingest/` (unchanged this session; pytest from a venv set up per `data/ingest/README.md`).
 3. **Don't assume nothing changed since this brief was written.** Read the current state of files you intend to touch first — Horst may have made interim changes.
 
 ## Branch status
@@ -217,7 +217,7 @@ For running the BM25 floor tripwire:
 ```bash
 ~/.cargo/bin/cargo test -p primer-kb-load --test bm25_floor_tripwire \
     -- --ignored bm25_score_floor_tripwire --nocapture
-# After issue #45 partial closure: min top-K 0.95, median 4.25, worst top-1 2.06; PASS at the 0.5 floor.
+# After issue #45 corpus expansion: min top-K 0.95, median 4.25, worst top-1 2.06; PASS at the 0.5 floor.
 ```
 
 For running the hybrid sweep:

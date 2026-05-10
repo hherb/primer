@@ -592,7 +592,7 @@ pub const QUERIES: &[BenchQuery] = &[
         canonical_id: Some("seed:en:insects"),
         cluster: Cluster::Life,
     },
-    // Issue #45 partial closure: re-targeted from wiki-simple:en:plant
+    // Issue #45 corpus expansion: re-targeted from wiki-simple:en:plant
     // (which discusses photosynthesis/anatomy, not scent) to the new
     // hand-drafted seed:en:flowers passage which directly answers the
     // child-style "why do flowers smell nice" framing in
@@ -627,14 +627,14 @@ pub const KNOWN_FAILING_QUERIES: &[&str] = &[
     // Issue #45 paraphrases — BM25-only at top_k=5 picks lexically
     // adjacent passages (brain/cells/lungs-breathing/photosynthesis)
     // rather than the semantically correct one. Both loose and strict
-    // fail. Re-added to the dataset so the BM25 sweep diagnostic
-    // measures against them and the hybrid recall test demonstrates
-    // the lift.
+    // fail. Kept in the dataset so the BM25 sweep diagnostic measures
+    // against them and the hybrid recall test demonstrates the lift.
     //
-    // 2 of these 4 — "tummy growl" and "flowers smell nice" — are
-    // expected to flip to passing once the seed corpus is expanded;
-    // when they do, remove them from this list so they become
-    // permanent regression guarantees.
+    // Two other paraphrases ("tummy growl", "flowers smell nice") were
+    // originally listed here too; they were lifted by the issue #45
+    // corpus expansion (added "growl" to seed:en:digestion; added the
+    // new seed:en:flowers passage) and now serve as permanent
+    // regression guarantees in the active query set instead.
     "what is inside a tiny bug",
     "why does the brain need oxygen from the lungs",
 ];
@@ -645,14 +645,16 @@ pub const KNOWN_FAILING_QUERIES: &[&str] = &[
 /// a corpus-coverage gap the dense leg can't bridge — investigate
 /// before adding.
 ///
-/// **Tracked in:** GitHub issue #45 (paraphrase queries that BM25
-/// could not surface; hybrid lifts 2 of 4, the other 2 remain).
+/// **Tracked in:** GitHub issue #45 (closed). Empty after the issue
+/// #45 corpus expansion that added "growl" to `seed:en:digestion` and
+/// added the new `seed:en:flowers` passage — hybrid now achieves 100%
+/// loose / 100% strict recall on all 91 benchmark queries.
 pub const KNOWN_FAILING_QUERIES_HYBRID: &[&str] = &[
-    // Slot intentionally empty after the issue #45 partial closure
-    // (corpus expansion: "growl" added to seed:en:digestion;
-    // seed:en:flowers added). New entries here mean either a real
-    // semantic regression or a corpus-coverage gap the dense leg
-    // cannot bridge — investigate before adding.
+    // Slot intentionally empty after the issue #45 corpus expansion
+    // ("growl" added to seed:en:digestion; seed:en:flowers added).
+    // New entries here mean either a real semantic regression or a
+    // corpus-coverage gap the dense leg cannot bridge — investigate
+    // before adding.
 ];
 
 #[cfg(test)]
