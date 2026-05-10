@@ -22,7 +22,7 @@
 - `4778c2a` — `refactor(ingest): migrate ingest tests off simple_wikipedia shim (#61)`
 - `811732a` — `refactor(ingest): drop simple_wikipedia back-compat shim (closes #61)`
 - `63c80a1` — `docs(handoff): refresh NEXT_SESSION + archive timestamped copy`
-- (plus a follow-up commit for the inline mypy stub + uv-only README — sha-pending until committed)
+- `a0e666f` — `fix(ingest): add types-requests stub; switch README setup to uv`
 
 **Concrete deliverables:**
 
