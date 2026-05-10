@@ -24,8 +24,9 @@ import time
 import urllib.parse
 
 from retry import RetrySettings, retry_http_get
-from wiki.source import WikiSource
-from wiki.strip import strip_klexikon_wikitext
+
+from .source import WikiSource
+from .strip import strip_klexikon_wikitext
 
 
 # Length of the head-of-extract slice that disambiguation patterns are

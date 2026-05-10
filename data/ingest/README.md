@@ -44,6 +44,11 @@ test suite, so `from simple_wikipedia import slugify` etc. keep
 resolving. New code should import from the submodule directly
 (`from wiki.fetch import fetch_lead`).
 
+`wiki/__init__.py` deliberately exposes no re-exports — import from
+the specific submodule (`from wiki.source import KLEXIKON`,
+`from wiki.fetch import fetch_lead`), not from the package
+(`from wiki import KLEXIKON` will fail).
+
 ## Prerequisites
 
 - Internet access — the ingest scripts fetch from the live MediaWiki

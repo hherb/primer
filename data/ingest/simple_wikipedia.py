@@ -12,6 +12,16 @@ The implementation was split into three focused submodules under
   test suite, so ``from simple_wikipedia import slugify`` etc. keep
   resolving without a test edit.
 
+The re-exported names are *bindings*, not the canonical home of the
+underlying objects. Patching ``simple_wikipedia.<name>`` (e.g. via
+``monkeypatch.setattr``) rebinds the shim's name only; the live code
+in ``wiki.<submodule>`` reads from its own module globals and will
+not see the patch. Test code that needs to mock a fetch-side constant
+(``_RETRY_SETTINGS``, ``_DEFAULT_USER_AGENT``) must patch the
+submodule attribute (``monkeypatch.setattr("wiki.fetch._RETRY_SETTINGS",
+...)``), not the shim attribute. Patching ``time.sleep`` continues to
+work as before because it is a module-global on ``time`` itself.
+
 To regenerate a JSONL seed corpus:
 
 .. code-block:: bash
