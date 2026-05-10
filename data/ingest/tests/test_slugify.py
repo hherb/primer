@@ -1,6 +1,6 @@
 """Tests for slugify — pure function, no I/O."""
 import pytest
-from simple_wikipedia import (
+from wiki.source import (
     _assert_unique_passage_ids,
     _assert_unique_slugs,
     slugify,

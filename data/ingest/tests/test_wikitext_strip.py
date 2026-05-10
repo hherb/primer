@@ -12,7 +12,7 @@ markup leaking into the seed corpus — these tests catch that as soon as
 the pattern is added to a fixture.
 """
 import pytest
-from simple_wikipedia import strip_klexikon_wikitext
+from wiki.strip import strip_klexikon_wikitext
 
 
 # ─── Wiki link conversion ────────────────────────────────────────────────

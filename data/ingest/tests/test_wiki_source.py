@@ -18,7 +18,7 @@ SIMPLE_ENGLISH would silently corrupt the existing
 produce a 404 against the wrong host; etc. Cheap structural checks
 here catch all of that before any HTTP traffic.
 """
-from simple_wikipedia import KLEXIKON, SIMPLE_ENGLISH, WikiSource
+from wiki.source import KLEXIKON, SIMPLE_ENGLISH, WikiSource
 
 
 def test_simple_english_preset_matches_phase_0_2_schema():

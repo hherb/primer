@@ -3,13 +3,8 @@ talks to the real network."""
 import json
 from pathlib import Path
 import pytest
-from simple_wikipedia import (
-    KLEXIKON,
-    SIMPLE_ENGLISH,
-    _klexikon_canonical_url,
-    fetch_lead,
-    fetch_leads,
-)
+from wiki.fetch import _klexikon_canonical_url, fetch_lead, fetch_leads
+from wiki.source import KLEXIKON, SIMPLE_ENGLISH
 
 
 FIXTURES = Path(__file__).parent / "fixtures"
