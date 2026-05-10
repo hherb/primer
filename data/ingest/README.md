@@ -39,15 +39,11 @@ source means: declare a `WikiSource` preset (with the right
   (`fetch_lead`, `fetch_leads`) and per-strategy fetchers, plus the
   retry-settings constant (`_RETRY_SETTINGS`).
 
-`simple_wikipedia.py` re-exports every name imported by the existing
-test suite, so `from simple_wikipedia import slugify` etc. keep
-resolving. New code should import from the submodule directly
-(`from wiki.fetch import fetch_lead`).
-
-`wiki/__init__.py` deliberately exposes no re-exports — import from
-the specific submodule (`from wiki.source import KLEXIKON`,
-`from wiki.fetch import fetch_lead`), not from the package
-(`from wiki import KLEXIKON` will fail).
+Import from the specific submodule (`from wiki.source import KLEXIKON`,
+`from wiki.fetch import fetch_lead`, `from wiki.strip import
+strip_klexikon_wikitext`); `wiki/__init__.py` deliberately exposes no
+re-exports, and `simple_wikipedia.py` is the CLI entry point only — it
+no longer carries back-compat re-exports.
 
 ## Prerequisites
 
