@@ -592,11 +592,16 @@ pub const QUERIES: &[BenchQuery] = &[
         canonical_id: Some("seed:en:insects"),
         cluster: Cluster::Life,
     },
+    // Issue #45 partial closure: re-targeted from wiki-simple:en:plant
+    // (which discusses photosynthesis/anatomy, not scent) to the new
+    // hand-drafted seed:en:flowers passage which directly answers the
+    // child-style "why do flowers smell nice" framing in
+    // pollinator-attraction terms.
     BenchQuery {
         query: "why do flowers smell nice",
-        required: &["plant", "autotroph"],
-        canonical_id: Some("wiki-simple:en:plant"),
-        cluster: Cluster::Wiki,
+        required: &["flower", "scent"],
+        canonical_id: Some("seed:en:flowers"),
+        cluster: Cluster::Life,
     },
     BenchQuery {
         query: "why does the brain need oxygen from the lungs",
@@ -625,9 +630,12 @@ pub const KNOWN_FAILING_QUERIES: &[&str] = &[
     // fail. Re-added to the dataset so the BM25 sweep diagnostic
     // measures against them and the hybrid recall test demonstrates
     // the lift.
-    "what makes my tummy growl when I am hungry",
+    //
+    // 2 of these 4 — "tummy growl" and "flowers smell nice" — are
+    // expected to flip to passing once the seed corpus is expanded;
+    // when they do, remove them from this list so they become
+    // permanent regression guarantees.
     "what is inside a tiny bug",
-    "why do flowers smell nice",
     "why does the brain need oxygen from the lungs",
 ];
 
@@ -640,25 +648,11 @@ pub const KNOWN_FAILING_QUERIES: &[&str] = &[
 /// **Tracked in:** GitHub issue #45 (paraphrase queries that BM25
 /// could not surface; hybrid lifts 2 of 4, the other 2 remain).
 pub const KNOWN_FAILING_QUERIES_HYBRID: &[&str] = &[
-    // Issue #45: hybrid (BGE-M3 dense + BM25 RRF) routes "tummy growl
-    // when hungry" to sleep-dreams/lungs/reptiles, missing the
-    // digestion passage. Even semantic embeddings cannot bridge "tummy
-    // growl" → "stomach growls when hungry" because the digestion
-    // passage never describes the symptom in those words. Corpus gap,
-    // not a retrieval bug. Cure: add a sentence to the digestion
-    // passage that names the growling symptom (the next seed-corpus
-    // expansion is the natural moment to do this).
-    "what makes my tummy growl when I am hungry",
-    // Issue #45: hybrid routes "flowers smell nice" to
-    // photosynthesis/soap/water, missing the wiki plant passage. The
-    // child-language framing centres on flowers and scent, neither of
-    // which maps to "autotroph" or the plant passage's lead. The top-1
-    // hit (photosynthesis) is a plausible Socratic answer in its own
-    // right but the strict canonical mapping says the plant page is
-    // the intended target. Corpus/canonical-mapping gap. Cure: either
-    // expand the plant passage to mention flowers + scent, or relax
-    // the canonical mapping to accept either passage.
-    "why do flowers smell nice",
+    // Slot intentionally empty after the issue #45 partial closure
+    // (corpus expansion: "growl" added to seed:en:digestion;
+    // seed:en:flowers added). New entries here mean either a real
+    // semantic regression or a corpus-coverage gap the dense leg
+    // cannot bridge — investigate before adding.
 ];
 
 #[cfg(test)]
