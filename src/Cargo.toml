@@ -14,6 +14,7 @@ members = [
     "crates/primer-kb-load",
     "crates/primer-embedding",
     "crates/primer-engine",
+    "crates/primer-gui",
 ]
 exclude = ["vendor/piper-rs", "vendor/silero-vad-rust"]
 
@@ -75,6 +76,11 @@ unicode-normalization = "0.1"
 
 # Test helpers
 tempfile = "3"
+
+# Tauri 2.x desktop GUI runtime. Pinned to the 2.x line; the actual
+# feature set is selected per consumer (primer-gui today).
+tauri = { version = "2", default-features = false }
+tauri-build = { version = "2" }
 
 # Workspace crates
 primer-core = { path = "crates/primer-core" }
