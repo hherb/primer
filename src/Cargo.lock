@@ -2173,7 +2173,6 @@ name = "primer-cli"
 version = "0.1.0"
 dependencies = [
  "anyhow",
- "chrono",
  "clap",
  "dotenvy",
  "primer-classifier",
@@ -2195,7 +2194,6 @@ dependencies = [
  "toml",
  "tracing",
  "tracing-subscriber",
- "unicode-normalization",
  "uuid",
 ]
 

@@ -21,6 +21,12 @@ use primer_inference::stub::StubBackend;
 /// that would otherwise require borrowing from the binary's `Cli` /
 /// settings struct. Extracted so the helpers can be called after
 /// partial moves of the source-of-truth fields.
+///
+/// **Invariant:** every backend-affecting CLI flag in `primer-cli` (and
+/// the eventual `primer-gui` equivalent) must round-trip through this
+/// struct. Adding a new flag means adding a field here AND threading it
+/// in at the construction site — silent omission would let the binary
+/// see a flag the wiring helpers ignore.
 pub struct BackendParams {
     pub api_key: Option<String>,
     pub ollama_url: String,
