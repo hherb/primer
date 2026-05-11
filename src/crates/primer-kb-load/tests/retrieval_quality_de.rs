@@ -121,6 +121,14 @@ async fn de_seed_corpus_registers_klexikon_source() {
             "source {} missing attribution",
             src.id
         );
+        // The literal `"CC-BY-SA-4.0"` must match `WikiSource::license`
+        // for the `KLEXIKON` preset in
+        // `data/ingest/wiki/source.py` exactly. If the ingest layer is
+        // ever rewritten to a different SPDX-style spelling
+        // (`cc-by-sa-4.0`, `CC-BY-SA-4.0-DE`, ...), update both sides
+        // in lockstep. The whole-string match is intentional: a
+        // `starts_with("CC-BY-SA-4")` would silently accept a wrong
+        // jurisdiction marker.
         if src.license == "CC-BY-SA-4.0" {
             seen_klexikon = true;
         }

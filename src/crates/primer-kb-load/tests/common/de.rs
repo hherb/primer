@@ -17,7 +17,7 @@
 //! `Wiki` variant does not appear here because the entire German layer
 //! IS the wiki — there is no parallel hand-drafted seed cluster.
 
-use super::{BenchQuery, Cluster};
+use super::{BenchQuery, CANONICAL_PROBE_TOP_K, Cluster};
 
 /// Canonical benchmark queries for the `de` locale. Targets the
 /// 66-passage Klexikon corpus shipped at `data/seed/wiki_passages.de.jsonl`.
@@ -134,10 +134,20 @@ pub const QUERIES_DE: &[BenchQuery] = &[
         canonical_id: Some("wiki-klexikon:de:dinosaurier"),
         cluster: Cluster::Life,
     },
+    // The earlier draft of this slot asked "wie viele beine haben
+    // insekten" with `required: &["sechs"]`. That passed for the wrong
+    // reason — the `wiki-klexikon:de:insekten` article never names the
+    // leg count; "sechs Beine" only appears in `wiki-klexikon:de:bienen`.
+    // Code review (PR #63) flagged the fragility: top-5 retrieval
+    // happened to surface `bienen` (it mentions both "Insekten" AND
+    // "sechs"), so the loose check was measuring "some passage in
+    // top-K says sechs" rather than "the right passage answered the
+    // question". Replaced with a question the insekten article DOES
+    // answer directly, with a strict canonical_id pin.
     BenchQuery {
-        query: "wie viele beine haben insekten",
-        required: &["sechs"],
-        canonical_id: None,
+        query: "wie viele arten von insekten gibt es",
+        required: &["million", "arten"],
+        canonical_id: Some("wiki-klexikon:de:insekten"),
         cluster: Cluster::Life,
     },
     BenchQuery {
@@ -222,7 +232,11 @@ mod sanity_tests {
     fn every_de_cluster_has_at_least_three_queries() {
         // Wiki cluster is excluded — the Klexikon layer IS the
         // German wiki, so it does not have a separate hand-drafted
-        // seed cluster sitting alongside it.
+        // seed cluster sitting alongside it. **If a German hand-drafted
+        // seed layer is ever added (mirroring the EN seed_passages /
+        // wiki_passages split), add `Cluster::Wiki` to this list so
+        // wiki-targeted DE queries get the same per-cluster floor
+        // guarantee.**
         for cluster in [
             Cluster::Space,
             Cluster::Body,
@@ -242,15 +256,20 @@ mod sanity_tests {
 
     #[test]
     fn de_strict_subset_meets_floor() {
-        // Brief specified ~12 strict canonical-id mappings as the
-        // target. Set a defensive lower bound of 10.
+        // 20 strict canonical-id mappings ship today (PR #63 + the
+        // insekten-query fix); the EN-side floor is ≥15 against ~24
+        // mappings (a ~60% gap), so match that tightness ratio rather
+        // than the looser 50% gap from the initial PR. Tuning could
+        // remove up to 5 strict mappings before this trips — meaningful
+        // signal preserved without forcing every tuning experiment to
+        // edit this floor.
         let strict_count = QUERIES_DE
             .iter()
             .filter(|q| q.canonical_id.is_some())
             .count();
         assert!(
-            strict_count >= 10,
-            "DE strict subset has only {} entries; need at least 10 for the recall signal",
+            strict_count >= 15,
+            "DE strict subset has only {} entries; need at least 15 for the recall signal",
             strict_count
         );
     }
@@ -306,7 +325,7 @@ mod sanity_tests {
                     .map(|c| if c.is_alphanumeric() { c } else { ' ' })
                     .collect();
             let params = RetrievalParams {
-                top_k: 200,
+                top_k: CANONICAL_PROBE_TOP_K,
                 min_score: f64::NEG_INFINITY,
                 source_filter: vec![],
             };
