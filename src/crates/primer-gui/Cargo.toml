@@ -1,0 +1,25 @@
+[package]
+name = "primer-gui"
+description = "Tauri desktop UI for testing and monitoring The Primer's Socratic dialogue"
+version.workspace = true
+edition.workspace = true
+
+[[bin]]
+name = "primer-gui"
+path = "src/main.rs"
+
+[build-dependencies]
+tauri-build = { workspace = true }
+
+[dependencies]
+# Tauri runtime. `wry` is the default-included WebView; we pin the
+# default-features OFF at the workspace level and re-enable here to
+# keep the surface explicit. Without `wry` the Builder can't infer
+# its Runtime type parameter.
+tauri = { workspace = true, features = ["wry"] }
+
+# Engine + pedagogy deps and the `embedding` / `ollama-embedding` feature
+# forwards land in step 3 alongside the first session-lifecycle commands.
+
+[features]
+default = []
