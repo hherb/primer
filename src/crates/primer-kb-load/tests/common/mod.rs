@@ -4,8 +4,23 @@
 //! `tests/common/mod.rs` is the standard Cargo pattern for test-shared
 //! code: each test file uses `mod common;` to import these types and
 //! data. This file is NOT a separate test binary.
+//!
+//! Per-locale query data lives in submodules:
+//! - English: top-level `QUERIES`, `KNOWN_FAILING_QUERIES`, `KNOWN_FAILING_QUERIES_HYBRID`
+//!   (kept at the top level for back-compat with existing tests).
+//! - German: `common::de::QUERIES_DE`, `KNOWN_FAILING_QUERIES_DE`,
+//!   `KNOWN_FAILING_QUERIES_DE_HYBRID` — see `tests/common/de.rs`.
 
 #![allow(dead_code)] // not every BenchQuery field is read by every consumer
+
+pub mod de;
+
+/// `top_k` used by the canonical-id-exists sanity probes (both EN and
+/// DE). Set well above the size of any single seed corpus shipped so
+/// the canonical row is guaranteed to surface when it actually exists.
+/// Today's corpora: 91 EN passages, 66 DE passages — 200 carries
+/// comfortable headroom for the next round of corpus expansion.
+pub const CANONICAL_PROBE_TOP_K: usize = 200;
 
 /// Cluster a benchmark query targets. Used for per-cluster recall
 /// breakdown in the sweep diagnostic.
@@ -756,15 +771,15 @@ mod sanity_tests {
             // OR-joined tokens. Querying the raw id directly fails
             // because `:` and `-` are not whitespace, leaving the
             // sanitizer with a single blob like "seedensun" or
-            // "earthorbitdaynight" that matches nothing. With top_k=200
-            // (well above the ~90-passage corpus) the canonical row is
-            // guaranteed to surface when it exists.
+            // "earthorbitdaynight" that matches nothing. With
+            // `CANONICAL_PROBE_TOP_K` (well above corpus size) the
+            // canonical row is guaranteed to surface when it exists.
             let probe: String =
                 q.1.chars()
                     .map(|c| if c.is_alphanumeric() { c } else { ' ' })
                     .collect();
             let params = RetrievalParams {
-                top_k: 200,
+                top_k: CANONICAL_PROBE_TOP_K,
                 min_score: f64::NEG_INFINITY,
                 source_filter: vec![],
             };
