@@ -19,6 +19,13 @@
 //! Klexikon passage collapses into its topical cluster (no parallel
 //! hand-drafted seed sitting alongside it). This matches the
 //! cluster-floor sanity test in `tests/common/de.rs`.
+//!
+//! Empirical shape against today's corpus: strict recall is 95% (one
+//! miss in the space cluster, `"warum scheint die sonne so hell"`) at
+//! `top_k=3` regardless of `min_score`, then flatlines at 100% from
+//! `top_k=5` onward. Production `(top_k=5, min_score=0.5)` is a
+//! comfortable choice — the EN-tuned defaults clear the German
+//! benchmark unchanged.
 
 mod common;
 
@@ -142,6 +149,9 @@ fn pick_winner(cells: &[CellMetrics]) -> &CellMetrics {
     cells
         .iter()
         .max_by(|a, b| {
+            // Defensive: NaN is unreachable on this grid (every total > 0)
+            // but treat it as Equal rather than panicking, so a future
+            // empty-corpus run prints the table instead of crashing.
             a.strict_recall()
                 .partial_cmp(&b.strict_recall())
                 .unwrap_or(Ordering::Equal)
@@ -150,7 +160,7 @@ fn pick_winner(cells: &[CellMetrics]) -> &CellMetrics {
                         .partial_cmp(&b.loose_recall())
                         .unwrap_or(Ordering::Equal),
                 )
-                .then(b.top_k.cmp(&a.top_k))
+                .then(b.top_k.cmp(&a.top_k)) // smaller top_k wins → reverse
                 .then(
                     a.min_score
                         .partial_cmp(&b.min_score)

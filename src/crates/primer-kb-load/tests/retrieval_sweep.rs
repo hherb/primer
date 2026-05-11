@@ -25,6 +25,12 @@ use primer_knowledge::SqliteKnowledgeBase;
 const TOP_K_GRID: &[usize] = &[3, 5, 7, 10];
 const MIN_SCORE_GRID: &[f64] = &[0.0, 0.25, 0.5, 0.75, 1.0, 1.5];
 
+/// EN benchmark covers all six clusters (the five topical clusters plus
+/// `Cluster::Wiki` for the Simple English Wikipedia layer). The
+/// parallel `retrieval_sweep_de.rs` defines its own `DE_CLUSTERS = 5`
+/// because Klexikon collapses into the topical clusters.
+const EN_CLUSTERS: usize = 6;
+
 #[derive(Debug, Clone, Copy)]
 struct CellMetrics {
     top_k: usize,
@@ -33,7 +39,7 @@ struct CellMetrics {
     loose_total: usize,
     strict_pass: usize,
     strict_total: usize,
-    per_cluster: [(Cluster, usize, usize); 6], // (cluster, pass, total)
+    per_cluster: [(Cluster, usize, usize); EN_CLUSTERS], // (cluster, pass, total)
 }
 
 impl CellMetrics {
@@ -63,7 +69,7 @@ async fn evaluate_cell(
     let mut loose_total = 0;
     let mut strict_pass = 0;
     let mut strict_total = 0;
-    let mut cluster_counts: [(Cluster, usize, usize); 6] = [
+    let mut cluster_counts: [(Cluster, usize, usize); EN_CLUSTERS] = [
         (Cluster::Space, 0, 0),
         (Cluster::Body, 0, 0),
         (Cluster::HowThingsWork, 0, 0),
