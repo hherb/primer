@@ -4,8 +4,16 @@
 //! `tests/common/mod.rs` is the standard Cargo pattern for test-shared
 //! code: each test file uses `mod common;` to import these types and
 //! data. This file is NOT a separate test binary.
+//!
+//! Per-locale query data lives in submodules:
+//! - English: top-level `QUERIES`, `KNOWN_FAILING_QUERIES`, `KNOWN_FAILING_QUERIES_HYBRID`
+//!   (kept at the top level for back-compat with existing tests).
+//! - German: `common::de::QUERIES_DE`, `KNOWN_FAILING_QUERIES_DE`,
+//!   `KNOWN_FAILING_QUERIES_DE_HYBRID` — see `tests/common/de.rs`.
 
 #![allow(dead_code)] // not every BenchQuery field is read by every consumer
+
+pub mod de;
 
 /// Cluster a benchmark query targets. Used for per-cluster recall
 /// breakdown in the sweep diagnostic.

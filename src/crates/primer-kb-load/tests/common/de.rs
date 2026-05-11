@@ -1,0 +1,322 @@
+//! German benchmark dataset for retrieval-quality integration tests.
+//!
+//! Mirrors `tests/common/mod.rs::QUERIES` for the `de` locale. The
+//! Klexikon corpus (66 articles at the time of authoring; CC-BY-SA-4.0
+//! children's wiki — the German analogue of Simple English Wikipedia)
+//! is the only seed layer for `de`, so every `canonical_id` here points
+//! at a `wiki-klexikon:de:*` passage. There is no separate hand-drafted
+//! seed layer for German.
+//!
+//! Queries are child-style German phrasings. `required` substrings were
+//! chosen against the lead text of each targeted passage so the loose
+//! check measures retrieval recall and not just vocabulary alignment.
+//! Substring matching runs on `text.to_lowercase()`, so German umlauts
+//! flow through unchanged.
+//!
+//! The shared `Cluster` enum (`tests/common/mod.rs`) is reused. The
+//! `Wiki` variant does not appear here because the entire German layer
+//! IS the wiki — there is no parallel hand-drafted seed cluster.
+
+use super::{BenchQuery, Cluster};
+
+/// Canonical benchmark queries for the `de` locale. Targets the
+/// 66-passage Klexikon corpus shipped at `data/seed/wiki_passages.de.jsonl`.
+pub const QUERIES_DE: &[BenchQuery] = &[
+    // ── Space cluster ─────────────────────────────────────────────
+    BenchQuery {
+        query: "warum scheint die sonne so hell",
+        required: &["stern", "hitze"],
+        canonical_id: Some("wiki-klexikon:de:sonne"),
+        cluster: Cluster::Space,
+    },
+    BenchQuery {
+        query: "was sind sterne",
+        required: &["wasserstoff", "helium"],
+        canonical_id: Some("wiki-klexikon:de:stern"),
+        cluster: Cluster::Space,
+    },
+    BenchQuery {
+        query: "warum wechselt der mond seine form",
+        required: &["sonne", "beleuchtet"],
+        canonical_id: Some("wiki-klexikon:de:mond"),
+        cluster: Cluster::Space,
+    },
+    BenchQuery {
+        query: "was ist eine galaxie",
+        required: &["sterne", "weltall"],
+        canonical_id: Some("wiki-klexikon:de:galaxie"),
+        cluster: Cluster::Space,
+    },
+    BenchQuery {
+        query: "warum gibt es jahreszeiten",
+        required: &["achse", "schief"],
+        canonical_id: Some("wiki-klexikon:de:jahreszeiten"),
+        cluster: Cluster::Space,
+    },
+    // ── Body cluster ──────────────────────────────────────────────
+    BenchQuery {
+        query: "wie pumpt das herz das blut",
+        required: &["muskel", "blut"],
+        canonical_id: Some("wiki-klexikon:de:herz"),
+        cluster: Cluster::Body,
+    },
+    BenchQuery {
+        query: "wozu brauchen wir die lunge",
+        required: &["sauerstoff", "kohlendioxid"],
+        canonical_id: Some("wiki-klexikon:de:lunge"),
+        cluster: Cluster::Body,
+    },
+    BenchQuery {
+        query: "was macht das gehirn in unserem kopf",
+        required: &["organ", "informationen"],
+        canonical_id: Some("wiki-klexikon:de:gehirn"),
+        cluster: Cluster::Body,
+    },
+    BenchQuery {
+        query: "wie verdaut der körper das essen",
+        required: &["nahrung", "zerlegen"],
+        canonical_id: Some("wiki-klexikon:de:verdauung"),
+        cluster: Cluster::Body,
+    },
+    BenchQuery {
+        query: "wie viele knochen hat der mensch",
+        required: &["skelett", "knochen"],
+        canonical_id: None,
+        cluster: Cluster::Body,
+    },
+    BenchQuery {
+        query: "wie hören wir mit den ohren",
+        required: &["geräusch"],
+        canonical_id: None,
+        cluster: Cluster::Body,
+    },
+    // ── How-things-work cluster ───────────────────────────────────
+    BenchQuery {
+        query: "wie funktioniert ein magnet",
+        required: &["nordpol", "südpol"],
+        canonical_id: Some("wiki-klexikon:de:magnet"),
+        cluster: Cluster::HowThingsWork,
+    },
+    BenchQuery {
+        query: "was ist elektrizität",
+        required: &["strom", "kraft"],
+        canonical_id: Some("wiki-klexikon:de:elektrizitat"),
+        cluster: Cluster::HowThingsWork,
+    },
+    BenchQuery {
+        query: "was ist schwerkraft",
+        required: &["kraft", "boden"],
+        canonical_id: Some("wiki-klexikon:de:schwerkraft"),
+        cluster: Cluster::HowThingsWork,
+    },
+    BenchQuery {
+        query: "wie entsteht ein feuer",
+        required: &["sauerstoff", "verbrenn"],
+        canonical_id: None,
+        cluster: Cluster::HowThingsWork,
+    },
+    BenchQuery {
+        query: "was ist schall",
+        required: &["geräusch", "hören"],
+        canonical_id: Some("wiki-klexikon:de:schall"),
+        cluster: Cluster::HowThingsWork,
+    },
+    // ── Life cluster ──────────────────────────────────────────────
+    BenchQuery {
+        query: "wie wachsen pflanzen",
+        required: &["wurzeln", "blätter"],
+        canonical_id: Some("wiki-klexikon:de:pflanzen"),
+        cluster: Cluster::Life,
+    },
+    BenchQuery {
+        query: "wann sind die dinosaurier ausgestorben",
+        required: &["millionen", "ausgestorben"],
+        canonical_id: Some("wiki-klexikon:de:dinosaurier"),
+        cluster: Cluster::Life,
+    },
+    BenchQuery {
+        query: "wie viele beine haben insekten",
+        required: &["sechs"],
+        canonical_id: None,
+        cluster: Cluster::Life,
+    },
+    BenchQuery {
+        query: "wie atmen fische unter wasser",
+        required: &["kiemen", "wasser"],
+        canonical_id: Some("wiki-klexikon:de:fische"),
+        cluster: Cluster::Life,
+    },
+    BenchQuery {
+        query: "wie fliegen vögel",
+        required: &["flügel", "federn"],
+        canonical_id: Some("wiki-klexikon:de:vogel"),
+        cluster: Cluster::Life,
+    },
+    // ── Earth and weather cluster ─────────────────────────────────
+    BenchQuery {
+        query: "wie entsteht regen",
+        required: &["tropfen", "wolken"],
+        canonical_id: None,
+        cluster: Cluster::EarthWeather,
+    },
+    BenchQuery {
+        query: "wie entsteht ein vulkan",
+        required: &["gestein", "krater"],
+        canonical_id: Some("wiki-klexikon:de:vulkan"),
+        cluster: Cluster::EarthWeather,
+    },
+    BenchQuery {
+        query: "warum gibt es erdbeben",
+        required: &["bewegung"],
+        canonical_id: None,
+        cluster: Cluster::EarthWeather,
+    },
+    BenchQuery {
+        query: "wie entstehen wolken",
+        required: &["wasser", "kondens"],
+        canonical_id: Some("wiki-klexikon:de:wolke"),
+        cluster: Cluster::EarthWeather,
+    },
+    BenchQuery {
+        query: "wie entsteht wind",
+        required: &["luft", "luftdruck"],
+        canonical_id: None,
+        cluster: Cluster::EarthWeather,
+    },
+];
+
+/// German queries the production BM25-only retrieval defaults
+/// (`KB_FINAL_TOP_K`, `KB_BM25_ONLY_MIN_SCORE`) cannot satisfy. Kept in
+/// `QUERIES_DE` rather than deleted so the sweep diagnostic still
+/// measures against them. The BM25-only regression test in
+/// `retrieval_quality_de.rs` excludes these from its assertion.
+///
+/// Entries are populated by running the BM25-only test against the
+/// initial dataset; each surviving entry should carry a one-line
+/// rationale pointing at the corpus gap or query-vocabulary mismatch.
+pub const KNOWN_FAILING_QUERIES_DE: &[&str] = &[];
+
+/// German queries the hybrid (BM25 + dense-vector RRF) retrieval path
+/// with production `HybridParams::default()` cannot satisfy. Empty by
+/// default — every new entry represents either a real semantic
+/// regression or a corpus-coverage gap the dense leg cannot bridge.
+/// Investigate before adding.
+pub const KNOWN_FAILING_QUERIES_DE_HYBRID: &[&str] = &[];
+
+#[cfg(test)]
+mod sanity_tests {
+    use super::*;
+
+    #[test]
+    fn queries_de_have_expected_size_floor() {
+        // Brief specified ~25 queries as the target. Set a defensive
+        // lower bound of 20 to catch accidental truncation.
+        assert!(
+            QUERIES_DE.len() >= 20,
+            "expected at least 20 DE benchmark queries, got {}",
+            QUERIES_DE.len()
+        );
+    }
+
+    #[test]
+    fn every_de_cluster_has_at_least_three_queries() {
+        // Wiki cluster is excluded — the Klexikon layer IS the
+        // German wiki, so it does not have a separate hand-drafted
+        // seed cluster sitting alongside it.
+        for cluster in [
+            Cluster::Space,
+            Cluster::Body,
+            Cluster::HowThingsWork,
+            Cluster::Life,
+            Cluster::EarthWeather,
+        ] {
+            let count = QUERIES_DE.iter().filter(|q| q.cluster == cluster).count();
+            assert!(
+                count >= 3,
+                "DE cluster {:?} has only {} queries; need at least 3 for per-cluster recall to be meaningful",
+                cluster,
+                count
+            );
+        }
+    }
+
+    #[test]
+    fn de_strict_subset_meets_floor() {
+        // Brief specified ~12 strict canonical-id mappings as the
+        // target. Set a defensive lower bound of 10.
+        let strict_count = QUERIES_DE
+            .iter()
+            .filter(|q| q.canonical_id.is_some())
+            .count();
+        assert!(
+            strict_count >= 10,
+            "DE strict subset has only {} entries; need at least 10 for the recall signal",
+            strict_count
+        );
+    }
+
+    #[test]
+    fn de_known_failing_queries_all_appear_in_queries() {
+        // Mirrors the EN equivalent: a typo in KNOWN_FAILING_QUERIES_DE
+        // would silently disable nothing. Fails loudly if an entry
+        // doesn't match a real benchmark query.
+        for failing in KNOWN_FAILING_QUERIES_DE {
+            let found = QUERIES_DE.iter().any(|q| q.query == *failing);
+            assert!(
+                found,
+                "KNOWN_FAILING_QUERIES_DE entry {:?} does not appear in QUERIES_DE — typo or stale entry",
+                failing
+            );
+        }
+        for failing in KNOWN_FAILING_QUERIES_DE_HYBRID {
+            let found = QUERIES_DE.iter().any(|q| q.query == *failing);
+            assert!(
+                found,
+                "KNOWN_FAILING_QUERIES_DE_HYBRID entry {:?} does not appear in QUERIES_DE — typo or stale entry",
+                failing
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn de_strict_subset_canonical_ids_exist_in_corpus() {
+        // Mirrors the EN equivalent: every declared canonical_id must
+        // exist in the shipped Klexikon corpus, otherwise strict
+        // recall measures against ghost ids. Open a temp `de`-locale
+        // KB, auto-seed, then probe each id with the same word-parts
+        // workaround the EN test uses.
+        use primer_core::i18n::Locale;
+        use primer_core::knowledge::{KnowledgeBase, RetrievalParams};
+        use primer_kb_load::auto_seed_if_empty;
+        use primer_knowledge::SqliteKnowledgeBase;
+
+        let db = tempfile::NamedTempFile::new().unwrap();
+        let kb = SqliteKnowledgeBase::open_for_locale(db.path(), Locale::German).unwrap();
+        auto_seed_if_empty(&kb, Locale::German)
+            .await
+            .unwrap()
+            .unwrap();
+
+        for q in QUERIES_DE
+            .iter()
+            .filter_map(|q| q.canonical_id.map(|id| (q.query, id)))
+        {
+            let probe: String =
+                q.1.chars()
+                    .map(|c| if c.is_alphanumeric() { c } else { ' ' })
+                    .collect();
+            let params = RetrievalParams {
+                top_k: 200,
+                min_score: f64::NEG_INFINITY,
+                source_filter: vec![],
+            };
+            let hits = kb.retrieve(&probe, &params).await.unwrap();
+            let found = hits.iter().any(|p| p.id == q.1);
+            assert!(
+                found,
+                "canonical_id {:?} for query {:?} not found in DE seed corpus (probed with {:?})",
+                q.1, q.0, probe
+            );
+        }
+    }
+}
