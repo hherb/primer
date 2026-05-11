@@ -3421,17 +3421,6 @@ dependencies = [
 name = "primer-gui"
 version = "0.1.0"
 dependencies = [
- "primer-classifier",
- "primer-comprehension",
- "primer-core",
- "primer-engine",
- "primer-extractor",
- "primer-kb-load",
- "primer-knowledge",
- "primer-pedagogy",
- "primer-storage",
- "serde",
- "serde_json",
  "tauri",
  "tauri-build",
 ]
