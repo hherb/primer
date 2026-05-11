@@ -20,13 +20,12 @@ primer-kb-load = { path = "../primer-kb-load" }
 primer-embedding = { path = "../primer-embedding" }
 primer-pedagogy = { path = "../primer-pedagogy" }
 primer-storage = { path = "../primer-storage" }
+primer-engine = { path = "../primer-engine" }
 tokio.workspace = true
 clap.workspace = true
 dotenvy.workspace = true
 tracing.workspace = true
 tracing-subscriber.workspace = true
-unicode-normalization.workspace = true
-chrono.workspace = true
 uuid.workspace = true
 serde.workspace = true
 serde_json.workspace = true
@@ -48,12 +47,14 @@ default = []
 # `embedding` and `speech` build cleanly together because both paths
 # resolve to ort = "=2.0.0-rc.10" (fastembed pinned to =5.7.0 here,
 # which is the last line that targets rc.10). See primer-embedding's
-# Cargo.toml for the version-pin rationale.
-embedding = ["primer-embedding/fastembed"]
+# Cargo.toml for the version-pin rationale. Forwarded to primer-engine
+# so the shared `build_fastembed_embedder` helper picks up the right
+# `#[cfg(feature = "embedding")]` branch.
+embedding = ["primer-embedding/fastembed", "primer-engine/embedding"]
 
 # Lightweight Ollama-backed embedder. Useful for prototyping; not the
 # recommended runtime backend.
-ollama-embedding = ["primer-embedding/ollama"]
+ollama-embedding = ["primer-embedding/ollama", "primer-engine/ollama-embedding"]
 
 # Voice REPL via --speech. Pulls every speech backend feature so the
 # state machine can compose VAD → STT → DialogueManager → TTS → cpal

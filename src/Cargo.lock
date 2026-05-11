@@ -2173,13 +2173,13 @@ name = "primer-cli"
 version = "0.1.0"
 dependencies = [
  "anyhow",
- "chrono",
  "clap",
  "dotenvy",
  "primer-classifier",
  "primer-comprehension",
  "primer-core",
  "primer-embedding",
+ "primer-engine",
  "primer-extractor",
  "primer-inference",
  "primer-kb-load",
@@ -2194,7 +2194,6 @@ dependencies = [
  "toml",
  "tracing",
  "tracing-subscriber",
- "unicode-normalization",
  "uuid",
 ]
 
@@ -2242,6 +2241,24 @@ dependencies = [
  "thiserror 2.0.18",
  "tokio",
  "tracing",
+]
+
+[[package]]
+name = "primer-engine"
+version = "0.1.0"
+dependencies = [
+ "chrono",
+ "primer-classifier",
+ "primer-comprehension",
+ "primer-core",
+ "primer-embedding",
+ "primer-extractor",
+ "primer-inference",
+ "primer-storage",
+ "tokio",
+ "tracing",
+ "unicode-normalization",
+ "uuid",
 ]
 
 [[package]]
