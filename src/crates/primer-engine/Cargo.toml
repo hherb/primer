@@ -1,0 +1,32 @@
+[package]
+name = "primer-engine"
+description = "Shared wiring helpers for primer-cli and primer-gui (backend construction, path resolution, learner reconciliation)"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+primer-core.workspace = true
+primer-classifier.workspace = true
+primer-extractor.workspace = true
+primer-comprehension.workspace = true
+primer-inference = { path = "../primer-inference" }
+primer-embedding = { path = "../primer-embedding" }
+chrono.workspace = true
+tracing.workspace = true
+unicode-normalization.workspace = true
+uuid.workspace = true
+
+[dev-dependencies]
+primer-storage = { path = "../primer-storage" }
+tokio.workspace = true
+
+[features]
+default = []
+
+# Hybrid retrieval via the fastembed-rs (BGE-M3) backend. Mirrors the
+# matching feature on primer-cli/primer-gui so each binary can opt in
+# independently. The feature plumbs through to primer-embedding.
+embedding = ["primer-embedding/fastembed"]
+
+# Lightweight Ollama-backed embedder.
+ollama-embedding = ["primer-embedding/ollama"]

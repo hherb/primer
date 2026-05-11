@@ -13,6 +13,7 @@ members = [
     "crates/primer-comprehension",
     "crates/primer-kb-load",
     "crates/primer-embedding",
+    "crates/primer-engine",
 ]
 exclude = ["vendor/piper-rs", "vendor/silero-vad-rust"]
 
@@ -87,6 +88,7 @@ primer-extractor = { path = "crates/primer-extractor" }
 primer-comprehension = { path = "crates/primer-comprehension" }
 primer-kb-load = { path = "crates/primer-kb-load" }
 primer-embedding = { path = "crates/primer-embedding" }
+primer-engine = { path = "crates/primer-engine" }
 
 [patch.crates-io]
 # Vendored piper-rs patched for ort 2.0.0-rc.10 API compatibility.
