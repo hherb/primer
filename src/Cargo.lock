@@ -3421,8 +3421,28 @@ dependencies = [
 name = "primer-gui"
 version = "0.1.0"
 dependencies = [
+ "chrono",
+ "primer-classifier",
+ "primer-comprehension",
+ "primer-core",
+ "primer-embedding",
+ "primer-engine",
+ "primer-extractor",
+ "primer-inference",
+ "primer-kb-load",
+ "primer-knowledge",
+ "primer-pedagogy",
+ "primer-storage",
+ "serde",
+ "serde_json",
  "tauri",
  "tauri-build",
+ "tempfile",
+ "thiserror 2.0.18",
+ "tokio",
+ "tracing",
+ "tracing-subscriber",
+ "uuid",
 ]
 
 [[package]]

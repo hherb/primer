@@ -18,8 +18,44 @@ tauri-build = { workspace = true }
 # its Runtime type parameter.
 tauri = { workspace = true, features = ["wry"] }
 
-# Engine + pedagogy deps and the `embedding` / `ollama-embedding` feature
-# forwards land in step 3 alongside the first session-lifecycle commands.
+# JSON serialisation for GuiConfig + frontend DTOs.
+serde.workspace = true
+serde_json.workspace = true
+thiserror.workspace = true
+
+# Structured logging for the same RUST_LOG=… surface the CLI exposes.
+# Without this, tracing::warn! calls inside the pedagogy/inference
+# stack disappear silently when the GUI drives them.
+tracing.workspace = true
+tracing-subscriber.workspace = true
+
+# Shared engine wiring + pedagogy stack the GUI drives.
+primer-engine.workspace = true
+primer-core.workspace = true
+primer-pedagogy.workspace = true
+primer-knowledge.workspace = true
+primer-storage.workspace = true
+primer-kb-load.workspace = true
+primer-classifier.workspace = true
+primer-extractor.workspace = true
+primer-comprehension.workspace = true
+primer-embedding.workspace = true
+primer-inference = { path = "../primer-inference" }
+
+tokio.workspace = true
+uuid.workspace = true
+chrono.workspace = true
+
+[dev-dependencies]
+tempfile.workspace = true
 
 [features]
 default = []
+
+# Hybrid retrieval via fastembed-rs (BGE-M3). Mirrors primer-cli's flag
+# so the GUI can opt in independently. Forwards through to primer-engine
+# for the cfg-gated dispatch arms.
+embedding = ["primer-engine/embedding"]
+
+# Lightweight Ollama-backed embedder.
+ollama-embedding = ["primer-engine/ollama-embedding"]
