@@ -560,10 +560,12 @@ pub async fn send_message(
     app: AppHandle,
     input: String,
 ) -> Result<TurnComplete, String> {
-    // Clone both Arcs under the session mutex, then release it. The
-    // DM Arc drives the turn; the snapshot Arc is refreshed at the
-    // end so reader commands see fresh learner/session-id fields
-    // without ever locking the DM.
+    // Clone the Arcs under the session mutex, then release it. The DM
+    // Arc drives the turn; the snapshot Arc is refreshed at the end so
+    // reader commands see fresh learner/session-id fields without ever
+    // locking the DM. The `current_turn_abort` slot is set / cleared
+    // via brief re-locks of `state.session` below so the spawned task
+    // doesn't hold the session lock for its full streaming wallclock.
     let (dm_arc, snapshot_arc) = {
         let guard = state.session.lock().await;
         let active = guard
@@ -575,16 +577,64 @@ pub async fn send_message(
         )
     };
 
-    let payload = run_turn(&dm_arc, &input, |primer_turn_index, chunk| {
-        let payload = ChunkEvent {
-            primer_turn_index,
-            text: chunk.to_string(),
-        };
-        if let Err(e) = app.emit("primer://chunk", &payload) {
-            tracing::warn!("emit primer://chunk failed: {e}");
+    // Spawn the turn in a dedicated task so `cancel_response` can abort
+    // it. The chunk emitter lives inside the spawn because closures
+    // crossing the spawn boundary need owned captures.
+    //
+    // There is a microseconds-wide window between this `spawn` and the
+    // slot-stash below in which a `cancel_response` would observe an
+    // empty slot and silently no-op. Unobservable at human reaction
+    // times; closing it would mean pre-allocating a slot before the
+    // task exists, which adds complexity for no realistic gain.
+    let dm_clone = Arc::clone(&dm_arc);
+    let app_clone = app.clone();
+    let input_clone = input.clone();
+    let task = tokio::spawn(async move {
+        run_turn(&dm_clone, &input_clone, |primer_turn_index, chunk| {
+            let payload = ChunkEvent {
+                primer_turn_index,
+                text: chunk.to_string(),
+            };
+            if let Err(e) = app_clone.emit("primer://chunk", &payload) {
+                tracing::warn!("emit primer://chunk failed: {e}");
+            }
+        })
+        .await
+    });
+
+    // Stash the abort handle so `cancel_response` can target this turn.
+    // Held only briefly; cleared on completion below.
+    {
+        let guard = state.session.lock().await;
+        if let Some(active) = guard.as_ref() {
+            *active.current_turn_abort.lock().await = Some(task.abort_handle());
         }
-    })
-    .await?;
+    }
+
+    let join_result = task.await;
+
+    // Clear the abort slot whether we succeeded, failed, or were
+    // cancelled — leaving a stale handle behind would let a second
+    // cancel hit a no-op task.
+    {
+        let guard = state.session.lock().await;
+        if let Some(active) = guard.as_ref() {
+            *active.current_turn_abort.lock().await = None;
+        }
+    }
+
+    let payload = match join_result {
+        Ok(Ok(payload)) => payload,
+        Ok(Err(e)) => return Err(e),
+        Err(join_err) if join_err.is_cancelled() => {
+            // User-initiated cancel. The child turn stays in the in-memory
+            // session; the partial Primer turn drops per DM's existing
+            // "mid-stream error" semantic. The frontend's cancellation
+            // path already knows what to do with the streaming bubble.
+            return Err(CANCELLED_MESSAGE.to_string());
+        }
+        Err(join_err) => return Err(format!("turn task crashed: {join_err}")),
+    };
 
     refresh_snapshot(&dm_arc, &snapshot_arc).await;
 
@@ -592,6 +642,53 @@ pub async fn send_message(
         tracing::warn!("emit primer://turn_complete failed: {e}");
     }
     Ok(payload)
+}
+
+/// Sentinel returned by `send_message` when the user cancelled the
+/// turn via `cancel_response`. Deliberately a machine-readable token
+/// (`namespace:event`) rather than a user-facing sentence: the
+/// frontend matches the exact value to suppress the error banner,
+/// and any user-facing wording is the frontend's concern. If the
+/// token ever leaks past the frontend match it reads as an obvious
+/// bug rather than masquerading as a localised string.
+///
+/// Must stay in lockstep with `CANCEL_SENTINEL` in `ui/app.js`. The
+/// `cancelled_message_is_stable_machine_token` unit test pins the
+/// value so a one-sided change here breaks CI immediately.
+pub const CANCELLED_MESSAGE: &str = "primer:turn_cancelled";
+
+/// Abort the in-flight turn associated with `active`, if any. Pure
+/// helper (no Tauri state) so unit tests can drive it directly. The
+/// `cancel_response` command is a thin lookup-then-delegate wrapper
+/// around this.
+async fn cancel_active_turn(active: &ActiveSession) {
+    let abort_guard = active.current_turn_abort.lock().await;
+    if let Some(handle) = abort_guard.as_ref() {
+        handle.abort();
+    }
+}
+
+/// Abort the in-flight turn, if any. Idempotent — calling with no
+/// active turn (or no active session) is a no-op and returns Ok.
+///
+/// Triggers `JoinHandle::abort()` on the spawned task. The aborted
+/// future drops mid-`respond_to_streaming`, which:
+/// - Releases the DM lock guard.
+/// - Leaves the already-appended child turn in `dm.session.turns`
+///   (so the next `send_message` continues the same conversation).
+/// - Drops the partial Primer response per DM's "mid-stream error
+///   → no Primer turn recorded" invariant.
+///
+/// `send_message` observes the abort via `JoinError::is_cancelled`
+/// and returns the [`CANCELLED_MESSAGE`] sentinel so the frontend
+/// can distinguish user-cancel from a genuine error.
+#[tauri::command]
+pub async fn cancel_response(state: tauri::State<'_, AppState>) -> Result<(), String> {
+    let guard = state.session.lock().await;
+    if let Some(active) = guard.as_ref() {
+        cancel_active_turn(active).await;
+    }
+    Ok(())
 }
 
 /// Re-read learner + session-id fields from the just-completed DM and
@@ -1319,5 +1416,117 @@ mod tests {
             after.session_id.is_some(),
             "post-turn snapshot carries the session id"
         );
+    }
+
+    // ─── Cancel-mid-stream tests ──────────────────────────────────────
+
+    /// Validates the contract `cancel_response` relies on:
+    /// `JoinHandle::abort()` on a still-pending task results in a
+    /// `JoinError::is_cancelled() == true` join result. This is a
+    /// tokio invariant our cancel path is built on; the test exists
+    /// to fail loudly if a future tokio bump changes the semantics
+    /// (which would silently break our cancel path).
+    #[tokio::test]
+    async fn abort_handle_yields_cancelled_join_error() {
+        let task = tokio::spawn(async {
+            tokio::time::sleep(std::time::Duration::from_secs(60)).await;
+            "unreachable"
+        });
+        let handle = task.abort_handle();
+        // Yield once so the task enters its sleep.
+        tokio::task::yield_now().await;
+        handle.abort();
+        let err = task.await.unwrap_err();
+        assert!(
+            err.is_cancelled(),
+            "abort() should produce a cancelled JoinError, got {err:?}"
+        );
+    }
+
+    /// `current_turn_abort` starts None and stays None after a normal
+    /// turn — the send_message path's "clear-on-completion" step keeps
+    /// a stale handle from sitting around between turns.
+    #[tokio::test]
+    async fn current_turn_abort_slot_lifecycle() {
+        let home = TempDir::new().unwrap();
+        let cfg = stub_config_with_persistence(home.path());
+        let active = build_active_session(home.path(), &cfg).await.unwrap();
+
+        assert!(
+            active.current_turn_abort.lock().await.is_none(),
+            "starts empty"
+        );
+
+        // Mirror the spawn + store + await + clear sequence from
+        // send_message.
+        let dm_arc = Arc::clone(&active.dialogue_manager);
+        let task = tokio::spawn(async move { run_turn(&dm_arc, "hello", |_, _| {}).await });
+        *active.current_turn_abort.lock().await = Some(task.abort_handle());
+
+        let result = task.await.expect("task completes without panic");
+        assert!(result.is_ok(), "stub turn succeeds");
+
+        *active.current_turn_abort.lock().await = None;
+        assert!(
+            active.current_turn_abort.lock().await.is_none(),
+            "cleared after completion"
+        );
+    }
+
+    /// Calling the cancel sequence on a session with no in-flight turn
+    /// is safe — the optional handle is None and the abort branch is
+    /// skipped without panic. Mirrors what `cancel_response` does when
+    /// the user clicks Cancel a moment after the response landed.
+    #[tokio::test]
+    async fn cancel_with_idle_session_is_noop() {
+        let home = TempDir::new().unwrap();
+        let cfg = stub_config_with_persistence(home.path());
+        let active = build_active_session(home.path(), &cfg).await.unwrap();
+
+        // Drive the production helper directly. With an empty slot
+        // this must return cleanly without panicking.
+        cancel_active_turn(&active).await;
+        assert!(active.current_turn_abort.lock().await.is_none());
+    }
+
+    /// End-to-end smoke for the cancel path's effect on a live task:
+    /// spawn a pending task, stash its abort handle, drive
+    /// `cancel_active_turn`, and verify the join result reports
+    /// cancellation. Pins the abort *wiring* (not just the slot
+    /// mechanics) without needing a Tauri runtime in scope.
+    #[tokio::test]
+    async fn cancel_active_turn_aborts_pending_task() {
+        let home = TempDir::new().unwrap();
+        let cfg = stub_config_with_persistence(home.path());
+        let active = build_active_session(home.path(), &cfg).await.unwrap();
+
+        // A long sleep stands in for an in-flight respond_to_streaming.
+        // What matters is that `.abort()` on the stashed handle drops
+        // the future and yields a cancelled JoinError, which is the
+        // exact contract `send_message`'s match arm relies on.
+        let task = tokio::spawn(async {
+            tokio::time::sleep(std::time::Duration::from_secs(60)).await;
+        });
+        *active.current_turn_abort.lock().await = Some(task.abort_handle());
+        tokio::task::yield_now().await;
+
+        cancel_active_turn(&active).await;
+
+        let join_err = task.await.expect_err("task should be cancelled");
+        assert!(
+            join_err.is_cancelled(),
+            "expected cancelled JoinError, got {join_err:?}"
+        );
+    }
+
+    /// The frontend (`ui/app.js`) matches `CANCEL_SENTINEL` against
+    /// this exact string to suppress the error banner on
+    /// user-initiated cancel. A one-sided rename here without an
+    /// equivalent change in `ui/app.js` would silently re-surface
+    /// cancel messages as errors — pin the value so CI catches the
+    /// drift the moment it lands.
+    #[test]
+    fn cancelled_message_is_stable_machine_token() {
+        assert_eq!(CANCELLED_MESSAGE, "primer:turn_cancelled");
     }
 }
