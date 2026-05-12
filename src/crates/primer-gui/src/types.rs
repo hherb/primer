@@ -159,3 +159,68 @@ pub struct ComprehensionSummary {
     /// Optional short rationale — usually a phrase the child said.
     pub evidence: Option<String>,
 }
+
+/// Snapshot of the learner's longitudinal state — what the sidebar's
+/// "Learner" section renders.
+///
+/// Refreshed at the same trigger as [`TurnSignals`] (the
+/// `primer://turn_complete` event); the underlying `LearnerModel`
+/// mutates across turns as the comprehension classifier promotes
+/// depth, the extractor adds concepts, and the vocab scheduler moves
+/// box levels. Reading it is cheap — one short DM-mutex lock for the
+/// shape transform, no I/O.
+#[derive(Debug, Clone, Serialize)]
+pub struct LearnerSnapshot {
+    pub profile: LearnerProfileView,
+    /// Top-N concepts that are most overdue for passive review, picked
+    /// by [`primer_core::vocab::due_concepts`]. Empty for a fresh
+    /// learner with no concepts yet.
+    pub vocab_due: Vec<DueConcept>,
+    /// Counts of concepts at each [`primer_core::learner::UnderstandingDepth`]
+    /// variant, in canonical order (Unknown → Analysis). Always six
+    /// entries — depths the learner has never reached carry `count = 0`.
+    pub depth_distribution: Vec<DepthCount>,
+    /// Recent engagement states in chronological order (oldest first,
+    /// newest last). The sidebar renders left-to-right, so the
+    /// most-recent state is the rightmost dot.
+    /// Variant names match [`primer_core::learner::EngagementState::name`].
+    pub recent_engagement: Vec<String>,
+    /// Total concept count. `depth_distribution` sums to the same
+    /// number, but a direct field saves a JS reduce.
+    pub concept_count: usize,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct LearnerProfileView {
+    pub id: Uuid,
+    pub name: String,
+    pub age: u8,
+    /// Locale pack id ("en", "de", ...).
+    pub locale: String,
+}
+
+/// One row in the vocab-due list.
+#[derive(Debug, Clone, Serialize)]
+pub struct DueConcept {
+    pub concept_id: String,
+    /// 0..=4 — number of filled dots to render. `4` is the 30-day box.
+    pub box_level: u8,
+    /// `UnderstandingDepth` variant name — useful when the sidebar
+    /// wants to show the depth alongside the dot row.
+    pub depth: String,
+    /// Days until the concept next becomes due. Negative = already
+    /// overdue by that many days. `chrono::Duration::num_days`
+    /// truncates toward zero, so sub-day remainders on both sides
+    /// round to 0 — "0.4 days" reads as "due now" rather than "due
+    /// tomorrow", "-0.4 days" reads as "due now" rather than "1 day
+    /// late". The asymmetric-overdue side is the deliberate forgiving
+    /// choice over a true floor.
+    pub days_until_due: i64,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct DepthCount {
+    /// `UnderstandingDepth` variant name.
+    pub depth: String,
+    pub count: usize,
+}

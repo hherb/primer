@@ -19,10 +19,15 @@ use tauri::{AppHandle, Emitter};
 use tokio::sync::Mutex;
 use uuid::Uuid;
 
+use chrono::Utc;
+use primer_classifier::consts::DEFAULT_HISTORY_DEPTH;
+use primer_core::learner::UnderstandingDepth;
+use primer_core::vocab::due_concepts;
+
 use crate::state::{ActiveSession, AppState, SessionSnapshot};
 use crate::types::{
-    ChunkEvent, ComprehensionSummary, ConceptBreakdown, EngagementSummary, LearnerSummary,
-    SessionInfo, TurnComplete, TurnSignals,
+    ChunkEvent, ComprehensionSummary, ConceptBreakdown, DepthCount, DueConcept, EngagementSummary,
+    LearnerProfileView, LearnerSnapshot, LearnerSummary, SessionInfo, TurnComplete, TurnSignals,
 };
 use crate::wiring;
 
@@ -107,6 +112,123 @@ pub async fn get_turn_signals(
 
     let dm = dm_arc.lock().await;
     Ok(Some(read_signals(&dm)))
+}
+
+/// Default ceiling on the vocab-due list returned to the sidebar.
+/// The CLI's `--vocab-max-per-prompt` setting is for prompt injection
+/// (a much smaller cap, ~4); the sidebar's "review queue" is allowed
+/// to be longer because it's just a display affordance. Tuned for
+/// "see at a glance" without scrolling.
+const VOCAB_DUE_DISPLAY_LIMIT: usize = 8;
+
+/// Maximum number of recent engagement states the sidebar shows as a
+/// sparkline-style dot strip. The in-memory `recent_assessments` Vec
+/// is trimmed to `ClassifierSettings::history_depth` on every push
+/// (see `dialogue_manager::apply::apply_assessment`), so the dot strip
+/// can never exceed that bound today. We pin the display cap to the
+/// same default so the named limit reflects what's actually rendered;
+/// a future change that hydrates from `turn_classifications` (the
+/// persisted longitudinal record) would let this bound grow
+/// independently.
+const RECENT_ENGAGEMENT_DISPLAY_LIMIT: usize = DEFAULT_HISTORY_DEPTH;
+
+/// Return the longitudinal learner snapshot — profile + vocab-due list
+/// + depth distribution + recent engagement strip. Same DM-lock-once
+/// pattern as `get_turn_signals` so the sidebar can refresh both
+/// sections from the same trigger without contending.
+///
+/// Returns `Ok(None)` when no session is active.
+#[tauri::command]
+pub async fn get_learner_state(
+    state: tauri::State<'_, AppState>,
+) -> Result<Option<LearnerSnapshot>, String> {
+    let session_guard = state.session.lock().await;
+    let active = match session_guard.as_ref() {
+        Some(a) => a,
+        None => return Ok(None),
+    };
+    let dm_arc = Arc::clone(&active.dialogue_manager);
+    drop(session_guard);
+
+    let dm = dm_arc.lock().await;
+    Ok(Some(read_learner(&dm)))
+}
+
+/// Pure shape mapping from a held DM into a [`LearnerSnapshot`].
+/// Split out so a unit test can call it without round-tripping
+/// through a Tauri state. No `.await` — caller must already hold the
+/// DM lock.
+pub(crate) fn read_learner(dm: &DialogueManager) -> LearnerSnapshot {
+    let learner = &dm.learner;
+    let now = Utc::now();
+
+    let vocab_due = due_concepts(learner, now, VOCAB_DUE_DISPLAY_LIMIT)
+        .into_iter()
+        .map(|c| DueConcept {
+            concept_id: c.concept_id.clone(),
+            box_level: c.box_level,
+            depth: c.depth.name().to_string(),
+            days_until_due: days_until_due(c, now),
+        })
+        .collect();
+
+    let mut depth_counts: Vec<DepthCount> = UnderstandingDepth::ALL
+        .iter()
+        .map(|d| DepthCount {
+            depth: d.name().to_string(),
+            count: 0,
+        })
+        .collect();
+    for concept in &learner.concepts {
+        if let Some(row) = depth_counts
+            .iter_mut()
+            .find(|r| r.depth == concept.depth.name())
+        {
+            row.count += 1;
+        }
+    }
+
+    // recent_assessments is push-back/remove-front so it's already
+    // oldest-first; take the tail slice for the dot strip.
+    let start = learner
+        .recent_assessments
+        .len()
+        .saturating_sub(RECENT_ENGAGEMENT_DISPLAY_LIMIT);
+    let recent_engagement = learner.recent_assessments[start..]
+        .iter()
+        .map(|a| a.state.name().to_string())
+        .collect();
+
+    LearnerSnapshot {
+        profile: LearnerProfileView {
+            id: learner.profile.id,
+            name: learner.profile.name.clone(),
+            age: learner.profile.age,
+            locale: learner.profile.locale.pack_id().to_string(),
+        },
+        vocab_due,
+        depth_distribution: depth_counts,
+        recent_engagement,
+        concept_count: learner.concepts.len(),
+    }
+}
+
+/// Days until a concept's next due date. Negative = already overdue.
+/// `chrono::Duration::num_days` truncates toward zero, so sub-day
+/// remainders on both sides round to 0 — "0.4 days" reads as "due
+/// now" rather than "due tomorrow", and "-0.4 days" reads as "due
+/// now" rather than "1 day late". That's the rendering we want from
+/// a "next review" timer; the asymmetric-overdue side is the
+/// deliberate forgiving choice over a true floor.
+fn days_until_due(c: &primer_core::learner::ConceptState, now: chrono::DateTime<Utc>) -> i64 {
+    use primer_core::consts::vocab::BOX_INTERVALS_DAYS;
+    let Some(last) = c.last_encountered else {
+        return 0;
+    };
+    let box_idx = (c.box_level as usize).min(BOX_INTERVALS_DAYS.len() - 1);
+    let interval = chrono::Duration::days(BOX_INTERVALS_DAYS[box_idx] as i64);
+    let due_at = last + interval;
+    (due_at - now).num_days()
 }
 
 /// Pure-ish read of the DM's `last_*` accessors. Split out from
@@ -395,6 +517,158 @@ mod tests {
             "session must persist both the child and primer turns; got {} turns",
             loaded.turns.len()
         );
+    }
+
+    #[tokio::test]
+    async fn read_learner_fresh_session_shape() {
+        let home = TempDir::new().unwrap();
+        let cfg = stub_config_with_persistence(home.path());
+        let active = build_active_session(home.path(), &cfg).await.unwrap();
+        let dm = active.dialogue_manager.lock().await;
+        let snap = read_learner(&dm);
+
+        assert_eq!(snap.profile.name, cfg.learner.name);
+        assert_eq!(snap.profile.age, cfg.learner.age);
+        assert_eq!(snap.profile.locale, cfg.learner.locale);
+        assert_eq!(snap.concept_count, 0);
+        assert!(snap.vocab_due.is_empty());
+        assert!(snap.recent_engagement.is_empty());
+        // Distribution is always six entries — depths the learner
+        // has never reached carry count=0. Canonical order matches
+        // UnderstandingDepth::ALL.
+        let names: Vec<&str> = snap
+            .depth_distribution
+            .iter()
+            .map(|r| r.depth.as_str())
+            .collect();
+        assert_eq!(
+            names,
+            [
+                "Unknown",
+                "Aware",
+                "Recall",
+                "Comprehension",
+                "Application",
+                "Analysis"
+            ]
+        );
+        for row in &snap.depth_distribution {
+            assert_eq!(
+                row.count, 0,
+                "fresh learner has no concepts at {}",
+                row.depth
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn read_learner_counts_concepts_by_depth() {
+        use primer_core::learner::{ConceptState, UnderstandingDepth};
+        let home = TempDir::new().unwrap();
+        let cfg = stub_config_with_persistence(home.path());
+        let active = build_active_session(home.path(), &cfg).await.unwrap();
+        {
+            let mut dm = active.dialogue_manager.lock().await;
+            // Inject concepts directly into the in-memory learner —
+            // the extractor stub returns empty, so this is the only
+            // way to exercise the populated counting path in a unit test.
+            dm.learner.concepts.push(ConceptState {
+                concept_id: "physics:gravity".into(),
+                depth: UnderstandingDepth::Aware,
+                confidence: 0.6,
+                encounter_count: 1,
+                last_encountered: Some(Utc::now()),
+                notes: vec![],
+                box_level: 0,
+            });
+            dm.learner.concepts.push(ConceptState {
+                concept_id: "biology:photosynthesis".into(),
+                depth: UnderstandingDepth::Recall,
+                confidence: 0.8,
+                encounter_count: 2,
+                last_encountered: Some(Utc::now() - chrono::Duration::days(2)),
+                notes: vec![],
+                box_level: 0,
+            });
+            dm.learner.concepts.push(ConceptState {
+                concept_id: "physics:mass".into(),
+                depth: UnderstandingDepth::Aware,
+                confidence: 0.5,
+                encounter_count: 1,
+                last_encountered: Some(Utc::now()),
+                notes: vec![],
+                box_level: 0,
+            });
+        }
+        let dm = active.dialogue_manager.lock().await;
+        let snap = read_learner(&dm);
+
+        assert_eq!(snap.concept_count, 3);
+        let by_depth: std::collections::HashMap<_, _> = snap
+            .depth_distribution
+            .iter()
+            .map(|r| (r.depth.as_str(), r.count))
+            .collect();
+        assert_eq!(by_depth["Aware"], 2);
+        assert_eq!(by_depth["Recall"], 1);
+        assert_eq!(by_depth["Analysis"], 0);
+        // Vocab due: photosynthesis is 2 days past its 1-day box-0
+        // interval, so it lands in the due list. Mass and gravity
+        // were "just encountered" so are not yet due.
+        let due_ids: Vec<&str> = snap
+            .vocab_due
+            .iter()
+            .map(|c| c.concept_id.as_str())
+            .collect();
+        assert_eq!(due_ids, vec!["biology:photosynthesis"]);
+        assert!(snap.vocab_due[0].days_until_due <= 0, "must be overdue");
+    }
+
+    #[tokio::test]
+    async fn read_learner_recent_engagement_oldest_first_and_clamped() {
+        use primer_core::classifier::EngagementAssessment;
+        use primer_core::learner::EngagementState;
+        let home = TempDir::new().unwrap();
+        let cfg = stub_config_with_persistence(home.path());
+        let active = build_active_session(home.path(), &cfg).await.unwrap();
+        // Inject more than DEFAULT_HISTORY_DEPTH assessments in
+        // chronological order; the snapshot must preserve order
+        // (oldest first) and clamp to the display limit. Pushed
+        // directly because the in-memory cap from apply_assessment is
+        // exactly what we want to exercise from the snapshot side.
+        let states = [
+            EngagementState::Disengaging,
+            EngagementState::Reflecting,
+            EngagementState::Engaged,
+            EngagementState::FrustratedTrying,
+            EngagementState::Engaged,
+        ];
+        {
+            let mut dm = active.dialogue_manager.lock().await;
+            for s in states {
+                dm.learner.recent_assessments.push(EngagementAssessment {
+                    state: s,
+                    confidence: 0.8,
+                    reasoning: None,
+                });
+            }
+        }
+        let dm = active.dialogue_manager.lock().await;
+        let snap = read_learner(&dm);
+
+        assert_eq!(
+            snap.recent_engagement.len(),
+            RECENT_ENGAGEMENT_DISPLAY_LIMIT,
+            "clamped to the display limit when source exceeds it"
+        );
+        // Tail-slice preserves order — the displayed slice is the
+        // most-recent N states in the same order they were appended.
+        let tail_start = states.len() - RECENT_ENGAGEMENT_DISPLAY_LIMIT;
+        let expected: Vec<String> = states[tail_start..]
+            .iter()
+            .map(|s| s.name().to_string())
+            .collect();
+        assert_eq!(snap.recent_engagement, expected);
     }
 
     #[tokio::test]

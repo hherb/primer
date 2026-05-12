@@ -128,6 +128,72 @@
           ></div>
         </div>
       </section>
+
+      <section class="sidebar-section" data-section="learner">
+        <header class="sidebar-section-header">
+          <h2>Learner</h2>
+        </header>
+
+        <div class="sidebar-card" id="learner-profile-card" hidden>
+          <div class="sidebar-card-label">Profile</div>
+          <div class="sidebar-card-body">
+            <div class="row" id="learner-profile-row">
+              <span class="learner-name" id="learner-name">—</span>
+              <span class="muted" id="learner-age-locale">—</span>
+            </div>
+            <div class="row uuid-row">
+              <code class="learner-uuid" id="learner-uuid">—</code>
+              <button
+                type="button"
+                class="copy-btn"
+                id="learner-uuid-copy"
+                title="Copy learner UUID"
+                aria-label="Copy learner UUID"
+              >
+                Copy
+              </button>
+            </div>
+          </div>
+        </div>
+
+        <div class="sidebar-card" id="learner-vocab-card" hidden>
+          <div class="sidebar-card-label">
+            Vocabulary
+            <span class="muted vocab-count" id="learner-vocab-count"></span>
+          </div>
+          <div class="sidebar-card-body">
+            <ul class="vocab-list" id="learner-vocab-list"></ul>
+          </div>
+        </div>
+
+        <div class="sidebar-card" id="learner-distribution-card" hidden>
+          <div class="sidebar-card-label">
+            Concept depth
+            <span class="muted concept-count" id="learner-concept-count"></span>
+          </div>
+          <div class="sidebar-card-body">
+            <div
+              class="depth-bar"
+              id="learner-depth-bar"
+              role="img"
+              aria-label="Concept depth distribution"
+            ></div>
+            <ul class="depth-legend" id="learner-depth-legend"></ul>
+          </div>
+        </div>
+
+        <div class="sidebar-card" id="learner-engagement-card" hidden>
+          <div class="sidebar-card-label">Recent engagement</div>
+          <div class="sidebar-card-body">
+            <div
+              class="engagement-strip"
+              id="learner-engagement-strip"
+              role="img"
+              aria-label="Recent engagement state strip"
+            ></div>
+          </div>
+        </div>
+      </section>
     </aside>
 
     <script src="app.js"></script>
