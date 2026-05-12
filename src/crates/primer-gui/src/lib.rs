@@ -8,6 +8,7 @@ pub mod commands;
 pub mod config;
 pub mod state;
 pub mod types;
+pub mod validation;
 pub mod wiring;
 
 use std::path::PathBuf;

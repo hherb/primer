@@ -75,7 +75,13 @@ impl AppState {
 /// from blocking on each other unnecessarily.
 pub struct ActiveSession {
     /// Identifier of the underlying `Session` row in the session DB.
-    pub session_id: Uuid,
+    ///
+    /// `None` until the first `send_message` opens a `DialogueManager`
+    /// session (step 4). Returning `None` to the frontend is honest —
+    /// a pre-first-turn session has no id yet. An earlier draft used a
+    /// provisional `Uuid::new_v4()` here and overwrote it on first
+    /// turn, which silently invalidated any UUID the frontend cached.
+    pub session_id: Option<Uuid>,
 
     /// The session's locale (matches the learner's stored locale and
     /// the knowledge base's per-locale partition).
@@ -109,4 +115,27 @@ pub struct ActiveSession {
     pub vocab_settings: VocabSettings,
     pub embedder: Option<Arc<dyn Embedder>>,
     pub pedagogy_config: PedagogyConfig,
+}
+
+impl std::fmt::Debug for ActiveSession {
+    /// Print trait-object identities (via `Named::name()` where
+    /// available) instead of the objects themselves — none of them
+    /// implement `Debug`, but tests want `.unwrap_err()` to work and
+    /// printing the wiring summary is more useful than a `<dyn …>`
+    /// placeholder anyway.
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("ActiveSession")
+            .field("session_id", &self.session_id)
+            .field("locale", &self.locale)
+            .field("backend_name", &self.backend_name)
+            .field("main_model", &self.main_model)
+            .field("classifier", &self.classifier.identifier())
+            .field("extractor", &self.extractor.identifier())
+            .field("comprehension", &self.comprehension.identifier())
+            .field(
+                "embedder",
+                &self.embedder.as_ref().map(|e| e.name().to_string()),
+            )
+            .finish_non_exhaustive()
+    }
 }

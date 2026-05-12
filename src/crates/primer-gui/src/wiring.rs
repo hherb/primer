@@ -124,10 +124,7 @@ pub async fn build_active_session(
         if let Some(parent) = session_path.parent() {
             if !parent.as_os_str().is_empty() {
                 std::fs::create_dir_all(parent).map_err(|e| {
-                    format!(
-                        "creating session-db directory {}: {e}",
-                        parent.display()
-                    )
+                    format!("creating session-db directory {}: {e}", parent.display())
                 })?;
             }
         }
@@ -234,18 +231,18 @@ pub async fn build_active_session(
     };
 
     // ─── ActiveSession ───────────────────────────────────────────────
-    // The session_id is provisional — step 4's `send_message` will
-    // call `DialogueManager::open_session` and overwrite it with the
-    // real Session UUID. Stored here so commands have something to
-    // reference before the first turn lands.
-    let provisional_session_id = Uuid::new_v4();
-
+    // No session-id yet — step 4's `send_message` will call
+    // `DialogueManager::open_session` and write the real Session UUID
+    // here. `None` over IPC tells the frontend honestly that no turn
+    // has happened yet, instead of handing out a placeholder that
+    // would invalidate as soon as the first turn lands.
+    // `Arc::clone` can't coerce concrete → trait object; the `as _` cast
+    // does the upcast in one step and is the standard idiom for this.
     let learner_store: Arc<dyn LearnerStore> = Arc::clone(&session_store) as _;
-    let session_store_dyn: Arc<dyn primer_core::storage::SessionStore> =
-        Arc::clone(&session_store) as _;
+    let session_store_dyn: Arc<dyn SessionStore> = Arc::clone(&session_store) as _;
 
     Ok(ActiveSession {
-        session_id: provisional_session_id,
+        session_id: None,
         locale,
         learner: Mutex::new(learner),
         backend,
@@ -277,7 +274,9 @@ fn resolve_main_model(kind: &str, model: Option<&str>) -> Result<String, String>
         "ollama" => model.map(String::from).ok_or_else(|| {
             "ollama backend requires a model name (e.g. \"llama3.2\") in settings".to_string()
         }),
-        "stub" => Ok(model.map(String::from).unwrap_or_else(|| "stub".to_string())),
+        "stub" => Ok(model
+            .map(String::from)
+            .unwrap_or_else(|| "stub".to_string())),
         other => Err(format!(
             "unknown backend kind {other:?}: expected one of stub, cloud, ollama"
         )),
@@ -295,18 +294,20 @@ fn subsystem_kind(s: &crate::config::SubsystemConfig) -> Option<String> {
 /// Embedder construction, mirroring `primer-cli`'s dispatch matrix.
 ///
 /// `fastembed` / `ollama` require their respective cargo features; the
-/// `primer-engine` helpers exit the process with a clear error when the
-/// feature is missing, which is the same behaviour the CLI provides.
+/// `primer-engine` helpers return an `Err(String)` when the feature is
+/// missing so this command path can surface it to the frontend instead
+/// of killing the GUI process (the CLI maps the same Err to a clean
+/// stderr line + exit).
 async fn build_embedder(
     config: &crate::config::EmbedderConfig,
 ) -> Result<Option<Arc<dyn primer_core::embedder::Embedder>>, String> {
     match config.kind.as_str() {
         "none" => Ok(None),
         "stub" => Ok(Some(Arc::new(primer_embedding::StubEmbedder::new()) as _)),
-        "fastembed" => Ok(build_fastembed_embedder(config.model.as_deref())),
-        "ollama" => Ok(
-            build_ollama_embedder(config.ollama_url.as_deref(), config.model.as_deref()).await,
-        ),
+        "fastembed" => build_fastembed_embedder(config.model.as_deref()),
+        "ollama" => {
+            build_ollama_embedder(config.ollama_url.as_deref(), config.model.as_deref()).await
+        }
         other => Err(format!(
             "unknown embedder backend {other:?}: expected one of none, stub, fastembed, ollama"
         )),
@@ -325,17 +326,6 @@ mod tests {
         cfg
     }
 
-    /// Extract the error string from `build_active_session`'s result.
-    /// `ActiveSession` deliberately doesn't implement `Debug` (it holds
-    /// non-Debug trait objects), so the standard `.unwrap_err()` would
-    /// need it to be `Debug` to panic-print the Ok variant.
-    fn expect_err<T>(r: Result<T, String>) -> String {
-        match r {
-            Ok(_) => panic!("expected Err"),
-            Err(e) => e,
-        }
-    }
-
     #[tokio::test]
     async fn builds_active_session_with_stub_backend() {
         let home = TempDir::new().unwrap();
@@ -345,6 +335,10 @@ mod tests {
         assert_eq!(s.backend_name, "stub");
         assert_eq!(s.main_model, "stub");
         assert_eq!(s.locale, Locale::English);
+        assert!(
+            s.session_id.is_none(),
+            "session_id is None until first send_message"
+        );
         // Subsystems all default to stub when the main backend is stub.
         assert_eq!(s.classifier.identifier(), "stub");
         assert_eq!(s.extractor.identifier(), "stub");
@@ -361,7 +355,7 @@ mod tests {
         let home = TempDir::new().unwrap();
         let mut cfg = stub_config();
         cfg.learner.locale = "klingon".to_string();
-        let err = expect_err(build_active_session(home.path(), &cfg).await);
+        let err = build_active_session(home.path(), &cfg).await.unwrap_err();
         assert!(
             err.contains("klingon"),
             "error must name the offending locale: {err}"
@@ -374,7 +368,7 @@ mod tests {
         let mut cfg = stub_config();
         cfg.backend.kind = "ollama".to_string();
         cfg.backend.model = None;
-        let err = expect_err(build_active_session(home.path(), &cfg).await);
+        let err = build_active_session(home.path(), &cfg).await.unwrap_err();
         assert!(
             err.to_lowercase().contains("ollama"),
             "error must mention ollama: {err}"
@@ -386,7 +380,7 @@ mod tests {
         let home = TempDir::new().unwrap();
         let mut cfg = stub_config();
         cfg.backend.kind = "magic".to_string();
-        let err = expect_err(build_active_session(home.path(), &cfg).await);
+        let err = build_active_session(home.path(), &cfg).await.unwrap_err();
         assert!(
             err.contains("magic"),
             "error must name the offending backend: {err}"
@@ -398,11 +392,26 @@ mod tests {
         let home = TempDir::new().unwrap();
         let mut cfg = stub_config();
         cfg.embedder.kind = "secret-sauce".to_string();
-        let err = expect_err(build_active_session(home.path(), &cfg).await);
+        let err = build_active_session(home.path(), &cfg).await.unwrap_err();
         assert!(
             err.contains("secret-sauce"),
             "error must name the offending embedder: {err}"
         );
+    }
+
+    #[tokio::test]
+    async fn cloud_with_inline_api_key_constructs() {
+        // Inline key bypasses the ANTHROPIC_API_KEY env var entirely —
+        // exercise the wiring branch that resolves Inline → Some(key).
+        let home = TempDir::new().unwrap();
+        let mut cfg = stub_config();
+        cfg.backend.kind = "cloud".to_string();
+        cfg.backend.api_key_source = crate::config::ApiKeySource::Inline {
+            key: "sk-test-not-real".to_string(),
+        };
+        let s = build_active_session(home.path(), &cfg).await.unwrap();
+        assert_eq!(s.backend_name, "cloud");
+        assert_eq!(s.main_model, "claude-sonnet-4-6");
     }
 
     #[tokio::test]
@@ -412,6 +421,34 @@ mod tests {
         cfg.embedder.kind = "stub".to_string();
         let s = build_active_session(home.path(), &cfg).await.unwrap();
         assert!(s.embedder.is_some());
+    }
+
+    #[tokio::test]
+    async fn second_build_after_first_drops_persists_learner_growth() {
+        // Models the GUI's start_session → close_session → start_session
+        // round-trip at the wiring layer: each build_active_session
+        // call independently re-opens the on-disk learner. Validates
+        // that the second open sees a stable UUID (no orphaned learner
+        // rows) — the most important invariant of the close+restart
+        // flow.
+        let home = TempDir::new().unwrap();
+        let session_db = home.path().join("roundtrip.db");
+
+        let mut cfg = GuiConfig::default();
+        cfg.learner.name = "Roundtrip".to_string();
+        cfg.persistence.session_db = Some(session_db.clone());
+
+        // First build; the `ActiveSession` drops at the end of the
+        // block, mirroring the session-state-take inside
+        // close_session_inner.
+        let first_id = {
+            let s = build_active_session(home.path(), &cfg).await.unwrap();
+            s.learner.lock().await.profile.id
+        };
+
+        let s2 = build_active_session(home.path(), &cfg).await.unwrap();
+        let id2 = s2.learner.lock().await.profile.id;
+        assert_eq!(id2, first_id, "learner UUID stable across reopens");
     }
 
     #[tokio::test]

@@ -257,7 +257,6 @@ fn parse_mic_silence_ms(s: &str) -> std::result::Result<u32, String> {
     Ok(n)
 }
 
-
 #[cfg(feature = "speech")]
 fn validate_speech_assets(
     whisper_model: &Path,
@@ -303,7 +302,6 @@ fn validate_speech_assets(
     }
     Ok(())
 }
-
 
 /// Probe common system locations for an `espeak-ng-data` directory and
 /// set `PIPER_ESPEAKNG_DATA_DIRECTORY` to the parent of the first complete
@@ -697,7 +695,8 @@ async fn async_main() -> anyhow::Result<()> {
     // only for testing the hybrid pipeline; with no semantic signal it
     // dilutes BM25 with noise, so it is not the production default.
     // `fastembed` and `ollama` need their respective cargo features;
-    // if missing, the dispatch helpers exit with a clear error.
+    // if missing, the dispatch helpers return Err and the CLI exits
+    // with the message (the GUI surfaces the same Err inline).
     //
     // Real-backend construction failures fall back to BM25-only with a
     // tracing warn — the conversation still works, which is strictly
@@ -708,14 +707,25 @@ async fn async_main() -> anyhow::Result<()> {
     {
         "none" => None,
         "stub" => Some(Arc::new(primer_embedding::StubEmbedder::new()) as _),
-        "fastembed" => build_fastembed_embedder(cli.embedder_model.as_deref()),
-        "ollama" => {
-            build_ollama_embedder(
-                cli.embedder_ollama_url.as_deref(),
-                cli.embedder_model.as_deref(),
-            )
-            .await
-        }
+        "fastembed" => match build_fastembed_embedder(cli.embedder_model.as_deref()) {
+            Ok(opt) => opt,
+            Err(e) => {
+                eprintln!("Error: {e}");
+                std::process::exit(1);
+            }
+        },
+        "ollama" => match build_ollama_embedder(
+            cli.embedder_ollama_url.as_deref(),
+            cli.embedder_model.as_deref(),
+        )
+        .await
+        {
+            Ok(opt) => opt,
+            Err(e) => {
+                eprintln!("Error: {e}");
+                std::process::exit(1);
+            }
+        },
         other => {
             eprintln!(
                 "Error: unknown --embedder-backend {other:?}; expected one of none, stub, fastembed, ollama"
@@ -913,7 +923,6 @@ async fn async_main() -> anyhow::Result<()> {
     Ok(())
 }
 
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -942,7 +951,6 @@ mod tests {
         assert!(parse_mic_silence_ms("").is_err());
         assert!(parse_mic_silence_ms("-100").is_err());
     }
-
 
     #[test]
     fn no_persist_conflicts_with_resume_at_parse_time() {

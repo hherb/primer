@@ -1,26 +1,34 @@
 //! Settings commands: load, return, persist.
 //!
-//! `get_settings` is a pure read of the in-memory copy held by
-//! `AppState`. `update_settings` swaps the in-memory copy AND atomically
-//! writes the JSON to disk so a crash between IPC round-trips never
-//! leaves the user's settings out of sync.
+//! `get_settings` returns a redacted view ([`GuiConfigView`]) so the
+//! inline API key never crosses the IPC boundary. `update_settings`
+//! consumes a [`GuiConfigUpdate`] whose `ApiKeyUpdate::Keep` variant
+//! lets the frontend save the rest of the config without ever holding
+//! the secret. Validation runs *before* the disk write so a bad config
+//! never lands on disk.
 
-use crate::config::{self, GuiConfig};
+use crate::config::{self, GuiConfigUpdate, GuiConfigView};
 use crate::state::AppState;
+use crate::validation;
 
-/// Return the current GUI settings. Always succeeds — even when no
-/// config file exists on disk (defaults are returned).
+/// Return the current GUI settings (redacted view — no inline API key).
+/// Always succeeds; missing-on-disk returns the in-memory defaults
+/// loaded at startup.
 #[tauri::command]
-pub async fn get_settings(state: tauri::State<'_, AppState>) -> Result<GuiConfig, String> {
-    Ok(state.config.lock().await.clone())
+pub async fn get_settings(state: tauri::State<'_, AppState>) -> Result<GuiConfigView, String> {
+    Ok((&*state.config.lock().await).into())
 }
 
 /// Replace the current GUI settings.
 ///
-/// Order matters: persist to disk first (so a panic between the disk
-/// write and the in-memory swap never leaves disk lagging memory),
-/// then update the in-memory copy. Returns the validation/error
-/// string for the frontend to render inline.
+/// Steps, in order:
+/// 1. Resolve the update against the persisted value (so
+///    `ApiKeyUpdate::Keep` carries forward the existing secret).
+/// 2. Validate — surface obviously-bad configs (unknown backend kind,
+///    embedder kind, locale, etc.) here rather than at the next
+///    `start_session`.
+/// 3. Atomically persist to disk.
+/// 4. Swap the in-memory copy.
 ///
 /// **Active-session impact:** the in-memory ActiveSession (if any) is
 /// NOT mutated here. Settings that affect the active session (backend,
@@ -30,9 +38,12 @@ pub async fn get_settings(state: tauri::State<'_, AppState>) -> Result<GuiConfig
 #[tauri::command]
 pub async fn update_settings(
     state: tauri::State<'_, AppState>,
-    config: GuiConfig,
+    config: GuiConfigUpdate,
 ) -> Result<(), String> {
-    config::save(&state.home, &config).map_err(|e| e.to_string())?;
-    *state.config.lock().await = config;
+    let mut guard = state.config.lock().await;
+    let resolved = config.into_config(&guard);
+    validation::validate(&resolved)?;
+    config::save(&state.home, &resolved).map_err(|e| e.to_string())?;
+    *guard = resolved;
     Ok(())
 }

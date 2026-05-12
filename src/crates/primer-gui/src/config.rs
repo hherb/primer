@@ -8,6 +8,12 @@
 //!
 //! Defaults are derived from the CLI's clap defaults so a brand-new
 //! install behaves identically to `primer` with no flags.
+//!
+//! **Secret handling:** the inline API key never crosses the IPC
+//! boundary in either direction *unless explicitly being set*. The
+//! [`view`] / [`update`] DTOs are the only types serialised on the
+//! frontend round-trip; [`GuiConfig`] itself is reserved for disk and
+//! the Rust-side wiring path. See [`ApiKeySource`] / [`ApiKeyUpdate`].
 
 use std::fs;
 use std::io::Write;
@@ -85,6 +91,12 @@ impl Default for BackendConfig {
 /// environment at session-start time. `Inline` keeps the key in the
 /// config JSON (file mode 0600). The two-variant shape mirrors the
 /// CLI's "`--api-key` OR env" behaviour.
+///
+/// **Disk-only.** This type is intentionally NOT exposed to the
+/// frontend — every serialisation site that crosses the IPC boundary
+/// uses [`ApiKeySourceView`] (read) or [`ApiKeyUpdate`] (write).
+/// Re-exposing the inline key over IPC would let any compromised
+/// frontend JS exfiltrate the secret.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum ApiKeySource {
@@ -95,6 +107,56 @@ pub enum ApiKeySource {
 impl Default for ApiKeySource {
     fn default() -> Self {
         Self::Env
+    }
+}
+
+/// Frontend-safe projection of [`ApiKeySource`].
+///
+/// `Inline { has_key }` carries a boolean — *whether* a key is stored,
+/// not the key itself — so the settings UI can render "inline key is
+/// set" without ever seeing the secret.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum ApiKeySourceView {
+    Env,
+    Inline { has_key: bool },
+}
+
+impl From<&ApiKeySource> for ApiKeySourceView {
+    fn from(s: &ApiKeySource) -> Self {
+        match s {
+            ApiKeySource::Env => Self::Env,
+            ApiKeySource::Inline { key } => Self::Inline {
+                has_key: !key.is_empty(),
+            },
+        }
+    }
+}
+
+/// Update intent for the inline API key on the [`update_settings`](crate::commands::settings::update_settings) write path.
+///
+/// `Keep` is the workhorse — the frontend rendered the redacted view
+/// and isn't touching the secret, so the persisted value carries
+/// through. `Env` and `Inline` switch the source explicitly.
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum ApiKeyUpdate {
+    /// Preserve whatever's already persisted on disk.
+    Keep,
+    Env,
+    Inline {
+        key: String,
+    },
+}
+
+impl ApiKeyUpdate {
+    /// Resolve to a concrete [`ApiKeySource`] given the currently-persisted value.
+    pub fn resolve(self, current: &ApiKeySource) -> ApiKeySource {
+        match self {
+            Self::Keep => current.clone(),
+            Self::Env => ApiKeySource::Env,
+            Self::Inline { key } => ApiKeySource::Inline { key },
+        }
     }
 }
 
@@ -237,8 +299,19 @@ pub enum ConfigError {
         #[source]
         source: std::io::Error,
     },
+    /// JSON decode failure on `load`.
     #[error("config JSON decode failed at {path}: {source}")]
     Parse {
+        path: PathBuf,
+        #[source]
+        source: serde_json::Error,
+    },
+    /// JSON encode failure on `save`. Practically never happens for
+    /// our `Serialize`-derived types, but keeping it distinct from
+    /// `Parse` prevents the misleading "decode failed" message when
+    /// the failing direction was an encode.
+    #[error("config JSON encode failed for {path}: {source}")]
+    Serialize {
         path: PathBuf,
         #[source]
         source: serde_json::Error,
@@ -247,7 +320,8 @@ pub enum ConfigError {
 
 /// Resolve the absolute path of the GUI config file from a home directory.
 pub fn config_path(home: &Path) -> PathBuf {
-    home.join(primer_engine::PRIMER_HOME_DIR).join(CONFIG_FILENAME)
+    home.join(primer_engine::PRIMER_HOME_DIR)
+        .join(CONFIG_FILENAME)
 }
 
 /// Load the GUI config from disk.
@@ -283,7 +357,7 @@ pub fn save(home: &Path, config: &GuiConfig) -> Result<(), ConfigError> {
         source,
     })?;
 
-    let json = serde_json::to_string_pretty(config).map_err(|source| ConfigError::Parse {
+    let json = serde_json::to_string_pretty(config).map_err(|source| ConfigError::Serialize {
         path: path.clone(),
         source,
     })?;
@@ -294,10 +368,11 @@ pub fn save(home: &Path, config: &GuiConfig) -> Result<(), ConfigError> {
             path: tmp.clone(),
             source,
         })?;
-        f.write_all(json.as_bytes()).map_err(|source| ConfigError::Io {
-            path: tmp.clone(),
-            source,
-        })?;
+        f.write_all(json.as_bytes())
+            .map_err(|source| ConfigError::Io {
+                path: tmp.clone(),
+                source,
+            })?;
         f.sync_all().map_err(|source| ConfigError::Io {
             path: tmp.clone(),
             source,
@@ -316,6 +391,117 @@ pub fn save(home: &Path, config: &GuiConfig) -> Result<(), ConfigError> {
         source,
     })?;
     Ok(())
+}
+
+// ─── Frontend-facing DTOs ────────────────────────────────────────────
+//
+// `GuiConfigView` mirrors `GuiConfig` but uses [`BackendConfigView`]
+// (which redacts the inline API key). `GuiConfigUpdate` mirrors it on
+// the write path with [`BackendConfigUpdate`] (which carries
+// [`ApiKeyUpdate::Keep`] when the frontend isn't touching the key).
+//
+// Every IPC boundary uses these — never `GuiConfig` directly.
+
+/// Frontend-safe projection of [`GuiConfig`] (read path).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct GuiConfigView {
+    pub learner: LearnerConfig,
+    pub backend: BackendConfigView,
+    pub classifier: SubsystemConfig,
+    pub extractor: SubsystemConfig,
+    pub comprehension: SubsystemConfig,
+    pub embedder: EmbedderConfig,
+    pub vocab: VocabConfig,
+    pub breaks: BreakConfig,
+    pub persistence: PersistenceConfig,
+    pub ui: UiConfig,
+}
+
+/// Frontend-safe projection of [`BackendConfig`] (read path).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct BackendConfigView {
+    pub kind: String,
+    pub model: Option<String>,
+    pub ollama_url: String,
+    pub api_key_source: ApiKeySourceView,
+}
+
+impl From<&GuiConfig> for GuiConfigView {
+    fn from(c: &GuiConfig) -> Self {
+        Self {
+            learner: c.learner.clone(),
+            backend: BackendConfigView {
+                kind: c.backend.kind.clone(),
+                model: c.backend.model.clone(),
+                ollama_url: c.backend.ollama_url.clone(),
+                api_key_source: (&c.backend.api_key_source).into(),
+            },
+            classifier: c.classifier.clone(),
+            extractor: c.extractor.clone(),
+            comprehension: c.comprehension.clone(),
+            embedder: c.embedder.clone(),
+            vocab: c.vocab.clone(),
+            breaks: c.breaks.clone(),
+            persistence: c.persistence.clone(),
+            ui: c.ui.clone(),
+        }
+    }
+}
+
+/// Update intent for [`GuiConfig`] (write path).
+///
+/// Same shape as `GuiConfig` except `backend.api_key_source` is an
+/// [`ApiKeyUpdate`] — `Keep` (the common case) preserves whatever
+/// secret is already on disk so the frontend never has to handle it.
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+pub struct GuiConfigUpdate {
+    pub learner: LearnerConfig,
+    pub backend: BackendConfigUpdate,
+    pub classifier: SubsystemConfig,
+    pub extractor: SubsystemConfig,
+    pub comprehension: SubsystemConfig,
+    pub embedder: EmbedderConfig,
+    pub vocab: VocabConfig,
+    pub breaks: BreakConfig,
+    pub persistence: PersistenceConfig,
+    pub ui: UiConfig,
+}
+
+/// Update intent for [`BackendConfig`] (write path).
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+pub struct BackendConfigUpdate {
+    pub kind: String,
+    pub model: Option<String>,
+    pub ollama_url: String,
+    pub api_key_source: ApiKeyUpdate,
+}
+
+impl GuiConfigUpdate {
+    /// Resolve to a concrete [`GuiConfig`] using the currently-persisted
+    /// value to fill in any field the update keeps (today only the
+    /// inline API key).
+    pub fn into_config(self, current: &GuiConfig) -> GuiConfig {
+        GuiConfig {
+            learner: self.learner,
+            backend: BackendConfig {
+                kind: self.backend.kind,
+                model: self.backend.model,
+                ollama_url: self.backend.ollama_url,
+                api_key_source: self
+                    .backend
+                    .api_key_source
+                    .resolve(&current.backend.api_key_source),
+            },
+            classifier: self.classifier,
+            extractor: self.extractor,
+            comprehension: self.comprehension,
+            embedder: self.embedder,
+            vocab: self.vocab,
+            breaks: self.breaks,
+            persistence: self.persistence,
+            ui: self.ui,
+        }
+    }
 }
 
 #[cfg(test)]
@@ -435,6 +621,110 @@ mod tests {
         assert_eq!(cfg.backend, BackendConfig::default());
         assert_eq!(cfg.embedder, EmbedderConfig::default());
         assert_eq!(cfg.ui, UiConfig::default());
+    }
+
+    // ─── View / Update DTO tests ─────────────────────────────────────
+
+    #[test]
+    fn view_redacts_inline_api_key() {
+        // The single most important security test: the inline key must
+        // never appear in the JSON the frontend receives.
+        let mut cfg = GuiConfig::default();
+        cfg.backend.api_key_source = ApiKeySource::Inline {
+            key: "sk-secret-token-aaa".to_string(),
+        };
+        let view: GuiConfigView = (&cfg).into();
+        let json = serde_json::to_string(&view).unwrap();
+        assert!(
+            !json.contains("sk-secret-token-aaa"),
+            "redacted view must not contain the key: {json}"
+        );
+        assert!(
+            json.contains("\"has_key\":true"),
+            "view must signal a key is set: {json}"
+        );
+    }
+
+    #[test]
+    fn view_redacts_empty_inline_key_as_has_key_false() {
+        let mut cfg = GuiConfig::default();
+        cfg.backend.api_key_source = ApiKeySource::Inline { key: String::new() };
+        let view: GuiConfigView = (&cfg).into();
+        assert_eq!(
+            view.backend.api_key_source,
+            ApiKeySourceView::Inline { has_key: false }
+        );
+    }
+
+    #[test]
+    fn view_passes_env_source_through() {
+        let cfg = GuiConfig::default();
+        let view: GuiConfigView = (&cfg).into();
+        assert_eq!(view.backend.api_key_source, ApiKeySourceView::Env);
+    }
+
+    #[test]
+    fn update_keep_preserves_existing_inline_key() {
+        let mut current = GuiConfig::default();
+        current.backend.api_key_source = ApiKeySource::Inline {
+            key: "sk-original".to_string(),
+        };
+        let update_json = r#"{
+            "learner": {"name": "Ada", "age": 7, "locale": "en"},
+            "backend": {
+                "kind": "cloud",
+                "model": null,
+                "ollama_url": "http://localhost:11434",
+                "api_key_source": {"kind": "keep"}
+            },
+            "classifier": {"match_main": true, "kind": null, "model": null, "timeout_ms": 3000},
+            "extractor": {"match_main": true, "kind": null, "model": null, "timeout_ms": 5000},
+            "comprehension": {"match_main": true, "kind": null, "model": null, "timeout_ms": 5000},
+            "embedder": {"kind": "none", "model": null, "ollama_url": null},
+            "vocab": {"max_per_prompt": null},
+            "breaks": {"after_mins": 30},
+            "persistence": {"session_db": null, "knowledge_db": null, "no_persist": false},
+            "ui": {"sidebar_open": true, "last_section": "current_turn"}
+        }"#;
+        let update: GuiConfigUpdate = serde_json::from_str(update_json).unwrap();
+        let resolved = update.into_config(&current);
+        assert_eq!(
+            resolved.backend.api_key_source,
+            ApiKeySource::Inline {
+                key: "sk-original".to_string()
+            },
+            "Keep variant must carry forward the persisted key"
+        );
+        // Other fields come from the update, not the current.
+        assert_eq!(resolved.learner.name, "Ada");
+    }
+
+    #[test]
+    fn update_inline_overwrites_existing_key() {
+        let mut current = GuiConfig::default();
+        current.backend.api_key_source = ApiKeySource::Inline {
+            key: "sk-original".to_string(),
+        };
+        let new = ApiKeyUpdate::Inline {
+            key: "sk-rotated".to_string(),
+        };
+        let resolved = new.resolve(&current.backend.api_key_source);
+        assert_eq!(
+            resolved,
+            ApiKeySource::Inline {
+                key: "sk-rotated".to_string()
+            }
+        );
+    }
+
+    #[test]
+    fn update_env_clears_existing_inline_key() {
+        let mut current = GuiConfig::default();
+        current.backend.api_key_source = ApiKeySource::Inline {
+            key: "sk-original".to_string(),
+        };
+        let resolved = ApiKeyUpdate::Env.resolve(&current.backend.api_key_source);
+        assert_eq!(resolved, ApiKeySource::Env);
     }
 
     #[test]

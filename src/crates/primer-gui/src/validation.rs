@@ -1,0 +1,154 @@
+//! Validation of a [`GuiConfig`] before it lands on disk.
+//!
+//! The goal is to surface obviously-bad configs at `update_settings`
+//! time rather than at the next `start_session`, where the same checks
+//! eventually run as part of `build_active_session`. Catching them
+//! early means the settings modal can render the error inline and
+//! never lets a broken config persist.
+//!
+//! This is *cheap, structural* validation only — no I/O, no network.
+//! `start_session` remains the ultimate authority on whether the
+//! config actually produces a working session (model availability,
+//! embedder construction, etc.).
+
+use primer_core::i18n::Locale;
+
+use crate::config::GuiConfig;
+
+/// Run validation and return an inline-friendly error message on the
+/// first failure, or `Ok(())` if the config is structurally sound.
+pub fn validate(cfg: &GuiConfig) -> Result<(), String> {
+    validate_locale(&cfg.learner.locale)?;
+    validate_backend(&cfg.backend.kind)?;
+    // `match_main = true` causes the wiring code to ignore `kind`, so
+    // an invalid `kind` in that branch is dead data — don't fail the
+    // save on it.
+    validate_subsystem_kind("classifier", subsystem_override(&cfg.classifier))?;
+    validate_subsystem_kind("extractor", subsystem_override(&cfg.extractor))?;
+    validate_subsystem_kind("comprehension", subsystem_override(&cfg.comprehension))?;
+    validate_embedder(&cfg.embedder.kind)?;
+    validate_breaks(cfg.breaks.after_mins)?;
+    Ok(())
+}
+
+fn subsystem_override(s: &crate::config::SubsystemConfig) -> Option<&str> {
+    if s.match_main {
+        None
+    } else {
+        s.kind.as_deref()
+    }
+}
+
+fn validate_locale(pack_id: &str) -> Result<(), String> {
+    Locale::from_pack_id(pack_id).map(|_| ()).ok_or_else(|| {
+        let known: Vec<&str> = Locale::ALL.iter().map(|l| l.pack_id()).collect();
+        format!("locale {pack_id:?} is not a supported pack. Known: {known:?}")
+    })
+}
+
+fn validate_backend(kind: &str) -> Result<(), String> {
+    match kind {
+        "stub" | "cloud" | "ollama" => Ok(()),
+        other => Err(format!(
+            "unknown backend kind {other:?}: expected one of stub, cloud, ollama"
+        )),
+    }
+}
+
+/// Subsystem kind is optional — `None` means "match the main backend"
+/// (paired with `match_main = true` in `SubsystemConfig`). Only an
+/// explicit override is validated here.
+fn validate_subsystem_kind(label: &str, kind: Option<&str>) -> Result<(), String> {
+    match kind {
+        None => Ok(()),
+        Some("stub" | "cloud" | "ollama") => Ok(()),
+        Some(other) => Err(format!(
+            "unknown {label} backend {other:?}: expected one of stub, cloud, ollama"
+        )),
+    }
+}
+
+fn validate_embedder(kind: &str) -> Result<(), String> {
+    match kind {
+        "none" | "stub" | "fastembed" | "ollama" => Ok(()),
+        other => Err(format!(
+            "unknown embedder backend {other:?}: expected one of none, stub, fastembed, ollama"
+        )),
+    }
+}
+
+fn validate_breaks(after_mins: u32) -> Result<(), String> {
+    if after_mins == 0 {
+        Err("break-suggestion interval must be at least 1 minute".to_string())
+    } else {
+        Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn default_is_valid() {
+        validate(&GuiConfig::default()).expect("default config must validate");
+    }
+
+    #[test]
+    fn unknown_locale_rejected() {
+        let mut cfg = GuiConfig::default();
+        cfg.learner.locale = "klingon".to_string();
+        let err = validate(&cfg).unwrap_err();
+        assert!(
+            err.contains("klingon"),
+            "error must name the offender: {err}"
+        );
+    }
+
+    #[test]
+    fn unknown_backend_rejected() {
+        let mut cfg = GuiConfig::default();
+        cfg.backend.kind = "magic".to_string();
+        let err = validate(&cfg).unwrap_err();
+        assert!(err.contains("magic"));
+    }
+
+    #[test]
+    fn unknown_embedder_rejected() {
+        let mut cfg = GuiConfig::default();
+        cfg.embedder.kind = "secret-sauce".to_string();
+        let err = validate(&cfg).unwrap_err();
+        assert!(err.contains("secret-sauce"));
+    }
+
+    #[test]
+    fn subsystem_kind_override_validates() {
+        let mut cfg = GuiConfig::default();
+        cfg.classifier.match_main = false;
+        cfg.classifier.kind = Some("bogus".to_string());
+        let err = validate(&cfg).unwrap_err();
+        assert!(
+            err.contains("classifier"),
+            "error must name the subsystem: {err}"
+        );
+        assert!(err.contains("bogus"));
+    }
+
+    #[test]
+    fn subsystem_match_main_skips_kind_validation() {
+        // `match_main = true` + bogus kind is OK because the wiring
+        // code ignores `kind` in that case.
+        let mut cfg = GuiConfig::default();
+        cfg.classifier.match_main = true;
+        cfg.classifier.kind = Some("bogus".to_string());
+        validate(&cfg).expect("match_main=true ignores kind");
+    }
+
+    #[test]
+    fn zero_break_interval_rejected() {
+        let mut cfg = GuiConfig::default();
+        cfg.breaks.after_mins = 0;
+        let err = validate(&cfg).unwrap_err();
+        assert!(err.contains("1 minute"));
+    }
+}
