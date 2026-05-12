@@ -119,7 +119,10 @@ async fn await_pending_classification_aborts_and_preserves_state_on_timeout() {
         }
     }
 
-    let backend = std::sync::Arc::new(ScriptedBackend::new(vec![Ok(chunk("hi", false)), Ok(chunk("", true))]));
+    let backend = std::sync::Arc::new(ScriptedBackend::new(vec![
+        Ok(chunk("hi", false)),
+        Ok(chunk("", true)),
+    ]));
     let knowledge = std::sync::Arc::new(EmptyKnowledge);
     // Tight timeout so the await reliably trips it before the 5s sleep.
     let settings = ClassifierSettings {
@@ -366,7 +369,10 @@ async fn end_to_end_save_learner_after_open_and_one_turn() {
     let learner = test_learner();
     store.save_learner(&learner).await.unwrap();
 
-    let backend = std::sync::Arc::new(ScriptedBackend::new(vec![Ok(chunk("Hello!", false)), Ok(chunk("", true))]));
+    let backend = std::sync::Arc::new(ScriptedBackend::new(vec![
+        Ok(chunk("Hello!", false)),
+        Ok(chunk("", true)),
+    ]));
     let knowledge = std::sync::Arc::new(EmptyKnowledge);
 
     let mut dm = DialogueManager::new(
@@ -483,7 +489,8 @@ async fn extract_task_persists_concepts_for_both_turns_after_response() {
     let mut dm = DialogueManager::new(
         test_learner(),
         backend.clone(),
-        std::sync::Arc::new(EmptyKnowledge) as std::sync::Arc<dyn primer_core::knowledge::KnowledgeBase>,
+        std::sync::Arc::new(EmptyKnowledge)
+            as std::sync::Arc<dyn primer_core::knowledge::KnowledgeBase>,
         stores,
         subsystems_with_extractor(extractor as Arc<dyn ConceptExtractor>),
         PedagogyConfig::default(),
@@ -510,7 +517,9 @@ async fn extract_task_persists_concepts_for_both_turns_after_response() {
 
 #[tokio::test]
 async fn extract_task_does_not_spawn_on_inference_error() {
-    let backend = std::sync::Arc::new(ScriptedBackend::new(vec![Err(PrimerError::Inference("boom".into()))]));
+    let backend = std::sync::Arc::new(ScriptedBackend::new(vec![Err(PrimerError::Inference(
+        "boom".into(),
+    ))]));
     let extractor = Arc::new(primer_extractor::StubConceptExtractor::with_response(
         ConceptExtraction {
             child_concepts: vec!["should-not-persist".into()],
@@ -527,7 +536,8 @@ async fn extract_task_does_not_spawn_on_inference_error() {
     let mut dm = DialogueManager::new(
         test_learner(),
         backend.clone(),
-        std::sync::Arc::new(EmptyKnowledge) as std::sync::Arc<dyn primer_core::knowledge::KnowledgeBase>,
+        std::sync::Arc::new(EmptyKnowledge)
+            as std::sync::Arc<dyn primer_core::knowledge::KnowledgeBase>,
         stores,
         subsystems_with_extractor(extractor as Arc<dyn ConceptExtractor>),
         PedagogyConfig::default(),
@@ -564,7 +574,8 @@ async fn pending_extraction_applied_to_learner_at_next_turn() {
     let mut dm = DialogueManager::new(
         test_learner(),
         backend.clone(),
-        std::sync::Arc::new(EmptyKnowledge) as std::sync::Arc<dyn primer_core::knowledge::KnowledgeBase>,
+        std::sync::Arc::new(EmptyKnowledge)
+            as std::sync::Arc<dyn primer_core::knowledge::KnowledgeBase>,
         DialogueManagerStores::default(),
         subsystems_with_extractor(extractor as Arc<dyn ConceptExtractor>),
         PedagogyConfig::default(),
@@ -645,7 +656,8 @@ async fn post_response_chain_persists_extraction_and_comprehension() {
     let mut dm = DialogueManager::new(
         test_learner(),
         backend.clone(),
-        std::sync::Arc::new(EmptyKnowledge) as std::sync::Arc<dyn primer_core::knowledge::KnowledgeBase>,
+        std::sync::Arc::new(EmptyKnowledge)
+            as std::sync::Arc<dyn primer_core::knowledge::KnowledgeBase>,
         stores,
         subsystems,
         PedagogyConfig::default(),
@@ -745,7 +757,8 @@ async fn post_response_chain_skips_comprehension_on_empty_extraction() {
     let mut dm = DialogueManager::new(
         test_learner(),
         backend.clone(),
-        std::sync::Arc::new(EmptyKnowledge) as std::sync::Arc<dyn primer_core::knowledge::KnowledgeBase>,
+        std::sync::Arc::new(EmptyKnowledge)
+            as std::sync::Arc<dyn primer_core::knowledge::KnowledgeBase>,
         stores,
         subsystems,
         PedagogyConfig::default(),

@@ -134,18 +134,15 @@ async function onSubmit(e) {
 // double-emission.
 function setupChunkListener() {
   listen("primer://chunk", (event) => {
-    const payload = event.payload || {};
-    const text = typeof payload === "string" ? payload : payload.text || "";
-    if (!state.streamingPrimerEl || !text) return;
-    state.streamingPrimerEl.textContent += text;
+    if (!state.streamingPrimerEl) return;
+    state.streamingPrimerEl.textContent += event.payload.text;
     scrollToBottom();
   });
 }
 
 function setupTurnCompleteListener() {
   listen("primer://turn_complete", (event) => {
-    const payload = event.payload || {};
-    state.sessionId = payload.session_id || state.sessionId;
+    state.sessionId = event.payload.session_id;
     finaliseStreamingBubble({ aborted: false });
     enableComposer();
   });

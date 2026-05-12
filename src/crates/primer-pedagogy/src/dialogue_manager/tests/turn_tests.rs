@@ -195,7 +195,10 @@ async fn respond_to_thin_wrapper_still_works() {
 
 #[tokio::test]
 async fn respond_to_streaming_fires_engine_save_on_success() {
-    let backend = std::sync::Arc::new(ScriptedBackend::new(vec![Ok(chunk("Hi", false)), Ok(chunk("", true))]));
+    let backend = std::sync::Arc::new(ScriptedBackend::new(vec![
+        Ok(chunk("Hi", false)),
+        Ok(chunk("", true)),
+    ]));
     let knowledge = std::sync::Arc::new(EmptyKnowledge);
     let store = Arc::new(CountingStore::new());
     let mut dm = DialogueManager::new(
@@ -252,7 +255,10 @@ async fn respond_to_streaming_fires_engine_save_on_stream_error() {
 async fn summary_does_not_refresh_when_below_threshold_during_active_session() {
     // First respond_to_streaming fires only when there are turns to
     // process. With turn count below window+window, no refresh.
-    let backend = std::sync::Arc::new(ScriptedBackend::new(vec![Ok(chunk("ok", false)), Ok(chunk("", true))]));
+    let backend = std::sync::Arc::new(ScriptedBackend::new(vec![
+        Ok(chunk("ok", false)),
+        Ok(chunk("", true)),
+    ]));
     let knowledge = std::sync::Arc::new(EmptyKnowledge);
     let mut dm = DialogueManager::new(
         test_learner(),
@@ -575,7 +581,10 @@ async fn build_turn_prompt_omits_vocab_section_when_no_concept_is_due() {
 
 #[tokio::test]
 async fn respond_after_threshold_yields_suggest_break_intent() {
-    let backend = std::sync::Arc::new(ScriptedBackend::new(vec![Ok(chunk("Hello", false)), Ok(chunk("", true))]));
+    let backend = std::sync::Arc::new(ScriptedBackend::new(vec![
+        Ok(chunk("Hello", false)),
+        Ok(chunk("", true)),
+    ]));
     let knowledge = std::sync::Arc::new(EmptyKnowledge);
     let mut dm = DialogueManager::new(
         test_learner(),

@@ -18,8 +18,12 @@
     </header>
 
     <main class="chat">
-      <div class="chat-scroll" id="chat-scroll" aria-live="polite">
-        <!-- Bubbles are injected here. The first turn lands once the user sends. -->
+      <div class="chat-scroll" id="chat-scroll">
+        <!-- Bubbles are injected here. The first turn lands once the user sends.
+             No `aria-live` on the container: streaming `textContent +=` mutates an
+             existing node, which most screen readers either ignore or fire on
+             every chunk — both unhelpful. Per-bubble live semantics (announce
+             once on stream completion) lands with the a11y pass after step 6. -->
         <div class="empty-state" id="empty-state">
           <h2>Ready when you are.</h2>
           <p>
@@ -44,6 +48,6 @@
       </form>
     </main>
 
-    <script src="app.js" type="module"></script>
+    <script src="app.js"></script>
   </body>
 </html>

@@ -8,7 +8,9 @@
 //! `send_message` clones the DM Arc out of the session guard, releases
 //! the session guard, then locks the DM independently for the duration
 //! of the turn — so the long streaming wallclock doesn't keep other
-//! commands (e.g. `current_session_info`) waiting.
+//! commands (e.g. `current_session_info`) waiting. After each
+//! successful turn it refreshes [`ActiveSession::snapshot`] so reader
+//! commands never touch the DM lock at all.
 
 use std::sync::Arc;
 
@@ -17,7 +19,7 @@ use tauri::{AppHandle, Emitter};
 use tokio::sync::Mutex;
 use uuid::Uuid;
 
-use crate::state::{ActiveSession, AppState};
+use crate::state::{ActiveSession, AppState, SessionSnapshot};
 use crate::types::{ChunkEvent, LearnerSummary, SessionInfo, TurnComplete};
 use crate::wiring;
 
@@ -106,16 +108,22 @@ pub async fn send_message(
     app: AppHandle,
     input: String,
 ) -> Result<TurnComplete, String> {
-    // Clone the DM Arc out under the session mutex, then release it.
-    let dm_arc = {
+    // Clone both Arcs under the session mutex, then release it. The
+    // DM Arc drives the turn; the snapshot Arc is refreshed at the
+    // end so reader commands see fresh learner/session-id fields
+    // without ever locking the DM.
+    let (dm_arc, snapshot_arc) = {
         let guard = state.session.lock().await;
         let active = guard
             .as_ref()
             .ok_or_else(|| "no active session — call start_session first".to_string())?;
-        Arc::clone(&active.dialogue_manager)
+        (
+            Arc::clone(&active.dialogue_manager),
+            Arc::clone(&active.snapshot),
+        )
     };
 
-    run_turn(&dm_arc, &input, |primer_turn_index, chunk| {
+    let payload = run_turn(&dm_arc, &input, |primer_turn_index, chunk| {
         let payload = ChunkEvent {
             primer_turn_index,
             text: chunk.to_string(),
@@ -124,12 +132,36 @@ pub async fn send_message(
             tracing::warn!("emit primer://chunk failed: {e}");
         }
     })
-    .await
-    .inspect(|payload| {
-        if let Err(e) = app.emit("primer://turn_complete", payload) {
-            tracing::warn!("emit primer://turn_complete failed: {e}");
+    .await?;
+
+    refresh_snapshot(&dm_arc, &snapshot_arc).await;
+
+    if let Err(e) = app.emit("primer://turn_complete", &payload) {
+        tracing::warn!("emit primer://turn_complete failed: {e}");
+    }
+    Ok(payload)
+}
+
+/// Re-read learner + session-id fields from the just-completed DM and
+/// publish them into the snapshot. The DM lock is held only for the
+/// few field reads — no `.await` inside — so any concurrent
+/// `current_session_info` waiting on the snapshot mutex returns in
+/// microseconds, not the streaming wallclock.
+async fn refresh_snapshot(
+    dm_arc: &Arc<Mutex<DialogueManager>>,
+    snapshot_arc: &Arc<Mutex<SessionSnapshot>>,
+) {
+    let new_snapshot = {
+        let dm = dm_arc.lock().await;
+        SessionSnapshot {
+            session_id: Some(dm.session.id),
+            learner_id: dm.learner.profile.id,
+            learner_name: dm.learner.profile.name.clone(),
+            learner_age: dm.learner.profile.age,
+            concept_count: dm.learner.concepts.len(),
         }
-    })
+    };
+    *snapshot_arc.lock().await = new_snapshot;
 }
 
 /// Drive one streaming turn against a held DM.
@@ -167,20 +199,17 @@ where
 }
 
 async fn info_from(active: &ActiveSession) -> SessionInfo {
-    let dm = active.dialogue_manager.lock().await;
-    let session_has_turns = !dm.session.turns.is_empty();
+    // Reads ONLY from the snapshot — never touches the DM mutex —
+    // so a sidebar refresh during a streaming turn returns immediately
+    // instead of queueing behind the entire response wallclock.
+    let snapshot = active.snapshot.lock().await;
     SessionInfo {
-        // The session-row UUID is real from construction (DM mints it
-        // in `new`), but the on-disk row only exists after the first
-        // turn lands (`persist_turn` saves it). Return None until then
-        // so the frontend doesn't display a UUID that can't yet be
-        // round-tripped through `load_session`.
-        session_id: session_has_turns.then_some(dm.session.id),
+        session_id: snapshot.session_id,
         learner: LearnerSummary {
-            id: dm.learner.profile.id,
-            name: dm.learner.profile.name.clone(),
-            age: dm.learner.profile.age,
-            concept_count: dm.learner.concepts.len(),
+            id: snapshot.learner_id,
+            name: snapshot.learner_name.clone(),
+            age: snapshot.learner_age,
+            concept_count: snapshot.concept_count,
         },
         backend_kind: active.backend_name.clone(),
         main_model: active.main_model.clone(),
@@ -237,7 +266,10 @@ mod tests {
             first.session_id, second.session_id,
             "long-lived DM holds the same Session across turns"
         );
-        assert_eq!(second.child_turn_index, 2, "child #2 lands after first exchange");
+        assert_eq!(
+            second.child_turn_index, 2,
+            "child #2 lands after first exchange"
+        );
         assert_eq!(second.primer_turn_index, 3, "primer #2 lands at index 3");
     }
 
@@ -252,17 +284,17 @@ mod tests {
             .await
             .unwrap();
 
-        // Reach into the DM's storage Arc to verify the on-disk row
-        // round-trips. The DM exposes its stores via the public field
-        // path indirectly — we re-open via the test config's session
-        // db path instead, which validates the actual on-disk artefact
-        // independently of any DM-internal caching.
+        // Drain the DM's background tasks before re-opening the same
+        // DB from a second connection so we don't race a still-running
+        // extractor/comprehension/embedding write through the first.
+        dm_arc.lock().await.close_session().await;
+
+        // Re-open via the test config's session-db path so we validate
+        // the actual on-disk artefact independently of any DM-internal
+        // caching.
         let session_db = home.path().join("test_session.db");
-        let store = primer_storage::SqliteSessionStore::open_for_locale(
-            &session_db,
-            active.locale,
-        )
-        .unwrap();
+        let store = primer_storage::SqliteSessionStore::open_for_locale(&session_db, active.locale)
+            .unwrap();
         let loaded = primer_core::storage::SessionStore::load_session(&store, payload.session_id)
             .await
             .unwrap()
@@ -271,6 +303,50 @@ mod tests {
             loaded.turns.len() >= 2,
             "session must persist both the child and primer turns; got {} turns",
             loaded.turns.len()
+        );
+    }
+
+    /// Pre-turn `current_session_info` (via `info_from`) returns the
+    /// initial snapshot (no `session_id` yet) without ever touching
+    /// the DM mutex; after `send_message`-style snapshot refresh, the
+    /// session_id and concept count appear.
+    #[tokio::test]
+    async fn snapshot_decouples_info_from_dm_lock() {
+        let home = TempDir::new().unwrap();
+        let cfg = stub_config_with_persistence(home.path());
+        let active = build_active_session(home.path(), &cfg).await.unwrap();
+
+        let before = info_from(&active).await;
+        assert!(
+            before.session_id.is_none(),
+            "pre-turn snapshot has no session_id"
+        );
+        assert_eq!(before.learner.name, cfg.learner.name);
+        assert_eq!(before.learner.age, cfg.learner.age);
+
+        // Hold the DM lock for the whole duration of the snapshot
+        // refresh + reader call — if `info_from` were still touching
+        // the DM mutex, the second `info_from` below would deadlock
+        // here (current task holds DM lock, info_from would block
+        // waiting for it). Reaching the `assert!` proves info_from
+        // never blocks on the DM.
+        let dm_arc = Arc::clone(&active.dialogue_manager);
+        let _guard = dm_arc.lock().await;
+        let during_stream = info_from(&active).await;
+        assert_eq!(
+            during_stream.learner.id, before.learner.id,
+            "info_from returns while DM is locked elsewhere"
+        );
+        drop(_guard);
+
+        let dm_arc = Arc::clone(&active.dialogue_manager);
+        let _payload = run_turn(&dm_arc, "hello", |_, _| {}).await.unwrap();
+        refresh_snapshot(&dm_arc, &active.snapshot).await;
+
+        let after = info_from(&active).await;
+        assert!(
+            after.session_id.is_some(),
+            "post-turn snapshot carries the session id"
         );
     }
 }

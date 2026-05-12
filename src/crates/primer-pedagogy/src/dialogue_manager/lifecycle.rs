@@ -209,6 +209,14 @@ impl DialogueManager {
         self.comprehension.identifier()
     }
 
+    /// Stable identifier of the active embedder, or `None` when
+    /// hybrid retrieval is disabled (`--embedder-backend none`).
+    /// `Embedder` inherits `Named`, so `name()` is reachable via the
+    /// trait object without an explicit `use`.
+    pub fn embedder_identifier(&self) -> Option<&str> {
+        self.embedder.as_deref().map(|e| e.name())
+    }
+
     /// End the session gracefully. Drains any in-flight classifier task so
     /// the final turn's assessment lands on disk, records `ended_at`, and
     /// (if storage is configured) fires a final save so the timestamp

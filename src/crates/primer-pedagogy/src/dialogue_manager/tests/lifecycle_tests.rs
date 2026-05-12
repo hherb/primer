@@ -15,7 +15,10 @@ use super::super::*;
 
 #[tokio::test]
 async fn close_session_fires_engine_save_with_ended_at() {
-    let backend = std::sync::Arc::new(ScriptedBackend::new(vec![Ok(chunk("Hi", false)), Ok(chunk("", true))]));
+    let backend = std::sync::Arc::new(ScriptedBackend::new(vec![
+        Ok(chunk("Hi", false)),
+        Ok(chunk("", true)),
+    ]));
     let knowledge = std::sync::Arc::new(EmptyKnowledge);
     let store = Arc::new(CountingStore::new());
     let mut dm = DialogueManager::new(
@@ -391,7 +394,8 @@ async fn close_session_drains_extractor_task() {
     let mut dm = DialogueManager::new(
         test_learner(),
         backend.clone(),
-        std::sync::Arc::new(EmptyKnowledge) as std::sync::Arc<dyn primer_core::knowledge::KnowledgeBase>,
+        std::sync::Arc::new(EmptyKnowledge)
+            as std::sync::Arc<dyn primer_core::knowledge::KnowledgeBase>,
         stores,
         subsystems_with_extractor(extractor as Arc<dyn ConceptExtractor>),
         PedagogyConfig::default(),

@@ -19,10 +19,13 @@
 //!
 //! Sharing across tasks: the DM is held in `Arc<Mutex<DialogueManager>>`
 //! so a command can clone the Arc out of the session guard, release
-//! the session guard, and lock the DM independently. That keeps
+//! the session guard, and lock the DM independently. To keep
 //! `current_session_info` / `update_settings` / future sidebar
-//! commands free to run while a turn is streaming — they'd otherwise
-//! queue behind the entire turn duration.
+//! commands free to run while a turn is streaming, an
+//! [`SessionSnapshot`] mirror of the DM-owned fields the frontend
+//! needs lives behind its own short-lived `Mutex` — readers never
+//! touch the DM lock. The snapshot is refreshed after each successful
+//! turn from within `send_message`.
 
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -30,6 +33,7 @@ use std::sync::Arc;
 use primer_core::i18n::Locale;
 use primer_pedagogy::DialogueManager;
 use tokio::sync::Mutex;
+use uuid::Uuid;
 
 use crate::config::GuiConfig;
 
@@ -94,6 +98,33 @@ pub struct ActiveSession {
     /// Display string for the main model id (e.g. "claude-sonnet-4-6",
     /// "llama3.2"). Kept outside the DM mutex for the same reason.
     pub main_model: String,
+
+    /// Snapshot of the DM-owned fields the frontend reads via
+    /// `current_session_info`. Refreshed by `send_message` after each
+    /// successful turn so readers never have to lock the DM (and queue
+    /// behind an in-flight stream that can take tens of seconds).
+    pub snapshot: Arc<Mutex<SessionSnapshot>>,
+}
+
+/// Read-mostly mirror of the DM-owned fields the frontend renders via
+/// `current_session_info`. Kept separate from the DM mutex so the
+/// sidebar can read while a turn is streaming. Refreshed by
+/// `send_message` after every successful turn.
+#[derive(Debug, Clone)]
+pub struct SessionSnapshot {
+    /// `None` until the first send_message completes — at that point
+    /// a real `Session` row exists on disk and the UUID can be
+    /// round-tripped through `load_session`.
+    pub session_id: Option<Uuid>,
+    /// Stable learner UUID; written once at construction.
+    pub learner_id: Uuid,
+    /// Learner display name from the resolved profile.
+    pub learner_name: String,
+    /// Learner age from the resolved profile.
+    pub learner_age: u8,
+    /// Concept count from the in-memory learner model. Grows as the
+    /// extractor surfaces new concepts; refreshed at each turn boundary.
+    pub concept_count: usize,
 }
 
 impl std::fmt::Debug for ActiveSession {

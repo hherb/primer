@@ -32,7 +32,7 @@ use tokio::sync::Mutex;
 use uuid::Uuid;
 
 use crate::config::{ApiKeySource, GuiConfig};
-use crate::state::ActiveSession;
+use crate::state::{ActiveSession, SessionSnapshot};
 
 /// Construct everything `DialogueManager::new` would need from a single
 /// `GuiConfig`.
@@ -257,6 +257,15 @@ pub async fn build_active_session(
         vocab_settings,
         embedder,
     };
+    // Snapshot must be built BEFORE `learner` moves into `DialogueManager::new`.
+    let initial_snapshot = SessionSnapshot {
+        session_id: None,
+        learner_id: learner.profile.id,
+        learner_name: learner.profile.name.clone(),
+        learner_age: learner.profile.age,
+        concept_count: learner.concepts.len(),
+    };
+
     let dm = primer_pedagogy::DialogueManager::new(
         learner,
         Arc::clone(&backend),
@@ -268,6 +277,7 @@ pub async fn build_active_session(
 
     Ok(ActiveSession {
         dialogue_manager: Arc::new(Mutex::new(dm)),
+        snapshot: Arc::new(Mutex::new(initial_snapshot)),
         locale,
         backend_name: backend_config.kind.clone(),
         main_model,
@@ -431,11 +441,13 @@ mod tests {
         let home = TempDir::new().unwrap();
         let mut cfg = stub_config();
         cfg.embedder.kind = "stub".to_string();
-        // build_active_session returning Ok proves the stub embedder
-        // wired cleanly into the DM construction — DM doesn't expose
-        // its private embedder Arc, but the construction succeeding
-        // is the only outcome that matters for the wiring path.
-        let _ = build_active_session(home.path(), &cfg).await.unwrap();
+        let s = build_active_session(home.path(), &cfg).await.unwrap();
+        let dm = s.dialogue_manager.lock().await;
+        assert_eq!(
+            dm.embedder_identifier(),
+            Some(primer_embedding::STUB_MODEL_ID),
+            "stub embedder must be wired into the DM"
+        );
     }
 
     #[tokio::test]
