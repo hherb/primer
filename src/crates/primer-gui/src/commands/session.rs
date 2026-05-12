@@ -20,6 +20,7 @@ use tokio::sync::Mutex;
 use uuid::Uuid;
 
 use chrono::Utc;
+use primer_classifier::consts::DEFAULT_HISTORY_DEPTH;
 use primer_core::learner::UnderstandingDepth;
 use primer_core::vocab::due_concepts;
 
@@ -121,10 +122,15 @@ pub async fn get_turn_signals(
 const VOCAB_DUE_DISPLAY_LIMIT: usize = 8;
 
 /// Maximum number of recent engagement states the sidebar shows as a
-/// sparkline-style dot strip. Mirrors the typical classifier
-/// `history_depth` setting — we clamp to this here so the frontend
-/// doesn't need to truncate.
-const RECENT_ENGAGEMENT_DISPLAY_LIMIT: usize = 8;
+/// sparkline-style dot strip. The in-memory `recent_assessments` Vec
+/// is trimmed to `ClassifierSettings::history_depth` on every push
+/// (see `dialogue_manager::apply::apply_assessment`), so the dot strip
+/// can never exceed that bound today. We pin the display cap to the
+/// same default so the named limit reflects what's actually rendered;
+/// a future change that hydrates from `turn_classifications` (the
+/// persisted longitudinal record) would let this bound grow
+/// independently.
+const RECENT_ENGAGEMENT_DISPLAY_LIMIT: usize = DEFAULT_HISTORY_DEPTH;
 
 /// Return the longitudinal learner snapshot — profile + vocab-due list
 /// + depth distribution + recent engagement strip. Same DM-lock-once
@@ -182,17 +188,15 @@ pub(crate) fn read_learner(dm: &DialogueManager) -> LearnerSnapshot {
         }
     }
 
-    // recent_assessments grows over time; clamp the tail to the most
-    // recent N for the dot strip. Already oldest-first within the slice.
-    let recent_engagement = learner
+    // recent_assessments is push-back/remove-front so it's already
+    // oldest-first; take the tail slice for the dot strip.
+    let start = learner
         .recent_assessments
+        .len()
+        .saturating_sub(RECENT_ENGAGEMENT_DISPLAY_LIMIT);
+    let recent_engagement = learner.recent_assessments[start..]
         .iter()
-        .rev()
-        .take(RECENT_ENGAGEMENT_DISPLAY_LIMIT)
         .map(|a| a.state.name().to_string())
-        .collect::<Vec<_>>()
-        .into_iter()
-        .rev()
         .collect();
 
     LearnerSnapshot {
@@ -210,9 +214,12 @@ pub(crate) fn read_learner(dm: &DialogueManager) -> LearnerSnapshot {
 }
 
 /// Days until a concept's next due date. Negative = already overdue.
-/// Floors fractional days so "0.4 days" reads as "due now" rather
-/// than "due tomorrow" — matches what the user expects from a
-/// "next review" timer.
+/// `chrono::Duration::num_days` truncates toward zero, so sub-day
+/// remainders on both sides round to 0 — "0.4 days" reads as "due
+/// now" rather than "due tomorrow", and "-0.4 days" reads as "due
+/// now" rather than "1 day late". That's the rendering we want from
+/// a "next review" timer; the asymmetric-overdue side is the
+/// deliberate forgiving choice over a true floor.
 fn days_until_due(c: &primer_core::learner::ConceptState, now: chrono::DateTime<Utc>) -> i64 {
     use primer_core::consts::vocab::BOX_INTERVALS_DAYS;
     let Some(last) = c.last_encountered else {
@@ -529,13 +536,28 @@ mod tests {
         // Distribution is always six entries — depths the learner
         // has never reached carry count=0. Canonical order matches
         // UnderstandingDepth::ALL.
-        let names: Vec<&str> = snap.depth_distribution.iter().map(|r| r.depth.as_str()).collect();
+        let names: Vec<&str> = snap
+            .depth_distribution
+            .iter()
+            .map(|r| r.depth.as_str())
+            .collect();
         assert_eq!(
             names,
-            ["Unknown", "Aware", "Recall", "Comprehension", "Application", "Analysis"]
+            [
+                "Unknown",
+                "Aware",
+                "Recall",
+                "Comprehension",
+                "Application",
+                "Analysis"
+            ]
         );
         for row in &snap.depth_distribution {
-            assert_eq!(row.count, 0, "fresh learner has no concepts at {}", row.depth);
+            assert_eq!(
+                row.count, 0,
+                "fresh learner has no concepts at {}",
+                row.depth
+            );
         }
     }
 
@@ -593,9 +615,60 @@ mod tests {
         // Vocab due: photosynthesis is 2 days past its 1-day box-0
         // interval, so it lands in the due list. Mass and gravity
         // were "just encountered" so are not yet due.
-        let due_ids: Vec<&str> = snap.vocab_due.iter().map(|c| c.concept_id.as_str()).collect();
+        let due_ids: Vec<&str> = snap
+            .vocab_due
+            .iter()
+            .map(|c| c.concept_id.as_str())
+            .collect();
         assert_eq!(due_ids, vec!["biology:photosynthesis"]);
         assert!(snap.vocab_due[0].days_until_due <= 0, "must be overdue");
+    }
+
+    #[tokio::test]
+    async fn read_learner_recent_engagement_oldest_first_and_clamped() {
+        use primer_core::classifier::EngagementAssessment;
+        use primer_core::learner::EngagementState;
+        let home = TempDir::new().unwrap();
+        let cfg = stub_config_with_persistence(home.path());
+        let active = build_active_session(home.path(), &cfg).await.unwrap();
+        // Inject more than DEFAULT_HISTORY_DEPTH assessments in
+        // chronological order; the snapshot must preserve order
+        // (oldest first) and clamp to the display limit. Pushed
+        // directly because the in-memory cap from apply_assessment is
+        // exactly what we want to exercise from the snapshot side.
+        let states = [
+            EngagementState::Disengaging,
+            EngagementState::Reflecting,
+            EngagementState::Engaged,
+            EngagementState::FrustratedTrying,
+            EngagementState::Engaged,
+        ];
+        {
+            let mut dm = active.dialogue_manager.lock().await;
+            for s in states {
+                dm.learner.recent_assessments.push(EngagementAssessment {
+                    state: s,
+                    confidence: 0.8,
+                    reasoning: None,
+                });
+            }
+        }
+        let dm = active.dialogue_manager.lock().await;
+        let snap = read_learner(&dm);
+
+        assert_eq!(
+            snap.recent_engagement.len(),
+            RECENT_ENGAGEMENT_DISPLAY_LIMIT,
+            "clamped to the display limit when source exceeds it"
+        );
+        // Tail-slice preserves order — the displayed slice is the
+        // most-recent N states in the same order they were appended.
+        let tail_start = states.len() - RECENT_ENGAGEMENT_DISPLAY_LIMIT;
+        let expected: Vec<String> = states[tail_start..]
+            .iter()
+            .map(|s| s.name().to_string())
+            .collect();
+        assert_eq!(snap.recent_engagement, expected);
     }
 
     #[tokio::test]

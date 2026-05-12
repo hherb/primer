@@ -355,7 +355,9 @@ function renderLearner(snap) {
   const due = snap.vocab_due ?? [];
   if (snap.concept_count > 0) {
     l.vocabCard.hidden = false;
-    l.vocabCount.textContent = `${due.length} due`;
+    // Suppress the "0 due" pill when the list is empty — the inline
+    // empty-state message already says it more clearly.
+    l.vocabCount.textContent = due.length > 0 ? `${due.length} due` : "";
     l.vocabList.replaceChildren();
     if (due.length === 0) {
       const div = document.createElement("div");

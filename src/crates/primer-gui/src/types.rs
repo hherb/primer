@@ -180,7 +180,9 @@ pub struct LearnerSnapshot {
     /// variant, in canonical order (Unknown → Analysis). Always six
     /// entries — depths the learner has never reached carry `count = 0`.
     pub depth_distribution: Vec<DepthCount>,
-    /// Recent engagement states in chronological order (oldest first).
+    /// Recent engagement states in chronological order (oldest first,
+    /// newest last). The sidebar renders left-to-right, so the
+    /// most-recent state is the rightmost dot.
     /// Variant names match [`primer_core::learner::EngagementState::name`].
     pub recent_engagement: Vec<String>,
     /// Total concept count. `depth_distribution` sums to the same
@@ -207,8 +209,12 @@ pub struct DueConcept {
     /// wants to show the depth alongside the dot row.
     pub depth: String,
     /// Days until the concept next becomes due. Negative = already
-    /// overdue by that many days. Floor so "due in 0.4 days" reads as
-    /// "due now" rather than "due tomorrow".
+    /// overdue by that many days. `chrono::Duration::num_days`
+    /// truncates toward zero, so sub-day remainders on both sides
+    /// round to 0 — "0.4 days" reads as "due now" rather than "due
+    /// tomorrow", "-0.4 days" reads as "due now" rather than "1 day
+    /// late". The asymmetric-overdue side is the deliberate forgiving
+    /// choice over a true floor.
     pub days_until_due: i64,
 }
 
