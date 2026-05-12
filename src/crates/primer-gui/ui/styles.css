@@ -576,3 +576,212 @@ body.sidebar-collapsed .sidebar {
   background: color-mix(in oklab, var(--depth-analysis) 18%, transparent);
   color: var(--depth-analysis-fg);
 }
+
+/* ─── Learner section ───────────────────────────────────────────── */
+
+.learner-name {
+  font-weight: 600;
+  font-size: 0.92rem;
+}
+
+.uuid-row {
+  gap: 0.4rem;
+  align-items: center;
+}
+
+.learner-uuid {
+  font-family:
+    ui-monospace,
+    SFMono-Regular,
+    Menlo,
+    Consolas,
+    monospace;
+  font-size: 0.72rem;
+  padding: 0.12rem 0.4rem;
+  background: color-mix(in oklab, var(--fg) 6%, transparent);
+  border-radius: 0.35rem;
+  letter-spacing: 0;
+  word-break: break-all;
+}
+
+.copy-btn {
+  padding: 0.15rem 0.45rem;
+  border: 1px solid var(--border);
+  border-radius: 0.35rem;
+  background: var(--bg);
+  color: var(--fg);
+  font: inherit;
+  font-size: 0.72rem;
+  cursor: pointer;
+  transition: background 120ms ease;
+}
+
+.copy-btn:hover {
+  background: color-mix(in oklab, var(--accent) 8%, var(--bg));
+}
+
+.copy-btn[data-state="copied"] {
+  color: var(--accent);
+  border-color: var(--accent);
+}
+
+.vocab-count,
+.concept-count {
+  margin-left: 0.4rem;
+  font-size: 0.72rem;
+  font-variant-numeric: tabular-nums;
+}
+
+.vocab-list {
+  margin: 0;
+  padding: 0;
+  list-style: none;
+  display: flex;
+  flex-direction: column;
+  gap: 0.35rem;
+}
+
+.vocab-list li {
+  display: grid;
+  grid-template-columns: 1fr auto auto;
+  align-items: center;
+  gap: 0.5rem;
+  font-size: 0.82rem;
+}
+
+.vocab-list .concept {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.box-dots {
+  display: inline-flex;
+  gap: 0.12rem;
+  font-size: 0.62rem;
+  color: var(--accent);
+  letter-spacing: 0.05em;
+  line-height: 1;
+}
+
+.vocab-list .due-when {
+  font-size: 0.72rem;
+  color: var(--fg-muted);
+  font-variant-numeric: tabular-nums;
+  min-width: 4.2rem;
+  text-align: right;
+}
+
+.vocab-list .due-when[data-overdue="true"] {
+  color: #b91c1c;
+  font-weight: 500;
+}
+
+@media (prefers-color-scheme: dark) {
+  .vocab-list .due-when[data-overdue="true"] {
+    color: #fda4af;
+  }
+}
+
+.vocab-empty {
+  font-size: 0.82rem;
+  color: var(--fg-muted);
+  font-style: italic;
+}
+
+/* Stacked horizontal depth-distribution bar. Each segment's flex-grow
+   is set inline from JS to the concept count, so empty depths
+   collapse to zero width and don't take visual space. Colours pull
+   from the same --depth-* variables the depth-pill uses, so the bar
+   and the pills stay in lockstep across light/dark themes. */
+.depth-bar {
+  display: flex;
+  width: 100%;
+  height: 0.7rem;
+  border-radius: 0.35rem;
+  overflow: hidden;
+  background: color-mix(in oklab, var(--fg) 8%, transparent);
+}
+
+.depth-bar .seg {
+  height: 100%;
+  transition: flex-grow 220ms ease;
+}
+
+.depth-bar .seg[data-depth="unknown"] {
+  background: var(--depth-unknown);
+}
+.depth-bar .seg[data-depth="aware"] {
+  background: var(--depth-aware);
+}
+.depth-bar .seg[data-depth="recall"] {
+  background: var(--depth-recall);
+}
+.depth-bar .seg[data-depth="comprehension"] {
+  background: var(--depth-comprehension);
+}
+.depth-bar .seg[data-depth="application"] {
+  background: var(--depth-application);
+}
+.depth-bar .seg[data-depth="analysis"] {
+  background: var(--depth-analysis);
+}
+
+.depth-legend {
+  margin: 0;
+  padding: 0;
+  list-style: none;
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.4rem 0.7rem;
+  font-size: 0.72rem;
+  color: var(--fg-muted);
+}
+
+.depth-legend li {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.3rem;
+  font-variant-numeric: tabular-nums;
+}
+
+.depth-legend .swatch {
+  display: inline-block;
+  width: 0.55rem;
+  height: 0.55rem;
+  border-radius: 0.15rem;
+}
+
+/* Engagement state dot strip — sparkline-style row of dots, each
+   coloured by the EngagementState variant name. Variant slugs match
+   EngagementState::name() lowercased. */
+.engagement-strip {
+  display: flex;
+  gap: 0.3rem;
+  flex-wrap: wrap;
+}
+
+.engagement-strip .dot {
+  display: inline-block;
+  width: 0.7rem;
+  height: 0.7rem;
+  border-radius: 50%;
+  background: color-mix(in oklab, var(--fg-muted) 35%, transparent);
+}
+
+.engagement-strip .dot[data-state="engaged"] {
+  background: #16a34a;
+}
+.engagement-strip .dot[data-state="reflecting"] {
+  background: #2563eb;
+}
+.engagement-strip .dot[data-state="frustratedstuck"] {
+  background: #dc2626;
+}
+.engagement-strip .dot[data-state="frustratedtrying"] {
+  background: #f97316;
+}
+.engagement-strip .dot[data-state="disengaging"] {
+  background: #a16207;
+}
+/* unknown / default: stays the muted base colour */

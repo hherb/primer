@@ -42,7 +42,26 @@ const dom = {
     comprehensionList: document.getElementById("signals-comprehension-list"),
     comprehensionModel: document.getElementById("signals-comprehension-model"),
   },
+  learner: {
+    profileCard: document.getElementById("learner-profile-card"),
+    name: document.getElementById("learner-name"),
+    ageLocale: document.getElementById("learner-age-locale"),
+    uuid: document.getElementById("learner-uuid"),
+    uuidCopy: document.getElementById("learner-uuid-copy"),
+    vocabCard: document.getElementById("learner-vocab-card"),
+    vocabCount: document.getElementById("learner-vocab-count"),
+    vocabList: document.getElementById("learner-vocab-list"),
+    distributionCard: document.getElementById("learner-distribution-card"),
+    conceptCount: document.getElementById("learner-concept-count"),
+    depthBar: document.getElementById("learner-depth-bar"),
+    depthLegend: document.getElementById("learner-depth-legend"),
+    engagementCard: document.getElementById("learner-engagement-card"),
+    engagementStrip: document.getElementById("learner-engagement-strip"),
+  },
 };
+
+/// Maximum filled box dots — matches MAX_BOX_LEVEL in primer_core::vocab.
+const MAX_BOX_LEVEL = 4;
 
 // Live state — `streamingPrimerEl` points at the currently-streaming
 // Primer bubble (if any) so chunk events can append to its text node
@@ -60,10 +79,11 @@ async function main() {
   setupComposer();
   setupAutogrow();
   setupSidebarToggle();
+  setupUuidCopy();
   await openOrStartSession();
   // Render whatever's already on the DM (resumed sessions land here
   // with populated last_* accessors); first-launch shows the empty state.
-  refreshSignals();
+  refreshSidebar();
 }
 
 async function openOrStartSession() {
@@ -172,7 +192,7 @@ function setupTurnCompleteListener() {
     enableComposer();
     // Fire-and-forget — sidebar updates are non-critical; a failure
     // here shouldn't deny the user the chat surface.
-    refreshSignals();
+    refreshSidebar();
   });
 }
 
@@ -187,6 +207,13 @@ function setupSidebarToggle() {
   });
 }
 
+/// Refresh both sidebar sections (Current turn + Learner) in parallel.
+/// One IPC round-trip per section keeps the DM-lock duration small and
+/// lets the two sections fail independently.
+async function refreshSidebar() {
+  await Promise.all([refreshSignals(), refreshLearner()]);
+}
+
 async function refreshSignals() {
   try {
     const signals = await invoke("get_turn_signals");
@@ -194,6 +221,15 @@ async function refreshSignals() {
   } catch (err) {
     // Sidebar errors are non-critical — log but don't surface.
     console.warn("get_turn_signals failed:", err);
+  }
+}
+
+async function refreshLearner() {
+  try {
+    const snap = await invoke("get_learner_state");
+    renderLearner(snap);
+  } catch (err) {
+    console.warn("get_learner_state failed:", err);
   }
 }
 
@@ -296,6 +332,154 @@ function renderChips(ulEl, items) {
     li.textContent = item;
     ulEl.appendChild(li);
   }
+}
+
+function renderLearner(snap) {
+  const l = dom.learner;
+  if (!snap) {
+    l.profileCard.hidden = true;
+    l.vocabCard.hidden = true;
+    l.distributionCard.hidden = true;
+    l.engagementCard.hidden = true;
+    return;
+  }
+
+  // Profile
+  l.profileCard.hidden = false;
+  l.name.textContent = snap.profile.name;
+  l.ageLocale.textContent = `age ${snap.profile.age} · ${snap.profile.locale}`;
+  l.uuid.textContent = snap.profile.id;
+  l.uuid.dataset.uuid = snap.profile.id;
+
+  // Vocabulary
+  const due = snap.vocab_due ?? [];
+  if (snap.concept_count > 0) {
+    l.vocabCard.hidden = false;
+    l.vocabCount.textContent = `${due.length} due`;
+    l.vocabList.replaceChildren();
+    if (due.length === 0) {
+      const div = document.createElement("div");
+      div.className = "vocab-empty";
+      div.textContent = "Nothing's due — all concepts are within their review intervals.";
+      l.vocabList.appendChild(div);
+    } else {
+      for (const concept of due) {
+        l.vocabList.appendChild(renderVocabItem(concept));
+      }
+    }
+  } else {
+    l.vocabCard.hidden = true;
+  }
+
+  // Depth distribution
+  if (snap.concept_count > 0) {
+    l.distributionCard.hidden = false;
+    l.conceptCount.textContent = `${snap.concept_count} total`;
+    renderDepthBar(l.depthBar, snap.depth_distribution);
+    renderDepthLegend(l.depthLegend, snap.depth_distribution);
+  } else {
+    l.distributionCard.hidden = true;
+  }
+
+  // Recent engagement strip
+  const recent = snap.recent_engagement ?? [];
+  if (recent.length > 0) {
+    l.engagementCard.hidden = false;
+    l.engagementStrip.replaceChildren();
+    for (const state of recent) {
+      const dot = document.createElement("span");
+      dot.className = "dot";
+      dot.dataset.state = state.toLowerCase();
+      dot.title = state;
+      l.engagementStrip.appendChild(dot);
+    }
+  } else {
+    l.engagementCard.hidden = true;
+  }
+}
+
+function renderVocabItem(c) {
+  const li = document.createElement("li");
+  const concept = document.createElement("span");
+  concept.className = "concept";
+  concept.textContent = c.concept_id;
+  concept.title = `${c.concept_id} (${c.depth})`;
+  const dots = document.createElement("span");
+  dots.className = "box-dots";
+  dots.setAttribute("aria-label", `box level ${c.box_level} of ${MAX_BOX_LEVEL}`);
+  dots.textContent = renderBoxDots(c.box_level);
+  const when = document.createElement("span");
+  when.className = "due-when";
+  when.textContent = formatDueWhen(c.days_until_due);
+  when.dataset.overdue = String(c.days_until_due < 0);
+  li.appendChild(concept);
+  li.appendChild(dots);
+  li.appendChild(when);
+  return li;
+}
+
+function renderBoxDots(level) {
+  const filled = Math.max(0, Math.min(MAX_BOX_LEVEL, level));
+  return "●".repeat(filled) + "○".repeat(MAX_BOX_LEVEL - filled);
+}
+
+function formatDueWhen(days) {
+  if (days < 0) {
+    const n = -days;
+    return n === 1 ? "1 day late" : `${n} days late`;
+  }
+  if (days === 0) return "due now";
+  if (days === 1) return "due tmrw";
+  return `due ${days}d`;
+}
+
+function renderDepthBar(barEl, counts) {
+  barEl.replaceChildren();
+  const total = counts.reduce((s, r) => s + r.count, 0);
+  for (const row of counts) {
+    if (row.count === 0) continue;
+    const seg = document.createElement("span");
+    seg.className = "seg";
+    seg.dataset.depth = row.depth.toLowerCase();
+    seg.style.flexGrow = String(row.count);
+    seg.title = `${row.depth}: ${row.count} of ${total}`;
+    barEl.appendChild(seg);
+  }
+}
+
+function renderDepthLegend(legendEl, counts) {
+  legendEl.replaceChildren();
+  for (const row of counts) {
+    const li = document.createElement("li");
+    const swatch = document.createElement("span");
+    swatch.className = "swatch";
+    swatch.style.background = `var(--depth-${row.depth.toLowerCase()})`;
+    const label = document.createElement("span");
+    label.textContent = `${row.depth} · ${row.count}`;
+    li.appendChild(swatch);
+    li.appendChild(label);
+    legendEl.appendChild(li);
+  }
+}
+
+function setupUuidCopy() {
+  dom.learner.uuidCopy.addEventListener("click", async () => {
+    const uuid = dom.learner.uuid.dataset.uuid || dom.learner.uuid.textContent || "";
+    if (!uuid || uuid === "—") return;
+    try {
+      await navigator.clipboard.writeText(uuid);
+      dom.learner.uuidCopy.dataset.state = "copied";
+      dom.learner.uuidCopy.textContent = "Copied";
+      setTimeout(() => {
+        dom.learner.uuidCopy.dataset.state = "";
+        dom.learner.uuidCopy.textContent = "Copy";
+      }, 1400);
+    } catch (err) {
+      // Tauri's WebView clipboard is generally available; falling
+      // through is just a no-op for the rare case the API isn't.
+      console.warn("clipboard.writeText failed:", err);
+    }
+  });
 }
 
 function renderComprehensionItem(a) {
