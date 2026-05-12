@@ -11,6 +11,17 @@ set -euo pipefail
 #
 # Output: src/target/aarch64-apple-darwin/release/bundle/dmg/Primer_*.dmg
 
+# Auto-source local notarization credentials if present. The env file
+# itself is gitignored; see scripts/apple-notarize-env.sh.example for
+# the format. CI workflows can skip this by either providing the env
+# vars externally or by leaving the file absent — the missing-var
+# check below still fires on accidental misconfiguration.
+script_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+if [ -f "$script_dir/apple-notarize-env.sh" ]; then
+    # shellcheck source=/dev/null
+    source "$script_dir/apple-notarize-env.sh"
+fi
+
 if [ ! -x "$HOME/.cargo/bin/cargo" ]; then
     echo "error: ~/.cargo/bin/cargo not found; install via rustup" >&2
     exit 1

@@ -1,0 +1,24 @@
+#!/usr/bin/env bash
+# Apple notarization credentials for `scripts/build-dmg.sh`.
+#
+# To activate on this machine:
+#   1. Copy this file to scripts/apple-notarize-env.sh
+#   2. Fill in the three values below from your App Store Connect API key
+#      (appstoreconnect.apple.com -> Users and Access -> Keys).
+#   3. Make sure the .p8 file pointed to by APPLE_API_KEY_PATH is readable
+#      and stored somewhere outside the repo (~/.appstoreconnect/ is the
+#      conventional spot).
+#
+# The non-".example" copy is gitignored so your real values never land
+# in version control. `scripts/build-dmg.sh` sources it automatically
+# if it exists, so you don't need to remember to `source` it manually.
+
+# Issuer ID — UUID-shaped, from App Store Connect -> Keys page header.
+export APPLE_API_ISSUER="00000000-0000-0000-0000-000000000000"
+
+# Key ID — 10-character string, one per key.
+export APPLE_API_KEY="XXXXXXXXXX"
+
+# Absolute path to the .p8 file you downloaded when the key was created.
+# Apple lets you download it once — store it somewhere stable.
+export APPLE_API_KEY_PATH="$HOME/.appstoreconnect/AuthKey_XXXXXXXXXX.p8"

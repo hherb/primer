@@ -333,12 +333,13 @@ Produces a signed and notarized `.dmg` for the desktop GUI, ready to hand to eva
   ~/.cargo/bin/cargo install tauri-cli --version "^2.0"
   ```
 - A `Developer ID Application` certificate from the Apple Developer Program in your login keychain. Verify with `security find-identity -p codesigning -v` — you should see a line matching `Developer ID Application: <Your Name> (TEAMID)`. If missing, create at developer.apple.com → Certificates → + → Developer ID Application, then double-click the downloaded `.cer` to install.
-- An App Store Connect API key with the "Developer" role (re-use the one you already have for App Store submission if applicable). At appstoreconnect.apple.com → Users and Access → Keys → +; download the `.p8` file (you only get one chance) and note the Key ID and Issuer ID. Export in your shell profile:
+- An App Store Connect API key with the "Developer" role (re-use the one you already have for App Store submission if applicable). At appstoreconnect.apple.com → Users and Access → Keys → +; download the `.p8` file (you only get one chance) and note the Key ID and Issuer ID. Either export the three variables in your shell profile:
   ```bash
   export APPLE_API_ISSUER="<Issuer ID>"
   export APPLE_API_KEY="<Key ID>"
   export APPLE_API_KEY_PATH="$HOME/.appstoreconnect/AuthKey_XXXXXX.p8"
   ```
+  or — easier — copy `scripts/apple-notarize-env.sh.example` to `scripts/apple-notarize-env.sh`, fill in your three values, and `scripts/build-dmg.sh` auto-sources it on every run. The real file is gitignored so your credentials never land in version control.
 
 **Build:**
 ```bash

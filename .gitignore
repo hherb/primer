@@ -18,6 +18,11 @@ target
 .env.local
 .env.*.local
 
+# Apple notarization credentials for scripts/build-dmg.sh. The .example
+# template is committed; the real file (with Issuer ID, Key ID, .p8 path)
+# stays local — never commit it.
+scripts/apple-notarize-env.sh
+
 # Claude Code local settings (per-checkout, not project state)
 .claude/
 
