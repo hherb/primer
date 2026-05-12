@@ -27,8 +27,8 @@ use primer_core::vocab::due_concepts;
 use crate::state::{ActiveSession, AppState, SessionSnapshot};
 use crate::types::{
     ChunkEvent, ComprehensionSummary, ConceptBreakdown, DepthCount, DueConcept, EngagementSummary,
-    LearnerProfileView, LearnerSnapshot, LearnerSummary, SessionInfo, SessionTurnSummary,
-    TurnComplete, TurnSignals,
+    LearnerProfileView, LearnerSnapshot, LearnerSummary, SessionFullTurn, SessionInfo,
+    SessionListingDto, SessionTurnSummary, TurnComplete, TurnSignals,
 };
 use crate::wiring;
 
@@ -64,6 +64,114 @@ pub async fn start_session(state: tauri::State<'_, AppState>) -> Result<SessionI
 #[tauri::command]
 pub async fn close_session(state: tauri::State<'_, AppState>) -> Result<(), String> {
     close_session_inner(&state).await
+}
+
+/// Resume a previously-saved session by UUID, replacing any active one.
+///
+/// Drops any current session (drains its background tasks first), then
+/// builds a fresh `ActiveSession` from the persisted GuiConfig, loads
+/// the named session from disk, and applies it via
+/// `DialogueManager::resume_session` — which refreshes the rolling
+/// summary if it's stale and rehydrates the classifier trajectory.
+///
+/// Errors:
+/// - `session_id` not a valid UUID → inline error.
+/// - No session with that id on disk → "session not found" error.
+/// - Construction failure (locale, embedder, etc.) → wiring-level error.
+#[tauri::command]
+pub async fn resume_session(
+    state: tauri::State<'_, AppState>,
+    session_id: String,
+) -> Result<SessionInfo, String> {
+    let uuid = Uuid::parse_str(&session_id)
+        .map_err(|e| format!("invalid session id {session_id:?}: {e}"))?;
+
+    close_session_inner(&state).await?;
+
+    let cfg = state.config.lock().await.clone();
+    let active = wiring::build_active_session(&state.home, &cfg).await?;
+
+    let loaded = active
+        .session_store
+        .load_session(uuid)
+        .await
+        .map_err(|e| format!("load_session failed: {e}"))?
+        .ok_or_else(|| format!("no session found with id {uuid}"))?;
+
+    // Replace DM's freshly-minted session with the loaded one. After
+    // this returns, dm.session.id == uuid and recent_assessments are
+    // hydrated for the just-resumed session.
+    active
+        .dialogue_manager
+        .lock()
+        .await
+        .resume_session(loaded)
+        .await
+        .map_err(|e| format!("resume_session failed: {e}"))?;
+
+    // Snapshot was built with session_id = None at construction.
+    // Refresh it now so current_session_info reports the resumed id.
+    refresh_snapshot(&active.dialogue_manager, &active.snapshot).await;
+
+    let info = info_from(&active).await;
+    *state.session.lock().await = Some(active);
+    Ok(info)
+}
+
+/// List every persisted session for the picker view.
+///
+/// Opens a transient `SqliteSessionStore` against the configured
+/// session-DB path (or the per-learner default) and runs
+/// `list_sessions`. Returns an empty Vec when:
+/// - `persistence.no_persist == true` (no on-disk store exists)
+/// - the resolved DB file doesn't exist yet (fresh install, never
+///   started a session)
+///
+/// Doesn't reuse a running session's store: list_sessions is invoked
+/// from the launch picker, before any session is active. Opening a
+/// fresh connection per call is fine — SQLite read-only opens are
+/// microseconds, and the picker is a once-per-launch surface.
+#[tauri::command]
+pub async fn list_sessions(
+    state: tauri::State<'_, AppState>,
+) -> Result<Vec<SessionListingDto>, String> {
+    use primer_core::i18n::Locale;
+    use primer_core::storage::SessionStore;
+
+    let cfg = state.config.lock().await.clone();
+    if cfg.persistence.no_persist {
+        return Ok(Vec::new());
+    }
+    let session_path = primer_engine::resolve_session_db_path(
+        cfg.persistence.session_db.clone(),
+        &state.home,
+        &cfg.learner.name,
+        cfg.persistence.no_persist,
+    );
+    // Fresh install / never-saved-yet: nothing to list. Don't create
+    // the file on a read.
+    if !session_path.exists() {
+        return Ok(Vec::new());
+    }
+    let locale = Locale::from_pack_id(&cfg.learner.locale).unwrap_or_default();
+    let store = primer_storage::SqliteSessionStore::open_for_locale(&session_path, locale)
+        .map_err(|e| format!("opening session-db {}: {e}", session_path.display()))?;
+    let listings = store
+        .list_sessions()
+        .await
+        .map_err(|e| format!("list_sessions failed: {e}"))?;
+    Ok(listings
+        .into_iter()
+        .map(|l| SessionListingDto {
+            session_id: l.id,
+            learner_id: l.learner_id,
+            started_at: l.started_at.to_rfc3339(),
+            ended_at: l.ended_at.map(|t| t.to_rfc3339()),
+            last_activity: l.last_activity.to_rfc3339(),
+            turn_count: l.turn_count,
+            summary: l.summary,
+        })
+        .collect())
 }
 
 /// Return a summary of the active session, or `None` if no session is
@@ -158,6 +266,40 @@ pub async fn get_learner_state(
 
     let dm = dm_arc.lock().await;
     Ok(Some(read_learner(&dm)))
+}
+
+/// Return every turn in the active session with FULL text — for the
+/// chat-replay path after `resume_session` populates DM with a loaded
+/// `Session`. Distinct from `list_session_turns` (truncated, for the
+/// sidebar) so the sidebar's per-turn-complete refresh doesn't ship
+/// every full-text turn across IPC on every update.
+///
+/// Returns `Ok(None)` when no session is active.
+#[tauri::command]
+pub async fn get_full_session_turns(
+    state: tauri::State<'_, AppState>,
+) -> Result<Option<Vec<SessionFullTurn>>, String> {
+    let session_guard = state.session.lock().await;
+    let active = match session_guard.as_ref() {
+        Some(a) => a,
+        None => return Ok(None),
+    };
+    let dm_arc = Arc::clone(&active.dialogue_manager);
+    drop(session_guard);
+
+    let dm = dm_arc.lock().await;
+    let turns = dm
+        .session
+        .turns
+        .iter()
+        .enumerate()
+        .map(|(i, t)| SessionFullTurn {
+            index: i,
+            speaker: speaker_name(t.speaker).to_string(),
+            text: t.text.clone(),
+        })
+        .collect();
+    Ok(Some(turns))
 }
 
 /// Return the turn-by-turn list that the sidebar's "Session" section
@@ -565,6 +707,92 @@ mod tests {
             "child #2 lands after first exchange"
         );
         assert_eq!(second.primer_turn_index, 3, "primer #2 lands at index 3");
+    }
+
+    #[tokio::test]
+    async fn resume_path_swaps_dm_session_to_loaded_one() {
+        // Models the resume_session command: build active, run a turn
+        // to land a session row, drop, build a second active (which
+        // mints a fresh session), then load + resume to swap DM's
+        // session in place. End state: dm.session.id matches the
+        // originally-persisted id.
+        let home = TempDir::new().unwrap();
+        let cfg = stub_config_with_persistence(home.path());
+
+        // First active: run one turn so a session row exists on disk.
+        let first_active = build_active_session(home.path(), &cfg).await.unwrap();
+        let first_dm = Arc::clone(&first_active.dialogue_manager);
+        let payload = run_turn(&first_dm, "hello", |_, _| {}).await.unwrap();
+        let original_id = payload.session_id;
+        // Drain background tasks before drop so the row is committed.
+        first_dm.lock().await.close_session().await;
+        drop(first_active);
+
+        // Second active: brand-new DM, brand-new minted session id.
+        let second_active = build_active_session(home.path(), &cfg).await.unwrap();
+        let fresh_id_before_resume = second_active.dialogue_manager.lock().await.session.id;
+        assert_ne!(
+            fresh_id_before_resume, original_id,
+            "fresh build mints a fresh session id"
+        );
+
+        // Resume: load the original session via the stored Arc, then
+        // swap it in via DM::resume_session. After this the DM is
+        // logically continuing the persisted conversation.
+        let loaded = second_active
+            .session_store
+            .load_session(original_id)
+            .await
+            .unwrap()
+            .expect("loaded session must exist on disk");
+        second_active
+            .dialogue_manager
+            .lock()
+            .await
+            .resume_session(loaded)
+            .await
+            .unwrap();
+
+        let after = second_active.dialogue_manager.lock().await.session.id;
+        assert_eq!(
+            after, original_id,
+            "after resume_session, dm.session.id matches the loaded one"
+        );
+
+        // And the loaded session carries the persisted turn count.
+        assert_eq!(
+            second_active.dialogue_manager.lock().await.session.turns.len(),
+            2,
+            "resumed session carries both turns of the original exchange"
+        );
+    }
+
+    #[tokio::test]
+    async fn list_sessions_via_store_after_one_turn() {
+        // Builds a session through wiring, runs a turn (the only way to
+        // land a sessions row through DM), then uses the same store Arc
+        // ActiveSession exposes to read the listing back. Validates the
+        // wiring contract — list_sessions sees what send_message wrote
+        // — without needing a Tauri state injection harness.
+
+        let home = TempDir::new().unwrap();
+        let cfg = stub_config_with_persistence(home.path());
+        let active = build_active_session(home.path(), &cfg).await.unwrap();
+        let dm_arc = Arc::clone(&active.dialogue_manager);
+        let store = Arc::clone(&active.session_store);
+
+        let payload = run_turn(&dm_arc, "what is curiosity?", |_, _| {})
+            .await
+            .unwrap();
+        dm_arc.lock().await.close_session().await;
+
+        let listings = store.list_sessions().await.unwrap();
+        assert_eq!(listings.len(), 1, "exactly one persisted session");
+        assert_eq!(listings[0].id, payload.session_id);
+        assert_eq!(
+            listings[0].turn_count, 2,
+            "child + primer turns both counted"
+        );
     }
 
     #[tokio::test]

@@ -10,7 +10,7 @@
 use async_trait::async_trait;
 use primer_core::classifier::EngagementAssessment;
 use primer_core::comprehension::ComprehensionAssessment;
-use primer_core::conversation::{Session, SessionId, Turn};
+use primer_core::conversation::{Session, SessionId, SessionListing, Turn};
 use primer_core::embedder::Embedder;
 use primer_core::error::Result;
 use primer_core::knowledge::HybridParams;
@@ -63,6 +63,10 @@ impl SessionStore for SqliteSessionStore {
 
     async fn most_recent_session_learner_id(&self) -> Result<Option<Uuid>> {
         self.most_recent_session_learner_id_inner().await
+    }
+
+    async fn list_sessions(&self) -> Result<Vec<SessionListing>> {
+        self.list_sessions_inner().await
     }
 
     async fn update_turn_concepts(

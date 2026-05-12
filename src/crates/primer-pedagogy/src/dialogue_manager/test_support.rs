@@ -227,6 +227,12 @@ impl primer_core::storage::SessionStore for CountingStore {
         Ok(None)
     }
 
+    async fn list_sessions(
+        &self,
+    ) -> Result<Vec<primer_core::conversation::SessionListing>> {
+        Ok(vec![])
+    }
+
     async fn update_turn_concepts(
         &self,
         _session_id: primer_core::conversation::SessionId,
@@ -457,6 +463,11 @@ impl primer_core::storage::SessionStore for ConceptCapturingStore {
     }
     async fn most_recent_session_learner_id(&self) -> Result<Option<uuid::Uuid>> {
         self.inner.most_recent_session_learner_id().await
+    }
+    async fn list_sessions(
+        &self,
+    ) -> Result<Vec<primer_core::conversation::SessionListing>> {
+        self.inner.list_sessions().await
     }
     async fn update_turn_concepts(
         &self,

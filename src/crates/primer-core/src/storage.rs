@@ -8,7 +8,7 @@ use uuid::Uuid;
 
 use crate::classifier::EngagementAssessment;
 use crate::comprehension::ComprehensionAssessment;
-use crate::conversation::{Session, SessionId, Turn};
+use crate::conversation::{Session, SessionId, SessionListing, Turn};
 use crate::embedder::Embedder;
 use crate::error::Result;
 use crate::knowledge::HybridParams;
@@ -103,6 +103,20 @@ pub trait SessionStore: Send + Sync {
     /// Returns `Ok(None)` for a DB with no sessions. Reserves `Err` for
     /// genuine I/O / decoding failures.
     async fn most_recent_session_learner_id(&self) -> Result<Option<Uuid>>;
+
+    /// List every session in this DB as a lightweight aggregate:
+    /// id, learner_id, started_at, ended_at, last_activity, turn_count,
+    /// summary. Ordered most-recent-activity first (i.e. by
+    /// `COALESCE(MAX(turns.timestamp), started_at) DESC`) so a picker
+    /// view can render rows in the user-natural order with no further
+    /// sorting.
+    ///
+    /// Returns an empty `Vec` for a fresh DB; reserves `Err` for
+    /// genuine I/O failure. Implementations should compute the
+    /// aggregates in SQL — a child of 8 will not have thousands of
+    /// sessions in their lifetime, but loading each `Session` in full
+    /// just to count turns and skim the summary is still wasteful.
+    async fn list_sessions(&self) -> Result<Vec<SessionListing>>;
 
     /// Add concepts to a previously-persisted turn. Resolves
     /// `(session_id, turn_index)` → `turn_id` internally; lazily creates

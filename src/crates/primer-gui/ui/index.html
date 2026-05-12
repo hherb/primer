@@ -555,6 +555,47 @@
       hidden
     ></div>
 
+    <div class="picker-screen" id="picker-screen" hidden>
+      <div class="picker-shell">
+        <header class="picker-header">
+          <div class="brand brand-large">
+            <span class="brand-mark">●</span>
+            <span class="brand-name">Primer</span>
+          </div>
+          <h1 class="picker-title" id="picker-title">Welcome to Primer</h1>
+          <p class="picker-subtitle muted" id="picker-subtitle">
+            Pick up where you left off, or start fresh.
+          </p>
+        </header>
+
+        <div class="picker-body">
+          <div class="picker-loading" id="picker-loading">
+            <span class="muted">Loading sessions…</span>
+          </div>
+          <div class="error-banner" id="picker-error" hidden></div>
+          <div class="picker-empty" id="picker-empty" hidden>
+            <p>No saved sessions yet. Start a new one to begin.</p>
+          </div>
+          <ol
+            class="picker-list"
+            id="picker-list"
+            aria-label="Past sessions"
+            hidden
+          ></ol>
+        </div>
+
+        <footer class="picker-footer">
+          <button type="button" class="btn-tertiary" id="picker-settings">
+            Settings
+          </button>
+          <button type="button" class="btn-primary" id="picker-start-new">
+            Start new session
+          </button>
+        </footer>
+      </div>
+    </div>
+
+    <script src="picker.js"></script>
     <script src="settings.js"></script>
     <script src="app.js"></script>
   </body>

@@ -31,6 +31,7 @@ use std::path::PathBuf;
 use std::sync::Arc;
 
 use primer_core::i18n::Locale;
+use primer_core::storage::SessionStore;
 use primer_pedagogy::DialogueManager;
 use tokio::sync::Mutex;
 use uuid::Uuid;
@@ -104,6 +105,13 @@ pub struct ActiveSession {
     /// successful turn so readers never have to lock the DM (and queue
     /// behind an in-flight stream that can take tens of seconds).
     pub snapshot: Arc<Mutex<SessionSnapshot>>,
+
+    /// Handle to the underlying session store. Cloned out of wiring so
+    /// the resume_session command can call `load_session(uuid)` after
+    /// the fresh `ActiveSession` is built — DM itself doesn't expose
+    /// `load_session`, and we don't want to re-open the SQLite file
+    /// just to read one row.
+    pub session_store: Arc<dyn SessionStore>,
 }
 
 /// Read-mostly mirror of the DM-owned fields the frontend renders via

@@ -98,28 +98,69 @@ async function main() {
   setupSidebarToggle();
   setupUuidCopy();
   setupSettingsButton();
-  await openOrStartSession();
-  // Render whatever's already on the DM (resumed sessions land here
-  // with populated last_* accessors); first-launch shows the empty state.
-  refreshSidebar();
+  // No auto-start anymore — show the picker and let the user pick
+  // (resume a past session) or click Start new (settings modal →
+  // save & start a fresh session).
+  await window.PrimerPicker.show({
+    onResumed: (info) => handleSessionReady({ info, shouldReplay: true }),
+    onStarted: () => handleSessionReady({ info: null, shouldReplay: false }),
+  });
 }
 
 function setupSettingsButton() {
   dom.settingsOpen.addEventListener("click", () => {
     // settings.js is loaded by index.html before app.js, so the
     // global is guaranteed to exist by the time the button is
-    // clickable.
-    window.PrimerSettings.open({ onSessionRestarted: handleSessionRestarted });
+    // clickable. Save & start new session re-enters the chat surface
+    // via the same handler the picker uses, so the post-start UI
+    // state is consistent regardless of how the new session got
+    // started.
+    window.PrimerSettings.open({
+      onSessionRestarted: () =>
+        handleSessionReady({ info: null, shouldReplay: false }),
+    });
   });
 }
 
-/// Wipe chat surface + index counter and re-render from the freshly
-/// started session. Called when the settings modal saves with
-/// "Save & start new session" — the in-memory ActiveSession was
-/// replaced server-side, so anything the user typed before now
-/// belongs to a closed session and shouldn't sit visually-attached
-/// to bubbles tagged for a new turn timeline.
-async function handleSessionRestarted() {
+/// Bring up the chat surface for the session that just became active.
+///
+/// Called from three places — picker resume, picker start-new (via
+/// settings modal), and the header settings modal's "Save & start
+/// new session" — so all three paths land in the same UI state.
+///
+/// `info` is supplied directly when the caller already has it (picker
+/// resume); a `null` triggers a `current_session_info` fetch. When
+/// `shouldReplay` is true, the loaded session's turns are fetched in
+/// full and replayed as bubbles so the user sees the conversation
+/// history — that's the picker-resume path. Fresh sessions skip
+/// replay (there's nothing to render) and leave the empty-state in
+/// place until the first message lands.
+async function handleSessionReady({ info, shouldReplay }) {
+  resetChatSurface();
+
+  const sessionInfo =
+    info ?? (await invoke("current_session_info").catch(() => null));
+  if (sessionInfo) {
+    renderSessionInfo(sessionInfo);
+  }
+
+  if (shouldReplay) {
+    try {
+      const turns = await invoke("get_full_session_turns");
+      if (turns && turns.length > 0) replayTurns(turns);
+    } catch (err) {
+      console.warn("get_full_session_turns failed:", err);
+    }
+  }
+
+  enableComposer();
+  refreshSidebar();
+}
+
+/// Wipe the chat surface back to its empty-state shell — used before
+/// rendering either a freshly-started session or replaying a resumed
+/// one. Mirror of what fresh-launch shows.
+function resetChatSurface() {
   state.streamingPrimerEl = null;
   state.nextTurnIndex = 0;
   state.sessionId = null;
@@ -128,8 +169,6 @@ async function handleSessionRestarted() {
     state.spotlightTimer = null;
   }
   hideError();
-  // Strip every bubble row but keep the empty-state node — same
-  // surface a fresh launch shows.
   for (const row of Array.from(dom.chatScroll.querySelectorAll(".bubble-row"))) {
     row.remove();
   }
@@ -139,21 +178,30 @@ async function handleSessionRestarted() {
       dom.chatScroll.appendChild(dom.emptyState);
     }
   }
-  await openOrStartSession();
-  refreshSidebar();
 }
 
-async function openOrStartSession() {
-  try {
-    let info = await invoke("current_session_info");
-    if (info === null) {
-      info = await invoke("start_session");
-    }
-    renderSessionInfo(info);
-    enableComposer();
-  } catch (err) {
-    showError(formatErr(err));
+/// Render every turn of a resumed session as a chat bubble. `turns`
+/// is the SessionFullTurn[] payload from `get_full_session_turns` —
+/// each carries the FULL text (not the truncated sidebar preview)
+/// because chat bubbles need to display the original content. The
+/// next user-typed message lands at `state.nextTurnIndex = turns.length`
+/// so the click-to-scroll indices stay aligned with the backend's
+/// `session.turns` indices.
+function replayTurns(turns) {
+  hideEmptyState();
+  for (const t of turns) {
+    const row = document.createElement("div");
+    row.className =
+      t.speaker === "child" ? "bubble-row is-child" : "bubble-row is-primer";
+    row.dataset.turnIndex = String(t.index);
+    const bubble = document.createElement("div");
+    bubble.className = "bubble";
+    bubble.textContent = t.text;
+    row.appendChild(bubble);
+    dom.chatScroll.appendChild(row);
   }
+  state.nextTurnIndex = turns.length;
+  scrollToBottom();
 }
 
 function renderSessionInfo(info) {
