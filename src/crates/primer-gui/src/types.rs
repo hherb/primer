@@ -225,6 +225,53 @@ pub struct DepthCount {
     pub count: usize,
 }
 
+/// One turn rendered as a chat bubble on session resume.
+///
+/// Distinct from [`SessionTurnSummary`] (the sidebar's truncated list):
+/// this carries the FULL text because chat bubbles need it. Used only
+/// by [`get_full_session_turns`](crate::commands::session::get_full_session_turns)
+/// — a one-shot replay surface invoked when the picker resumes a
+/// session. The sidebar's per-turn-complete refresh keeps using the
+/// truncated `list_session_turns` to avoid pushing every full-text
+/// turn across IPC every time the bar updates.
+#[derive(Debug, Clone, Serialize)]
+pub struct SessionFullTurn {
+    /// Zero-based index in the session timeline.
+    pub index: usize,
+    /// Stable `"child"` or `"primer"` from `speaker_name` — used as a
+    /// CSS selector hook in the bubble row.
+    pub speaker: String,
+    /// Full turn text, no truncation.
+    pub text: String,
+}
+
+/// One row in the launch-screen session picker. Aggregates from
+/// `SessionStore::list_sessions`; the frontend renders rows in the
+/// order returned (most-recent-activity first) without re-sorting.
+///
+/// Timestamps cross IPC as ISO-8601 strings so the frontend can
+/// render relative times ("2 hours ago", "yesterday") without
+/// re-implementing chrono parsing.
+#[derive(Debug, Clone, Serialize)]
+pub struct SessionListingDto {
+    /// Stable UUID used for `resume_session` lookup.
+    pub session_id: Uuid,
+    pub learner_id: Uuid,
+    /// `Session.started_at`.
+    pub started_at: String,
+    /// `Session.ended_at`. `None` for sessions that ran to crash /
+    /// shutdown without an explicit close (the common case).
+    pub ended_at: Option<String>,
+    /// `MAX(turns.timestamp)` or `started_at` when the session has no
+    /// turns yet. Drives the row's "last seen" label.
+    pub last_activity: String,
+    pub turn_count: usize,
+    /// Rolling LLM summary; usually empty for sessions with fewer than
+    /// one context-window worth of turns. Frontend should hide the
+    /// summary line when empty rather than showing a blank row.
+    pub summary: String,
+}
+
 /// One row in the sidebar's "Session" turn-by-turn list.
 ///
 /// Returned by `list_session_turns`; the frontend renders the list

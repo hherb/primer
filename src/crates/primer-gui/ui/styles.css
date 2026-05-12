@@ -1269,6 +1269,164 @@ code {
   border-radius: 0.25rem;
 }
 
+/* ─── Session picker ────────────────────────────────────────────── */
+
+.picker-screen {
+  position: fixed;
+  inset: 0;
+  z-index: 90;
+  background: linear-gradient(
+    160deg,
+    color-mix(in oklab, var(--accent) 4%, var(--bg)),
+    var(--bg) 55%
+  );
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 3vh 2vw;
+  overflow-y: auto;
+}
+
+.picker-shell {
+  display: flex;
+  flex-direction: column;
+  width: min(560px, 100%);
+  max-height: 94vh;
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: 0.85rem;
+  box-shadow: 0 20px 50px rgba(0, 0, 0, 0.2);
+  overflow: hidden;
+}
+
+.picker-header {
+  display: flex;
+  flex-direction: column;
+  gap: 0.4rem;
+  padding: 1.4rem 1.5rem 1rem;
+  border-bottom: 1px solid var(--border);
+  background: var(--bg);
+}
+
+.brand-large .brand-mark {
+  font-size: 1rem;
+}
+
+.brand-large .brand-name {
+  font-size: 1rem;
+  letter-spacing: -0.005em;
+}
+
+.picker-title {
+  margin: 0.2rem 0 0;
+  font-size: 1.5rem;
+  font-weight: 600;
+  letter-spacing: -0.015em;
+  color: var(--fg);
+}
+
+.picker-subtitle {
+  margin: 0;
+  font-size: 0.92rem;
+  line-height: 1.5;
+}
+
+.picker-body {
+  flex: 1 1 auto;
+  overflow-y: auto;
+  padding: 1rem 1.3rem;
+  min-height: 7rem;
+}
+
+.picker-loading {
+  padding: 1rem 0;
+  text-align: center;
+}
+
+.picker-empty {
+  padding: 1.4rem 0.4rem;
+  text-align: center;
+  color: var(--fg-muted);
+}
+
+.picker-empty p {
+  margin: 0;
+}
+
+.picker-list {
+  margin: 0;
+  padding: 0;
+  list-style: none;
+  display: flex;
+  flex-direction: column;
+  gap: 0.5rem;
+}
+
+.picker-row {
+  display: flex;
+  flex-direction: column;
+  gap: 0.25rem;
+  width: 100%;
+  padding: 0.7rem 0.85rem;
+  border: 1px solid var(--border);
+  border-radius: 0.55rem;
+  background: var(--bg);
+  text-align: left;
+  font: inherit;
+  color: var(--fg);
+  cursor: pointer;
+  transition:
+    background 120ms ease,
+    border-color 120ms ease;
+}
+
+.picker-row:hover {
+  background: color-mix(in oklab, var(--accent) 6%, var(--bg));
+  border-color: color-mix(in oklab, var(--accent) 30%, var(--border));
+}
+
+.picker-row:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 1px;
+}
+
+.picker-row-when {
+  font-size: 0.95rem;
+  font-weight: 600;
+  letter-spacing: -0.005em;
+}
+
+.picker-row-summary {
+  font-size: 0.86rem;
+  color: var(--fg);
+  line-height: 1.4;
+  display: -webkit-box;
+  -webkit-line-clamp: 2;
+  line-clamp: 2;
+  -webkit-box-orient: vertical;
+  overflow: hidden;
+}
+
+.picker-row-summary.is-empty {
+  font-style: italic;
+  color: var(--fg-muted);
+}
+
+.picker-row-meta {
+  font-size: 0.78rem;
+  font-variant-numeric: tabular-nums;
+}
+
+.picker-footer {
+  display: flex;
+  gap: 0.55rem;
+  justify-content: space-between;
+  align-items: center;
+  padding: 0.85rem 1.3rem 1.1rem;
+  border-top: 1px solid var(--border);
+  background: var(--bg);
+}
+
 /* ─── Toast ─────────────────────────────────────────────────────── */
 
 .toast {

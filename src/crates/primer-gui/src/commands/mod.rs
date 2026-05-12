@@ -21,10 +21,13 @@ pub fn register(builder: tauri::Builder<Wry>) -> tauri::Builder<Wry> {
         settings::update_settings,
         session::start_session,
         session::close_session,
+        session::resume_session,
+        session::list_sessions,
         session::current_session_info,
         session::send_message,
         session::get_turn_signals,
         session::get_learner_state,
         session::list_session_turns,
+        session::get_full_session_turns,
     ])
 }

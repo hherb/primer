@@ -249,4 +249,94 @@ impl SqliteSessionStore {
             }
         }
     }
+
+    /// Aggregate every session row into a `SessionListing` slice for
+    /// picker views. The `COALESCE(MAX(t.timestamp), s.started_at)`
+    /// expression doubles as the ORDER-BY key so a session with no
+    /// turns yet still places by its `started_at` rather than at the
+    /// bottom of the list.
+    pub(super) async fn list_sessions_inner(
+        &self,
+    ) -> Result<Vec<primer_core::conversation::SessionListing>> {
+        use primer_core::conversation::SessionListing;
+
+        let conn = self.conn.lock().unwrap();
+        // LEFT JOIN keeps turn-less sessions in the result set; the
+        // GROUP BY collapses each session's turn rows so COUNT/MAX
+        // aggregate over them. COALESCE(MAX(timestamp), started_at)
+        // serves double duty as both the `last_activity` value and the
+        // ORDER-BY key so a freshly-opened session that never received
+        // a turn still places by its started_at rather than sorting
+        // to the bottom on NULL.
+        let mut stmt = conn
+            .prepare(
+                "SELECT s.id, s.learner_id, s.started_at, s.ended_at, s.summary,
+                        COUNT(t.id) AS turn_count,
+                        MAX(t.timestamp) AS last_turn_at
+                 FROM sessions s
+                 LEFT JOIN turns t ON t.session_id = s.id
+                 GROUP BY s.id
+                 ORDER BY COALESCE(MAX(t.timestamp), s.started_at) DESC",
+            )
+            .map_err(|e| PrimerError::Storage(format!("prepare list_sessions: {e}")))?;
+
+        let rows = stmt
+            .query_map([], |r| {
+                let id_str: String = r.get(0)?;
+                let learner_str: String = r.get(1)?;
+                let started_str: String = r.get(2)?;
+                let ended_opt: Option<String> = r.get(3)?;
+                let summary: String = r.get(4)?;
+                let turn_count: i64 = r.get(5)?;
+                let last_turn_opt: Option<String> = r.get(6)?;
+                Ok((
+                    id_str,
+                    learner_str,
+                    started_str,
+                    ended_opt,
+                    summary,
+                    turn_count,
+                    last_turn_opt,
+                ))
+            })
+            .map_err(|e| PrimerError::Storage(format!("query list_sessions: {e}")))?;
+
+        let mut out = Vec::new();
+        for row in rows {
+            let (id_str, learner_str, started_str, ended_opt, summary, turn_count, last_opt) =
+                row.map_err(|e| PrimerError::Storage(format!("read list_sessions row: {e}")))?;
+            let id = Uuid::parse_str(&id_str)
+                .map_err(|e| PrimerError::Storage(format!("parse session id {id_str}: {e}")))?;
+            let learner_id = Uuid::parse_str(&learner_str).map_err(|e| {
+                PrimerError::Storage(format!("parse learner_id {learner_str}: {e}"))
+            })?;
+            let started_at = parse_rfc3339(&started_str, "sessions.started_at")?;
+            let ended_at = match ended_opt {
+                Some(s) => Some(parse_rfc3339(&s, "sessions.ended_at")?),
+                None => None,
+            };
+            let last_activity = match last_opt {
+                Some(s) => parse_rfc3339(&s, "turns.timestamp")?,
+                None => started_at,
+            };
+            // COUNT(*) cannot return a negative value in practice;
+            // try_from rejects the impossible-but-cheap-to-check
+            // i64::MIN..0 range loudly rather than silently wrapping.
+            let turn_count = usize::try_from(turn_count).map_err(|_| {
+                PrimerError::Storage(format!(
+                    "list_sessions: COUNT(t.id) returned out-of-range {turn_count}"
+                ))
+            })?;
+            out.push(SessionListing {
+                id,
+                learner_id,
+                started_at,
+                ended_at,
+                last_activity,
+                turn_count,
+                summary,
+            });
+        }
+        Ok(out)
+    }
 }

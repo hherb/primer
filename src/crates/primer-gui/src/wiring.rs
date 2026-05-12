@@ -281,6 +281,7 @@ pub async fn build_active_session(
         locale,
         backend_name: backend_config.kind.clone(),
         main_model,
+        session_store: Arc::clone(&session_store) as _,
     })
 }
 

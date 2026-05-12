@@ -154,6 +154,26 @@ impl Session {
     }
 }
 
+/// Lightweight session metadata for picker / index views.
+///
+/// Held outside `Session` because consumers (the GUI's session picker
+/// today; potentially a CLI `--list-sessions` flag tomorrow) want
+/// per-row aggregates — turn count, last activity — without paying the
+/// cost of materializing every `Turn`. `SessionStore::list_sessions`
+/// returns a `Vec<SessionListing>` ordered most-recent-activity first.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SessionListing {
+    pub id: SessionId,
+    pub learner_id: LearnerId,
+    pub started_at: DateTime<Utc>,
+    pub ended_at: Option<DateTime<Utc>>,
+    /// Max(turns.timestamp) or `started_at` if no turns exist yet.
+    pub last_activity: DateTime<Utc>,
+    pub turn_count: usize,
+    /// Rolling LLM summary; may be empty for short / fresh sessions.
+    pub summary: String,
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

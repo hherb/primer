@@ -27,8 +27,8 @@ use primer_core::vocab::due_concepts;
 use crate::state::{ActiveSession, AppState, SessionSnapshot};
 use crate::types::{
     ChunkEvent, ComprehensionSummary, ConceptBreakdown, DepthCount, DueConcept, EngagementSummary,
-    LearnerProfileView, LearnerSnapshot, LearnerSummary, SessionInfo, SessionTurnSummary,
-    TurnComplete, TurnSignals,
+    LearnerProfileView, LearnerSnapshot, LearnerSummary, SessionFullTurn, SessionInfo,
+    SessionListingDto, SessionTurnSummary, TurnComplete, TurnSignals,
 };
 use crate::wiring;
 
@@ -64,6 +64,132 @@ pub async fn start_session(state: tauri::State<'_, AppState>) -> Result<SessionI
 #[tauri::command]
 pub async fn close_session(state: tauri::State<'_, AppState>) -> Result<(), String> {
     close_session_inner(&state).await
+}
+
+/// Resume a previously-saved session by UUID, replacing any active one.
+///
+/// Drops any current session (drains its background tasks first), then
+/// builds a fresh `ActiveSession` from the persisted GuiConfig, loads
+/// the named session from disk, and applies it via
+/// `DialogueManager::resume_session` — which refreshes the rolling
+/// summary if it's stale and rehydrates the classifier trajectory.
+///
+/// Errors:
+/// - `session_id` not a valid UUID → inline error.
+/// - No session with that id on disk → "session not found" error.
+/// - Locale mismatch: the loaded learner's stored locale differs from
+///   the GUI's current `learner.locale` setting (mirrors the CLI's
+///   `--resume` guard — prevents silent `concept_language_tag`
+///   corruption when new concepts get tagged under the wrong locale).
+/// - Construction failure (embedder, model resolution, etc.) → wiring-level error.
+#[tauri::command]
+pub async fn resume_session(
+    state: tauri::State<'_, AppState>,
+    session_id: String,
+) -> Result<SessionInfo, String> {
+    use primer_core::i18n::Locale;
+    use primer_engine::verify_resume_locale_match;
+
+    let uuid = Uuid::parse_str(&session_id)
+        .map_err(|e| format!("invalid session id {session_id:?}: {e}"))?;
+
+    close_session_inner(&state).await?;
+
+    let cfg = state.config.lock().await.clone();
+    let active = wiring::build_active_session(&state.home, &cfg).await?;
+
+    let loaded = active
+        .session_store
+        .load_session(uuid)
+        .await
+        .map_err(|e| format!("load_session failed: {e}"))?
+        .ok_or_else(|| format!("no session found with id {uuid}"))?;
+
+    // Locale-mismatch guard. `build_active_session` already loaded the
+    // persisted learner row and seeded `dm.learner.profile.locale` from
+    // it; the GUI's currently-configured locale comes from cfg. If they
+    // differ we must abort BEFORE swapping the loaded session in — once
+    // resume_session lands, any new concepts extracted in the resumed
+    // session would be tagged with the wrong concept_language_tag and
+    // silently corrupt the longitudinal learner data.
+    let cfg_locale = Locale::from_pack_id(&cfg.learner.locale).unwrap_or_default();
+    let learner_locale = active.dialogue_manager.lock().await.learner.profile.locale;
+    verify_resume_locale_match(cfg_locale, learner_locale, uuid)?;
+
+    // Replace DM's freshly-minted session with the loaded one. After
+    // this returns, dm.session.id == uuid and recent_assessments are
+    // hydrated for the just-resumed session.
+    active
+        .dialogue_manager
+        .lock()
+        .await
+        .resume_session(loaded)
+        .await
+        .map_err(|e| format!("resume_session failed: {e}"))?;
+
+    // Snapshot was built with session_id = None at construction.
+    // Refresh it now so current_session_info reports the resumed id.
+    refresh_snapshot(&active.dialogue_manager, &active.snapshot).await;
+
+    let info = info_from(&active).await;
+    *state.session.lock().await = Some(active);
+    Ok(info)
+}
+
+/// List every persisted session for the picker view.
+///
+/// Opens a transient `SqliteSessionStore` against the configured
+/// session-DB path (or the per-learner default) and runs
+/// `list_sessions`. Returns an empty Vec when:
+/// - `persistence.no_persist == true` (no on-disk store exists)
+/// - the resolved DB file doesn't exist yet (fresh install, never
+///   started a session)
+///
+/// Doesn't reuse a running session's store: list_sessions is invoked
+/// from the launch picker, before any session is active. Opening a
+/// fresh connection per call is fine — SQLite read-only opens are
+/// microseconds, and the picker is a once-per-launch surface.
+#[tauri::command]
+pub async fn list_sessions(
+    state: tauri::State<'_, AppState>,
+) -> Result<Vec<SessionListingDto>, String> {
+    use primer_core::i18n::Locale;
+    use primer_core::storage::SessionStore;
+
+    let cfg = state.config.lock().await.clone();
+    if cfg.persistence.no_persist {
+        return Ok(Vec::new());
+    }
+    let session_path = primer_engine::resolve_session_db_path(
+        cfg.persistence.session_db.clone(),
+        &state.home,
+        &cfg.learner.name,
+        cfg.persistence.no_persist,
+    );
+    // Fresh install / never-saved-yet: nothing to list. Don't create
+    // the file on a read.
+    if !session_path.exists() {
+        return Ok(Vec::new());
+    }
+    let locale = Locale::from_pack_id(&cfg.learner.locale).unwrap_or_default();
+    let store = primer_storage::SqliteSessionStore::open_for_locale(&session_path, locale)
+        .map_err(|e| format!("opening session-db {}: {e}", session_path.display()))?;
+    let listings = store
+        .list_sessions()
+        .await
+        .map_err(|e| format!("list_sessions failed: {e}"))?;
+    Ok(listings
+        .into_iter()
+        .map(|l| SessionListingDto {
+            session_id: l.id,
+            learner_id: l.learner_id,
+            started_at: l.started_at.to_rfc3339(),
+            ended_at: l.ended_at.map(|t| t.to_rfc3339()),
+            last_activity: l.last_activity.to_rfc3339(),
+            turn_count: l.turn_count,
+            summary: l.summary,
+        })
+        .collect())
 }
 
 /// Return a summary of the active session, or `None` if no session is
@@ -158,6 +284,40 @@ pub async fn get_learner_state(
 
     let dm = dm_arc.lock().await;
     Ok(Some(read_learner(&dm)))
+}
+
+/// Return every turn in the active session with FULL text — for the
+/// chat-replay path after `resume_session` populates DM with a loaded
+/// `Session`. Distinct from `list_session_turns` (truncated, for the
+/// sidebar) so the sidebar's per-turn-complete refresh doesn't ship
+/// every full-text turn across IPC on every update.
+///
+/// Returns `Ok(None)` when no session is active.
+#[tauri::command]
+pub async fn get_full_session_turns(
+    state: tauri::State<'_, AppState>,
+) -> Result<Option<Vec<SessionFullTurn>>, String> {
+    let session_guard = state.session.lock().await;
+    let active = match session_guard.as_ref() {
+        Some(a) => a,
+        None => return Ok(None),
+    };
+    let dm_arc = Arc::clone(&active.dialogue_manager);
+    drop(session_guard);
+
+    let dm = dm_arc.lock().await;
+    let turns = dm
+        .session
+        .turns
+        .iter()
+        .enumerate()
+        .map(|(i, t)| SessionFullTurn {
+            index: i,
+            speaker: speaker_name(t.speaker).to_string(),
+            text: t.text.clone(),
+        })
+        .collect();
+    Ok(Some(turns))
 }
 
 /// Return the turn-by-turn list that the sidebar's "Session" section
@@ -565,6 +725,203 @@ mod tests {
             "child #2 lands after first exchange"
         );
         assert_eq!(second.primer_turn_index, 3, "primer #2 lands at index 3");
+    }
+
+    #[tokio::test]
+    async fn resume_path_swaps_dm_session_to_loaded_one() {
+        // Models the resume_session command: build active, run a turn
+        // to land a session row, drop, build a second active (which
+        // mints a fresh session), then load + resume to swap DM's
+        // session in place. End state: dm.session.id matches the
+        // originally-persisted id.
+        let home = TempDir::new().unwrap();
+        let cfg = stub_config_with_persistence(home.path());
+
+        // First active: run one turn so a session row exists on disk.
+        let first_active = build_active_session(home.path(), &cfg).await.unwrap();
+        let first_dm = Arc::clone(&first_active.dialogue_manager);
+        let payload = run_turn(&first_dm, "hello", |_, _| {}).await.unwrap();
+        let original_id = payload.session_id;
+        // Drain background tasks before drop so the row is committed.
+        first_dm.lock().await.close_session().await;
+        drop(first_active);
+
+        // Second active: brand-new DM, brand-new minted session id.
+        let second_active = build_active_session(home.path(), &cfg).await.unwrap();
+        let fresh_id_before_resume = second_active.dialogue_manager.lock().await.session.id;
+        assert_ne!(
+            fresh_id_before_resume, original_id,
+            "fresh build mints a fresh session id"
+        );
+
+        // Resume: load the original session via the stored Arc, then
+        // swap it in via DM::resume_session. After this the DM is
+        // logically continuing the persisted conversation.
+        let loaded = second_active
+            .session_store
+            .load_session(original_id)
+            .await
+            .unwrap()
+            .expect("loaded session must exist on disk");
+        second_active
+            .dialogue_manager
+            .lock()
+            .await
+            .resume_session(loaded)
+            .await
+            .unwrap();
+
+        let after = second_active.dialogue_manager.lock().await.session.id;
+        assert_eq!(
+            after, original_id,
+            "after resume_session, dm.session.id matches the loaded one"
+        );
+
+        // And the loaded session carries the persisted turn count.
+        assert_eq!(
+            second_active
+                .dialogue_manager
+                .lock()
+                .await
+                .session
+                .turns
+                .len(),
+            2,
+            "resumed session carries both turns of the original exchange"
+        );
+    }
+
+    #[tokio::test]
+    async fn list_sessions_via_store_after_one_turn() {
+        // Builds a session through wiring, runs a turn (the only way to
+        // land a sessions row through DM), then uses the same store Arc
+        // ActiveSession exposes to read the listing back. Validates the
+        // wiring contract — list_sessions sees what send_message wrote
+        // — without needing a Tauri state injection harness.
+
+        let home = TempDir::new().unwrap();
+        let cfg = stub_config_with_persistence(home.path());
+        let active = build_active_session(home.path(), &cfg).await.unwrap();
+        let dm_arc = Arc::clone(&active.dialogue_manager);
+        let store = Arc::clone(&active.session_store);
+
+        let payload = run_turn(&dm_arc, "what is curiosity?", |_, _| {})
+            .await
+            .unwrap();
+        dm_arc.lock().await.close_session().await;
+
+        let listings = store.list_sessions().await.unwrap();
+        assert_eq!(listings.len(), 1, "exactly one persisted session");
+        assert_eq!(listings[0].id, payload.session_id);
+        assert_eq!(
+            listings[0].turn_count, 2,
+            "child + primer turns both counted"
+        );
+    }
+
+    #[test]
+    fn resume_rejects_invalid_uuid_inline() {
+        // The first thing resume_session does is parse the session_id
+        // string into a Uuid; an invalid id must produce a helpful
+        // error string the picker can render rather than panicking.
+        let err = Uuid::parse_str("not-a-uuid")
+            .map_err(|e| format!("invalid session id {:?}: {e}", "not-a-uuid"))
+            .unwrap_err();
+        assert!(
+            err.contains("invalid session id"),
+            "user-facing prefix preserved: {err}"
+        );
+        assert!(
+            err.contains("\"not-a-uuid\""),
+            "echoes the bad input verbatim so the user can spot the typo: {err}"
+        );
+    }
+
+    #[tokio::test]
+    async fn resume_returns_not_found_for_unknown_uuid() {
+        // Mirrors the "no session found" branch in resume_session: a
+        // syntactically-valid UUID that no session row backs must
+        // produce an Ok(None) at the store layer, which the command
+        // turns into a user-facing error string.
+        let home = TempDir::new().unwrap();
+        let cfg = stub_config_with_persistence(home.path());
+        let active = build_active_session(home.path(), &cfg).await.unwrap();
+
+        let random_id = Uuid::new_v4();
+        let loaded = active.session_store.load_session(random_id).await.unwrap();
+        assert!(
+            loaded.is_none(),
+            "load_session on a never-persisted id yields None"
+        );
+
+        // Emulate the command's `.ok_or_else(...)` mapping so the test
+        // pins the actual user-facing error shape.
+        let err: String = loaded
+            .map(|_| String::new())
+            .ok_or_else(|| format!("no session found with id {random_id}"))
+            .unwrap_err();
+        assert!(err.starts_with("no session found with id "));
+        assert!(err.contains(&random_id.to_string()));
+    }
+
+    #[tokio::test]
+    async fn resume_rejects_locale_mismatch() {
+        // Mirrors the locale-mismatch guard in resume_session: persist a
+        // session+learner under locale=en, build a second ActiveSession
+        // with cfg.learner.locale=de, then assert the same check the
+        // Tauri command runs (`verify_resume_locale_match`) fires
+        // BEFORE swap-in. Catches silent concept_language_tag corruption
+        // — the bug class the CLI's --resume guard already prevents.
+        use primer_engine::verify_resume_locale_match;
+
+        let home = TempDir::new().unwrap();
+
+        // Step 1: build under English so the learner row + a session
+        // row both land with locale=en.
+        let cfg_en = stub_config_with_persistence(home.path());
+        let active_en = build_active_session(home.path(), &cfg_en).await.unwrap();
+        let dm_en = Arc::clone(&active_en.dialogue_manager);
+        let payload = run_turn(&dm_en, "hello", |_, _| {}).await.unwrap();
+        let persisted_id = payload.session_id;
+        dm_en.lock().await.close_session().await;
+        drop(active_en);
+
+        // Step 2: rebuild with the same persistence path but a German
+        // cfg locale. The persisted learner row already carries
+        // locale=en, so the freshly-built DM's learner.profile.locale
+        // is still English after wiring's load_learner runs.
+        let mut cfg_de = stub_config_with_persistence(home.path());
+        cfg_de.learner.locale = "de".to_string();
+        let active_de = build_active_session(home.path(), &cfg_de).await.unwrap();
+        let learner_locale = active_de
+            .dialogue_manager
+            .lock()
+            .await
+            .learner
+            .profile
+            .locale;
+        assert_eq!(
+            learner_locale,
+            primer_core::i18n::Locale::English,
+            "persisted learner row's locale survives the cfg-locale change"
+        );
+
+        // Step 3: same call the Tauri command makes — must error before
+        // any session swap-in happens.
+        let cfg_locale = primer_core::i18n::Locale::from_pack_id(&cfg_de.learner.locale).unwrap();
+        let err = verify_resume_locale_match(cfg_locale, learner_locale, persisted_id).unwrap_err();
+        assert!(
+            err.contains(&persisted_id.to_string()),
+            "names the session being resumed: {err}"
+        );
+        assert!(
+            err.contains("'en'"),
+            "names the learner's stored locale: {err}"
+        );
+        assert!(
+            err.contains("'de'"),
+            "names the conflicting cfg locale: {err}"
+        );
     }
 
     #[tokio::test]

@@ -1597,6 +1597,109 @@ async fn most_recent_session_learner_id_picks_most_recent_when_multiple_distinct
     assert_eq!(result, Some(newer_learner));
 }
 
+// ─── list_sessions ────────────────────────────────────────────────
+
+#[tokio::test]
+async fn list_sessions_returns_empty_on_empty_db() {
+    let store = SqliteSessionStore::open_for_locale(
+        std::path::Path::new(":memory:"),
+        primer_core::i18n::Locale::default(),
+    )
+    .unwrap();
+    let result = store.list_sessions().await.unwrap();
+    assert!(result.is_empty());
+}
+
+#[tokio::test]
+async fn list_sessions_includes_turn_count_and_summary() {
+    use primer_core::conversation::{Session, Speaker, Turn};
+
+    let store = open_memory();
+    let learner_id = Uuid::new_v4();
+    let mut session = Session::new(learner_id);
+    session.summary = "discussed planets and gravity".into();
+    session.summary_through_turn_index = 2;
+    session.add_turn(Turn {
+        speaker: Speaker::Child,
+        text: "why does the moon orbit?".into(),
+        timestamp: Utc::now(),
+        intent: None,
+        concepts: vec![],
+    });
+    session.add_turn(Turn {
+        speaker: Speaker::Primer,
+        text: "what's pulling on it?".into(),
+        timestamp: Utc::now(),
+        intent: None,
+        concepts: vec![],
+    });
+    store.save_session(&session).await.unwrap();
+
+    let listings = store.list_sessions().await.unwrap();
+    assert_eq!(listings.len(), 1);
+    assert_eq!(listings[0].id, session.id);
+    assert_eq!(listings[0].learner_id, learner_id);
+    assert_eq!(listings[0].turn_count, 2);
+    assert_eq!(listings[0].summary, "discussed planets and gravity");
+    assert!(listings[0].ended_at.is_none());
+}
+
+#[tokio::test]
+async fn list_sessions_orders_by_last_activity_desc() {
+    use chrono::{Duration, Utc};
+    use primer_core::conversation::{Session, Speaker, Turn};
+
+    let store = open_memory();
+    let learner_id = Uuid::new_v4();
+
+    let mut older = Session::new(learner_id);
+    older.started_at = Utc::now() - Duration::hours(5);
+    older.add_turn(Turn {
+        speaker: Speaker::Child,
+        text: "older question".into(),
+        timestamp: Utc::now() - Duration::hours(4),
+        intent: None,
+        concepts: vec![],
+    });
+    store.save_session(&older).await.unwrap();
+
+    let mut newer = Session::new(learner_id);
+    newer.started_at = Utc::now() - Duration::hours(3);
+    newer.add_turn(Turn {
+        speaker: Speaker::Child,
+        text: "newer question".into(),
+        timestamp: Utc::now() - Duration::minutes(2),
+        intent: None,
+        concepts: vec![],
+    });
+    store.save_session(&newer).await.unwrap();
+
+    let listings = store.list_sessions().await.unwrap();
+    assert_eq!(listings.len(), 2);
+    assert_eq!(
+        listings[0].id, newer.id,
+        "most-recent activity wins regardless of started_at"
+    );
+    assert_eq!(listings[1].id, older.id);
+}
+
+#[tokio::test]
+async fn list_sessions_uses_started_at_when_no_turns() {
+    // A session that has been opened but never had a turn must still
+    // appear in the picker — sort key falls back to started_at.
+    use primer_core::conversation::Session;
+
+    let store = open_memory();
+    let learner_id = Uuid::new_v4();
+    let session = Session::new(learner_id);
+    store.save_session(&session).await.unwrap();
+
+    let listings = store.list_sessions().await.unwrap();
+    assert_eq!(listings.len(), 1);
+    assert_eq!(listings[0].turn_count, 0);
+    assert_eq!(listings[0].last_activity, listings[0].started_at);
+}
+
 // ─── update_turn_concepts ─────────────────────────────────────────
 
 #[tokio::test]

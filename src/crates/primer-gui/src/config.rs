@@ -55,7 +55,7 @@ pub struct LearnerConfig {
 impl Default for LearnerConfig {
     fn default() -> Self {
         Self {
-            name: "Explorer".to_string(),
+            name: primer_core::consts::learner::DEFAULT_NAME.to_string(),
             age: 8,
             locale: "en".to_string(),
         }
