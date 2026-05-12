@@ -125,6 +125,13 @@ async function onSubmit(e) {
   }
 }
 
+// Both listeners are wired once at startup and never torn down — the
+// app has no flow today that closes the session UI without exiting
+// the process. `listen` returns a Promise<UnlistenFn>; we discard the
+// handle deliberately. If a future step adds in-app session teardown
+// (e.g. settings-modal reload, picker-driven session switch), capture
+// the resolved unlisten fns here and call them on teardown to avoid
+// double-emission.
 function setupChunkListener() {
   listen("primer://chunk", (event) => {
     const payload = event.payload || {};

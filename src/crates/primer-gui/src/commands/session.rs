@@ -94,12 +94,15 @@ async fn close_session_inner(state: &tauri::State<'_, AppState>) -> Result<(), S
 ///    from disk and `resume_session` so the timeline + summary +
 ///    engagement history carry over.
 /// 3. Run `respond_to_streaming`, emitting one `primer://chunk` event
-///    per token. The callback also captures the chunk text into a
-///    String so we have the full response for the post-turn event.
+///    per token. The frontend reassembles the full response from the
+///    chunk stream — no String accumulation is needed server-side.
 /// 4. `close_session` to drain background tasks (classifier / extractor
-///    / comprehension), mark `ended_at`, and save.
+///    / comprehension), mark `ended_at`, and save. See #74 for the
+///    follow-up that moves this drain off the critical path.
 /// 5. Write the updated `LearnerModel` and the now-stable `session_id`
-///    back into `ActiveSession`.
+///    back into `ActiveSession`. The session_id writeback also runs on
+///    the error path so a mid-stream failure on the first turn doesn't
+///    orphan its (saved-to-disk) child turn under a fresh UUID on retry.
 /// 6. Emit `primer://turn_complete` with the bare-essentials payload.
 ///
 /// **Concurrency.** The session mutex is held for the entire turn —
@@ -144,7 +147,7 @@ pub async fn send_message(
 /// index and the chunk text. Callers wire it to whatever delivery
 /// channel they want (Tauri events in production, a `Vec<String>`
 /// accumulator in tests).
-pub(crate) async fn run_turn<F>(
+async fn run_turn<F>(
     active: &mut ActiveSession,
     input: &str,
     mut on_chunk: F,
@@ -219,11 +222,23 @@ where
     // mid-stream error.
     dm.close_session().await;
 
+    // Stamp the session_id back into ActiveSession on BOTH paths.
+    // respond_to_streaming records the child turn before the inference
+    // call (step 1 of its flow) and persist_turn saves the partial
+    // session to disk regardless of stream outcome. Without writing
+    // session_id back on the error path, a mid-stream failure on the
+    // first turn would orphan that on-disk Session: the next
+    // send_message would see `previous_session_id = None` and mint a
+    // fresh UUID, leaving the failed child turn stranded.
+    let session_id = dm.session.id;
+    active.session_id = Some(session_id);
+
     response_result.map_err(|e| e.to_string())?;
 
-    let session_id = dm.session.id;
+    // Learner writeback only on success — respond_to_streaming's
+    // contract is that the learner model is not updated on a mid-stream
+    // error (the partial Primer turn was dropped).
     *active.learner.lock().await = dm.learner;
-    active.session_id = Some(session_id);
 
     Ok(TurnComplete {
         session_id,
