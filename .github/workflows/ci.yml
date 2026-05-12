@@ -27,6 +27,24 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
+      - name: Install Tauri Linux system deps
+        # primer-gui depends on Tauri 2.x, which on Linux uses
+        # webkit2gtk for its webview. The dev headers and their
+        # transitive pkg-config files (glib-2.0, gtk, soup, etc.)
+        # aren't in the default ubuntu-latest image. libxdo-dev is
+        # required by tauri-runtime-wry for hotkey/clipboard;
+        # libayatana-appindicator3-dev is for tray. macOS uses Apple's
+        # WebKit framework directly so no equivalent step is needed
+        # there.
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            libwebkit2gtk-4.1-dev \
+            libxdo-dev \
+            libssl-dev \
+            libayatana-appindicator3-dev \
+            librsvg2-dev
+
       - name: Install Rust toolchain
         # rust-toolchain.toml lives at src/rust-toolchain.toml — pinned
         # to 1.87 + rustfmt + clippy. The action picks it up automatically
