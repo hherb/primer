@@ -80,6 +80,30 @@ impl PedagogicalIntent {
         Self::SessionClose,
         Self::SuggestBreak,
     ];
+
+    /// Canonical machine-readable name. Stable identifier exposed across
+    /// the FFI surface (Tauri `TurnSignals`, future verbose-CLI tracing).
+    /// Don't rename — frontends key behaviour (e.g. badge colour, log
+    /// filters) on these exact strings.
+    pub fn name(self) -> &'static str {
+        match self {
+            Self::SocraticQuestion => "SocraticQuestion",
+            Self::ComprehensionCheck => "ComprehensionCheck",
+            Self::Scaffolding => "Scaffolding",
+            Self::Encouragement => "Encouragement",
+            Self::Extension => "Extension",
+            Self::DirectAnswer => "DirectAnswer",
+            Self::AnswerThenPivot => "AnswerThenPivot",
+            Self::SessionClose => "SessionClose",
+            Self::SuggestBreak => "SuggestBreak",
+        }
+    }
+}
+
+impl std::fmt::Display for PedagogicalIntent {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.name())
+    }
 }
 
 /// A complete conversation session.
@@ -148,5 +172,32 @@ mod tests {
         assert!(PedagogicalIntent::ALL.contains(&PedagogicalIntent::SocraticQuestion));
         assert!(PedagogicalIntent::ALL.contains(&PedagogicalIntent::SessionClose));
         assert!(PedagogicalIntent::ALL.contains(&PedagogicalIntent::SuggestBreak));
+    }
+
+    #[test]
+    fn pedagogical_intent_name_matches_canonical_strings() {
+        assert_eq!(
+            PedagogicalIntent::SocraticQuestion.name(),
+            "SocraticQuestion"
+        );
+        assert_eq!(
+            PedagogicalIntent::ComprehensionCheck.name(),
+            "ComprehensionCheck"
+        );
+        assert_eq!(PedagogicalIntent::Scaffolding.name(), "Scaffolding");
+        assert_eq!(PedagogicalIntent::Encouragement.name(), "Encouragement");
+        assert_eq!(PedagogicalIntent::Extension.name(), "Extension");
+        assert_eq!(PedagogicalIntent::DirectAnswer.name(), "DirectAnswer");
+        assert_eq!(PedagogicalIntent::AnswerThenPivot.name(), "AnswerThenPivot");
+        assert_eq!(PedagogicalIntent::SessionClose.name(), "SessionClose");
+        assert_eq!(PedagogicalIntent::SuggestBreak.name(), "SuggestBreak");
+    }
+
+    #[test]
+    fn pedagogical_intent_display_uses_name() {
+        assert_eq!(
+            format!("{}", PedagogicalIntent::SuggestBreak),
+            "SuggestBreak"
+        );
     }
 }

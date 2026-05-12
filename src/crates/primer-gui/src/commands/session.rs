@@ -20,7 +20,10 @@ use tokio::sync::Mutex;
 use uuid::Uuid;
 
 use crate::state::{ActiveSession, AppState, SessionSnapshot};
-use crate::types::{ChunkEvent, LearnerSummary, SessionInfo, TurnComplete};
+use crate::types::{
+    ChunkEvent, ComprehensionSummary, ConceptBreakdown, EngagementSummary, LearnerSummary,
+    SessionInfo, TurnComplete, TurnSignals,
+};
 use crate::wiring;
 
 /// Construct an `ActiveSession` from the persisted settings and store
@@ -64,6 +67,92 @@ pub async fn current_session_info(
         Ok(Some(info_from(active).await))
     } else {
         Ok(None)
+    }
+}
+
+/// Return the pedagogical signals for the most-recently completed
+/// exchange (intent, engagement, concepts, comprehension).
+///
+/// **DM-lock duration: brief.** Locks the DM mutex only long enough to
+/// clone a handful of `last_*` accessor outputs; no `.await` inside
+/// the locked region. A `current_session_info` request issued in
+/// parallel with this one therefore queues for microseconds, not the
+/// streaming wallclock. Holding the lock for an in-flight
+/// `send_message` is fine — the lock-wait just defers the signal
+/// refresh until the response finishes streaming, which is the
+/// correct UX (the signals don't change until then anyway).
+///
+/// **Why not via `SessionSnapshot` like `current_session_info`?** That
+/// snapshot exists so reader commands NEVER touch the DM mutex, since
+/// they may fire during a streaming turn. Signals don't have that
+/// constraint: the frontend refreshes them on `primer://turn_complete`
+/// (post-stream, DM free) and on launch — never during a turn. A brief
+/// post-stream DM lock costs less than the per-turn snapshot-write
+/// fan-out we'd otherwise add to `refresh_snapshot`. If a future
+/// caller ever needs live mid-stream signals, fold them into
+/// `SessionSnapshot` instead of relaxing this invariant.
+///
+/// Returns `Ok(None)` when no session is active.
+#[tauri::command]
+pub async fn get_turn_signals(
+    state: tauri::State<'_, AppState>,
+) -> Result<Option<TurnSignals>, String> {
+    let session_guard = state.session.lock().await;
+    let active = match session_guard.as_ref() {
+        Some(a) => a,
+        None => return Ok(None),
+    };
+    let dm_arc = Arc::clone(&active.dialogue_manager);
+    drop(session_guard);
+
+    let dm = dm_arc.lock().await;
+    Ok(Some(read_signals(&dm)))
+}
+
+/// Pure-ish read of the DM's `last_*` accessors. Split out from
+/// `get_turn_signals` so step 6's learner snapshot can reuse the same
+/// pattern (one DM lock per sidebar refresh) without duplicating the
+/// shape mapping. No `.await` — caller must already hold the DM lock.
+pub(crate) fn read_signals(dm: &DialogueManager) -> TurnSignals {
+    // Wire strings come from each enum's `name()` — the same canonical
+    // identifiers the storage lookup tables use. Don't switch back to
+    // `format!("{:?}", ...)`: Debug output is not a stable contract and
+    // frontend CSS/keys depend on these exact strings.
+    let intent = dm.last_intent().map(|i| i.name().to_string());
+    let engagement = dm.last_assessment().map(|a| EngagementSummary {
+        state: a.state.name().to_string(),
+        confidence: a.confidence,
+        reasoning: a.reasoning.clone(),
+    });
+    let concepts = dm
+        .last_extraction()
+        .map(|e| ConceptBreakdown {
+            child: e.child_concepts.clone(),
+            primer: e.primer_concepts.clone(),
+        })
+        .unwrap_or_default();
+    let comprehension = dm
+        .last_comprehension()
+        .map(|r| {
+            r.assessments
+                .iter()
+                .map(|a| ComprehensionSummary {
+                    concept: a.concept.clone(),
+                    depth: a.depth.name().to_string(),
+                    confidence: a.confidence,
+                    evidence: a.evidence.clone(),
+                })
+                .collect()
+        })
+        .unwrap_or_default();
+    TurnSignals {
+        intent,
+        engagement,
+        concepts,
+        comprehension,
+        classifier_identifier: dm.classifier_identifier().to_string(),
+        extractor_identifier: dm.extractor_identifier().to_string(),
+        comprehension_identifier: dm.comprehension_identifier().to_string(),
     }
 }
 
@@ -222,6 +311,8 @@ mod tests {
     use super::*;
     use crate::config::GuiConfig;
     use crate::wiring::build_active_session;
+    use primer_core::conversation::PedagogicalIntent;
+    use primer_core::learner::EngagementState;
     use tempfile::TempDir;
 
     fn stub_config_with_persistence(home: &std::path::Path) -> GuiConfig {
@@ -303,6 +394,109 @@ mod tests {
             loaded.turns.len() >= 2,
             "session must persist both the child and primer turns; got {} turns",
             loaded.turns.len()
+        );
+    }
+
+    #[tokio::test]
+    async fn read_signals_empty_before_any_turn() {
+        let home = TempDir::new().unwrap();
+        let cfg = stub_config_with_persistence(home.path());
+        let active = build_active_session(home.path(), &cfg).await.unwrap();
+        let dm = active.dialogue_manager.lock().await;
+        let signals = read_signals(&dm);
+        assert!(signals.intent.is_none(), "no intent before any turn");
+        assert!(
+            signals.engagement.is_none(),
+            "no engagement before any turn"
+        );
+        assert!(signals.concepts.child.is_empty());
+        assert!(signals.concepts.primer.is_empty());
+        assert!(signals.comprehension.is_empty());
+        // Identifiers are populated at construction (subsystems always exist).
+        assert_eq!(signals.classifier_identifier, "stub");
+        assert_eq!(signals.extractor_identifier, "stub");
+        assert_eq!(signals.comprehension_identifier, "stub");
+    }
+
+    #[tokio::test]
+    async fn read_signals_after_first_turn_has_intent_only() {
+        // After exactly one respond_to_streaming, intent is current
+        // (decided in-turn) but the classifier / extractor /
+        // comprehension tasks for that turn haven't been drained —
+        // that drain happens at the TOP of turn 2's respond_to_streaming.
+        // This is the lag boundary the UI banner promises; pin it.
+        let home = TempDir::new().unwrap();
+        let cfg = stub_config_with_persistence(home.path());
+        let active = build_active_session(home.path(), &cfg).await.unwrap();
+        let dm_arc = Arc::clone(&active.dialogue_manager);
+
+        run_turn(&dm_arc, "hello", |_, _| {}).await.unwrap();
+
+        let dm = dm_arc.lock().await;
+        let signals = read_signals(&dm);
+        assert!(
+            signals.intent.is_some(),
+            "intent is decided in-turn — populated after first respond_to_streaming"
+        );
+        assert!(
+            signals.engagement.is_none(),
+            "engagement task is still pending — drain happens at top of turn 2"
+        );
+        assert!(
+            signals.concepts.child.is_empty() && signals.concepts.primer.is_empty(),
+            "extractor task is still pending — drain happens at top of turn 2"
+        );
+        assert!(
+            signals.comprehension.is_empty(),
+            "comprehension task is still pending — drain happens at top of turn 2"
+        );
+    }
+
+    #[tokio::test]
+    async fn read_signals_populates_after_second_turn() {
+        // The DM drains the previous turn's background tasks at the
+        // TOP of the next respond_to_streaming. So after turn 2,
+        // last_* reflects turn 1's analysis — a populated path the
+        // stub classifier/extractor/comprehension all exercise.
+        let home = TempDir::new().unwrap();
+        let cfg = stub_config_with_persistence(home.path());
+        let active = build_active_session(home.path(), &cfg).await.unwrap();
+        let dm_arc = Arc::clone(&active.dialogue_manager);
+
+        run_turn(&dm_arc, "hello", |_, _| {}).await.unwrap();
+        run_turn(&dm_arc, "tell me more", |_, _| {}).await.unwrap();
+
+        let dm = dm_arc.lock().await;
+        let signals = read_signals(&dm);
+        // Intent is current (decided during turn 2); always populated
+        // after at least one respond_to_streaming has run.
+        let intent = signals
+            .intent
+            .as_deref()
+            .expect("intent is current — set during turn 2");
+        // Stable wire format from PedagogicalIntent::name() — must
+        // match one of the canonical variant names. If this assertion
+        // ever fires, either a variant was added/renamed in primer-core
+        // (update the list below + the CSS) or somebody put the
+        // `format!("{:?}", ...)` back. Both need to be caught.
+        assert!(
+            PedagogicalIntent::ALL.iter().any(|v| v.name() == intent),
+            "intent {intent:?} must be a canonical PedagogicalIntent::name()"
+        );
+        // Stub classifier produces a deterministic Engaged-default
+        // assessment — populated after the turn-1 task drain at top
+        // of turn 2.
+        let eng = signals
+            .engagement
+            .expect("engagement populated after second turn drains turn-1 classifier task");
+        assert!(
+            EngagementState::ALL.iter().any(|v| v.name() == eng.state),
+            "engagement state {:?} must be a canonical EngagementState::name()",
+            eng.state
+        );
+        assert!(
+            (0.0..=1.0).contains(&eng.confidence),
+            "confidence in valid range"
         );
     }
 

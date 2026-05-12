@@ -14,6 +14,23 @@
   --error-fg: #991b1b;
   --error-border: #fecaca;
   --shadow-sm: 0 1px 2px rgba(0, 0, 0, 0.04);
+
+  /* Depth-pill palette — one stop per UnderstandingDepth variant.
+     Light-mode foreground is the saturated end so the pill text stays
+     legible on a 18%-mixed background. Keep variant names in sync with
+     primer-core's UnderstandingDepth::name(). */
+  --depth-unknown: #6b7280;
+  --depth-aware: #ca8a04;
+  --depth-recall: #2563eb;
+  --depth-comprehension: #16a34a;
+  --depth-application: #9333ea;
+  --depth-analysis: #db2777;
+  --depth-unknown-fg: #4b5563;
+  --depth-aware-fg: #a16207;
+  --depth-recall-fg: #1d4ed8;
+  --depth-comprehension-fg: #15803d;
+  --depth-application-fg: #7e22ce;
+  --depth-analysis-fg: #be185d;
 }
 
 @media (prefers-color-scheme: dark) {
@@ -31,6 +48,15 @@
     --error-bg: #3f1d1d;
     --error-fg: #fecaca;
     --error-border: #7f1d1d;
+
+    /* In dark mode the depth-pill background is the same mix, but the
+       text needs to lift to a pastel for contrast. */
+    --depth-unknown-fg: #d1d5db;
+    --depth-aware-fg: #fde68a;
+    --depth-recall-fg: #bfdbfe;
+    --depth-comprehension-fg: #bbf7d0;
+    --depth-application-fg: #e9d5ff;
+    --depth-analysis-fg: #fbcfe8;
   }
 }
 
@@ -58,6 +84,30 @@ body {
 body {
   display: grid;
   grid-template-rows: auto 1fr;
+  grid-template-columns: minmax(0, 1fr) minmax(280px, 340px);
+  grid-template-areas:
+    "header header"
+    "chat sidebar";
+  transition: grid-template-columns 180ms ease;
+}
+
+body.sidebar-collapsed {
+  grid-template-columns: minmax(0, 1fr) 0;
+}
+
+.app-header {
+  grid-area: header;
+}
+
+.chat {
+  grid-area: chat;
+}
+
+.sidebar {
+  grid-area: sidebar;
+  overflow: hidden;
+  border-left: 1px solid var(--border);
+  background: var(--surface);
 }
 
 /* ─── Header ─────────────────────────────────────────────────────── */
@@ -270,4 +320,259 @@ body {
 #send:disabled {
   cursor: not-allowed;
   opacity: 0.55;
+}
+
+/* ─── Sidebar toggle button ─────────────────────────────────────── */
+
+.sidebar-toggle {
+  -webkit-app-region: no-drag;
+  padding: 0.3rem 0.7rem;
+  border: 1px solid var(--border);
+  border-radius: 0.5rem;
+  background: var(--bg);
+  color: var(--fg);
+  font: inherit;
+  font-size: 0.8rem;
+  cursor: pointer;
+  transition: background 120ms ease;
+}
+
+.sidebar-toggle:hover {
+  background: color-mix(in oklab, var(--accent) 8%, var(--bg));
+}
+
+.sidebar-toggle[aria-pressed="false"] {
+  opacity: 0.65;
+}
+
+/* ─── Sidebar ───────────────────────────────────────────────────── */
+
+.sidebar {
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+  overflow-y: auto;
+}
+
+body.sidebar-collapsed .sidebar {
+  display: none;
+}
+
+.sidebar-section {
+  padding: 0.9rem 1rem;
+  border-bottom: 1px solid var(--border);
+  display: flex;
+  flex-direction: column;
+  gap: 0.7rem;
+}
+
+.sidebar-section:last-child {
+  border-bottom: none;
+}
+
+.sidebar-section-header {
+  display: flex;
+  flex-direction: column;
+  gap: 0.3rem;
+}
+
+.sidebar-section-header h2 {
+  margin: 0;
+  font-size: 0.78rem;
+  font-weight: 600;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  color: var(--fg-muted);
+}
+
+.sidebar-section-hint {
+  font-size: 0.78rem;
+  line-height: 1.45;
+}
+
+.sidebar-empty {
+  padding: 0.6rem 0.7rem;
+  border: 1px dashed var(--border);
+  border-radius: 0.5rem;
+  color: var(--fg-muted);
+  font-size: 0.85rem;
+}
+
+.sidebar-empty p {
+  margin: 0;
+}
+
+.sidebar-card {
+  display: flex;
+  flex-direction: column;
+  gap: 0.45rem;
+  padding: 0.65rem 0.75rem;
+  border: 1px solid var(--border);
+  border-radius: 0.55rem;
+  background: var(--bg);
+}
+
+.sidebar-card-label {
+  font-size: 0.72rem;
+  font-weight: 600;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  color: var(--fg-muted);
+}
+
+.sidebar-card-body {
+  display: flex;
+  flex-direction: column;
+  gap: 0.4rem;
+  font-size: 0.88rem;
+}
+
+.sidebar-card-body.two-col {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 0.6rem;
+}
+
+.col-label {
+  font-size: 0.75rem;
+  margin-bottom: 0.25rem;
+}
+
+.sidebar-card-meta {
+  font-size: 0.75rem;
+  font-variant-numeric: tabular-nums;
+}
+
+.sidebar-card-rationale {
+  font-size: 0.82rem;
+  font-style: italic;
+  line-height: 1.5;
+}
+
+/* Inline row used by the engagement card (badge + bar + value). */
+.row {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  flex-wrap: wrap;
+}
+
+.badge {
+  display: inline-flex;
+  align-items: center;
+  padding: 0.12rem 0.55rem;
+  border-radius: 999px;
+  background: color-mix(in oklab, var(--accent) 14%, transparent);
+  color: var(--accent);
+  font-size: 0.78rem;
+  font-weight: 600;
+  letter-spacing: 0.01em;
+}
+
+.confidence-bar {
+  position: relative;
+  flex: 1 1 6rem;
+  min-width: 4rem;
+  height: 0.45rem;
+  border-radius: 999px;
+  background: color-mix(in oklab, var(--fg) 8%, transparent);
+  overflow: hidden;
+}
+
+.confidence-fill {
+  display: block;
+  height: 100%;
+  width: 0%;
+  background: var(--accent);
+  border-radius: inherit;
+  transition: width 220ms ease;
+}
+
+.confidence-value {
+  font-size: 0.78rem;
+  font-variant-numeric: tabular-nums;
+  color: var(--fg-muted);
+  min-width: 2.4rem;
+  text-align: right;
+}
+
+.chips {
+  margin: 0;
+  padding: 0;
+  list-style: none;
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.25rem;
+}
+
+.chips li {
+  display: inline-block;
+  padding: 0.1rem 0.45rem;
+  background: color-mix(in oklab, var(--fg) 6%, transparent);
+  color: var(--fg);
+  border-radius: 0.35rem;
+  font-size: 0.78rem;
+  font-variant-numeric: tabular-nums;
+}
+
+.chips .placeholder {
+  color: var(--fg-muted);
+  font-style: italic;
+  background: transparent;
+  padding: 0;
+}
+
+.comprehension-list {
+  margin: 0;
+  padding: 0;
+  list-style: none;
+  display: flex;
+  flex-direction: column;
+  gap: 0.4rem;
+}
+
+.comprehension-list li {
+  display: grid;
+  grid-template-columns: 1fr auto auto;
+  align-items: center;
+  gap: 0.5rem;
+  font-size: 0.85rem;
+}
+
+.depth-pill {
+  display: inline-flex;
+  align-items: center;
+  padding: 0.08rem 0.5rem;
+  border-radius: 999px;
+  font-size: 0.72rem;
+  font-weight: 600;
+  letter-spacing: 0.02em;
+}
+
+/* Variant names mirror UnderstandingDepth::name() lowercased. The JS
+   sets `data-depth` from the canonical `.name()` value from
+   primer-core. If a variant is ever renamed there, update both ends. */
+.depth-pill[data-depth="unknown"] {
+  background: color-mix(in oklab, var(--depth-unknown) 18%, transparent);
+  color: var(--depth-unknown-fg);
+}
+.depth-pill[data-depth="aware"] {
+  background: color-mix(in oklab, var(--depth-aware) 18%, transparent);
+  color: var(--depth-aware-fg);
+}
+.depth-pill[data-depth="recall"] {
+  background: color-mix(in oklab, var(--depth-recall) 18%, transparent);
+  color: var(--depth-recall-fg);
+}
+.depth-pill[data-depth="comprehension"] {
+  background: color-mix(in oklab, var(--depth-comprehension) 18%, transparent);
+  color: var(--depth-comprehension-fg);
+}
+.depth-pill[data-depth="application"] {
+  background: color-mix(in oklab, var(--depth-application) 18%, transparent);
+  color: var(--depth-application-fg);
+}
+.depth-pill[data-depth="analysis"] {
+  background: color-mix(in oklab, var(--depth-analysis) 18%, transparent);
+  color: var(--depth-analysis-fg);
 }

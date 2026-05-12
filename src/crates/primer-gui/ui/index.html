@@ -15,6 +15,16 @@
       <div class="session-info" id="session-info" data-state="loading">
         <span class="muted">Starting session…</span>
       </div>
+      <button
+        type="button"
+        class="sidebar-toggle"
+        id="sidebar-toggle"
+        aria-pressed="true"
+        aria-controls="sidebar"
+        title="Show or hide the evaluation sidebar"
+      >
+        Hide Sidebar
+      </button>
     </header>
 
     <main class="chat">
@@ -47,6 +57,78 @@
         <button type="submit" id="send" disabled>Send</button>
       </form>
     </main>
+
+    <aside class="sidebar" id="sidebar" aria-label="Evaluation sidebar">
+      <section class="sidebar-section" data-section="current-turn">
+        <header class="sidebar-section-header">
+          <h2>Current turn</h2>
+          <span class="sidebar-section-hint muted" id="signals-lag-hint" hidden>
+            Engagement, concepts, and comprehension show the previous exchange
+            — the dialogue manager analyses each turn in the background and
+            applies the results at the top of the next turn.
+          </span>
+        </header>
+
+        <div class="sidebar-empty" id="sidebar-empty">
+          <p>Signals appear here once the first exchange completes.</p>
+        </div>
+
+        <div class="sidebar-card" id="signals-intent-card" hidden>
+          <div class="sidebar-card-label">Intent</div>
+          <div class="sidebar-card-body">
+            <span class="badge" id="signals-intent-badge">—</span>
+          </div>
+        </div>
+
+        <div class="sidebar-card" id="signals-engagement-card" hidden>
+          <div class="sidebar-card-label">Engagement</div>
+          <div class="sidebar-card-body">
+            <div class="row">
+              <span class="badge" id="signals-engagement-state">—</span>
+              <span class="confidence-bar" aria-hidden="true">
+                <span class="confidence-fill" id="signals-engagement-fill"></span>
+              </span>
+              <span class="confidence-value" id="signals-engagement-value">—</span>
+            </div>
+            <div
+              class="sidebar-card-rationale muted"
+              id="signals-engagement-reasoning"
+              hidden
+            ></div>
+            <div
+              class="sidebar-card-meta muted"
+              id="signals-engagement-model"
+            ></div>
+          </div>
+        </div>
+
+        <div class="sidebar-card" id="signals-concepts-card" hidden>
+          <div class="sidebar-card-label">Concepts</div>
+          <div class="sidebar-card-body two-col">
+            <div>
+              <div class="col-label muted">Child</div>
+              <ul class="chips" id="signals-concepts-child"></ul>
+            </div>
+            <div>
+              <div class="col-label muted">Primer</div>
+              <ul class="chips" id="signals-concepts-primer"></ul>
+            </div>
+          </div>
+          <div class="sidebar-card-meta muted" id="signals-extractor-model"></div>
+        </div>
+
+        <div class="sidebar-card" id="signals-comprehension-card" hidden>
+          <div class="sidebar-card-label">Comprehension</div>
+          <div class="sidebar-card-body">
+            <ul class="comprehension-list" id="signals-comprehension-list"></ul>
+          </div>
+          <div
+            class="sidebar-card-meta muted"
+            id="signals-comprehension-model"
+          ></div>
+        </div>
+      </section>
+    </aside>
 
     <script src="app.js"></script>
   </body>

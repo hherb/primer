@@ -73,3 +73,89 @@ pub struct ChunkEvent {
     /// The token text — append directly to the bubble.
     pub text: String,
 }
+
+/// Snapshot of the pedagogical signals attached to the most-recently
+/// completed exchange. Returned by `get_turn_signals` and rendered in
+/// the right-hand sidebar's "Current turn" section.
+///
+/// **One-turn lag, by design.** The classifier / extractor /
+/// comprehension subsystems spawn background tasks at the END of each
+/// turn and the dialogue manager drains them at the TOP of the NEXT
+/// `respond_to_streaming`. So after turn N's stream completes,
+/// `engagement` / `concepts` / `comprehension` reflect what the
+/// background tasks produced for turn **N−1** (turn N's haven't been
+/// awaited yet). `intent` is current — it's decided synchronously
+/// during respond_to_streaming. This mirrors what the CLI's `--verbose`
+/// flag shows and is the right trade-off for the natural inter-turn
+/// pause to absorb the 3–10 s analysis wallclock.
+///
+/// On the very first turn of a session, every Optional field except
+/// `intent` is `None`.
+#[derive(Debug, Clone, Serialize)]
+pub struct TurnSignals {
+    /// The pedagogical intent the Primer adopted on its most recent
+    /// response (e.g. `"SocraticQuestion"`, `"Encouragement"`,
+    /// `"SuggestBreak"`). Current — not lagged. Value comes from
+    /// `PedagogicalIntent::name()` — canonical, stable across releases;
+    /// frontends key behaviour on these exact strings.
+    pub intent: Option<String>,
+
+    /// The engagement assessment applied to the in-memory `LearnerModel`
+    /// for the previous turn's child input. Lagged by one turn.
+    pub engagement: Option<EngagementSummary>,
+
+    /// Concepts the extractor surfaced from the previous exchange.
+    /// Lagged by one turn.
+    pub concepts: ConceptBreakdown,
+
+    /// Per-concept comprehension assessments for the previous exchange.
+    /// Lagged by one turn.
+    pub comprehension: Vec<ComprehensionSummary>,
+
+    /// Stable identifier of the active classifier (e.g. `"stub"`,
+    /// `"llm:claude-sonnet-4-6"`). Renders as a small subtitle under
+    /// the engagement section so a parent can see which model produced
+    /// the rating.
+    pub classifier_identifier: String,
+    /// Stable identifier of the active extractor.
+    pub extractor_identifier: String,
+    /// Stable identifier of the active comprehension classifier.
+    pub comprehension_identifier: String,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct EngagementSummary {
+    /// The `EngagementState` variant name from `EngagementState::name()`,
+    /// e.g. `"Engaged"`, `"Reflecting"`, `"FrustratedStuck"`,
+    /// `"FrustratedTrying"`, `"Disengaging"`, `"Unknown"`.
+    pub state: String,
+    /// In `[0.0, 1.0]`.
+    pub confidence: f32,
+    /// Optional one-sentence rationale. LLM classifiers populate this;
+    /// the stub does not.
+    pub reasoning: Option<String>,
+}
+
+/// Two-column extractor breakdown of who introduced what.
+#[derive(Debug, Clone, Default, Serialize)]
+pub struct ConceptBreakdown {
+    /// Concepts the child surfaced.
+    pub child: Vec<String>,
+    /// Concepts the Primer introduced.
+    pub primer: Vec<String>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct ComprehensionSummary {
+    pub concept: String,
+    /// `UnderstandingDepth` variant name from `UnderstandingDepth::name()`:
+    /// `"Unknown"`, `"Aware"`, `"Recall"`, `"Comprehension"`,
+    /// `"Application"`, or `"Analysis"`. The frontend lowercases this for
+    /// the depth-pill `data-depth` selector — keep the lowercased forms
+    /// in sync with [`styles.css`](../../ui/styles.css).
+    pub depth: String,
+    /// In `[0.0, 1.0]`.
+    pub confidence: f32,
+    /// Optional short rationale — usually a phrase the child said.
+    pub evidence: Option<String>,
+}
