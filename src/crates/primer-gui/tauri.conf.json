@@ -41,7 +41,9 @@
     "shortDescription": "A Socratic AI learning companion for children",
     "longDescription": "The Primer is an offline-friendly Socratic learning companion. It asks more questions than it answers, catches parroting, suggests breaks, and remembers what was discussed across sessions.",
     "macOS": {
-      "minimumSystemVersion": "11.0"
+      "minimumSystemVersion": "11.0",
+      "signingIdentity": "Developer ID Application: Horst Herb (X5DWXB4283)",
+      "entitlements": "entitlements.plist"
     }
   }
 }
