@@ -95,7 +95,9 @@ pub struct ChunkEvent {
 pub struct TurnSignals {
     /// The pedagogical intent the Primer adopted on its most recent
     /// response (e.g. `"SocraticQuestion"`, `"Encouragement"`,
-    /// `"SuggestBreak"`). Current — not lagged.
+    /// `"SuggestBreak"`). Current — not lagged. Value comes from
+    /// `PedagogicalIntent::name()` — canonical, stable across releases;
+    /// frontends key behaviour on these exact strings.
     pub intent: Option<String>,
 
     /// The engagement assessment applied to the in-memory `LearnerModel`
@@ -123,7 +125,9 @@ pub struct TurnSignals {
 
 #[derive(Debug, Clone, Serialize)]
 pub struct EngagementSummary {
-    /// The `EngagementState` variant name, e.g. `"Curious"`, `"Frustrated"`.
+    /// The `EngagementState` variant name from `EngagementState::name()`,
+    /// e.g. `"Engaged"`, `"Reflecting"`, `"FrustratedStuck"`,
+    /// `"FrustratedTrying"`, `"Disengaging"`, `"Unknown"`.
     pub state: String,
     /// In `[0.0, 1.0]`.
     pub confidence: f32,
@@ -144,9 +148,11 @@ pub struct ConceptBreakdown {
 #[derive(Debug, Clone, Serialize)]
 pub struct ComprehensionSummary {
     pub concept: String,
-    /// `UnderstandingDepth` variant name: `"Aware"`, `"Familiar"`,
-    /// `"Solid"`, or `"Fluent"`. The frontend renders this as a pill
-    /// with depth-graded colour.
+    /// `UnderstandingDepth` variant name from `UnderstandingDepth::name()`:
+    /// `"Unknown"`, `"Aware"`, `"Recall"`, `"Comprehension"`,
+    /// `"Application"`, or `"Analysis"`. The frontend lowercases this for
+    /// the depth-pill `data-depth` selector — keep the lowercased forms
+    /// in sync with [`styles.css`](../../ui/styles.css).
     pub depth: String,
     /// In `[0.0, 1.0]`.
     pub confidence: f32,

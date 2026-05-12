@@ -82,6 +82,16 @@ pub async fn current_session_info(
 /// refresh until the response finishes streaming, which is the
 /// correct UX (the signals don't change until then anyway).
 ///
+/// **Why not via `SessionSnapshot` like `current_session_info`?** That
+/// snapshot exists so reader commands NEVER touch the DM mutex, since
+/// they may fire during a streaming turn. Signals don't have that
+/// constraint: the frontend refreshes them on `primer://turn_complete`
+/// (post-stream, DM free) and on launch — never during a turn. A brief
+/// post-stream DM lock costs less than the per-turn snapshot-write
+/// fan-out we'd otherwise add to `refresh_snapshot`. If a future
+/// caller ever needs live mid-stream signals, fold them into
+/// `SessionSnapshot` instead of relaxing this invariant.
+///
 /// Returns `Ok(None)` when no session is active.
 #[tauri::command]
 pub async fn get_turn_signals(
@@ -104,9 +114,13 @@ pub async fn get_turn_signals(
 /// pattern (one DM lock per sidebar refresh) without duplicating the
 /// shape mapping. No `.await` — caller must already hold the DM lock.
 pub(crate) fn read_signals(dm: &DialogueManager) -> TurnSignals {
-    let intent = dm.last_intent().map(|i| format!("{i:?}"));
+    // Wire strings come from each enum's `name()` — the same canonical
+    // identifiers the storage lookup tables use. Don't switch back to
+    // `format!("{:?}", ...)`: Debug output is not a stable contract and
+    // frontend CSS/keys depend on these exact strings.
+    let intent = dm.last_intent().map(|i| i.name().to_string());
     let engagement = dm.last_assessment().map(|a| EngagementSummary {
-        state: format!("{:?}", a.state),
+        state: a.state.name().to_string(),
         confidence: a.confidence,
         reasoning: a.reasoning.clone(),
     });
@@ -124,7 +138,7 @@ pub(crate) fn read_signals(dm: &DialogueManager) -> TurnSignals {
                 .iter()
                 .map(|a| ComprehensionSummary {
                     concept: a.concept.clone(),
-                    depth: format!("{:?}", a.depth),
+                    depth: a.depth.name().to_string(),
                     confidence: a.confidence,
                     evidence: a.evidence.clone(),
                 })
@@ -297,6 +311,8 @@ mod tests {
     use super::*;
     use crate::config::GuiConfig;
     use crate::wiring::build_active_session;
+    use primer_core::conversation::PedagogicalIntent;
+    use primer_core::learner::EngagementState;
     use tempfile::TempDir;
 
     fn stub_config_with_persistence(home: &std::path::Path) -> GuiConfig {
@@ -389,7 +405,10 @@ mod tests {
         let dm = active.dialogue_manager.lock().await;
         let signals = read_signals(&dm);
         assert!(signals.intent.is_none(), "no intent before any turn");
-        assert!(signals.engagement.is_none(), "no engagement before any turn");
+        assert!(
+            signals.engagement.is_none(),
+            "no engagement before any turn"
+        );
         assert!(signals.concepts.child.is_empty());
         assert!(signals.concepts.primer.is_empty());
         assert!(signals.comprehension.is_empty());
@@ -397,6 +416,40 @@ mod tests {
         assert_eq!(signals.classifier_identifier, "stub");
         assert_eq!(signals.extractor_identifier, "stub");
         assert_eq!(signals.comprehension_identifier, "stub");
+    }
+
+    #[tokio::test]
+    async fn read_signals_after_first_turn_has_intent_only() {
+        // After exactly one respond_to_streaming, intent is current
+        // (decided in-turn) but the classifier / extractor /
+        // comprehension tasks for that turn haven't been drained —
+        // that drain happens at the TOP of turn 2's respond_to_streaming.
+        // This is the lag boundary the UI banner promises; pin it.
+        let home = TempDir::new().unwrap();
+        let cfg = stub_config_with_persistence(home.path());
+        let active = build_active_session(home.path(), &cfg).await.unwrap();
+        let dm_arc = Arc::clone(&active.dialogue_manager);
+
+        run_turn(&dm_arc, "hello", |_, _| {}).await.unwrap();
+
+        let dm = dm_arc.lock().await;
+        let signals = read_signals(&dm);
+        assert!(
+            signals.intent.is_some(),
+            "intent is decided in-turn — populated after first respond_to_streaming"
+        );
+        assert!(
+            signals.engagement.is_none(),
+            "engagement task is still pending — drain happens at top of turn 2"
+        );
+        assert!(
+            signals.concepts.child.is_empty() && signals.concepts.primer.is_empty(),
+            "extractor task is still pending — drain happens at top of turn 2"
+        );
+        assert!(
+            signals.comprehension.is_empty(),
+            "comprehension task is still pending — drain happens at top of turn 2"
+        );
     }
 
     #[tokio::test]
@@ -417,15 +470,30 @@ mod tests {
         let signals = read_signals(&dm);
         // Intent is current (decided during turn 2); always populated
         // after at least one respond_to_streaming has run.
-        assert!(signals.intent.is_some(), "intent is current — set during turn 2");
+        let intent = signals
+            .intent
+            .as_deref()
+            .expect("intent is current — set during turn 2");
+        // Stable wire format from PedagogicalIntent::name() — must
+        // match one of the canonical variant names. If this assertion
+        // ever fires, either a variant was added/renamed in primer-core
+        // (update the list below + the CSS) or somebody put the
+        // `format!("{:?}", ...)` back. Both need to be caught.
+        assert!(
+            PedagogicalIntent::ALL.iter().any(|v| v.name() == intent),
+            "intent {intent:?} must be a canonical PedagogicalIntent::name()"
+        );
         // Stub classifier produces a deterministic Engaged-default
         // assessment — populated after the turn-1 task drain at top
         // of turn 2.
+        let eng = signals
+            .engagement
+            .expect("engagement populated after second turn drains turn-1 classifier task");
         assert!(
-            signals.engagement.is_some(),
-            "engagement populated after second turn drains turn-1 classifier task"
+            EngagementState::ALL.iter().any(|v| v.name() == eng.state),
+            "engagement state {:?} must be a canonical EngagementState::name()",
+            eng.state
         );
-        let eng = signals.engagement.unwrap();
         assert!(
             (0.0..=1.0).contains(&eng.confidence),
             "confidence in valid range"

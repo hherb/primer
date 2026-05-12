@@ -14,6 +14,23 @@
   --error-fg: #991b1b;
   --error-border: #fecaca;
   --shadow-sm: 0 1px 2px rgba(0, 0, 0, 0.04);
+
+  /* Depth-pill palette — one stop per UnderstandingDepth variant.
+     Light-mode foreground is the saturated end so the pill text stays
+     legible on a 18%-mixed background. Keep variant names in sync with
+     primer-core's UnderstandingDepth::name(). */
+  --depth-unknown: #6b7280;
+  --depth-aware: #ca8a04;
+  --depth-recall: #2563eb;
+  --depth-comprehension: #16a34a;
+  --depth-application: #9333ea;
+  --depth-analysis: #db2777;
+  --depth-unknown-fg: #4b5563;
+  --depth-aware-fg: #a16207;
+  --depth-recall-fg: #1d4ed8;
+  --depth-comprehension-fg: #15803d;
+  --depth-application-fg: #7e22ce;
+  --depth-analysis-fg: #be185d;
 }
 
 @media (prefers-color-scheme: dark) {
@@ -31,6 +48,15 @@
     --error-bg: #3f1d1d;
     --error-fg: #fecaca;
     --error-border: #7f1d1d;
+
+    /* In dark mode the depth-pill background is the same mix, but the
+       text needs to lift to a pastel for contrast. */
+    --depth-unknown-fg: #d1d5db;
+    --depth-aware-fg: #fde68a;
+    --depth-recall-fg: #bfdbfe;
+    --depth-comprehension-fg: #bbf7d0;
+    --depth-application-fg: #e9d5ff;
+    --depth-analysis-fg: #fbcfe8;
   }
 }
 
@@ -523,34 +549,30 @@ body.sidebar-collapsed .sidebar {
   letter-spacing: 0.02em;
 }
 
+/* Variant names mirror UnderstandingDepth::name() lowercased. The JS
+   sets `data-depth` from the canonical `.name()` value from
+   primer-core. If a variant is ever renamed there, update both ends. */
+.depth-pill[data-depth="unknown"] {
+  background: color-mix(in oklab, var(--depth-unknown) 18%, transparent);
+  color: var(--depth-unknown-fg);
+}
 .depth-pill[data-depth="aware"] {
-  background: color-mix(in oklab, #ca8a04 18%, transparent);
-  color: #a16207;
+  background: color-mix(in oklab, var(--depth-aware) 18%, transparent);
+  color: var(--depth-aware-fg);
 }
-.depth-pill[data-depth="familiar"] {
-  background: color-mix(in oklab, #2563eb 18%, transparent);
-  color: #1d4ed8;
+.depth-pill[data-depth="recall"] {
+  background: color-mix(in oklab, var(--depth-recall) 18%, transparent);
+  color: var(--depth-recall-fg);
 }
-.depth-pill[data-depth="solid"] {
-  background: color-mix(in oklab, #16a34a 18%, transparent);
-  color: #15803d;
+.depth-pill[data-depth="comprehension"] {
+  background: color-mix(in oklab, var(--depth-comprehension) 18%, transparent);
+  color: var(--depth-comprehension-fg);
 }
-.depth-pill[data-depth="fluent"] {
-  background: color-mix(in oklab, #9333ea 18%, transparent);
-  color: #7e22ce;
+.depth-pill[data-depth="application"] {
+  background: color-mix(in oklab, var(--depth-application) 18%, transparent);
+  color: var(--depth-application-fg);
 }
-
-@media (prefers-color-scheme: dark) {
-  .depth-pill[data-depth="aware"] {
-    color: #fde68a;
-  }
-  .depth-pill[data-depth="familiar"] {
-    color: #bfdbfe;
-  }
-  .depth-pill[data-depth="solid"] {
-    color: #bbf7d0;
-  }
-  .depth-pill[data-depth="fluent"] {
-    color: #e9d5ff;
-  }
+.depth-pill[data-depth="analysis"] {
+  background: color-mix(in oklab, var(--depth-analysis) 18%, transparent);
+  color: var(--depth-analysis-fg);
 }

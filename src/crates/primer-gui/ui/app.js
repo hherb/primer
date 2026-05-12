@@ -180,6 +180,10 @@ function setupSidebarToggle() {
   dom.sidebarToggle.addEventListener("click", () => {
     const collapsed = dom.body.classList.toggle("sidebar-collapsed");
     dom.sidebarToggle.setAttribute("aria-pressed", String(!collapsed));
+    // Flip the label too: a screen reader user gets the state from
+    // aria-pressed, but sighted users only see the button text. Keep
+    // both surfaces in sync.
+    dom.sidebarToggle.textContent = collapsed ? "Show Sidebar" : "Hide Sidebar";
   });
 }
 
@@ -300,7 +304,11 @@ function renderComprehensionItem(a) {
   concept.textContent = a.concept;
   const pill = document.createElement("span");
   pill.className = "depth-pill";
-  pill.dataset.depth = String(a.depth || "").toLowerCase();
+  // a.depth is always a canonical `UnderstandingDepth::name()` from
+  // the Rust side (Unknown / Aware / Recall / Comprehension /
+  // Application / Analysis). Lowercase it to match the CSS
+  // `data-depth=` selectors in styles.css.
+  pill.dataset.depth = a.depth.toLowerCase();
   pill.textContent = a.depth;
   const pct = Math.round((a.confidence ?? 0) * 100);
   const conf = document.createElement("span");
