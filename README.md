@@ -322,6 +322,40 @@ cargo run --bin primer -- --resume <uuid>
 
 When the resumed session has more than `context_window_turns` (default 20) turns, the Primer maintains long-term memory in two complementary ways: a rolling LLM-generated summary (refreshed on resume only when the loaded one is stale, then every 20 further pre-window turns during active conversation) and FTS5-based retrieval of relevant older turns based on the current child input. Both are injected into the system prompt — the chat-message timeline the model sees stays equal to the last 20 turns, so context budget is bounded even across hours of conversation.
 
+## Building the macOS DMG
+
+Produces a signed and notarized `.dmg` for the desktop GUI, ready to hand to evaluators with no Gatekeeper friction. Apple Silicon only.
+
+**One-time prerequisites:**
+
+- Install the Tauri 2 CLI:
+  ```bash
+  ~/.cargo/bin/cargo install tauri-cli --version "^2.0"
+  ```
+- A `Developer ID Application` certificate from the Apple Developer Program in your login keychain. Verify with `security find-identity -p codesigning -v` — you should see a line matching `Developer ID Application: <Your Name> (TEAMID)`. If missing, create at developer.apple.com → Certificates → + → Developer ID Application, then double-click the downloaded `.cer` to install.
+- An App Store Connect API key with the "Developer" role (re-use the one you already have for App Store submission if applicable). At appstoreconnect.apple.com → Users and Access → Keys → +; download the `.p8` file (you only get one chance) and note the Key ID and Issuer ID. Export in your shell profile:
+  ```bash
+  export APPLE_API_ISSUER="<Issuer ID>"
+  export APPLE_API_KEY="<Key ID>"
+  export APPLE_API_KEY_PATH="$HOME/.appstoreconnect/AuthKey_XXXXXX.p8"
+  ```
+
+**Build:**
+```bash
+./scripts/build-dmg.sh
+```
+
+Output: `src/target/aarch64-apple-darwin/release/bundle/dmg/Primer_0.1.0_aarch64.dmg`. Notarization typically takes 3–10 minutes; the script blocks until stapling completes.
+
+**Installing on an evaluator's Mac:** double-click the DMG, drag `Primer.app` to Applications, launch — no Gatekeeper warning expected. The notary stamp is stapled to the bundle so Gatekeeper accepts it offline.
+
+**Updating the app icon:** the source is [assets/curious_childs_primer_icon.png](assets/curious_childs_primer_icon.png). Regenerate the full set with:
+```bash
+cp assets/curious_childs_primer_icon.png src/crates/primer-gui/icons/source.png
+cd src/crates/primer-gui
+~/.cargo/bin/cargo tauri icon icons/source.png
+```
+
 ## Contributing
 
 **Developer manual:** see [docs/devel/](docs/devel/) for the full contributor manual — getting started, architecture, subsystem deep-dives, and how-to recipes (add a new backend, schema migration, locale, …).
