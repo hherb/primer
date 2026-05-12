@@ -48,12 +48,13 @@ The learner model (what the child knows, how deeply they understand it, what top
 - **Graceful inference-error handling** — typed `InferenceError` variants, bounded jittered retry on transient conditions (rate limits, 5xx, network flap), single i18n-ready render boundary. A child whose API key is wrong sees an actionable message instead of a raw 401.
 - **Learner-model persistence** — profile, concept-mastery state, learning preferences, and latest engagement snapshot persist across sessions via a `LearnerStore` trait + schema v4. A returning child carries forward their identity and progress.
 - **Voice round-trip POC** (`--speech`, behind a Cargo feature) — full LISTEN → THINK → SPEAK → LISTEN loop wired end-to-end: Silero VAD opens the mic, Whisper transcribes, the dialogue manager generates the response, Piper synthesises it phrase-by-phrase. No barge-in by design (the Primer never speaks over the child and the child never speaks over the Primer); cancel-on-resume preserves Socratic etiquette without freezing the loop.
+- **Desktop GUI (Tauri 2)** — a small native window (`primer-gui` crate) that exposes the Primer to non-CLI users (parents, older children, the developer during evaluation). Launch shows a session picker — past sessions for the configured learner, clickable to resume — alongside a "Start new session" button that opens a settings modal mirroring every CLI flag (backend, model, locale, embedder, classifier/extractor/comprehension subsystems, vocab and break tuning, persistence). Chat surface is markdown-rendered bubbles with streaming caret; a right-hand sidebar (collapsible, default-open) surfaces the per-turn signals the engine produces (intent badge, engagement state with confidence bar, extractor-surfaced concepts split by speaker, per-concept comprehension depth) plus a longitudinal Learner panel (vocab review queue with Leitner-box dots, concept-depth distribution bar, recent-engagement strip) and a Session timeline with click-to-scroll to any past turn. Vanilla HTML/CSS/JS (no npm framework); the Tauri backend embeds a long-lived `DialogueManager` and streams response tokens via `primer://chunk` / `primer://turn_complete` events.
 
 **Phase 0.2 and Phase 0.3 are both complete.** Hybrid retrieval, the hand-drafted CC0 seed corpus across all five planned clusters, a 35-article Simple-English-Wikipedia layer (CC-BY-SA-3.0), and tuned BM25-only AND hybrid retrieval defaults all ship today. Still ahead (see [ROADMAP.md](ROADMAP.md)): local llama.cpp inference, hardening of the speech loop, hardware integration.
 
 ## Architecture
 
-The codebase is a Rust workspace under `src/`, organised into twelve crates. The core design principle is **trait-based hardware abstraction**: the pedagogical engine doesn't know or care whether it's talking to a local 7B model on a phone's NPU, llama.cpp on a laptop, or Claude over the network. Backend selection is a runtime config choice, not a code change.
+The codebase is a Rust workspace under `src/`, organised into fourteen crates. The core design principle is **trait-based hardware abstraction**: the pedagogical engine doesn't know or care whether it's talking to a local 7B model on a phone's NPU, llama.cpp on a laptop, or Claude over the network. Backend selection is a runtime config choice, not a code change.
 
 ```
 src/
@@ -70,7 +71,9 @@ src/
     ├── primer-embedding/       # embedder backends (stub, fastembed/BGE-M3, ollama)
     ├── primer-kb-load/         # JSONL ingestion + auto-seed-on-empty + --reembed backfill
     ├── primer-pedagogy/        # Socratic dialogue engine (prompt builder + dialogue manager)
-    └── primer-cli/             # text-mode REPL binary
+    ├── primer-engine/          # shared wiring helpers (backend construction, path resolution)
+    ├── primer-cli/             # text-mode REPL binary
+    └── primer-gui/              # Tauri 2 desktop app (chat bubbles + settings modal + sidebar)
 ```
 
 ### primer-core
@@ -144,13 +147,21 @@ The voice pipeline. Stub backends are always available; real backends sit behind
 
 Two pure helper modules (`vad_debounce`, `phrase_split`) carry the streaming state machines so they can be unit-tested without any backend dep. The `--speech` flag in `primer-cli` is gated by a top-level `speech` feature that pulls all four. See the [Voice mode](#voice-mode-experimental-poc) section below for setup.
 
+### primer-engine
+
+Small internal library that holds the shared wiring helpers — `build_backend`, `build_classifier`, `build_extractor`, `build_comprehension`, `build_fastembed_embedder`, `build_ollama_embedder`, `resolve_session_db_path`, learner reconciliation, locale-mismatch guards. Both `primer-cli` and `primer-gui` import them so the REPL and the desktop app construct identical session stacks without copy-pasting setup code. Behaviour-neutral by design — the engine doesn't add policy, only shares plumbing.
+
 ### primer-cli
 
 A text-mode REPL for developing and testing the dialogue without any hardware. This is the primary development interface for now. With `--features speech` it gains a `--speech` flag that swaps the text REPL for a voice loop driven by `primer-speech`.
 
+### primer-gui
+
+A Tauri 2 desktop app that exposes the Primer to non-CLI users. Backend is Rust (embeds a long-lived `DialogueManager` via `primer-engine`'s wiring helpers; streams response tokens to the frontend through `primer://chunk` / `primer://turn_complete` events; persists settings to `~/.primer/gui-config.json` with mode 0600 so an inline API key can live there safely). Frontend is vanilla HTML/CSS/JS in Tauri's WebView — no npm framework. Three surfaces: a session picker at launch (lists past sessions for the configured learner; click to resume by UUID), a chat window with markdown-rendered bubbles + cancel-mid-stream, and a settings modal mirroring every CLI flag with two save modes ("Save & start new session" vs. "Save (next session only)"). A collapsible right-hand sidebar surfaces the same per-turn signals the CLI's `--verbose` flag prints, plus a longitudinal Learner panel (vocab review queue with Leitner-box dots, concept-depth distribution, recent-engagement strip) and a Session timeline with click-to-scroll to any past turn. Text-only in v1 — voice mode is a placeholder pending the speech-loop hardening pass.
+
 ## Building
 
-Requires Rust 1.85+ (edition 2024). No system dependencies — SQLite is bundled, TLS uses rustls.
+Requires Rust 1.88+ (edition 2024). No system dependencies for the default build — SQLite is bundled, TLS uses rustls. The `--speech` voice loop additionally needs system `espeak-ng` (see [Voice mode](#voice-mode-experimental-poc)); the desktop GUI needs the platform's standard WebView (already present on macOS and Windows; on Debian/Ubuntu run `apt install libwebkit2gtk-4.1-dev libgtk-3-dev libayatana-appindicator3-dev librsvg2-dev`).
 
 ```bash
 cd src
@@ -188,6 +199,16 @@ cargo run --bin primer -- --backend ollama --model llama3.2 --name Binti --age 8
 ```
 
 `--model` is required for ollama (e.g. `llama3.2`, `qwen2.5:7b`). The model must already be pulled (`ollama pull llama3.2`).
+
+### Desktop GUI mode
+
+A native window with chat bubbles, a session picker on launch, a settings modal mirroring every CLI flag, and a collapsible sidebar showing the pedagogical signals the engine produces per turn (intent, engagement, concepts, comprehension, vocab review queue). Aimed at parents and older children who want to evaluate or monitor the system without touching the CLI.
+
+```bash
+cargo run --bin primer-gui
+```
+
+Settings persist to `~/.primer/gui-config.json` (mode 0600). The first launch ships with the stub backend so you can click through the surface without an API key; pick **Settings** in the launch picker to switch to cloud or ollama and then **Save & start new session**. Sessions persist to the same per-learner SQLite file the CLI uses (`~/.primer/<slugified-name>.db`), so the GUI and the CLI share data — a session started in either can be resumed in the other.
 
 ### Voice mode (experimental POC)
 
