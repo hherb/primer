@@ -58,6 +58,11 @@ const dom = {
     engagementCard: document.getElementById("learner-engagement-card"),
     engagementStrip: document.getElementById("learner-engagement-strip"),
   },
+  session: {
+    empty: document.getElementById("session-empty"),
+    hint: document.getElementById("session-list-hint"),
+    list: document.getElementById("session-turn-list"),
+  },
 };
 
 /// Maximum filled box dots — matches MAX_BOX_LEVEL in primer_core::vocab.
@@ -69,6 +74,11 @@ const MAX_BOX_LEVEL = 4;
 const state = {
   sessionId: null,
   streamingPrimerEl: null,
+  /// Next zero-based turn index in the session timeline. Grows by 2
+  /// per exchange (child + primer). Used to tag bubble DOM elements
+  /// with `data-turn-index` so the Session sidebar's click-to-scroll
+  /// can address them in O(1).
+  nextTurnIndex: 0,
 };
 
 main();
@@ -207,11 +217,11 @@ function setupSidebarToggle() {
   });
 }
 
-/// Refresh both sidebar sections (Current turn + Learner) in parallel.
-/// One IPC round-trip per section keeps the DM-lock duration small and
-/// lets the two sections fail independently.
+/// Refresh every sidebar section in parallel. One IPC round-trip per
+/// section keeps the DM-lock duration small (each is a brief read,
+/// not a stream) and lets the sections fail independently.
 async function refreshSidebar() {
-  await Promise.all([refreshSignals(), refreshLearner()]);
+  await Promise.all([refreshSignals(), refreshLearner(), refreshTurnList()]);
 }
 
 async function refreshSignals() {
@@ -231,6 +241,107 @@ async function refreshLearner() {
   } catch (err) {
     console.warn("get_learner_state failed:", err);
   }
+}
+
+async function refreshTurnList() {
+  try {
+    const list = await invoke("list_session_turns");
+    renderTurnList(list);
+  } catch (err) {
+    console.warn("list_session_turns failed:", err);
+  }
+}
+
+function renderTurnList(list) {
+  const s = dom.session;
+  const turns = list ?? [];
+  if (turns.length === 0) {
+    s.list.hidden = true;
+    s.list.replaceChildren();
+    s.empty.hidden = false;
+    s.hint.hidden = true;
+    return;
+  }
+  s.empty.hidden = true;
+  s.list.hidden = false;
+  s.hint.hidden = false;
+  s.list.replaceChildren(...turns.map(renderTurnRow));
+}
+
+function renderTurnRow(turn) {
+  // Use a <button> inside <li> so the row is keyboard-focusable and
+  // announced as an interactive element rather than plain text.
+  const li = document.createElement("li");
+  const btn = document.createElement("button");
+  btn.type = "button";
+  btn.className = "turn-row";
+  btn.dataset.turnIndex = String(turn.index);
+  btn.dataset.speaker = String(turn.speaker || "").toLowerCase();
+  btn.setAttribute(
+    "aria-label",
+    `Turn ${turn.index + 1}, ${turn.speaker}: ${turn.text_preview}`,
+  );
+
+  const idxEl = document.createElement("span");
+  idxEl.className = "turn-index";
+  idxEl.textContent = `T${turn.index + 1}`;
+
+  const speakerEl = document.createElement("span");
+  speakerEl.className = "turn-speaker";
+  speakerEl.textContent = turn.speaker;
+
+  const previewEl = document.createElement("span");
+  previewEl.className = "turn-preview";
+
+  const textEl = document.createElement("span");
+  textEl.className = "turn-text";
+  textEl.textContent = turn.text_preview;
+  if (turn.truncated) {
+    textEl.title = `${turn.text_preview} (truncated)`;
+  }
+  previewEl.appendChild(textEl);
+
+  const intent = turn.intent;
+  const conceptCount = Array.isArray(turn.concepts) ? turn.concepts.length : 0;
+  if (intent || conceptCount > 0) {
+    const meta = document.createElement("span");
+    meta.className = "turn-meta";
+    if (intent) {
+      const intentBadge = document.createElement("span");
+      intentBadge.className = "turn-intent";
+      intentBadge.textContent = intent;
+      meta.appendChild(intentBadge);
+    }
+    if (conceptCount > 0) {
+      const conceptEl = document.createElement("span");
+      conceptEl.className = "turn-concept-count";
+      conceptEl.textContent =
+        conceptCount === 1 ? "1 concept" : `${conceptCount} concepts`;
+      meta.appendChild(conceptEl);
+    }
+    previewEl.appendChild(meta);
+  }
+
+  btn.appendChild(idxEl);
+  btn.appendChild(speakerEl);
+  btn.appendChild(previewEl);
+  btn.addEventListener("click", () => scrollChatToTurn(turn.index));
+  li.appendChild(btn);
+  return li;
+}
+
+/// Scroll the main chat scroll area to the bubble matching the given
+/// turn index, then briefly outline it so the user can find it. The
+/// bubbles are tagged at append-time with `data-turn-index`; this is
+/// a direct DOM query, no per-row event-listener bookkeeping needed.
+function scrollChatToTurn(index) {
+  const row = dom.chatScroll.querySelector(
+    `.bubble-row[data-turn-index="${index}"]`,
+  );
+  if (!row) return;
+  row.scrollIntoView({ behavior: "smooth", block: "center" });
+  row.classList.add("is-spotlight");
+  setTimeout(() => row.classList.remove("is-spotlight"), 1600);
 }
 
 function renderSignals(signals) {
@@ -510,6 +621,8 @@ function renderComprehensionItem(a) {
 function appendChildBubble(text) {
   const row = document.createElement("div");
   row.className = "bubble-row is-child";
+  row.dataset.turnIndex = String(state.nextTurnIndex);
+  state.nextTurnIndex += 1;
   const bubble = document.createElement("div");
   bubble.className = "bubble";
   bubble.textContent = text;
@@ -521,6 +634,8 @@ function appendChildBubble(text) {
 function appendStreamingPrimerBubble() {
   const row = document.createElement("div");
   row.className = "bubble-row is-primer";
+  row.dataset.turnIndex = String(state.nextTurnIndex);
+  state.nextTurnIndex += 1;
   const bubble = document.createElement("div");
   bubble.className = "bubble is-streaming";
   bubble.textContent = "";
