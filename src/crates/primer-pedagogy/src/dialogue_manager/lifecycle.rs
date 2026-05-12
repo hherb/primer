@@ -10,6 +10,8 @@
 //! Break-suggestion timing decisions live in `decide_intent_at_with_pack`
 //! — see `primer_core::session_timing` for the pure helper.
 
+use std::sync::Arc;
+
 use chrono::Utc;
 
 use primer_core::config::PedagogyConfig;
@@ -22,7 +24,7 @@ use primer_core::learner::LearnerModel;
 use super::{DialogueManager, DialogueManagerStores, DialogueManagerSubsystems};
 use crate::prompt_pack;
 
-impl<'a> DialogueManager<'a> {
+impl DialogueManager {
     /// Create a new dialogue manager for a session.
     ///
     /// `stores` bundles the optional `SessionStore` and `LearnerStore`;
@@ -32,8 +34,8 @@ impl<'a> DialogueManager<'a> {
     /// without lifetime constraints — `tokio::spawn` requires `'static`.
     pub fn new(
         learner: LearnerModel,
-        inference: &'a dyn InferenceBackend,
-        knowledge: &'a dyn KnowledgeBase,
+        inference: Arc<dyn InferenceBackend>,
+        knowledge: Arc<dyn KnowledgeBase>,
         stores: DialogueManagerStores,
         subsystems: DialogueManagerSubsystems,
         config: PedagogyConfig,
@@ -205,6 +207,14 @@ impl<'a> DialogueManager<'a> {
     /// Stable identifier of the active comprehension classifier (used by `--verbose`).
     pub fn comprehension_identifier(&self) -> &str {
         self.comprehension.identifier()
+    }
+
+    /// Stable identifier of the active embedder, or `None` when
+    /// hybrid retrieval is disabled (`--embedder-backend none`).
+    /// `Embedder` inherits `Named`, so `name()` is reachable via the
+    /// trait object without an explicit `use`.
+    pub fn embedder_identifier(&self) -> Option<&str> {
+        self.embedder.as_deref().map(|e| e.name())
     }
 
     /// End the session gracefully. Drains any in-flight classifier task so

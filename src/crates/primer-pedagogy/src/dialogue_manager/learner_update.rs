@@ -15,7 +15,7 @@ use primer_core::learner::EngagementState;
 
 use super::DialogueManager;
 
-impl<'a> DialogueManager<'a> {
+impl DialogueManager {
     /// Update the learner model based on the conversation evidence.
     ///
     /// This is deliberately minimal for the scaffold. A production version

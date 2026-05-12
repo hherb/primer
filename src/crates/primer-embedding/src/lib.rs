@@ -13,7 +13,7 @@
 //! [`Embedder`]: primer_core::embedder::Embedder
 
 pub mod stub;
-pub use stub::StubEmbedder;
+pub use stub::{STUB_MODEL_ID, StubEmbedder};
 
 #[cfg(feature = "fastembed")]
 pub mod fastembed_backend;

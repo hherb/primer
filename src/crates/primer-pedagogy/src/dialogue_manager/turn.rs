@@ -36,7 +36,7 @@ use primer_core::inference::{GenerationParams, Prompt};
 use super::{DialogueManager, ExtractionPart, PostResponseResult};
 use crate::prompt_builder;
 
-impl<'a> DialogueManager<'a> {
+impl DialogueManager {
     /// Process the child's input and generate the Primer's response.
     /// Convenience wrapper around `respond_to_streaming` that discards
     /// per-chunk callbacks. See that method for the full contract.

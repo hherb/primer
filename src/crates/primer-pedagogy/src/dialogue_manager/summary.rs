@@ -16,7 +16,7 @@
 
 use super::DialogueManager;
 
-impl<'a> DialogueManager<'a> {
+impl DialogueManager {
     /// Active-conversation cadence. Refresh the rolling summary when at
     /// least `context_window_turns` turns have fallen out of the window
     /// since `summary_through_turn_index` was last set, so per-turn

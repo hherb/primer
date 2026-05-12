@@ -4,65 +4,50 @@
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
     <title>Primer</title>
-    <style>
-      :root {
-        color-scheme: light dark;
-      }
-      html,
-      body {
-        margin: 0;
-        padding: 0;
-        height: 100%;
-        font-family:
-          system-ui,
-          -apple-system,
-          BlinkMacSystemFont,
-          "Segoe UI",
-          sans-serif;
-      }
-      body {
-        display: flex;
-        flex-direction: column;
-        align-items: center;
-        justify-content: center;
-        background:
-          radial-gradient(
-            circle at 30% 20%,
-            color-mix(in oklab, currentColor 6%, transparent),
-            transparent 60%
-          ),
-          radial-gradient(
-            circle at 70% 80%,
-            color-mix(in oklab, currentColor 4%, transparent),
-            transparent 60%
-          );
-        text-align: center;
-      }
-      h1 {
-        font-size: 1.6rem;
-        font-weight: 600;
-        margin: 0 0 0.4rem;
-        letter-spacing: -0.01em;
-      }
-      p {
-        margin: 0;
-        max-width: 28rem;
-        font-size: 0.95rem;
-        opacity: 0.7;
-        line-height: 1.5;
-      }
-      .stage {
-        font-size: 0.78rem;
-        text-transform: uppercase;
-        letter-spacing: 0.08em;
-        opacity: 0.45;
-        margin-top: 1.6rem;
-      }
-    </style>
+    <link rel="stylesheet" href="styles.css" />
   </head>
   <body>
-    <h1>The Primer</h1>
-    <p>A Socratic learning companion. Settings, chat, and live evaluation arrive in the next steps.</p>
-    <div class="stage">Step 2 · scaffold</div>
+    <header class="app-header">
+      <div class="brand">
+        <span class="brand-mark">●</span>
+        <span class="brand-name">Primer</span>
+      </div>
+      <div class="session-info" id="session-info" data-state="loading">
+        <span class="muted">Starting session…</span>
+      </div>
+    </header>
+
+    <main class="chat">
+      <div class="chat-scroll" id="chat-scroll">
+        <!-- Bubbles are injected here. The first turn lands once the user sends.
+             No `aria-live` on the container: streaming `textContent +=` mutates an
+             existing node, which most screen readers either ignore or fire on
+             every chunk — both unhelpful. Per-bubble live semantics (announce
+             once on stream completion) lands with the a11y pass after step 6. -->
+        <div class="empty-state" id="empty-state">
+          <h2>Ready when you are.</h2>
+          <p>
+            Type a question or share something you're curious about. The Primer
+            asks more than it answers — that's the point.
+          </p>
+        </div>
+      </div>
+
+      <div class="error-banner" id="error-banner" hidden></div>
+
+      <form class="composer" id="composer" autocomplete="off">
+        <textarea
+          id="input"
+          name="input"
+          placeholder="Ask the Primer something…"
+          rows="1"
+          aria-label="Your message"
+          disabled
+        ></textarea>
+        <button type="submit" id="send" disabled>Send</button>
+      </form>
+    </main>
+
+    <script src="app.js"></script>
   </body>
 </html>

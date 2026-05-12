@@ -38,7 +38,7 @@ fn ltm_hybrid_params() -> HybridParams {
     }
 }
 
-impl<'a> DialogueManager<'a> {
+impl DialogueManager {
     /// Retrieve knowledge passages relevant to the child's input.
     /// Falls back gracefully if the knowledge base is empty or errors.
     ///

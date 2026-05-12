@@ -15,17 +15,17 @@ use super::super::*;
 
 #[tokio::test]
 async fn respond_to_streaming_invokes_callback_per_chunk() {
-    let backend = ScriptedBackend::new(vec![
+    let backend = std::sync::Arc::new(ScriptedBackend::new(vec![
         Ok(chunk("Hel", false)),
         Ok(chunk("lo", false)),
         Ok(chunk(" there", false)),
         Ok(chunk("", true)),
-    ]);
-    let knowledge = EmptyKnowledge;
+    ]));
+    let knowledge = std::sync::Arc::new(EmptyKnowledge);
     let mut dm = DialogueManager::new(
         test_learner(),
-        &backend,
-        &knowledge,
+        backend.clone(),
+        knowledge.clone(),
         DialogueManagerStores::default(),
         default_subsystems(),
         PedagogyConfig::default(),
@@ -45,17 +45,17 @@ async fn respond_to_streaming_invokes_callback_per_chunk() {
 
 #[tokio::test]
 async fn respond_to_streaming_returns_full_accumulated_text() {
-    let backend = ScriptedBackend::new(vec![
+    let backend = std::sync::Arc::new(ScriptedBackend::new(vec![
         Ok(chunk("Hel", false)),
         Ok(chunk("lo", false)),
         Ok(chunk(" there", false)),
         Ok(chunk("", true)),
-    ]);
-    let knowledge = EmptyKnowledge;
+    ]));
+    let knowledge = std::sync::Arc::new(EmptyKnowledge);
     let mut dm = DialogueManager::new(
         test_learner(),
-        &backend,
-        &knowledge,
+        backend.clone(),
+        knowledge.clone(),
         DialogueManagerStores::default(),
         default_subsystems(),
         PedagogyConfig::default(),
@@ -67,16 +67,16 @@ async fn respond_to_streaming_returns_full_accumulated_text() {
 
 #[tokio::test]
 async fn respond_to_streaming_records_full_primer_turn() {
-    let backend = ScriptedBackend::new(vec![
+    let backend = std::sync::Arc::new(ScriptedBackend::new(vec![
         Ok(chunk("part one ", false)),
         Ok(chunk("part two", false)),
         Ok(chunk("", true)),
-    ]);
-    let knowledge = EmptyKnowledge;
+    ]));
+    let knowledge = std::sync::Arc::new(EmptyKnowledge);
     let mut dm = DialogueManager::new(
         test_learner(),
-        &backend,
-        &knowledge,
+        backend.clone(),
+        knowledge.clone(),
         DialogueManagerStores::default(),
         default_subsystems(),
         PedagogyConfig::default(),
@@ -90,15 +90,15 @@ async fn respond_to_streaming_records_full_primer_turn() {
 
 #[tokio::test]
 async fn respond_to_streaming_does_not_record_primer_turn_on_stream_error() {
-    let backend = ScriptedBackend::new(vec![
+    let backend = std::sync::Arc::new(ScriptedBackend::new(vec![
         Ok(chunk("partial", false)),
         Err(PrimerError::Inference("simulated network drop".into())),
-    ]);
-    let knowledge = EmptyKnowledge;
+    ]));
+    let knowledge = std::sync::Arc::new(EmptyKnowledge);
     let mut dm = DialogueManager::new(
         test_learner(),
-        &backend,
-        &knowledge,
+        backend.clone(),
+        knowledge.clone(),
         DialogueManagerStores::default(),
         default_subsystems(),
         PedagogyConfig::default(),
@@ -124,14 +124,14 @@ async fn respond_to_streaming_preserves_typed_inference_error_variant() {
     //
     // This test asserts that a typed Auth variant from the backend
     // survives the dialogue_manager round-trip with its variant intact.
-    let backend = ScriptedBackend::new(vec![Err(PrimerError::Inference(
+    let backend = std::sync::Arc::new(ScriptedBackend::new(vec![Err(PrimerError::Inference(
         primer_core::error::InferenceError::Auth,
-    ))]);
-    let knowledge = EmptyKnowledge;
+    ))]));
+    let knowledge = std::sync::Arc::new(EmptyKnowledge);
     let mut dm = DialogueManager::new(
         test_learner(),
-        &backend,
-        &knowledge,
+        backend.clone(),
+        knowledge.clone(),
         DialogueManagerStores::default(),
         default_subsystems(),
         PedagogyConfig::default(),
@@ -154,12 +154,12 @@ async fn respond_to_streaming_returns_empty_string_when_stream_yields_no_text() 
     // should succeed with an empty accumulated string and still record
     // the (empty) Primer turn — the consumer is responsible for noticing
     // and surfacing this as a user-facing problem if they care.
-    let backend = ScriptedBackend::new(vec![Ok(chunk("", true))]);
-    let knowledge = EmptyKnowledge;
+    let backend = std::sync::Arc::new(ScriptedBackend::new(vec![Ok(chunk("", true))]));
+    let knowledge = std::sync::Arc::new(EmptyKnowledge);
     let mut dm = DialogueManager::new(
         test_learner(),
-        &backend,
-        &knowledge,
+        backend.clone(),
+        knowledge.clone(),
         DialogueManagerStores::default(),
         default_subsystems(),
         PedagogyConfig::default(),
@@ -174,16 +174,16 @@ async fn respond_to_streaming_returns_empty_string_when_stream_yields_no_text() 
 
 #[tokio::test]
 async fn respond_to_thin_wrapper_still_works() {
-    let backend = ScriptedBackend::new(vec![
+    let backend = std::sync::Arc::new(ScriptedBackend::new(vec![
         Ok(chunk("alpha ", false)),
         Ok(chunk("beta", false)),
         Ok(chunk("", true)),
-    ]);
-    let knowledge = EmptyKnowledge;
+    ]));
+    let knowledge = std::sync::Arc::new(EmptyKnowledge);
     let mut dm = DialogueManager::new(
         test_learner(),
-        &backend,
-        &knowledge,
+        backend.clone(),
+        knowledge.clone(),
         DialogueManagerStores::default(),
         default_subsystems(),
         PedagogyConfig::default(),
@@ -195,13 +195,16 @@ async fn respond_to_thin_wrapper_still_works() {
 
 #[tokio::test]
 async fn respond_to_streaming_fires_engine_save_on_success() {
-    let backend = ScriptedBackend::new(vec![Ok(chunk("Hi", false)), Ok(chunk("", true))]);
-    let knowledge = EmptyKnowledge;
+    let backend = std::sync::Arc::new(ScriptedBackend::new(vec![
+        Ok(chunk("Hi", false)),
+        Ok(chunk("", true)),
+    ]));
+    let knowledge = std::sync::Arc::new(EmptyKnowledge);
     let store = Arc::new(CountingStore::new());
     let mut dm = DialogueManager::new(
         test_learner(),
-        &backend,
-        &knowledge,
+        backend.clone(),
+        knowledge.clone(),
         DialogueManagerStores {
             session: Some(Arc::clone(&store) as Arc<dyn SessionStore>),
             learner: None,
@@ -220,16 +223,16 @@ async fn respond_to_streaming_fires_engine_save_on_success() {
 
 #[tokio::test]
 async fn respond_to_streaming_fires_engine_save_on_stream_error() {
-    let backend = ScriptedBackend::new(vec![
+    let backend = std::sync::Arc::new(ScriptedBackend::new(vec![
         Ok(chunk("partial", false)),
         Err(PrimerError::Inference("simulated drop".into())),
-    ]);
-    let knowledge = EmptyKnowledge;
+    ]));
+    let knowledge = std::sync::Arc::new(EmptyKnowledge);
     let store = Arc::new(CountingStore::new());
     let mut dm = DialogueManager::new(
         test_learner(),
-        &backend,
-        &knowledge,
+        backend.clone(),
+        knowledge.clone(),
         DialogueManagerStores {
             session: Some(Arc::clone(&store) as Arc<dyn SessionStore>),
             learner: None,
@@ -252,12 +255,15 @@ async fn respond_to_streaming_fires_engine_save_on_stream_error() {
 async fn summary_does_not_refresh_when_below_threshold_during_active_session() {
     // First respond_to_streaming fires only when there are turns to
     // process. With turn count below window+window, no refresh.
-    let backend = ScriptedBackend::new(vec![Ok(chunk("ok", false)), Ok(chunk("", true))]);
-    let knowledge = EmptyKnowledge;
+    let backend = std::sync::Arc::new(ScriptedBackend::new(vec![
+        Ok(chunk("ok", false)),
+        Ok(chunk("", true)),
+    ]));
+    let knowledge = std::sync::Arc::new(EmptyKnowledge);
     let mut dm = DialogueManager::new(
         test_learner(),
-        &backend,
-        &knowledge,
+        backend.clone(),
+        knowledge.clone(),
         DialogueManagerStores::default(),
         default_subsystems(),
         PedagogyConfig::default(),
@@ -279,13 +285,13 @@ async fn per_turn_save_skipped_when_no_persisted_field_changes() {
     // a stub returning no assessments. The only save_learner call is
     // the one open_session emits.
     let (learner, store) = dirty_flag_test_setup(EngagementState::Reflecting);
-    let backend = RepeatingBackend;
-    let knowledge = EmptyKnowledge;
+    let backend = std::sync::Arc::new(RepeatingBackend);
+    let knowledge = std::sync::Arc::new(EmptyKnowledge);
 
     let mut dm = DialogueManager::new(
         learner,
-        &backend,
-        &knowledge,
+        backend.clone(),
+        knowledge.clone(),
         DialogueManagerStores {
             session: None,
             learner: Some(Arc::clone(&store) as Arc<dyn LearnerStore>),
@@ -315,13 +321,13 @@ async fn per_turn_save_fires_when_engagement_changes() {
     // Engaged in update_learner_model, which IS a change to a
     // persisted field. dirty=true → per-turn save fires.
     let (learner, store) = dirty_flag_test_setup(EngagementState::Reflecting);
-    let backend = RepeatingBackend;
-    let knowledge = EmptyKnowledge;
+    let backend = std::sync::Arc::new(RepeatingBackend);
+    let knowledge = std::sync::Arc::new(EmptyKnowledge);
 
     let mut dm = DialogueManager::new(
         learner,
-        &backend,
-        &knowledge,
+        backend.clone(),
+        knowledge.clone(),
         DialogueManagerStores {
             session: None,
             learner: Some(Arc::clone(&store) as Arc<dyn LearnerStore>),
@@ -350,13 +356,13 @@ async fn dirty_cleared_after_save_so_subsequent_idle_turn_skips_save() {
     // After the dirty turn, the flag should be cleared; the idle
     // turn must not produce a second per-turn save.
     let (learner, store) = dirty_flag_test_setup(EngagementState::Reflecting);
-    let backend = RepeatingBackend;
-    let knowledge = EmptyKnowledge;
+    let backend = std::sync::Arc::new(RepeatingBackend);
+    let knowledge = std::sync::Arc::new(EmptyKnowledge);
 
     let mut dm = DialogueManager::new(
         learner,
-        &backend,
-        &knowledge,
+        backend.clone(),
+        knowledge.clone(),
         DialogueManagerStores {
             session: None,
             learner: Some(Arc::clone(&store) as Arc<dyn LearnerStore>),
@@ -430,13 +436,13 @@ async fn save_learner_failure_does_not_propagate_through_respond_to() {
     let mut learner = test_learner();
     learner.current_engagement = EngagementState::Reflecting;
     let failing = Arc::new(FailingLearnerStore::new());
-    let backend = RepeatingBackend;
-    let knowledge = EmptyKnowledge;
+    let backend = std::sync::Arc::new(RepeatingBackend);
+    let knowledge = std::sync::Arc::new(EmptyKnowledge);
 
     let mut dm = DialogueManager::new(
         learner,
-        &backend,
-        &knowledge,
+        backend.clone(),
+        knowledge.clone(),
         DialogueManagerStores {
             session: None,
             learner: Some(Arc::clone(&failing) as Arc<dyn LearnerStore>),
@@ -488,12 +494,12 @@ async fn build_turn_prompt_includes_vocab_section_when_concept_is_overdue() {
     // Scripted backend isn't even called by build_turn_prompt — we drive
     // the prompt-build path directly. EmptyKnowledge keeps the knowledge
     // section empty so the assertion lands cleanly.
-    let backend = ScriptedBackend::new(vec![Ok(chunk("", true))]);
-    let knowledge = EmptyKnowledge;
+    let backend = std::sync::Arc::new(ScriptedBackend::new(vec![Ok(chunk("", true))]));
+    let knowledge = std::sync::Arc::new(EmptyKnowledge);
     let mut dm = DialogueManager::new(
         test_learner(),
-        &backend,
-        &knowledge,
+        backend.clone(),
+        knowledge.clone(),
         DialogueManagerStores::default(),
         default_subsystems(),
         PedagogyConfig::default(),
@@ -538,12 +544,12 @@ async fn build_turn_prompt_omits_vocab_section_when_no_concept_is_due() {
     use primer_core::conversation::PedagogicalIntent;
     use primer_core::learner::{ConceptState, UnderstandingDepth};
 
-    let backend = ScriptedBackend::new(vec![Ok(chunk("", true))]);
-    let knowledge = EmptyKnowledge;
+    let backend = std::sync::Arc::new(ScriptedBackend::new(vec![Ok(chunk("", true))]));
+    let knowledge = std::sync::Arc::new(EmptyKnowledge);
     let mut dm = DialogueManager::new(
         test_learner(),
-        &backend,
-        &knowledge,
+        backend.clone(),
+        knowledge.clone(),
         DialogueManagerStores::default(),
         default_subsystems(),
         PedagogyConfig::default(),
@@ -575,12 +581,15 @@ async fn build_turn_prompt_omits_vocab_section_when_no_concept_is_due() {
 
 #[tokio::test]
 async fn respond_after_threshold_yields_suggest_break_intent() {
-    let backend = ScriptedBackend::new(vec![Ok(chunk("Hello", false)), Ok(chunk("", true))]);
-    let knowledge = EmptyKnowledge;
+    let backend = std::sync::Arc::new(ScriptedBackend::new(vec![
+        Ok(chunk("Hello", false)),
+        Ok(chunk("", true)),
+    ]));
+    let knowledge = std::sync::Arc::new(EmptyKnowledge);
     let mut dm = DialogueManager::new(
         test_learner(),
-        &backend,
-        &knowledge,
+        backend.clone(),
+        knowledge.clone(),
         DialogueManagerStores::default(),
         default_subsystems(),
         primer_core::config::PedagogyConfig::default(),
@@ -608,12 +617,12 @@ async fn respond_after_threshold_yields_suggest_break_intent() {
 async fn cadence_resets_after_suggest_break_fires() {
     // Use RepeatingBackend so the same backend can handle both turns
     // (ScriptedBackend can only emit its script once).
-    let backend = RepeatingBackend;
-    let knowledge = EmptyKnowledge;
+    let backend = std::sync::Arc::new(RepeatingBackend);
+    let knowledge = std::sync::Arc::new(EmptyKnowledge);
     let mut dm = DialogueManager::new(
         test_learner(),
-        &backend,
-        &knowledge,
+        backend.clone(),
+        knowledge.clone(),
         DialogueManagerStores::default(),
         default_subsystems(),
         primer_core::config::PedagogyConfig::default(),

@@ -6,31 +6,32 @@
 //!
 //! 1. The persisted `GuiConfig` (mutable across "Save" actions).
 //! 2. The home directory path so config save/load are filesystem-pure.
-//! 3. An optional `ActiveSession` carrying the constructed inference /
-//!    knowledge / classifier / extractor / comprehension / embedder /
-//!    store Arcs once `start_session` succeeds.
+//! 3. An optional `ActiveSession` holding the constructed long-lived
+//!    `DialogueManager` once `start_session` succeeds.
 //!
-//! Per the implementation plan, the `DialogueManager` itself is *not*
-//! held long-lived — it's constructed lazily on each send-message
-//! command from the Arcs in `ActiveSession`. That choice keeps the
-//! lifetime story of DM's `&'a dyn` borrows compatible with Tauri's
-//! `'static + Send + Sync` state model without refactoring
-//! `primer-pedagogy`.
+//! The `DialogueManager` is held long-lived (behind `Arc<Mutex<…>>`)
+//! so the natural CLI latency design carries over: the previous turn's
+//! classifier / extractor / comprehension tasks are awaited at the
+//! TOP of the next `respond_to_streaming` rather than at the END of
+//! the current one. That keeps the composer re-enable instantaneous
+//! once the stream finishes and absorbs the ~13 s background-task
+//! wallclock in the natural inter-turn pause.
+//!
+//! Sharing across tasks: the DM is held in `Arc<Mutex<DialogueManager>>`
+//! so a command can clone the Arc out of the session guard, release
+//! the session guard, and lock the DM independently. To keep
+//! `current_session_info` / `update_settings` / future sidebar
+//! commands free to run while a turn is streaming, an
+//! [`SessionSnapshot`] mirror of the DM-owned fields the frontend
+//! needs lives behind its own short-lived `Mutex` — readers never
+//! touch the DM lock. The snapshot is refreshed after each successful
+//! turn from within `send_message`.
 
 use std::path::PathBuf;
 use std::sync::Arc;
 
-use primer_classifier::{ClassifierSettings, EngagementClassifier};
-use primer_comprehension::{ComprehensionClassifier, ComprehensionSettings};
-use primer_core::config::PedagogyConfig;
-use primer_core::embedder::Embedder;
 use primer_core::i18n::Locale;
-use primer_core::inference::InferenceBackend;
-use primer_core::learner::LearnerModel;
-use primer_core::storage::{LearnerStore, SessionStore};
-use primer_extractor::{ConceptExtractor, ExtractorSettings};
-use primer_knowledge::SqliteKnowledgeBase;
-use primer_pedagogy::vocab::VocabSettings;
+use primer_pedagogy::DialogueManager;
 use tokio::sync::Mutex;
 use uuid::Uuid;
 
@@ -66,76 +67,72 @@ impl AppState {
     }
 }
 
-/// Everything `DialogueManager::new` needs to be constructed
-/// per-command, plus the live `LearnerModel` that mutates across turns.
+/// The active session — wraps a long-lived `DialogueManager` plus the
+/// small chunk of display-only metadata commands need without locking
+/// the DM (so `current_session_info` doesn't block on an in-flight
+/// `send_message`).
 ///
-/// All trait objects are `Arc<dyn ...>` so a command can clone them out
-/// of the state guard, drop the guard, and run the (potentially slow)
-/// dialogue turn outside the mutex — preventing concurrent commands
-/// from blocking on each other unnecessarily.
+/// The DM owns all its collaborators (inference + knowledge as
+/// `Arc<dyn …>` since the Phase 0.3+ refactor; classifier / extractor
+/// / comprehension already were). Putting it behind an `Arc<Mutex<…>>`
+/// lets `send_message` clone the Arc and run its turn outside the
+/// session-state lock.
 pub struct ActiveSession {
-    /// Identifier of the underlying `Session` row in the session DB.
-    ///
-    /// `None` until the first `send_message` opens a `DialogueManager`
-    /// session (step 4). Returning `None` to the frontend is honest —
-    /// a pre-first-turn session has no id yet. An earlier draft used a
-    /// provisional `Uuid::new_v4()` here and overwrote it on first
-    /// turn, which silently invalidated any UUID the frontend cached.
-    pub session_id: Option<Uuid>,
+    /// The dialogue manager — owns the active `Session`, the loaded
+    /// `LearnerModel`, and every subsystem trait object the turn
+    /// needs. Long-lived across `send_message` calls so the previous
+    /// turn's background tasks are awaited at the top of the next
+    /// turn (CLI-style), not synchronously at end-of-turn.
+    pub dialogue_manager: Arc<Mutex<DialogueManager>>,
 
     /// The session's locale (matches the learner's stored locale and
-    /// the knowledge base's per-locale partition).
+    /// the knowledge base's per-locale partition). Kept outside the
+    /// DM mutex so `current_session_info` can read it without locking.
     pub locale: Locale,
 
-    /// The currently-loaded `LearnerModel`. Wrapped in a Mutex because
-    /// the dialogue turn mutates it (engagement state, concept depths,
-    /// vocab box transitions) and may run while other commands inspect
-    /// the snapshot for sidebar updates.
-    pub learner: Mutex<LearnerModel>,
-
-    pub backend: Arc<dyn InferenceBackend>,
-    /// Name string used by `primer-engine::build_*` dispatch. Held
-    /// alongside the Arc because `InferenceBackend::name()` cannot be
-    /// called through a borrow once the Arc is moved into a builder.
+    /// Display string for the inference backend kind (e.g. "cloud",
+    /// "ollama", "stub"). Kept outside the DM mutex so the frontend
+    /// header can render without contention.
     pub backend_name: String,
+
+    /// Display string for the main model id (e.g. "claude-sonnet-4-6",
+    /// "llama3.2"). Kept outside the DM mutex for the same reason.
     pub main_model: String,
 
-    pub knowledge: Arc<SqliteKnowledgeBase>,
+    /// Snapshot of the DM-owned fields the frontend reads via
+    /// `current_session_info`. Refreshed by `send_message` after each
+    /// successful turn so readers never have to lock the DM (and queue
+    /// behind an in-flight stream that can take tens of seconds).
+    pub snapshot: Arc<Mutex<SessionSnapshot>>,
+}
 
-    pub session_store: Arc<dyn SessionStore>,
-    pub learner_store: Arc<dyn LearnerStore>,
-
-    pub classifier: Arc<dyn EngagementClassifier>,
-    pub classifier_settings: ClassifierSettings,
-    pub extractor: Arc<dyn ConceptExtractor>,
-    pub extractor_settings: ExtractorSettings,
-    pub comprehension: Arc<dyn ComprehensionClassifier>,
-    pub comprehension_settings: ComprehensionSettings,
-
-    pub vocab_settings: VocabSettings,
-    pub embedder: Option<Arc<dyn Embedder>>,
-    pub pedagogy_config: PedagogyConfig,
+/// Read-mostly mirror of the DM-owned fields the frontend renders via
+/// `current_session_info`. Kept separate from the DM mutex so the
+/// sidebar can read while a turn is streaming. Refreshed by
+/// `send_message` after every successful turn.
+#[derive(Debug, Clone)]
+pub struct SessionSnapshot {
+    /// `None` until the first send_message completes — at that point
+    /// a real `Session` row exists on disk and the UUID can be
+    /// round-tripped through `load_session`.
+    pub session_id: Option<Uuid>,
+    /// Stable learner UUID; written once at construction.
+    pub learner_id: Uuid,
+    /// Learner display name from the resolved profile.
+    pub learner_name: String,
+    /// Learner age from the resolved profile.
+    pub learner_age: u8,
+    /// Concept count from the in-memory learner model. Grows as the
+    /// extractor surfaces new concepts; refreshed at each turn boundary.
+    pub concept_count: usize,
 }
 
 impl std::fmt::Debug for ActiveSession {
-    /// Print trait-object identities (via `Named::name()` where
-    /// available) instead of the objects themselves — none of them
-    /// implement `Debug`, but tests want `.unwrap_err()` to work and
-    /// printing the wiring summary is more useful than a `<dyn …>`
-    /// placeholder anyway.
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("ActiveSession")
-            .field("session_id", &self.session_id)
             .field("locale", &self.locale)
             .field("backend_name", &self.backend_name)
             .field("main_model", &self.main_model)
-            .field("classifier", &self.classifier.identifier())
-            .field("extractor", &self.extractor.identifier())
-            .field("comprehension", &self.comprehension.identifier())
-            .field(
-                "embedder",
-                &self.embedder.as_ref().map(|e| e.name().to_string()),
-            )
             .finish_non_exhaustive()
     }
 }
