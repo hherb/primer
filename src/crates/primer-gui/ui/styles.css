@@ -322,6 +322,33 @@ body.sidebar-collapsed {
   opacity: 0.55;
 }
 
+/* Send button doubles as Cancel while a turn streams. A red-orange
+   tint is the standard "destructive/abort" affordance and is clearly
+   distinct from the accent-coloured Send state so the user can see
+   the role swap at a glance. */
+#send.is-cancel {
+  background: #dc2626;
+  color: #fff;
+}
+
+#send.is-cancel:hover:not(:disabled) {
+  background: #b91c1c;
+}
+
+@media (prefers-color-scheme: dark) {
+  #send.is-cancel {
+    background: #ef4444;
+  }
+  #send.is-cancel:hover:not(:disabled) {
+    background: #dc2626;
+  }
+}
+
+.header-btn:disabled {
+  cursor: not-allowed;
+  opacity: 0.5;
+}
+
 /* ─── Sidebar toggle button ─────────────────────────────────────── */
 
 .sidebar-toggle {

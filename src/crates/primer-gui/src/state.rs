@@ -34,6 +34,7 @@ use primer_core::i18n::Locale;
 use primer_core::storage::SessionStore;
 use primer_pedagogy::DialogueManager;
 use tokio::sync::Mutex;
+use tokio::task::AbortHandle;
 use uuid::Uuid;
 
 use crate::config::GuiConfig;
@@ -112,6 +113,14 @@ pub struct ActiveSession {
     /// `load_session`, and we don't want to re-open the SQLite file
     /// just to read one row.
     pub session_store: Arc<dyn SessionStore>,
+
+    /// Abort handle for the in-flight turn, if any. `send_message`
+    /// spawns the turn into a dedicated tokio task and stashes its
+    /// abort handle here; `cancel_response` calls `.abort()` on it to
+    /// drop the in-progress stream. The DM's existing "partial Primer
+    /// turn is not recorded on mid-stream error" invariant cleans up
+    /// the state correctly when the spawned future is dropped.
+    pub current_turn_abort: Mutex<Option<AbortHandle>>,
 }
 
 /// Read-mostly mirror of the DM-owned fields the frontend renders via

@@ -282,6 +282,7 @@ pub async fn build_active_session(
         backend_name: backend_config.kind.clone(),
         main_model,
         session_store: Arc::clone(&session_store) as _,
+        current_turn_abort: Mutex::new(None),
     })
 }
 

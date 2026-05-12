@@ -24,6 +24,7 @@ const dom = {
   send: document.getElementById("send"),
   sidebarToggle: document.getElementById("sidebar-toggle"),
   settingsOpen: document.getElementById("settings-open"),
+  switchSession: document.getElementById("switch-session"),
   signals: {
     empty: document.getElementById("sidebar-empty"),
     lagHint: document.getElementById("signals-lag-hint"),
@@ -69,12 +70,24 @@ const dom = {
 /// Maximum filled box dots — matches MAX_BOX_LEVEL in primer_core::vocab.
 const MAX_BOX_LEVEL = 4;
 
+/// Sentinel returned by `send_message` when the user clicked the
+/// Cancel button mid-stream. Matches the `CANCELLED_MESSAGE` const in
+/// `commands/session.rs` — if that string ever changes, this constant
+/// must move in lockstep or the frontend will surface "Turn cancelled
+/// by user." as if it were a real error.
+const CANCEL_SENTINEL = "Turn cancelled by user.";
+
 // Live state — `streamingPrimerEl` points at the currently-streaming
 // Primer bubble (if any) so chunk events can append to its text node
 // without re-querying the DOM.
 const state = {
   sessionId: null,
   streamingPrimerEl: null,
+  /// `true` while a `send_message` invocation is in flight. Drives the
+  /// Send button's Send⇄Cancel label swap and lets the form submit
+  /// handler route a click to `cancel_response` instead of starting a
+  /// second turn while the first is still streaming.
+  isStreaming: false,
   /// Next zero-based turn index in the session timeline. Grows by 2
   /// per successful exchange (child + primer) and rolls back by 1 on a
   /// mid-stream error (the dropped Primer turn — see CLAUDE.md
@@ -98,13 +111,47 @@ async function main() {
   setupSidebarToggle();
   setupUuidCopy();
   setupSettingsButton();
-  // No auto-start anymore — show the picker and let the user pick
-  // (resume a past session) or click Start new (settings modal →
-  // save & start a fresh session).
-  await window.PrimerPicker.show({
+  setupSwitchSessionButton();
+  showPicker();
+}
+
+/// Open (or re-open) the launch-screen picker. The picker manages its
+/// own lifecycle — it hides itself on resolution and the callbacks
+/// drive the chat shell into the right state.
+function showPicker() {
+  window.PrimerPicker.show({
     onResumed: (info) => handleSessionReady({ info, shouldReplay: true }),
     onStarted: () => handleSessionReady({ info: null, shouldReplay: false }),
   });
+}
+
+function setupSwitchSessionButton() {
+  dom.switchSession.addEventListener("click", onSwitchSession);
+}
+
+/// Tear down the active session and return to the picker. Used by the
+/// header's "Sessions" button. We close the session server-side first
+/// so its background tasks drain cleanly, then wipe the chat surface
+/// before showing the picker — leaving stale bubbles up while the
+/// picker opens would feel like the previous session was still live.
+///
+/// `close_session` is idempotent and silently succeeds with no active
+/// session, so a stray click is harmless.
+async function onSwitchSession() {
+  try {
+    await invoke("close_session");
+  } catch (err) {
+    console.warn("close_session failed:", err);
+  }
+  resetChatSurface();
+  resetSessionHeader();
+  setComposerState("disabled");
+  showPicker();
+}
+
+function resetSessionHeader() {
+  dom.sessionInfo.dataset.state = "loading";
+  dom.sessionInfo.innerHTML = `<span class="muted">No session</span>`;
 }
 
 function setupSettingsButton() {
@@ -153,7 +200,11 @@ async function handleSessionReady({ info, shouldReplay }) {
     }
   }
 
-  enableComposer();
+  setComposerState("idle");
+  // Header "Sessions" button is gated on having an active session —
+  // the picker should only be re-reachable once one exists, otherwise
+  // clicking it does nothing visible.
+  dom.switchSession.disabled = false;
   refreshSidebar();
 }
 
@@ -221,15 +272,48 @@ function renderSessionInfo(info) {
   `;
 }
 
-function enableComposer() {
-  dom.input.disabled = false;
-  dom.send.disabled = false;
-  dom.input.focus();
-}
-
-function disableComposer() {
-  dom.input.disabled = true;
-  dom.send.disabled = true;
+/// Drive the composer's three-state UI from a single function so the
+/// Send/Cancel toggle stays in lockstep with input enabled-ness.
+///
+/// - `disabled`: pre-session — both input and send button are inert.
+///   Used between launch and the first session, and after the user
+///   clicks the Sessions button to return to the picker.
+/// - `idle`: a session is ready, no turn in flight — input is
+///   editable, Send button posts the typed message.
+/// - `streaming`: a turn is in flight — input is locked (can't queue
+///   a second turn), Send button shows "Cancel" and dispatches
+///   `cancel_response` on click.
+///
+/// Also flips `state.isStreaming` so the form submit handler can
+/// route between submit-new and cancel-current paths.
+function setComposerState(mode) {
+  switch (mode) {
+    case "disabled":
+      dom.input.disabled = true;
+      dom.send.disabled = true;
+      dom.send.textContent = "Send";
+      dom.send.classList.remove("is-cancel");
+      state.isStreaming = false;
+      break;
+    case "idle":
+      dom.input.disabled = false;
+      dom.send.disabled = false;
+      dom.send.textContent = "Send";
+      dom.send.classList.remove("is-cancel");
+      state.isStreaming = false;
+      dom.input.focus();
+      break;
+    case "streaming":
+      dom.input.disabled = true;
+      // Send stays clickable so the user can cancel.
+      dom.send.disabled = false;
+      dom.send.textContent = "Cancel";
+      dom.send.classList.add("is-cancel");
+      state.isStreaming = true;
+      break;
+    default:
+      console.warn("setComposerState: unknown mode", mode);
+  }
 }
 
 function setupComposer() {
@@ -253,6 +337,15 @@ function setupAutogrow() {
 
 async function onSubmit(e) {
   e.preventDefault();
+  // The Send button doubles as Cancel during a streaming turn. Route
+  // the click here rather than wiring a second listener so the form's
+  // Enter-key submit (if a future change re-enables the textarea
+  // mid-stream) still hits the same dispatch.
+  if (state.isStreaming) {
+    onCancel();
+    return;
+  }
+
   const text = dom.input.value.trim();
   if (!text || dom.send.disabled) return;
 
@@ -262,7 +355,7 @@ async function onSubmit(e) {
   state.streamingPrimerEl = appendStreamingPrimerBubble();
   dom.input.value = "";
   dom.input.style.height = "auto";
-  disableComposer();
+  setComposerState("streaming");
 
   try {
     await invoke("send_message", { input: text });
@@ -270,12 +363,39 @@ async function onSubmit(e) {
     // re-enable the composer; nothing to do here on success.
   } catch (err) {
     finaliseStreamingBubble({ aborted: true });
-    showError(formatErr(err));
-    enableComposer();
+    // User-initiated cancellation isn't an error the user needs to
+    // see acknowledged — they clicked the button, the partial bubble
+    // already disappeared as confirmation. A toast would be noise.
+    if (formatErr(err) !== CANCEL_SENTINEL) {
+      showError(formatErr(err));
+    }
+    setComposerState("idle");
     // Backend kept the child turn even on mid-stream failure; refresh
     // the sidebar so the Session list reflects it. turn_complete never
     // fired, so the standard refresh path didn't run.
     refreshSidebar();
+  }
+}
+
+/// Best-effort cancel of the in-flight turn. The actual UI cleanup
+/// (drop the streaming bubble, re-enable input) happens in the
+/// `onSubmit` catch branch when `send_message` returns the
+/// [`CANCEL_SENTINEL`] error — keeping the cleanup in one place
+/// avoids racing the backend's abort path. The button briefly disables
+/// here so a rapid double-click doesn't fire two cancel_response
+/// commands (the second would be a no-op but the visual flash looks
+/// glitchy).
+async function onCancel() {
+  dom.send.disabled = true;
+  try {
+    await invoke("cancel_response");
+  } catch (err) {
+    console.warn("cancel_response failed:", err);
+  } finally {
+    // Re-enable so the user can click again if the backend didn't
+    // actually abort (shouldn't happen, but the button shouldn't
+    // become permanently stuck if it does).
+    dom.send.disabled = false;
   }
 }
 
@@ -298,7 +418,7 @@ function setupTurnCompleteListener() {
   listen("primer://turn_complete", (event) => {
     state.sessionId = event.payload.session_id;
     finaliseStreamingBubble({ aborted: false });
-    enableComposer();
+    setComposerState("idle");
     // Fire-and-forget — sidebar updates are non-critical; a failure
     // here shouldn't deny the user the chat surface.
     refreshSidebar();
