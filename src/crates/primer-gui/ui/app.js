@@ -9,7 +9,10 @@
 // Tauri 2 exposes `invoke` / `listen` on `window.__TAURI__` because
 // `app.withGlobalTauri = true` is set in tauri.conf.json — no npm
 // toolchain needed.
-
+//
+// IIFE wrap: see picker.js header — top-level `const invoke` collides
+// across classic scripts otherwise.
+(() => {
 const { invoke } = window.__TAURI__.core;
 const { listen } = window.__TAURI__.event;
 
@@ -954,3 +957,5 @@ function escapeHtml(s) {
     .replace(/"/g, "&quot;")
     .replace(/'/g, "&#39;");
 }
+
+})();
