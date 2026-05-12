@@ -14,6 +14,7 @@ const { invoke } = window.__TAURI__.core;
 const { listen } = window.__TAURI__.event;
 
 const dom = {
+  body: document.body,
   sessionInfo: document.getElementById("session-info"),
   chatScroll: document.getElementById("chat-scroll"),
   emptyState: document.getElementById("empty-state"),
@@ -21,6 +22,26 @@ const dom = {
   composer: document.getElementById("composer"),
   input: document.getElementById("input"),
   send: document.getElementById("send"),
+  sidebarToggle: document.getElementById("sidebar-toggle"),
+  signals: {
+    empty: document.getElementById("sidebar-empty"),
+    lagHint: document.getElementById("signals-lag-hint"),
+    intentCard: document.getElementById("signals-intent-card"),
+    intentBadge: document.getElementById("signals-intent-badge"),
+    engagementCard: document.getElementById("signals-engagement-card"),
+    engagementState: document.getElementById("signals-engagement-state"),
+    engagementFill: document.getElementById("signals-engagement-fill"),
+    engagementValue: document.getElementById("signals-engagement-value"),
+    engagementReasoning: document.getElementById("signals-engagement-reasoning"),
+    engagementModel: document.getElementById("signals-engagement-model"),
+    conceptsCard: document.getElementById("signals-concepts-card"),
+    conceptsChild: document.getElementById("signals-concepts-child"),
+    conceptsPrimer: document.getElementById("signals-concepts-primer"),
+    extractorModel: document.getElementById("signals-extractor-model"),
+    comprehensionCard: document.getElementById("signals-comprehension-card"),
+    comprehensionList: document.getElementById("signals-comprehension-list"),
+    comprehensionModel: document.getElementById("signals-comprehension-model"),
+  },
 };
 
 // Live state — `streamingPrimerEl` points at the currently-streaming
@@ -38,7 +59,11 @@ async function main() {
   setupTurnCompleteListener();
   setupComposer();
   setupAutogrow();
+  setupSidebarToggle();
   await openOrStartSession();
+  // Render whatever's already on the DM (resumed sessions land here
+  // with populated last_* accessors); first-launch shows the empty state.
+  refreshSignals();
 }
 
 async function openOrStartSession() {
@@ -145,7 +170,147 @@ function setupTurnCompleteListener() {
     state.sessionId = event.payload.session_id;
     finaliseStreamingBubble({ aborted: false });
     enableComposer();
+    // Fire-and-forget — sidebar updates are non-critical; a failure
+    // here shouldn't deny the user the chat surface.
+    refreshSignals();
   });
+}
+
+function setupSidebarToggle() {
+  dom.sidebarToggle.addEventListener("click", () => {
+    const collapsed = dom.body.classList.toggle("sidebar-collapsed");
+    dom.sidebarToggle.setAttribute("aria-pressed", String(!collapsed));
+  });
+}
+
+async function refreshSignals() {
+  try {
+    const signals = await invoke("get_turn_signals");
+    renderSignals(signals);
+  } catch (err) {
+    // Sidebar errors are non-critical — log but don't surface.
+    console.warn("get_turn_signals failed:", err);
+  }
+}
+
+function renderSignals(signals) {
+  if (!signals) {
+    showSignalsEmpty();
+    return;
+  }
+  const s = dom.signals;
+
+  // The sidebar has SOMETHING to render once any field is populated.
+  // Even on turn 1 we get intent + identifier strings; the lag-hint
+  // appears once the engagement/concepts/comprehension cards do.
+  const anyLagged =
+    signals.engagement ||
+    (signals.concepts && (signals.concepts.child?.length || signals.concepts.primer?.length)) ||
+    (signals.comprehension && signals.comprehension.length > 0);
+  s.empty.hidden = !!(signals.intent || anyLagged);
+  s.lagHint.hidden = !anyLagged;
+
+  // Intent
+  if (signals.intent) {
+    s.intentCard.hidden = false;
+    s.intentBadge.textContent = signals.intent;
+  } else {
+    s.intentCard.hidden = true;
+  }
+
+  // Engagement
+  if (signals.engagement) {
+    s.engagementCard.hidden = false;
+    s.engagementState.textContent = signals.engagement.state;
+    const pct = Math.round((signals.engagement.confidence ?? 0) * 100);
+    s.engagementFill.style.width = `${pct}%`;
+    s.engagementValue.textContent = `${pct}%`;
+    if (signals.engagement.reasoning) {
+      s.engagementReasoning.hidden = false;
+      s.engagementReasoning.textContent = `“${signals.engagement.reasoning}”`;
+    } else {
+      s.engagementReasoning.hidden = true;
+      s.engagementReasoning.textContent = "";
+    }
+    s.engagementModel.textContent = signals.classifier_identifier
+      ? `via ${signals.classifier_identifier}`
+      : "";
+  } else {
+    s.engagementCard.hidden = true;
+  }
+
+  // Concepts
+  const child = signals.concepts?.child ?? [];
+  const primer = signals.concepts?.primer ?? [];
+  if (child.length || primer.length) {
+    s.conceptsCard.hidden = false;
+    renderChips(s.conceptsChild, child);
+    renderChips(s.conceptsPrimer, primer);
+    s.extractorModel.textContent = signals.extractor_identifier
+      ? `via ${signals.extractor_identifier}`
+      : "";
+  } else {
+    s.conceptsCard.hidden = true;
+  }
+
+  // Comprehension
+  const assessments = signals.comprehension ?? [];
+  if (assessments.length) {
+    s.comprehensionCard.hidden = false;
+    s.comprehensionList.replaceChildren(
+      ...assessments.map(renderComprehensionItem),
+    );
+    s.comprehensionModel.textContent = signals.comprehension_identifier
+      ? `via ${signals.comprehension_identifier}`
+      : "";
+  } else {
+    s.comprehensionCard.hidden = true;
+  }
+}
+
+function showSignalsEmpty() {
+  const s = dom.signals;
+  s.empty.hidden = false;
+  s.lagHint.hidden = true;
+  s.intentCard.hidden = true;
+  s.engagementCard.hidden = true;
+  s.conceptsCard.hidden = true;
+  s.comprehensionCard.hidden = true;
+}
+
+function renderChips(ulEl, items) {
+  ulEl.replaceChildren();
+  if (!items.length) {
+    const li = document.createElement("li");
+    li.className = "placeholder";
+    li.textContent = "—";
+    ulEl.appendChild(li);
+    return;
+  }
+  for (const item of items) {
+    const li = document.createElement("li");
+    li.textContent = item;
+    ulEl.appendChild(li);
+  }
+}
+
+function renderComprehensionItem(a) {
+  const li = document.createElement("li");
+  const concept = document.createElement("span");
+  concept.textContent = a.concept;
+  const pill = document.createElement("span");
+  pill.className = "depth-pill";
+  pill.dataset.depth = String(a.depth || "").toLowerCase();
+  pill.textContent = a.depth;
+  const pct = Math.round((a.confidence ?? 0) * 100);
+  const conf = document.createElement("span");
+  conf.className = "muted";
+  conf.textContent = `${pct}%`;
+  conf.title = a.evidence ? `“${a.evidence}”` : "";
+  li.appendChild(concept);
+  li.appendChild(pill);
+  li.appendChild(conf);
+  return li;
 }
 
 function appendChildBubble(text) {
