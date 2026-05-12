@@ -22,5 +22,6 @@ pub fn register(builder: tauri::Builder<Wry>) -> tauri::Builder<Wry> {
         session::start_session,
         session::close_session,
         session::current_session_info,
+        session::send_message,
     ])
 }
