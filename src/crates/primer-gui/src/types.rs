@@ -241,8 +241,9 @@ pub struct SessionTurnSummary {
     /// Zero-based index in the session's turn timeline. Matches
     /// [`TurnComplete::child_turn_index`] / `primer_turn_index`.
     pub index: usize,
-    /// `Speaker::name()` — `"child"` or `"primer"`. The frontend lowercases
-    /// for a `data-speaker` selector; keep in sync with [`primer_core::conversation::Speaker::name`].
+    /// Stable lowercase identifier — `"child"` or `"primer"` — produced
+    /// by `commands::session::speaker_name`. Used directly as a
+    /// `[data-speaker=…]` selector hook on the frontend; do not rename.
     pub speaker: String,
     /// Truncated turn text — server-side cap matches the sidebar's
     /// visual budget for an at-a-glance scan. The full text is in the

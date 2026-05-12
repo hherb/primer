@@ -75,10 +75,16 @@ const state = {
   sessionId: null,
   streamingPrimerEl: null,
   /// Next zero-based turn index in the session timeline. Grows by 2
-  /// per exchange (child + primer). Used to tag bubble DOM elements
-  /// with `data-turn-index` so the Session sidebar's click-to-scroll
-  /// can address them in O(1).
+  /// per successful exchange (child + primer) and rolls back by 1 on a
+  /// mid-stream error (the dropped Primer turn — see CLAUDE.md
+  /// "the partial Primer turn is not recorded into the session"). Used
+  /// to tag bubble DOM elements with `data-turn-index` so the Session
+  /// sidebar's click-to-scroll can address them in O(1).
   nextTurnIndex: 0,
+  /// setTimeout id for the spotlight-clear on click-to-scroll. Tracked
+  /// so a second click within the highlight window cancels the prior
+  /// timeout instead of letting it strip the new target's highlight.
+  spotlightTimer: null,
 };
 
 main();
@@ -177,6 +183,10 @@ async function onSubmit(e) {
     finaliseStreamingBubble({ aborted: true });
     showError(formatErr(err));
     enableComposer();
+    // Backend kept the child turn even on mid-stream failure; refresh
+    // the sidebar so the Session list reflects it. turn_complete never
+    // fired, so the standard refresh path didn't run.
+    refreshSidebar();
   }
 }
 
@@ -276,7 +286,10 @@ function renderTurnRow(turn) {
   btn.type = "button";
   btn.className = "turn-row";
   btn.dataset.turnIndex = String(turn.index);
-  btn.dataset.speaker = String(turn.speaker || "").toLowerCase();
+  // Backend serialises `Speaker` as lowercase `"child"` / `"primer"`
+  // via `speaker_name` in commands/session.rs — used as a `[data-speaker=…]`
+  // selector hook in styles.css.
+  btn.dataset.speaker = turn.speaker;
   btn.setAttribute(
     "aria-label",
     `Turn ${turn.index + 1}, ${turn.speaker}: ${turn.text_preview}`,
@@ -302,7 +315,7 @@ function renderTurnRow(turn) {
   previewEl.appendChild(textEl);
 
   const intent = turn.intent;
-  const conceptCount = Array.isArray(turn.concepts) ? turn.concepts.length : 0;
+  const conceptCount = turn.concepts.length;
   if (intent || conceptCount > 0) {
     const meta = document.createElement("span");
     meta.className = "turn-meta";
@@ -332,16 +345,30 @@ function renderTurnRow(turn) {
 
 /// Scroll the main chat scroll area to the bubble matching the given
 /// turn index, then briefly outline it so the user can find it. The
-/// bubbles are tagged at append-time with `data-turn-index`; this is
-/// a direct DOM query, no per-row event-listener bookkeeping needed.
+/// bubbles carry `data-turn-index` from append-time (with a roll-back
+/// path on mid-stream error so indices stay aligned with the backend's
+/// session turns); this is a direct DOM query, no per-row
+/// event-listener bookkeeping needed.
 function scrollChatToTurn(index) {
   const row = dom.chatScroll.querySelector(
     `.bubble-row[data-turn-index="${index}"]`,
   );
   if (!row) return;
   row.scrollIntoView({ behavior: "smooth", block: "center" });
+  // Cancel any in-flight spotlight before scheduling this one so a
+  // rapid click sequence within the 1.6 s highlight window doesn't
+  // let an earlier timeout strip the new target's highlight.
+  if (state.spotlightTimer !== null) {
+    clearTimeout(state.spotlightTimer);
+    dom.chatScroll
+      .querySelectorAll(".bubble-row.is-spotlight")
+      .forEach((r) => r.classList.remove("is-spotlight"));
+  }
   row.classList.add("is-spotlight");
-  setTimeout(() => row.classList.remove("is-spotlight"), 1600);
+  state.spotlightTimer = setTimeout(() => {
+    row.classList.remove("is-spotlight");
+    state.spotlightTimer = null;
+  }, 1600);
 }
 
 function renderSignals(signals) {
@@ -649,11 +676,24 @@ function finaliseStreamingBubble({ aborted }) {
   const el = state.streamingPrimerEl;
   if (!el) return;
   el.classList.remove("is-streaming");
-  if (aborted && el.textContent.trim() === "") {
-    // Empty-aborted: drop the placeholder rather than leaving a blank
-    // Primer bubble. Matches DM's "partial Primer turn dropped on
-    // mid-stream error" semantic.
-    el.parentElement?.remove();
+  if (aborted) {
+    // The partial Primer turn is never persisted (CLAUDE.md: "On a
+    // mid-stream error, the partial Primer turn is not recorded into
+    // the session"). Roll back the index we provisionally claimed in
+    // `appendStreamingPrimerBubble` so the next exchange's bubbles
+    // realign with backend `session.turns` indices; otherwise the
+    // Session-sidebar click-to-scroll would target the wrong bubble.
+    state.nextTurnIndex -= 1;
+    if (el.textContent.trim() === "") {
+      // Empty-aborted: drop the placeholder entirely.
+      el.parentElement?.remove();
+    } else {
+      // Non-empty partial: keep the visible text (the child saw it)
+      // but strip its data-turn-index — there's no backend turn for
+      // this bubble to be addressed by, and leaving the attribute on
+      // would collide with the next exchange's primer bubble.
+      el.parentElement?.removeAttribute("data-turn-index");
+    }
   }
   state.streamingPrimerEl = null;
 }

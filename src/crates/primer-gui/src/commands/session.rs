@@ -209,9 +209,13 @@ pub(crate) fn read_turn_list(dm: &DialogueManager) -> Vec<SessionTurnSummary> {
 
 /// Canonical lowercase name for a `Speaker`. Mirrors the
 /// `EngagementState::name()` / `PedagogicalIntent::name()` convention
-/// used elsewhere in this crate so the frontend can lowercase the
-/// returned string for a `data-speaker` selector.
-fn speaker_name(s: primer_core::conversation::Speaker) -> &'static str {
+/// used elsewhere in this crate. The returned string flows out to the
+/// frontend via [`SessionTurnSummary::speaker`] and is consumed as a
+/// `[data-speaker=…]` selector hook; do not rename.
+///
+/// `Speaker` itself has no `name()` method (only `ALL`) so this helper
+/// lives here rather than on the core enum.
+pub(crate) fn speaker_name(s: primer_core::conversation::Speaker) -> &'static str {
     match s {
         primer_core::conversation::Speaker::Child => "child",
         primer_core::conversation::Speaker::Primer => "primer",
