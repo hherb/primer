@@ -261,6 +261,13 @@ impl SqliteSessionStore {
         use primer_core::conversation::SessionListing;
 
         let conn = self.conn.lock().unwrap();
+        // LEFT JOIN keeps turn-less sessions in the result set; the
+        // GROUP BY collapses each session's turn rows so COUNT/MAX
+        // aggregate over them. COALESCE(MAX(timestamp), started_at)
+        // serves double duty as both the `last_activity` value and the
+        // ORDER-BY key so a freshly-opened session that never received
+        // a turn still places by its started_at rather than sorting
+        // to the bottom on NULL.
         let mut stmt = conn
             .prepare(
                 "SELECT s.id, s.learner_id, s.started_at, s.ended_at, s.summary,
@@ -312,13 +319,21 @@ impl SqliteSessionStore {
                 Some(s) => parse_rfc3339(&s, "turns.timestamp")?,
                 None => started_at,
             };
+            // COUNT(*) cannot return a negative value in practice;
+            // try_from rejects the impossible-but-cheap-to-check
+            // i64::MIN..0 range loudly rather than silently wrapping.
+            let turn_count = usize::try_from(turn_count).map_err(|_| {
+                PrimerError::Storage(format!(
+                    "list_sessions: COUNT(t.id) returned out-of-range {turn_count}"
+                ))
+            })?;
             out.push(SessionListing {
                 id,
                 learner_id,
                 started_at,
                 ended_at,
                 last_activity,
-                turn_count: turn_count as usize,
+                turn_count,
                 summary,
             });
         }

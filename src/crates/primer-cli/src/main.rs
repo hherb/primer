@@ -53,7 +53,7 @@ struct Cli {
     ollama_url: String,
 
     /// Child's name (for the learner profile).
-    #[arg(long, default_value = "Explorer")]
+    #[arg(long, default_value = primer_core::consts::learner::DEFAULT_NAME)]
     name: String,
 
     /// Child's age in years.

@@ -13,6 +13,12 @@
 
 const { invoke } = window.__TAURI__.core;
 
+// Default placeholder name a fresh learner profile carries until the
+// user supplies their own. Mirrors `primer_core::consts::learner::DEFAULT_NAME`
+// — keep in sync when changing. Used to suppress the personalised
+// "Welcome back, {name}" greeting for unconfigured installs.
+const DEFAULT_LEARNER_NAME = "Explorer";
+
 const dom = {
   screen: document.getElementById("picker-screen"),
   title: document.getElementById("picker-title"),
@@ -38,6 +44,9 @@ const state = {
 wireFooterButtons();
 window.PrimerPicker = { show, hide };
 
+/// Show the picker overlay. Re-fetches the session list every call so
+/// "what's on screen" stays trivially aligned with disk. Callbacks
+/// are stored on `state` and fired once the user picks an action.
 async function show({ onResumed, onStarted } = {}) {
   state.onResumed = onResumed ?? null;
   state.onStarted = onStarted ?? null;
@@ -46,6 +55,9 @@ async function show({ onResumed, onStarted } = {}) {
   await refresh();
 }
 
+/// Hide the picker overlay without resetting state. Callers that want
+/// to surface the picker again (future: switch-session-from-chat) just
+/// call show() — the next refresh() will re-fetch from disk.
 function hide() {
   dom.screen.hidden = true;
 }
@@ -63,22 +75,37 @@ function showError(msg) {
   dom.loading.hidden = true;
 }
 
+/// Reload the picker contents from disk + settings. Public-ish: called
+/// internally by show() and after a failed resume attempt to repaint
+/// the list. Independent error handling per fetch — see comment below.
 async function refresh() {
-  try {
-    const [sessions, settings] = await Promise.all([
-      invoke("list_sessions"),
-      invoke("get_settings"),
-    ]);
-    applyHeader(settings);
-    renderSessions(sessions ?? []);
-  } catch (err) {
-    showError(`Couldn't load sessions: ${formatErr(err)}`);
+  // Fetch both in parallel but keep error reporting independent —
+  // a settings-load failure shouldn't masquerade as a sessions-load
+  // error, since the picker can still render its list with the
+  // generic "Welcome to Primer" header while the settings round-trip
+  // is broken.
+  const [sessionsResult, settingsResult] = await Promise.allSettled([
+    invoke("list_sessions"),
+    invoke("get_settings"),
+  ]);
+
+  if (settingsResult.status === "fulfilled") {
+    applyHeader(settingsResult.value);
+  } else {
+    console.warn("get_settings failed:", settingsResult.reason);
+    applyHeader(null);
+  }
+
+  if (sessionsResult.status === "fulfilled") {
+    renderSessions(sessionsResult.value ?? []);
+  } else {
+    showError(`Couldn't load sessions: ${formatErr(sessionsResult.reason)}`);
   }
 }
 
 function applyHeader(settings) {
   const name = settings?.learner?.name?.trim();
-  if (name && name !== "Explorer") {
+  if (name && name !== DEFAULT_LEARNER_NAME) {
     dom.title.textContent = `Welcome back, ${name}`;
     dom.subtitle.textContent = "Pick up where you left off, or start fresh.";
   } else {
@@ -142,6 +169,10 @@ function renderRow(s) {
   return li;
 }
 
+/// Resume a session by id. Disables UI for the duration so a fast
+/// second click can't fire a parallel resume_session, then hands the
+/// returned SessionInfo to `state.onResumed`. On failure repaints the
+/// list (in case disk state changed) and surfaces the error inline.
 async function resume(sessionId) {
   // Disable every row + footer button so the user can't fire a
   // second resume_session while the first is still constructing.
