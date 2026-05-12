@@ -18,6 +18,7 @@ use crate::config::GuiConfig;
 /// Run validation and return an inline-friendly error message on the
 /// first failure, or `Ok(())` if the config is structurally sound.
 pub fn validate(cfg: &GuiConfig) -> Result<(), String> {
+    validate_learner(&cfg.learner)?;
     validate_locale(&cfg.learner.locale)?;
     validate_backend(&cfg.backend.kind)?;
     // `match_main = true` causes the wiring code to ignore `kind`, so
@@ -28,6 +29,21 @@ pub fn validate(cfg: &GuiConfig) -> Result<(), String> {
     validate_subsystem_kind("comprehension", subsystem_override(&cfg.comprehension))?;
     validate_embedder(&cfg.embedder.kind)?;
     validate_breaks(cfg.breaks.after_mins)?;
+    Ok(())
+}
+
+/// Learner profile guards. An empty (or whitespace-only) name would
+/// otherwise slug to `""` at session-start time, producing a `.db`
+/// filename of `.db` — a real filesystem edge case worth blocking at
+/// the modal rather than at first send. Age 0 is similarly meaningless
+/// for a learner profile and would produce a confusing system prompt.
+fn validate_learner(learner: &crate::config::LearnerConfig) -> Result<(), String> {
+    if learner.name.trim().is_empty() {
+        return Err("Learner name is required.".to_string());
+    }
+    if learner.age == 0 {
+        return Err("Learner age must be at least 1.".to_string());
+    }
     Ok(())
 }
 
@@ -150,5 +166,29 @@ mod tests {
         cfg.breaks.after_mins = 0;
         let err = validate(&cfg).unwrap_err();
         assert!(err.contains("1 minute"));
+    }
+
+    #[test]
+    fn empty_learner_name_rejected() {
+        let mut cfg = GuiConfig::default();
+        cfg.learner.name = String::new();
+        let err = validate(&cfg).unwrap_err();
+        assert!(err.contains("name"), "error must mention the field: {err}");
+    }
+
+    #[test]
+    fn whitespace_only_learner_name_rejected() {
+        let mut cfg = GuiConfig::default();
+        cfg.learner.name = "   ".to_string();
+        let err = validate(&cfg).unwrap_err();
+        assert!(err.contains("name"));
+    }
+
+    #[test]
+    fn zero_learner_age_rejected() {
+        let mut cfg = GuiConfig::default();
+        cfg.learner.age = 0;
+        let err = validate(&cfg).unwrap_err();
+        assert!(err.contains("age"), "error must mention the field: {err}");
     }
 }
