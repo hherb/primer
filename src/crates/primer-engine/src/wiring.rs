@@ -289,14 +289,22 @@ pub async fn build_comprehension(
     }
 }
 
-/// Construct a fastembed-rs-backed `Embedder`. Returns `None` and emits
-/// a stderr error when the `embedding` cargo feature is not compiled
-/// in or when fastembed init fails. Failure is *not* fatal — the
-/// caller falls back to BM25-only retrieval.
+/// Construct a fastembed-rs-backed `Embedder`.
+///
+/// Return-value semantics:
+/// - `Ok(Some(arc))` — feature compiled in AND init succeeded.
+/// - `Ok(None)` — feature compiled in but init failed (e.g. model
+///   download failed). Caller falls back to BM25-only retrieval; a
+///   warning is emitted to stderr so a CLI user sees it.
+/// - `Err(msg)` — feature not compiled in. The user explicitly asked
+///   for fastembed; surfacing this as an error lets the binary decide
+///   whether to exit (CLI) or render it inline (GUI). Earlier
+///   versions called `std::process::exit(1)` here which is hostile to
+///   any caller that isn't a CLI — never re-introduce that.
 #[cfg(feature = "embedding")]
 pub fn build_fastembed_embedder(
     model: Option<&str>,
-) -> Option<Arc<dyn primer_core::embedder::Embedder>> {
+) -> std::result::Result<Option<Arc<dyn primer_core::embedder::Embedder>>, String> {
     use primer_embedding::FastEmbedBackend;
     let m = model.unwrap_or(primer_embedding::BGE_M3_MODEL_ID);
     if m != primer_embedding::BGE_M3_MODEL_ID {
@@ -308,10 +316,10 @@ pub fn build_fastembed_embedder(
         "Loading fastembed model {m}; first run downloads ~570 MB into ~/.cache/primer/models/."
     );
     match FastEmbedBackend::new() {
-        Ok(b) => Some(Arc::new(b) as _),
+        Ok(b) => Ok(Some(Arc::new(b) as _)),
         Err(e) => {
             eprintln!("fastembed init failed ({e}); falling back to BM25-only retrieval.");
-            None
+            Ok(None)
         }
     }
 }
@@ -319,30 +327,30 @@ pub fn build_fastembed_embedder(
 #[cfg(not(feature = "embedding"))]
 pub fn build_fastembed_embedder(
     _model: Option<&str>,
-) -> Option<Arc<dyn primer_core::embedder::Embedder>> {
-    eprintln!(
-        "Error: --embedder-backend fastembed requires the `embedding` cargo feature. \
-         Build with `cargo run --features primer-cli/embedding -- ...` (or use --embedder-backend none)."
-    );
-    std::process::exit(1);
+) -> std::result::Result<Option<Arc<dyn primer_core::embedder::Embedder>>, String> {
+    Err(
+        "fastembed embedder requires the `embedding` cargo feature. \
+         Build with `cargo run --features primer-cli/embedding -- ...` (or use embedder = none)."
+            .to_string(),
+    )
 }
 
 #[cfg(feature = "ollama-embedding")]
 pub async fn build_ollama_embedder(
     url: Option<&str>,
     model: Option<&str>,
-) -> Option<Arc<dyn primer_core::embedder::Embedder>> {
+) -> std::result::Result<Option<Arc<dyn primer_core::embedder::Embedder>>, String> {
     use primer_embedding::{DEFAULT_OLLAMA_MODEL, DEFAULT_OLLAMA_URL, OllamaEmbedder};
     let url = url.unwrap_or(DEFAULT_OLLAMA_URL);
     let model = model.unwrap_or(DEFAULT_OLLAMA_MODEL);
     match OllamaEmbedder::with_endpoint(url, model).await {
         Ok(b) => {
             eprintln!("Embedder: ollama {model} at {url}");
-            Some(Arc::new(b) as _)
+            Ok(Some(Arc::new(b) as _))
         }
         Err(e) => {
             eprintln!("ollama embedder init failed ({e}); falling back to BM25-only retrieval.");
-            None
+            Ok(None)
         }
     }
 }
@@ -351,12 +359,12 @@ pub async fn build_ollama_embedder(
 pub async fn build_ollama_embedder(
     _url: Option<&str>,
     _model: Option<&str>,
-) -> Option<Arc<dyn primer_core::embedder::Embedder>> {
-    eprintln!(
-        "Error: --embedder-backend ollama requires the `ollama-embedding` cargo feature. \
+) -> std::result::Result<Option<Arc<dyn primer_core::embedder::Embedder>>, String> {
+    Err(
+        "ollama embedder requires the `ollama-embedding` cargo feature. \
          Build with `cargo run --features primer-cli/ollama-embedding -- ...`"
-    );
-    std::process::exit(1);
+            .to_string(),
+    )
 }
 
 #[cfg(test)]

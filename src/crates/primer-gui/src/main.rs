@@ -1,8 +1,9 @@
 //! The Primer GUI — a Tauri desktop UI for testing and monitoring
 //! the Socratic dialogue engine.
 //!
-//! Step 2 (this commit) scaffolds an empty window. Step 3 wires the
-//! session lifecycle commands; step 4 streams chat.
+//! Thin shim around [`primer_gui::run`]. Everything interesting lives
+//! in the library so commands, state, and persistence can be
+//! unit-tested without the Tauri WebView in the loop.
 
 // On Windows, suppress the console-subsystem prompt when running the
 // release build (the Tauri default — kept here so a future cargo run
@@ -10,10 +11,8 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
 fn main() {
-    // TODO(step 3): initialise tracing-subscriber with EnvFilter (mirroring
-    // primer-cli) once the engine wiring lands — without it, `tracing::warn!`
-    // calls inside the pedagogy/inference stack silently disappear.
-    tauri::Builder::default()
-        .run(tauri::generate_context!())
-        .expect("error while running primer-gui");
+    if let Err(e) = primer_gui::run() {
+        eprintln!("primer-gui exited with error: {e}");
+        std::process::exit(1);
+    }
 }

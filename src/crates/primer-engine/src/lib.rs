@@ -13,8 +13,12 @@ pub mod learner;
 pub mod paths;
 pub mod wiring;
 
-pub use learner::{create_learner_with_id, reconcile_persisted_learner, verify_resume_locale_match};
-pub use paths::{IN_MEMORY, PRIMER_HOME_DIR, resolve_session_db_path, should_show_first_run_banner, slug};
+pub use learner::{
+    create_learner_with_id, reconcile_persisted_learner, verify_resume_locale_match,
+};
+pub use paths::{
+    IN_MEMORY, PRIMER_HOME_DIR, resolve_session_db_path, should_show_first_run_banner, slug,
+};
 pub use wiring::{
     BackendParams, build_backend, build_classifier, build_comprehension, build_extractor,
     build_fastembed_embedder, build_ollama_embedder,
