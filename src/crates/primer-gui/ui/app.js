@@ -23,6 +23,7 @@ const dom = {
   input: document.getElementById("input"),
   send: document.getElementById("send"),
   sidebarToggle: document.getElementById("sidebar-toggle"),
+  settingsOpen: document.getElementById("settings-open"),
   signals: {
     empty: document.getElementById("sidebar-empty"),
     lagHint: document.getElementById("signals-lag-hint"),
@@ -96,9 +97,49 @@ async function main() {
   setupAutogrow();
   setupSidebarToggle();
   setupUuidCopy();
+  setupSettingsButton();
   await openOrStartSession();
   // Render whatever's already on the DM (resumed sessions land here
   // with populated last_* accessors); first-launch shows the empty state.
+  refreshSidebar();
+}
+
+function setupSettingsButton() {
+  dom.settingsOpen.addEventListener("click", () => {
+    // settings.js is loaded by index.html before app.js, so the
+    // global is guaranteed to exist by the time the button is
+    // clickable.
+    window.PrimerSettings.open({ onSessionRestarted: handleSessionRestarted });
+  });
+}
+
+/// Wipe chat surface + index counter and re-render from the freshly
+/// started session. Called when the settings modal saves with
+/// "Save & start new session" — the in-memory ActiveSession was
+/// replaced server-side, so anything the user typed before now
+/// belongs to a closed session and shouldn't sit visually-attached
+/// to bubbles tagged for a new turn timeline.
+async function handleSessionRestarted() {
+  state.streamingPrimerEl = null;
+  state.nextTurnIndex = 0;
+  state.sessionId = null;
+  if (state.spotlightTimer !== null) {
+    clearTimeout(state.spotlightTimer);
+    state.spotlightTimer = null;
+  }
+  hideError();
+  // Strip every bubble row but keep the empty-state node — same
+  // surface a fresh launch shows.
+  for (const row of Array.from(dom.chatScroll.querySelectorAll(".bubble-row"))) {
+    row.remove();
+  }
+  if (dom.emptyState) {
+    dom.emptyState.hidden = false;
+    if (!dom.chatScroll.contains(dom.emptyState)) {
+      dom.chatScroll.appendChild(dom.emptyState);
+    }
+  }
+  await openOrStartSession();
   refreshSidebar();
 }
 

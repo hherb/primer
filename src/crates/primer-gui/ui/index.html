@@ -15,16 +15,28 @@
       <div class="session-info" id="session-info" data-state="loading">
         <span class="muted">Starting session…</span>
       </div>
-      <button
-        type="button"
-        class="sidebar-toggle"
-        id="sidebar-toggle"
-        aria-pressed="true"
-        aria-controls="sidebar"
-        title="Show or hide the evaluation sidebar"
-      >
-        Hide Sidebar
-      </button>
+      <div class="header-actions">
+        <button
+          type="button"
+          class="header-btn"
+          id="settings-open"
+          aria-haspopup="dialog"
+          aria-controls="settings-modal"
+          title="Settings"
+        >
+          Settings
+        </button>
+        <button
+          type="button"
+          class="sidebar-toggle"
+          id="sidebar-toggle"
+          aria-pressed="true"
+          aria-controls="sidebar"
+          title="Show or hide the evaluation sidebar"
+        >
+          Hide Sidebar
+        </button>
+      </div>
     </header>
 
     <main class="chat">
@@ -216,6 +228,334 @@
       </section>
     </aside>
 
+    <div
+      class="modal-backdrop"
+      id="settings-backdrop"
+      hidden
+      aria-hidden="true"
+    >
+      <div
+        class="modal"
+        id="settings-modal"
+        role="dialog"
+        aria-modal="true"
+        aria-labelledby="settings-title"
+      >
+        <header class="modal-header">
+          <h2 id="settings-title">Settings</h2>
+          <button
+            type="button"
+            class="modal-close"
+            id="settings-close"
+            aria-label="Close settings"
+            title="Close"
+          >
+            ×
+          </button>
+        </header>
+
+        <div
+          class="modal-banner"
+          id="settings-banner"
+          role="alert"
+          hidden
+        ></div>
+
+        <form class="modal-body" id="settings-form" novalidate>
+          <details class="settings-group" open>
+            <summary>Learner</summary>
+            <div class="settings-grid">
+              <label class="field">
+                <span>Name</span>
+                <input type="text" id="f-learner-name" required />
+              </label>
+              <label class="field">
+                <span>Age</span>
+                <input type="number" id="f-learner-age" min="0" max="120" />
+              </label>
+              <label class="field">
+                <span>Locale</span>
+                <select id="f-learner-locale">
+                  <!-- Options injected from JS so adding a locale pack
+                       only requires updating LOCALE_CHOICES in settings.js. -->
+                </select>
+              </label>
+            </div>
+          </details>
+
+          <details class="settings-group" open>
+            <summary>Inference backend</summary>
+            <div class="settings-grid">
+              <label class="field">
+                <span>Backend</span>
+                <select id="f-backend-kind">
+                  <option value="stub">stub (no API key)</option>
+                  <option value="cloud">cloud (Anthropic)</option>
+                  <option value="ollama">ollama (local)</option>
+                </select>
+              </label>
+              <label class="field">
+                <span>Model</span>
+                <input
+                  type="text"
+                  id="f-backend-model"
+                  placeholder="(per-backend default)"
+                />
+              </label>
+              <label class="field" id="f-backend-ollama-url-field">
+                <span>Ollama URL</span>
+                <input
+                  type="text"
+                  id="f-backend-ollama-url"
+                  placeholder="http://localhost:11434"
+                />
+              </label>
+            </div>
+
+            <fieldset class="api-key-fieldset" id="f-api-key-fieldset">
+              <legend>API key (cloud only)</legend>
+              <label class="radio">
+                <input
+                  type="radio"
+                  name="api-key-source"
+                  value="env"
+                  id="f-api-key-env"
+                />
+                <span>Read from <code>ANTHROPIC_API_KEY</code> environment variable</span>
+              </label>
+              <label class="radio">
+                <input
+                  type="radio"
+                  name="api-key-source"
+                  value="inline"
+                  id="f-api-key-inline"
+                />
+                <span>Store inline in config file (mode 0600)</span>
+              </label>
+              <label class="field field-indent" id="f-api-key-input-field" hidden>
+                <span id="f-api-key-input-label">Anthropic API key</span>
+                <input
+                  type="password"
+                  id="f-api-key-input"
+                  autocomplete="off"
+                  spellcheck="false"
+                />
+                <small class="hint muted" id="f-api-key-hint"></small>
+              </label>
+            </fieldset>
+          </details>
+
+          <details class="settings-group">
+            <summary>Classifier subsystem</summary>
+            <div class="subsystem-fields" data-subsystem="classifier">
+              <label class="check">
+                <input type="checkbox" data-field="match-main" checked />
+                <span>Match main backend</span>
+              </label>
+              <div class="settings-grid">
+                <label class="field">
+                  <span>Backend</span>
+                  <select data-field="kind">
+                    <option value="">(match main)</option>
+                    <option value="stub">stub</option>
+                    <option value="cloud">cloud</option>
+                    <option value="ollama">ollama</option>
+                  </select>
+                </label>
+                <label class="field">
+                  <span>Model</span>
+                  <input type="text" data-field="model" placeholder="(match main)" />
+                </label>
+                <label class="field">
+                  <span>Timeout (ms)</span>
+                  <input type="number" data-field="timeout-ms" min="0" />
+                </label>
+              </div>
+            </div>
+          </details>
+
+          <details class="settings-group">
+            <summary>Extractor subsystem</summary>
+            <div class="subsystem-fields" data-subsystem="extractor">
+              <label class="check">
+                <input type="checkbox" data-field="match-main" checked />
+                <span>Match main backend</span>
+              </label>
+              <div class="settings-grid">
+                <label class="field">
+                  <span>Backend</span>
+                  <select data-field="kind">
+                    <option value="">(match main)</option>
+                    <option value="stub">stub</option>
+                    <option value="cloud">cloud</option>
+                    <option value="ollama">ollama</option>
+                  </select>
+                </label>
+                <label class="field">
+                  <span>Model</span>
+                  <input type="text" data-field="model" placeholder="(match main)" />
+                </label>
+                <label class="field">
+                  <span>Timeout (ms)</span>
+                  <input type="number" data-field="timeout-ms" min="0" />
+                </label>
+              </div>
+            </div>
+          </details>
+
+          <details class="settings-group">
+            <summary>Comprehension subsystem</summary>
+            <div class="subsystem-fields" data-subsystem="comprehension">
+              <label class="check">
+                <input type="checkbox" data-field="match-main" checked />
+                <span>Match main backend</span>
+              </label>
+              <div class="settings-grid">
+                <label class="field">
+                  <span>Backend</span>
+                  <select data-field="kind">
+                    <option value="">(match main)</option>
+                    <option value="stub">stub</option>
+                    <option value="cloud">cloud</option>
+                    <option value="ollama">ollama</option>
+                  </select>
+                </label>
+                <label class="field">
+                  <span>Model</span>
+                  <input type="text" data-field="model" placeholder="(match main)" />
+                </label>
+                <label class="field">
+                  <span>Timeout (ms)</span>
+                  <input type="number" data-field="timeout-ms" min="0" />
+                </label>
+              </div>
+            </div>
+          </details>
+
+          <details class="settings-group">
+            <summary>Embedder (hybrid retrieval)</summary>
+            <div class="settings-grid">
+              <label class="field">
+                <span>Backend</span>
+                <select id="f-embedder-kind">
+                  <option value="none">none (BM25 only)</option>
+                  <option value="stub">stub (testing only)</option>
+                  <option value="fastembed">fastembed (local, ~570 MB)</option>
+                  <option value="ollama">ollama (remote)</option>
+                </select>
+              </label>
+              <label class="field">
+                <span>Model</span>
+                <input
+                  type="text"
+                  id="f-embedder-model"
+                  placeholder="(backend default)"
+                />
+              </label>
+              <label class="field" id="f-embedder-ollama-url-field">
+                <span>Ollama URL</span>
+                <input
+                  type="text"
+                  id="f-embedder-ollama-url"
+                  placeholder="http://localhost:11434"
+                />
+              </label>
+            </div>
+            <p class="hint muted">
+              <code>fastembed</code> requires the binary to be built with
+              <code>--features primer-gui/embedding</code>. If unavailable
+              at session start, the backend falls back to BM25 with a warning.
+            </p>
+          </details>
+
+          <details class="settings-group">
+            <summary>Vocabulary &amp; session breaks</summary>
+            <div class="settings-grid">
+              <label class="field">
+                <span>Max vocab hints per prompt</span>
+                <input
+                  type="number"
+                  id="f-vocab-max"
+                  min="0"
+                  placeholder="(default 4)"
+                />
+              </label>
+              <label class="field">
+                <span>Break-suggestion interval (minutes)</span>
+                <input
+                  type="number"
+                  id="f-breaks-after-mins"
+                  min="1"
+                />
+              </label>
+            </div>
+          </details>
+
+          <details class="settings-group">
+            <summary>Persistence</summary>
+            <div class="settings-grid">
+              <label class="field field-full">
+                <span>Session database path</span>
+                <input
+                  type="text"
+                  id="f-persistence-session-db"
+                  placeholder="(default ~/.primer/<slug>.db)"
+                />
+              </label>
+              <label class="field field-full">
+                <span>Knowledge database path</span>
+                <input
+                  type="text"
+                  id="f-persistence-knowledge-db"
+                  placeholder="(default :memory:)"
+                />
+              </label>
+              <label class="check field-full">
+                <input type="checkbox" id="f-persistence-no-persist" />
+                <span>In-memory only (nothing written to disk)</span>
+              </label>
+            </div>
+          </details>
+
+          <details class="settings-group is-coming-soon">
+            <summary>Speech (coming soon)</summary>
+            <p class="hint muted">
+              Voice mode (Listen / Think / Speak) is not yet wired into the
+              GUI. To try it today, use the CLI:
+              <code>cargo run --bin primer --features primer-cli/speech -- --speech …</code>
+            </p>
+          </details>
+        </form>
+
+        <footer class="modal-footer">
+          <div class="modal-footer-hint muted" id="settings-active-hint" hidden>
+            A session is active — "Save &amp; start new session" will close it
+            and start a fresh session with the new settings.
+          </div>
+          <div class="modal-footer-actions">
+            <button type="button" class="btn-tertiary" id="settings-cancel">
+              Cancel
+            </button>
+            <button type="button" class="btn-secondary" id="settings-save-next">
+              Save (next session only)
+            </button>
+            <button type="button" class="btn-primary" id="settings-save-restart">
+              Save &amp; start new session
+            </button>
+          </div>
+        </footer>
+      </div>
+    </div>
+
+    <div
+      class="toast"
+      id="toast"
+      role="status"
+      aria-live="polite"
+      hidden
+    ></div>
+
+    <script src="settings.js"></script>
     <script src="app.js"></script>
   </body>
 </html>

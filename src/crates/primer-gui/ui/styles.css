@@ -897,3 +897,400 @@ body.sidebar-collapsed .sidebar {
   outline-offset: 2px;
   transition: outline-color 600ms ease;
 }
+
+/* ─── Header actions cluster ────────────────────────────────────── */
+
+.header-actions {
+  display: flex;
+  gap: 0.5rem;
+  align-items: center;
+}
+
+.header-btn {
+  -webkit-app-region: no-drag;
+  padding: 0.3rem 0.7rem;
+  border: 1px solid var(--border);
+  border-radius: 0.5rem;
+  background: var(--bg);
+  color: var(--fg);
+  font: inherit;
+  font-size: 0.8rem;
+  cursor: pointer;
+  transition: background 120ms ease;
+}
+
+.header-btn:hover {
+  background: color-mix(in oklab, var(--accent) 8%, var(--bg));
+}
+
+/* ─── Settings modal ────────────────────────────────────────────── */
+
+.modal-backdrop {
+  position: fixed;
+  inset: 0;
+  z-index: 100;
+  background: color-mix(in oklab, #000 45%, transparent);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 2vh 2vw;
+  -webkit-app-region: no-drag;
+}
+
+.modal {
+  display: flex;
+  flex-direction: column;
+  width: min(720px, 100%);
+  max-height: 96vh;
+  background: var(--surface);
+  color: var(--fg);
+  border: 1px solid var(--border);
+  border-radius: 0.75rem;
+  box-shadow: 0 24px 60px rgba(0, 0, 0, 0.35);
+  overflow: hidden;
+}
+
+.modal-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 0.9rem 1.2rem;
+  border-bottom: 1px solid var(--border);
+}
+
+.modal-header h2 {
+  margin: 0;
+  font-size: 1.05rem;
+  font-weight: 600;
+  letter-spacing: -0.005em;
+}
+
+.modal-close {
+  border: none;
+  background: transparent;
+  color: var(--fg-muted);
+  font-size: 1.6rem;
+  line-height: 1;
+  padding: 0 0.4rem;
+  cursor: pointer;
+  border-radius: 0.35rem;
+}
+
+.modal-close:hover {
+  background: color-mix(in oklab, var(--fg) 8%, transparent);
+  color: var(--fg);
+}
+
+.modal-banner {
+  margin: 0.7rem 1.2rem 0;
+  padding: 0.55rem 0.8rem;
+  background: var(--error-bg);
+  color: var(--error-fg);
+  border: 1px solid var(--error-border);
+  border-radius: 0.45rem;
+  font-size: 0.85rem;
+}
+
+.modal-body {
+  overflow-y: auto;
+  padding: 0.8rem 1.2rem 1rem;
+  display: flex;
+  flex-direction: column;
+  gap: 0.6rem;
+}
+
+.modal-footer {
+  display: flex;
+  flex-direction: column;
+  gap: 0.5rem;
+  padding: 0.8rem 1.2rem 1rem;
+  border-top: 1px solid var(--border);
+  background: var(--bg);
+}
+
+.modal-footer-hint {
+  font-size: 0.8rem;
+  line-height: 1.5;
+}
+
+.modal-footer-actions {
+  display: flex;
+  gap: 0.55rem;
+  justify-content: flex-end;
+  flex-wrap: wrap;
+}
+
+.btn-primary,
+.btn-secondary,
+.btn-tertiary {
+  padding: 0.5rem 0.95rem;
+  border-radius: 0.5rem;
+  font: inherit;
+  font-size: 0.88rem;
+  font-weight: 500;
+  cursor: pointer;
+  border: 1px solid transparent;
+  transition:
+    background 120ms ease,
+    filter 120ms ease;
+}
+
+.btn-primary {
+  background: var(--accent);
+  color: white;
+}
+
+.btn-primary:hover:not(:disabled) {
+  filter: brightness(1.08);
+}
+
+.btn-secondary {
+  background: color-mix(in oklab, var(--accent) 14%, transparent);
+  color: var(--accent);
+  border-color: color-mix(in oklab, var(--accent) 35%, var(--border));
+}
+
+.btn-secondary:hover:not(:disabled) {
+  background: color-mix(in oklab, var(--accent) 22%, transparent);
+}
+
+.btn-tertiary {
+  background: transparent;
+  color: var(--fg-muted);
+  border-color: var(--border);
+}
+
+.btn-tertiary:hover:not(:disabled) {
+  color: var(--fg);
+  background: color-mix(in oklab, var(--fg) 6%, transparent);
+}
+
+.btn-primary:disabled,
+.btn-secondary:disabled,
+.btn-tertiary:disabled {
+  cursor: not-allowed;
+  opacity: 0.6;
+}
+
+/* Collapsible group — built on native <details>/<summary> so collapse
+   works without JS and is keyboard-navigable for free. */
+.settings-group {
+  border: 1px solid var(--border);
+  border-radius: 0.55rem;
+  background: var(--bg);
+}
+
+.settings-group > summary {
+  list-style: none;
+  cursor: pointer;
+  padding: 0.6rem 0.85rem;
+  font-weight: 600;
+  font-size: 0.92rem;
+  user-select: none;
+  position: relative;
+}
+
+.settings-group > summary::-webkit-details-marker {
+  display: none;
+}
+
+.settings-group > summary::after {
+  content: "▸";
+  position: absolute;
+  right: 0.85rem;
+  top: 50%;
+  transform: translateY(-50%);
+  color: var(--fg-muted);
+  font-size: 0.78rem;
+  transition: transform 120ms ease;
+}
+
+.settings-group[open] > summary::after {
+  transform: translateY(-50%) rotate(90deg);
+}
+
+.settings-group[open] > summary {
+  border-bottom: 1px solid var(--border);
+}
+
+.settings-group > *:not(summary) {
+  padding: 0.7rem 0.85rem 0.85rem;
+}
+
+.settings-group.is-coming-soon > summary {
+  color: var(--fg-muted);
+}
+
+/* Two-column grid for short form fields; single-column on narrow widths. */
+.settings-grid {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 0.6rem 0.8rem;
+}
+
+@media (max-width: 560px) {
+  .settings-grid {
+    grid-template-columns: 1fr;
+  }
+}
+
+.field {
+  display: flex;
+  flex-direction: column;
+  gap: 0.25rem;
+  font-size: 0.84rem;
+  min-width: 0;
+}
+
+.field-full {
+  grid-column: 1 / -1;
+}
+
+.field-indent {
+  padding-left: 1.6rem;
+}
+
+.field > span {
+  font-weight: 500;
+  color: var(--fg);
+}
+
+.field input,
+.field select {
+  padding: 0.45rem 0.6rem;
+  border: 1px solid var(--border);
+  border-radius: 0.4rem;
+  background: var(--surface);
+  color: var(--fg);
+  font: inherit;
+  font-size: 0.88rem;
+  outline: none;
+  transition: border-color 120ms ease;
+  min-width: 0;
+}
+
+.field input:focus,
+.field select:focus {
+  border-color: var(--accent);
+}
+
+.field input:disabled,
+.field select:disabled {
+  opacity: 0.55;
+  cursor: not-allowed;
+}
+
+.field .hint {
+  font-size: 0.76rem;
+  line-height: 1.4;
+}
+
+.check {
+  display: flex;
+  align-items: center;
+  gap: 0.45rem;
+  font-size: 0.86rem;
+  cursor: pointer;
+}
+
+.check input[type="checkbox"] {
+  width: 1rem;
+  height: 1rem;
+  accent-color: var(--accent);
+}
+
+.radio {
+  display: flex;
+  align-items: center;
+  gap: 0.45rem;
+  font-size: 0.86rem;
+  cursor: pointer;
+  padding: 0.2rem 0;
+}
+
+.radio input[type="radio"] {
+  width: 1rem;
+  height: 1rem;
+  accent-color: var(--accent);
+}
+
+.api-key-fieldset {
+  margin: 0.7rem 0 0;
+  padding: 0.55rem 0.75rem 0.65rem;
+  border: 1px solid var(--border);
+  border-radius: 0.45rem;
+  background: var(--surface);
+  display: flex;
+  flex-direction: column;
+  gap: 0.3rem;
+}
+
+.api-key-fieldset legend {
+  padding: 0 0.35rem;
+  font-size: 0.76rem;
+  font-weight: 600;
+  letter-spacing: 0.05em;
+  text-transform: uppercase;
+  color: var(--fg-muted);
+}
+
+.api-key-fieldset[disabled] {
+  opacity: 0.5;
+}
+
+.api-key-fieldset[disabled] .radio,
+.api-key-fieldset[disabled] input {
+  cursor: not-allowed;
+}
+
+.subsystem-fields {
+  display: flex;
+  flex-direction: column;
+  gap: 0.6rem;
+}
+
+/* When match-main is checked the override grid is visually faded and
+   the inputs underneath are disabled by JS — both signals together
+   communicate "this section is overridden by main backend". */
+.subsystem-fields[data-overridden="true"] .settings-grid {
+  opacity: 0.45;
+}
+
+code {
+  font-family:
+    ui-monospace,
+    SFMono-Regular,
+    Menlo,
+    Consolas,
+    monospace;
+  font-size: 0.85em;
+  padding: 0.05rem 0.3rem;
+  background: color-mix(in oklab, var(--fg) 6%, transparent);
+  border-radius: 0.25rem;
+}
+
+/* ─── Toast ─────────────────────────────────────────────────────── */
+
+.toast {
+  position: fixed;
+  bottom: 1.2rem;
+  left: 50%;
+  transform: translateX(-50%) translateY(0.5rem);
+  z-index: 200;
+  padding: 0.55rem 1rem;
+  background: var(--fg);
+  color: var(--bg);
+  border-radius: 0.5rem;
+  font-size: 0.85rem;
+  box-shadow: 0 8px 24px rgba(0, 0, 0, 0.25);
+  opacity: 0;
+  transition:
+    opacity 180ms ease,
+    transform 180ms ease;
+  pointer-events: none;
+}
+
+.toast:not([hidden]) {
+  opacity: 1;
+  transform: translateX(-50%) translateY(0);
+}
