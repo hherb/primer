@@ -577,17 +577,14 @@ pub async fn run_loop<'r>(
 }
 
 /// Adapter that lets `&mut DialogueManager` satisfy the [`Responder`]
-/// trait. The lifetime `'a` is the dialogue manager's borrowed-backends
-/// lifetime; `'b` is how long this adapter lives. `'a: 'b` keeps the
-/// nested-borrow well-formed.
-struct DialogueResponder<'a, 'b> {
-    dialogue: &'b mut primer_pedagogy::DialogueManager<'a>,
+/// trait. The lifetime parameter is the borrow of the manager, not of
+/// its collaborators — the manager itself is `'static` now that
+/// inference and knowledge are held as `Arc<dyn …>`.
+struct DialogueResponder<'b> {
+    dialogue: &'b mut primer_pedagogy::DialogueManager,
 }
 
-impl<'a, 'b> Responder for DialogueResponder<'a, 'b>
-where
-    'a: 'b,
-{
+impl<'b> Responder for DialogueResponder<'b> {
     fn respond<'r>(
         &'r mut self,
         transcript: &'r str,
@@ -696,9 +693,9 @@ impl primer_core::speech::TranscriptionSession for ChannelSttSession {
 
 /// Entry point: run the voice REPL until Ctrl+C or a quit phrase is heard.
 #[cfg(feature = "speech")]
-pub async fn run<'a>(
+pub async fn run(
     cfg: SpeechLoopConfig<'_>,
-    dialogue: &mut primer_pedagogy::DialogueManager<'a>,
+    dialogue: &mut primer_pedagogy::DialogueManager,
 ) -> Result<()> {
     use primer_core::speech::VadEvent;
     use primer_speech::{
@@ -1012,9 +1009,9 @@ pub async fn run<'a>(
 /// an error so the binary fails fast if `--speech` is somehow set
 /// without the feature.
 #[cfg(not(feature = "speech"))]
-pub async fn run<'a>(
+pub async fn run(
     _cfg: SpeechLoopConfig<'_>,
-    _dialogue: &mut primer_pedagogy::DialogueManager<'a>,
+    _dialogue: &mut primer_pedagogy::DialogueManager,
 ) -> Result<()> {
     Err(primer_core::error::PrimerError::Speech(
         "primer-cli was built without the `speech` feature".into(),

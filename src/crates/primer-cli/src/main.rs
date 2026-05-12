@@ -756,10 +756,11 @@ async fn async_main() -> anyhow::Result<()> {
         vocab_settings,
         embedder: embedder.clone(),
     };
+    let knowledge_arc: Arc<dyn KnowledgeBase> = Arc::new(knowledge);
     let mut dm = DialogueManager::new(
         learner,
-        backend.as_ref(),
-        &knowledge as &dyn KnowledgeBase,
+        Arc::clone(&backend),
+        Arc::clone(&knowledge_arc),
         stores,
         subsystems,
         pedagogy_config,

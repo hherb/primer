@@ -97,19 +97,23 @@ pub struct DialogueManagerSubsystems {
 /// session and learner model state. The CLI (or future GUI) drives
 /// the conversation by calling `respond_to()` in a loop.
 ///
-/// `inference` and `knowledge` are borrowed references: they are used
-/// only synchronously inside method bodies. `storage`, `learner_store`,
-/// and `classifier` are `Arc<dyn …>` so they can be captured by the
-/// post-response classifier task (`tokio::spawn` requires `'static`).
-pub struct DialogueManager<'a> {
+/// All trait-object collaborators are `Arc<dyn …>` so the manager has
+/// no lifetime parameter and can be stored long-lived behind an
+/// `Arc<Mutex<…>>` (or any other `'static` container) — required by
+/// the GUI's Tauri `State<T>` and helpful for any future host that
+/// keeps a DM alive across an event loop. The Arcs are cheap to clone
+/// and let the spawned classifier / extractor / comprehension tasks
+/// capture their collaborators across turn boundaries (`tokio::spawn`
+/// requires `'static`).
+pub struct DialogueManager {
     /// The learner model — updated in place as we learn about the child.
     pub learner: LearnerModel,
     /// The current conversation session.
     pub session: Session,
     /// Inference backend (local model or cloud API).
-    inference: &'a dyn InferenceBackend,
+    inference: Arc<dyn InferenceBackend>,
     /// Knowledge base for RAG retrieval.
-    knowledge: &'a dyn KnowledgeBase,
+    knowledge: Arc<dyn KnowledgeBase>,
     /// Optional session persistence. When set, the session is saved after
     /// every `respond_to_streaming` call (success or mid-stream error).
     /// Arc so the classifier task can capture it across turn boundaries.
@@ -230,7 +234,7 @@ type PostResponseOutcome = Option<
     >,
 >;
 
-impl<'a> DialogueManager<'a> {
+impl DialogueManager {
     /// Returns the current wallclock for break-gate decisions. Tests
     /// can override via `clock_override`; production always reads
     /// `chrono::Utc::now()`.

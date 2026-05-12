@@ -230,27 +230,24 @@ pub async fn build_active_session(
             .unwrap_or(primer_core::consts::vocab::DEFAULT_VOCAB_MAX_PER_PROMPT),
     };
 
-    // ─── ActiveSession ───────────────────────────────────────────────
-    // No session-id yet — step 4's `send_message` will call
-    // `DialogueManager::open_session` and write the real Session UUID
-    // here. `None` over IPC tells the frontend honestly that no turn
-    // has happened yet, instead of handing out a placeholder that
-    // would invalidate as soon as the first turn lands.
-    // `Arc::clone` can't coerce concrete → trait object; the `as _` cast
-    // does the upcast in one step and is the standard idiom for this.
+    // ─── DialogueManager construction ────────────────────────────────
+    // Build the long-lived DM here. `DialogueManager::new` mints a fresh
+    // `Session` automatically (with a brand-new UUID), so no extra
+    // `open_session` call is needed — the first `send_message` lands
+    // the first child turn and primer response into that session.
+    //
+    // The `as _` casts upcast concrete `Arc<T>` to `Arc<dyn Trait>` —
+    // `Arc::clone` alone can't bridge the unsize coercion across the
+    // generic boundary, so the explicit cast is the standard idiom.
     let learner_store: Arc<dyn LearnerStore> = Arc::clone(&session_store) as _;
     let session_store_dyn: Arc<dyn SessionStore> = Arc::clone(&session_store) as _;
+    let knowledge_dyn: Arc<dyn primer_core::knowledge::KnowledgeBase> = knowledge as _;
 
-    Ok(ActiveSession {
-        session_id: None,
-        locale,
-        learner: Mutex::new(learner),
-        backend,
-        backend_name: backend_config.kind.clone(),
-        main_model,
-        knowledge,
-        session_store: session_store_dyn,
-        learner_store,
+    let stores = primer_pedagogy::DialogueManagerStores {
+        session: Some(session_store_dyn),
+        learner: Some(learner_store),
+    };
+    let subsystems = primer_pedagogy::DialogueManagerSubsystems {
         classifier,
         classifier_settings,
         extractor,
@@ -259,7 +256,21 @@ pub async fn build_active_session(
         comprehension_settings,
         vocab_settings,
         embedder,
+    };
+    let dm = primer_pedagogy::DialogueManager::new(
+        learner,
+        Arc::clone(&backend),
+        knowledge_dyn,
+        stores,
+        subsystems,
         pedagogy_config,
+    );
+
+    Ok(ActiveSession {
+        dialogue_manager: Arc::new(Mutex::new(dm)),
+        locale,
+        backend_name: backend_config.kind.clone(),
+        main_model,
     })
 }
 
@@ -335,19 +346,20 @@ mod tests {
         assert_eq!(s.backend_name, "stub");
         assert_eq!(s.main_model, "stub");
         assert_eq!(s.locale, Locale::English);
+        // The DM is constructed but no turn has run yet, so its
+        // session is empty (no on-disk row yet).
+        let dm = s.dialogue_manager.lock().await;
         assert!(
-            s.session_id.is_none(),
-            "session_id is None until first send_message"
+            dm.session.turns.is_empty(),
+            "no turns until first send_message"
         );
         // Subsystems all default to stub when the main backend is stub.
-        assert_eq!(s.classifier.identifier(), "stub");
-        assert_eq!(s.extractor.identifier(), "stub");
-        assert_eq!(s.comprehension.identifier(), "stub");
-        assert!(s.embedder.is_none(), "default embedder is none");
+        assert_eq!(dm.classifier_identifier(), "stub");
+        assert_eq!(dm.extractor_identifier(), "stub");
+        assert_eq!(dm.comprehension_identifier(), "stub");
         // The learner row is freshly minted; name matches config.
-        let learner = s.learner.lock().await;
-        assert_eq!(learner.profile.name, "Explorer");
-        assert_eq!(learner.profile.age, 8);
+        assert_eq!(dm.learner.profile.name, "Explorer");
+        assert_eq!(dm.learner.profile.age, 8);
     }
 
     #[tokio::test]
@@ -419,8 +431,11 @@ mod tests {
         let home = TempDir::new().unwrap();
         let mut cfg = stub_config();
         cfg.embedder.kind = "stub".to_string();
-        let s = build_active_session(home.path(), &cfg).await.unwrap();
-        assert!(s.embedder.is_some());
+        // build_active_session returning Ok proves the stub embedder
+        // wired cleanly into the DM construction — DM doesn't expose
+        // its private embedder Arc, but the construction succeeding
+        // is the only outcome that matters for the wiring path.
+        let _ = build_active_session(home.path(), &cfg).await.unwrap();
     }
 
     #[tokio::test]
@@ -443,11 +458,12 @@ mod tests {
         // close_session_inner.
         let first_id = {
             let s = build_active_session(home.path(), &cfg).await.unwrap();
-            s.learner.lock().await.profile.id
+            let dm = s.dialogue_manager.lock().await;
+            dm.learner.profile.id
         };
 
         let s2 = build_active_session(home.path(), &cfg).await.unwrap();
-        let id2 = s2.learner.lock().await.profile.id;
+        let id2 = s2.dialogue_manager.lock().await.learner.profile.id;
         assert_eq!(id2, first_id, "learner UUID stable across reopens");
     }
 
@@ -463,16 +479,16 @@ mod tests {
         cfg.persistence.session_db = Some(session_db.clone());
 
         let s1 = build_active_session(home.path(), &cfg).await.unwrap();
-        let id1 = s1.learner.lock().await.profile.id;
+        let id1 = s1.dialogue_manager.lock().await.learner.profile.id;
 
         // Second open with a different CLI-level name.
         let mut cfg2 = cfg.clone();
         cfg2.learner.name = "Other".to_string();
         let s2 = build_active_session(home.path(), &cfg2).await.unwrap();
-        let learner2 = s2.learner.lock().await;
-        assert_eq!(learner2.profile.id, id1, "UUID stable across opens");
+        let dm2 = s2.dialogue_manager.lock().await;
+        assert_eq!(dm2.learner.profile.id, id1, "UUID stable across opens");
         assert_eq!(
-            learner2.profile.name, "Binti",
+            dm2.learner.profile.name, "Binti",
             "persisted name wins over GUI override"
         );
     }

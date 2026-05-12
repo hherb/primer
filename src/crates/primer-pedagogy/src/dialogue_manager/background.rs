@@ -25,7 +25,7 @@ use super::{
     apply_comprehension, apply_extraction, merge_concepts_into_turn,
 };
 
-impl<'a> DialogueManager<'a> {
+impl DialogueManager {
     /// Drain only the classifier task and apply its outcome.
     ///
     /// Production paths use `await_pending_background` (which drains both

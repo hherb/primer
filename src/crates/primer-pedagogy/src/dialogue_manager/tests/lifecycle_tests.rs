@@ -6,8 +6,6 @@ use std::sync::Arc;
 use chrono::Utc;
 use primer_core::config::PedagogyConfig;
 use primer_core::conversation::{Speaker, Turn};
-use primer_core::inference::InferenceBackend;
-use primer_core::knowledge::KnowledgeBase;
 use primer_core::learner::EngagementState;
 use primer_extractor::ExtractorSettings;
 use uuid::Uuid;
@@ -17,13 +15,13 @@ use super::super::*;
 
 #[tokio::test]
 async fn close_session_fires_engine_save_with_ended_at() {
-    let backend = ScriptedBackend::new(vec![Ok(chunk("Hi", false)), Ok(chunk("", true))]);
-    let knowledge = EmptyKnowledge;
+    let backend = std::sync::Arc::new(ScriptedBackend::new(vec![Ok(chunk("Hi", false)), Ok(chunk("", true))]));
+    let knowledge = std::sync::Arc::new(EmptyKnowledge);
     let store = Arc::new(CountingStore::new());
     let mut dm = DialogueManager::new(
         test_learner(),
-        &backend,
-        &knowledge,
+        backend.clone(),
+        knowledge.clone(),
         DialogueManagerStores {
             session: Some(Arc::clone(&store) as Arc<dyn SessionStore>),
             learner: None,
@@ -45,13 +43,13 @@ async fn close_session_fires_engine_save_with_ended_at() {
 
 #[tokio::test]
 async fn open_session_fires_engine_save() {
-    let backend = ScriptedBackend::new(vec![Ok(chunk("", true))]);
-    let knowledge = EmptyKnowledge;
+    let backend = std::sync::Arc::new(ScriptedBackend::new(vec![Ok(chunk("", true))]));
+    let knowledge = std::sync::Arc::new(EmptyKnowledge);
     let store = Arc::new(CountingStore::new());
     let mut dm = DialogueManager::new(
         test_learner(),
-        &backend,
-        &knowledge,
+        backend.clone(),
+        knowledge.clone(),
         DialogueManagerStores {
             session: Some(Arc::clone(&store) as Arc<dyn SessionStore>),
             learner: None,
@@ -74,12 +72,12 @@ async fn resume_session_loads_turns_without_greeting() {
     // Resume picks up the loaded turns verbatim. No greeting is
     // prepended; the turn count after resume_session matches the
     // loaded session exactly.
-    let backend = ScriptedBackend::new(vec![Ok(chunk("", true))]);
-    let knowledge = EmptyKnowledge;
+    let backend = std::sync::Arc::new(ScriptedBackend::new(vec![Ok(chunk("", true))]));
+    let knowledge = std::sync::Arc::new(EmptyKnowledge);
     let mut dm = DialogueManager::new(
         test_learner(),
-        &backend,
-        &knowledge,
+        backend.clone(),
+        knowledge.clone(),
         DialogueManagerStores::default(),
         default_subsystems(),
         PedagogyConfig::default(),
@@ -96,13 +94,13 @@ async fn resume_session_loads_turns_without_greeting() {
 
 #[tokio::test]
 async fn resume_session_clears_ended_at_and_persists() {
-    let backend = ScriptedBackend::new(vec![Ok(chunk("", true))]);
-    let knowledge = EmptyKnowledge;
+    let backend = std::sync::Arc::new(ScriptedBackend::new(vec![Ok(chunk("", true))]));
+    let knowledge = std::sync::Arc::new(EmptyKnowledge);
     let store = Arc::new(CountingStore::new());
     let mut dm = DialogueManager::new(
         test_learner(),
-        &backend,
-        &knowledge,
+        backend.clone(),
+        knowledge.clone(),
         DialogueManagerStores {
             session: Some(Arc::clone(&store) as Arc<dyn SessionStore>),
             learner: None,
@@ -122,12 +120,12 @@ async fn resume_session_preserves_loaded_learner_id() {
     // The in-memory LearnerModel comes from CLI flags; the loaded
     // Session might belong to a different learner_id. Resume must
     // keep the loaded learner_id (no silent override).
-    let backend = ScriptedBackend::new(vec![Ok(chunk("", true))]);
-    let knowledge = EmptyKnowledge;
+    let backend = std::sync::Arc::new(ScriptedBackend::new(vec![Ok(chunk("", true))]));
+    let knowledge = std::sync::Arc::new(EmptyKnowledge);
     let mut dm = DialogueManager::new(
         test_learner(),
-        &backend,
-        &knowledge,
+        backend.clone(),
+        knowledge.clone(),
         DialogueManagerStores::default(),
         default_subsystems(),
         PedagogyConfig::default(),
@@ -148,12 +146,12 @@ async fn resume_session_triggers_summary_refresh_when_above_window() {
     // A loaded session with > context_window_turns should get its
     // summary refreshed unconditionally on resume so the Primer has
     // long-term memory of pre-window turns from turn one.
-    let backend = ScriptedBackend::new(vec![Ok(chunk("", true))]);
-    let knowledge = EmptyKnowledge;
+    let backend = std::sync::Arc::new(ScriptedBackend::new(vec![Ok(chunk("", true))]));
+    let knowledge = std::sync::Arc::new(EmptyKnowledge);
     let mut dm = DialogueManager::new(
         test_learner(),
-        &backend,
-        &knowledge,
+        backend.clone(),
+        knowledge.clone(),
         DialogueManagerStores::default(),
         default_subsystems(),
         PedagogyConfig::default(),
@@ -180,12 +178,12 @@ async fn resume_session_triggers_summary_refresh_when_above_window() {
 async fn resume_session_skips_summary_when_inside_first_window() {
     // Sessions that fit inside the active window have nothing to
     // summarize; resume must not waste an inference call.
-    let backend = ScriptedBackend::new(vec![Ok(chunk("", true))]);
-    let knowledge = EmptyKnowledge;
+    let backend = std::sync::Arc::new(ScriptedBackend::new(vec![Ok(chunk("", true))]));
+    let knowledge = std::sync::Arc::new(EmptyKnowledge);
     let mut dm = DialogueManager::new(
         test_learner(),
-        &backend,
-        &knowledge,
+        backend.clone(),
+        knowledge.clone(),
         DialogueManagerStores::default(),
         default_subsystems(),
         PedagogyConfig::default(),
@@ -203,12 +201,12 @@ async fn resume_session_skips_refresh_when_summary_already_current() {
     // turns[..5] — exactly the pre-window range. There is no new
     // pre-window content for the summary to absorb, so resume must
     // not burn an LLM call regenerating identical work.
-    let backend = ScriptedBackend::new(vec![Ok(chunk("", true))]);
-    let knowledge = EmptyKnowledge;
+    let backend = std::sync::Arc::new(ScriptedBackend::new(vec![Ok(chunk("", true))]));
+    let knowledge = std::sync::Arc::new(EmptyKnowledge);
     let mut dm = DialogueManager::new(
         test_learner(),
-        &backend,
-        &knowledge,
+        backend.clone(),
+        knowledge.clone(),
         DialogueManagerStores::default(),
         default_subsystems(),
         PedagogyConfig::default(),
@@ -234,12 +232,12 @@ async fn resume_session_refreshes_when_existing_summary_is_stale() {
     // turns[..3]. The current pre-window range is turns[..10], so
     // there are 7 pre-window turns the summary doesn't yet know
     // about. Resume must refresh.
-    let backend = ScriptedBackend::new(vec![Ok(chunk("", true))]);
-    let knowledge = EmptyKnowledge;
+    let backend = std::sync::Arc::new(ScriptedBackend::new(vec![Ok(chunk("", true))]));
+    let knowledge = std::sync::Arc::new(EmptyKnowledge);
     let mut dm = DialogueManager::new(
         test_learner(),
-        &backend,
-        &knowledge,
+        backend.clone(),
+        knowledge.clone(),
         DialogueManagerStores::default(),
         default_subsystems(),
         PedagogyConfig::default(),
@@ -293,13 +291,13 @@ async fn resume_session_rehydrates_recent_assessments() {
         .unwrap();
 
     // Create a DialogueManager and resume the persisted session.
-    let backend = ScriptedBackend::new(vec![Ok(chunk("", true))]);
-    let knowledge = EmptyKnowledge;
+    let backend = std::sync::Arc::new(ScriptedBackend::new(vec![Ok(chunk("", true))]));
+    let knowledge = std::sync::Arc::new(EmptyKnowledge);
     let settings = ClassifierSettings::default();
     let mut dm = DialogueManager::new(
         learner,
-        &backend,
-        &knowledge,
+        backend.clone(),
+        knowledge.clone(),
         DialogueManagerStores {
             session: Some(Arc::clone(&storage) as Arc<dyn SessionStore>),
             learner: None,
@@ -347,13 +345,13 @@ async fn close_session_always_saves_learner_regardless_of_dirty() {
     // Lifecycle events flush unconditionally — they're explicit
     // checkpoints, not "save when dirty" sites.
     let (learner, store) = dirty_flag_test_setup(EngagementState::Engaged);
-    let backend = RepeatingBackend;
-    let knowledge = EmptyKnowledge;
+    let backend = std::sync::Arc::new(RepeatingBackend);
+    let knowledge = std::sync::Arc::new(EmptyKnowledge);
 
     let mut dm = DialogueManager::new(
         learner,
-        &backend,
-        &knowledge,
+        backend.clone(),
+        knowledge.clone(),
         DialogueManagerStores {
             session: None,
             learner: Some(Arc::clone(&store) as Arc<dyn LearnerStore>),
@@ -376,7 +374,7 @@ async fn close_session_always_saves_learner_regardless_of_dirty() {
 /// records `save_comprehensions` calls so chain tests can assert
 #[tokio::test]
 async fn close_session_drains_extractor_task() {
-    let backend = ScriptedBackend::new(vec![Ok(chunk("Hi", true))]);
+    let backend = std::sync::Arc::new(ScriptedBackend::new(vec![Ok(chunk("Hi", true))]));
     let extractor = Arc::new(primer_extractor::StubConceptExtractor::with_response(
         ConceptExtraction {
             child_concepts: vec!["x".into()],
@@ -392,8 +390,8 @@ async fn close_session_drains_extractor_task() {
 
     let mut dm = DialogueManager::new(
         test_learner(),
-        &backend as &dyn InferenceBackend,
-        &EmptyKnowledge as &dyn KnowledgeBase,
+        backend.clone(),
+        std::sync::Arc::new(EmptyKnowledge) as std::sync::Arc<dyn primer_core::knowledge::KnowledgeBase>,
         stores,
         subsystems_with_extractor(extractor as Arc<dyn ConceptExtractor>),
         PedagogyConfig::default(),
@@ -417,12 +415,12 @@ async fn close_session_drains_extractor_task() {
 
 #[tokio::test]
 async fn new_initialises_last_break_suggested_at_to_none() {
-    let backend = ScriptedBackend::new(vec![Ok(chunk("", true))]);
-    let knowledge = EmptyKnowledge;
+    let backend = std::sync::Arc::new(ScriptedBackend::new(vec![Ok(chunk("", true))]));
+    let knowledge = std::sync::Arc::new(EmptyKnowledge);
     let dm = DialogueManager::new(
         test_learner(),
-        &backend,
-        &knowledge,
+        backend.clone(),
+        knowledge.clone(),
         DialogueManagerStores::default(),
         default_subsystems(),
         primer_core::config::PedagogyConfig::default(),
@@ -432,12 +430,12 @@ async fn new_initialises_last_break_suggested_at_to_none() {
 
 #[tokio::test]
 async fn resume_session_clears_last_break_suggested_at() {
-    let backend = ScriptedBackend::new(vec![Ok(chunk("", true))]);
-    let knowledge = EmptyKnowledge;
+    let backend = std::sync::Arc::new(ScriptedBackend::new(vec![Ok(chunk("", true))]));
+    let knowledge = std::sync::Arc::new(EmptyKnowledge);
     let mut dm = DialogueManager::new(
         test_learner(),
-        &backend,
-        &knowledge,
+        backend.clone(),
+        knowledge.clone(),
         DialogueManagerStores::default(),
         default_subsystems(),
         primer_core::config::PedagogyConfig::default(),

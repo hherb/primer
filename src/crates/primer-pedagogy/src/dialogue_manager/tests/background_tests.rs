@@ -8,8 +8,6 @@ use async_trait::async_trait;
 use chrono::Utc;
 use primer_core::config::PedagogyConfig;
 use primer_core::error::{PrimerError, Result};
-use primer_core::inference::InferenceBackend;
-use primer_core::knowledge::KnowledgeBase;
 use primer_core::learner::EngagementState;
 use primer_extractor::ExtractorSettings;
 
@@ -41,17 +39,17 @@ async fn respond_to_streaming_spawns_classify_task_and_persists() {
         .unwrap(),
     );
 
-    let backend = ScriptedBackend::new(vec![
+    let backend = std::sync::Arc::new(ScriptedBackend::new(vec![
         Ok(chunk("Great question!", false)),
         Ok(chunk("", true)),
-    ]);
-    let knowledge = EmptyKnowledge;
+    ]));
+    let knowledge = std::sync::Arc::new(EmptyKnowledge);
     let settings = ClassifierSettings::default();
 
     let mut dm = DialogueManager::new(
         test_learner(),
-        &backend,
-        &knowledge,
+        backend.clone(),
+        knowledge.clone(),
         DialogueManagerStores {
             session: Some(Arc::clone(&storage) as Arc<dyn SessionStore>),
             learner: None,
@@ -121,8 +119,8 @@ async fn await_pending_classification_aborts_and_preserves_state_on_timeout() {
         }
     }
 
-    let backend = ScriptedBackend::new(vec![Ok(chunk("hi", false)), Ok(chunk("", true))]);
-    let knowledge = EmptyKnowledge;
+    let backend = std::sync::Arc::new(ScriptedBackend::new(vec![Ok(chunk("hi", false)), Ok(chunk("", true))]));
+    let knowledge = std::sync::Arc::new(EmptyKnowledge);
     // Tight timeout so the await reliably trips it before the 5s sleep.
     let settings = ClassifierSettings {
         blocking_timeout: Duration::from_millis(50),
@@ -131,8 +129,8 @@ async fn await_pending_classification_aborts_and_preserves_state_on_timeout() {
 
     let mut dm = DialogueManager::new(
         test_learner(),
-        &backend,
-        &knowledge,
+        backend.clone(),
+        knowledge.clone(),
         DialogueManagerStores::default(),
         DialogueManagerSubsystems {
             classifier: Arc::new(SlowClassifier),
@@ -229,8 +227,8 @@ async fn end_to_end_classifier_routing_across_multi_turn_session() {
         .unwrap(),
     );
 
-    let backend = RepeatingBackend;
-    let knowledge = EmptyKnowledge;
+    let backend = std::sync::Arc::new(RepeatingBackend);
+    let knowledge = std::sync::Arc::new(EmptyKnowledge);
 
     // Generous blocking timeout for deterministic test behaviour.
     let settings = ClassifierSettings {
@@ -245,8 +243,8 @@ async fn end_to_end_classifier_routing_across_multi_turn_session() {
 
     let mut dm = DialogueManager::new(
         learner,
-        &backend,
-        &knowledge,
+        backend.clone(),
+        knowledge.clone(),
         DialogueManagerStores {
             session: Some(Arc::clone(&storage) as Arc<dyn SessionStore>),
             learner: None,
@@ -368,13 +366,13 @@ async fn end_to_end_save_learner_after_open_and_one_turn() {
     let learner = test_learner();
     store.save_learner(&learner).await.unwrap();
 
-    let backend = ScriptedBackend::new(vec![Ok(chunk("Hello!", false)), Ok(chunk("", true))]);
-    let knowledge = EmptyKnowledge;
+    let backend = std::sync::Arc::new(ScriptedBackend::new(vec![Ok(chunk("Hello!", false)), Ok(chunk("", true))]));
+    let knowledge = std::sync::Arc::new(EmptyKnowledge);
 
     let mut dm = DialogueManager::new(
         learner,
-        &backend,
-        &knowledge,
+        backend.clone(),
+        knowledge.clone(),
         DialogueManagerStores {
             session: Some(Arc::clone(&store) as Arc<dyn SessionStore>),
             learner: Some(Arc::clone(&store) as Arc<dyn LearnerStore>),
@@ -438,12 +436,12 @@ async fn divergence_bug_closed_via_cli_startup_flow() {
     store.save_learner(&adopted_learner).await.unwrap();
 
     // Construct a DialogueManager with the adopted learner.
-    let backend = ScriptedBackend::new(vec![Ok(chunk("", true))]);
-    let knowledge = EmptyKnowledge;
+    let backend = std::sync::Arc::new(ScriptedBackend::new(vec![Ok(chunk("", true))]));
+    let knowledge = std::sync::Arc::new(EmptyKnowledge);
     let mut dm = DialogueManager::new(
         adopted_learner,
-        &backend,
-        &knowledge,
+        backend.clone(),
+        knowledge.clone(),
         DialogueManagerStores {
             session: Some(Arc::clone(&store) as Arc<dyn SessionStore>),
             learner: Some(Arc::clone(&store) as Arc<dyn LearnerStore>),
@@ -468,7 +466,7 @@ async fn divergence_bug_closed_via_cli_startup_flow() {
 
 #[tokio::test]
 async fn extract_task_persists_concepts_for_both_turns_after_response() {
-    let backend = ScriptedBackend::new(vec![Ok(chunk("Hi there!", true))]);
+    let backend = std::sync::Arc::new(ScriptedBackend::new(vec![Ok(chunk("Hi there!", true))]));
     let extractor = Arc::new(primer_extractor::StubConceptExtractor::with_response(
         ConceptExtraction {
             child_concepts: vec!["topic-a".into()],
@@ -484,8 +482,8 @@ async fn extract_task_persists_concepts_for_both_turns_after_response() {
 
     let mut dm = DialogueManager::new(
         test_learner(),
-        &backend as &dyn InferenceBackend,
-        &EmptyKnowledge as &dyn KnowledgeBase,
+        backend.clone(),
+        std::sync::Arc::new(EmptyKnowledge) as std::sync::Arc<dyn primer_core::knowledge::KnowledgeBase>,
         stores,
         subsystems_with_extractor(extractor as Arc<dyn ConceptExtractor>),
         PedagogyConfig::default(),
@@ -512,7 +510,7 @@ async fn extract_task_persists_concepts_for_both_turns_after_response() {
 
 #[tokio::test]
 async fn extract_task_does_not_spawn_on_inference_error() {
-    let backend = ScriptedBackend::new(vec![Err(PrimerError::Inference("boom".into()))]);
+    let backend = std::sync::Arc::new(ScriptedBackend::new(vec![Err(PrimerError::Inference("boom".into()))]));
     let extractor = Arc::new(primer_extractor::StubConceptExtractor::with_response(
         ConceptExtraction {
             child_concepts: vec!["should-not-persist".into()],
@@ -528,8 +526,8 @@ async fn extract_task_does_not_spawn_on_inference_error() {
 
     let mut dm = DialogueManager::new(
         test_learner(),
-        &backend as &dyn InferenceBackend,
-        &EmptyKnowledge as &dyn KnowledgeBase,
+        backend.clone(),
+        std::sync::Arc::new(EmptyKnowledge) as std::sync::Arc<dyn primer_core::knowledge::KnowledgeBase>,
         stores,
         subsystems_with_extractor(extractor as Arc<dyn ConceptExtractor>),
         PedagogyConfig::default(),
@@ -547,7 +545,7 @@ async fn extract_task_does_not_spawn_on_inference_error() {
 
 #[tokio::test]
 async fn pending_extraction_applied_to_learner_at_next_turn() {
-    let backend = ScriptedBackend::new(vec![Ok(chunk("Hi turn 1!", true))]);
+    let backend = std::sync::Arc::new(ScriptedBackend::new(vec![Ok(chunk("Hi turn 1!", true))]));
     // Two turns of extraction scripted: turn 1 surfaces "gravity" + "physics",
     // turn 2 surfaces "mass". Only the first one matters for this test —
     // we want to assert that after respond_to(turn 2), the learner has
@@ -565,8 +563,8 @@ async fn pending_extraction_applied_to_learner_at_next_turn() {
 
     let mut dm = DialogueManager::new(
         test_learner(),
-        &backend as &dyn InferenceBackend,
-        &EmptyKnowledge as &dyn KnowledgeBase,
+        backend.clone(),
+        std::sync::Arc::new(EmptyKnowledge) as std::sync::Arc<dyn primer_core::knowledge::KnowledgeBase>,
         DialogueManagerStores::default(),
         subsystems_with_extractor(extractor as Arc<dyn ConceptExtractor>),
         PedagogyConfig::default(),
@@ -607,7 +605,7 @@ async fn post_response_chain_persists_extraction_and_comprehension() {
     use primer_core::extractor::ConceptExtraction;
     use primer_core::learner::UnderstandingDepth;
 
-    let backend = ScriptedBackend::new(vec![Ok(chunk("Hi there!", true))]);
+    let backend = std::sync::Arc::new(ScriptedBackend::new(vec![Ok(chunk("Hi there!", true))]));
     let extractor = Arc::new(primer_extractor::StubConceptExtractor::with_response(
         ConceptExtraction {
             child_concepts: vec!["gravity".into()],
@@ -646,8 +644,8 @@ async fn post_response_chain_persists_extraction_and_comprehension() {
 
     let mut dm = DialogueManager::new(
         test_learner(),
-        &backend as &dyn InferenceBackend,
-        &EmptyKnowledge as &dyn KnowledgeBase,
+        backend.clone(),
+        std::sync::Arc::new(EmptyKnowledge) as std::sync::Arc<dyn primer_core::knowledge::KnowledgeBase>,
         stores,
         subsystems,
         PedagogyConfig::default(),
@@ -721,7 +719,7 @@ async fn post_response_chain_skips_comprehension_on_empty_extraction() {
         }
     }
 
-    let backend = ScriptedBackend::new(vec![Ok(chunk("Hi there!", true))]);
+    let backend = std::sync::Arc::new(ScriptedBackend::new(vec![Ok(chunk("Hi there!", true))]));
     let extractor =
         Arc::new(primer_extractor::StubConceptExtractor::new()) as Arc<dyn ConceptExtractor>;
     let comprehension =
@@ -746,8 +744,8 @@ async fn post_response_chain_skips_comprehension_on_empty_extraction() {
 
     let mut dm = DialogueManager::new(
         test_learner(),
-        &backend as &dyn InferenceBackend,
-        &EmptyKnowledge as &dyn KnowledgeBase,
+        backend.clone(),
+        std::sync::Arc::new(EmptyKnowledge) as std::sync::Arc<dyn primer_core::knowledge::KnowledgeBase>,
         stores,
         subsystems,
         PedagogyConfig::default(),
