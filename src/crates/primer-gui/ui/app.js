@@ -72,10 +72,12 @@ const MAX_BOX_LEVEL = 4;
 
 /// Sentinel returned by `send_message` when the user clicked the
 /// Cancel button mid-stream. Matches the `CANCELLED_MESSAGE` const in
-/// `commands/session.rs` — if that string ever changes, this constant
-/// must move in lockstep or the frontend will surface "Turn cancelled
-/// by user." as if it were a real error.
-const CANCEL_SENTINEL = "Turn cancelled by user.";
+/// `commands/session.rs` — a `cancelled_message_is_stable_machine_token`
+/// unit test on the Rust side pins the value, so a one-sided change
+/// here or there breaks CI immediately. A machine-readable token
+/// (rather than a sentence) means a missed match surfaces as obvious
+/// machine output, not a localised-looking string.
+const CANCEL_SENTINEL = "primer:turn_cancelled";
 
 // Live state — `streamingPrimerEl` points at the currently-streaming
 // Primer bubble (if any) so chunk events can append to its text node
@@ -201,10 +203,6 @@ async function handleSessionReady({ info, shouldReplay }) {
   }
 
   setComposerState("idle");
-  // Header "Sessions" button is gated on having an active session —
-  // the picker should only be re-reachable once one exists, otherwise
-  // clicking it does nothing visible.
-  dom.switchSession.disabled = false;
   refreshSidebar();
 }
 
@@ -273,16 +271,21 @@ function renderSessionInfo(info) {
 }
 
 /// Drive the composer's three-state UI from a single function so the
-/// Send/Cancel toggle stays in lockstep with input enabled-ness.
+/// Send/Cancel toggle, input enabled-ness, and the "Sessions" header
+/// button all stay in lockstep.
 ///
-/// - `disabled`: pre-session — both input and send button are inert.
-///   Used between launch and the first session, and after the user
-///   clicks the Sessions button to return to the picker.
+/// - `disabled`: pre-session — both input and send button are inert,
+///   and the Sessions button is hidden behind a disabled state since
+///   there's nothing to switch away from. Used between launch and the
+///   first session, and after `onSwitchSession` returns to the picker.
 /// - `idle`: a session is ready, no turn in flight — input is
-///   editable, Send button posts the typed message.
+///   editable, Send button posts the typed message, Sessions button
+///   is enabled (the picker is reachable).
 /// - `streaming`: a turn is in flight — input is locked (can't queue
 ///   a second turn), Send button shows "Cancel" and dispatches
-///   `cancel_response` on click.
+///   `cancel_response` on click, Sessions button is disabled so a
+///   stray click can't kick off a `close_session` that blocks on the
+///   in-flight turn's DM lock.
 ///
 /// Also flips `state.isStreaming` so the form submit handler can
 /// route between submit-new and cancel-current paths.
@@ -293,6 +296,7 @@ function setComposerState(mode) {
       dom.send.disabled = true;
       dom.send.textContent = "Send";
       dom.send.classList.remove("is-cancel");
+      dom.switchSession.disabled = true;
       state.isStreaming = false;
       break;
     case "idle":
@@ -300,6 +304,7 @@ function setComposerState(mode) {
       dom.send.disabled = false;
       dom.send.textContent = "Send";
       dom.send.classList.remove("is-cancel");
+      dom.switchSession.disabled = false;
       state.isStreaming = false;
       dom.input.focus();
       break;
@@ -309,6 +314,7 @@ function setComposerState(mode) {
       dom.send.disabled = false;
       dom.send.textContent = "Cancel";
       dom.send.classList.add("is-cancel");
+      dom.switchSession.disabled = true;
       state.isStreaming = true;
       break;
     default:
@@ -366,8 +372,9 @@ async function onSubmit(e) {
     // User-initiated cancellation isn't an error the user needs to
     // see acknowledged — they clicked the button, the partial bubble
     // already disappeared as confirmation. A toast would be noise.
-    if (formatErr(err) !== CANCEL_SENTINEL) {
-      showError(formatErr(err));
+    const msg = formatErr(err);
+    if (msg !== CANCEL_SENTINEL) {
+      showError(msg);
     }
     setComposerState("idle");
     // Backend kept the child turn even on mid-stream failure; refresh

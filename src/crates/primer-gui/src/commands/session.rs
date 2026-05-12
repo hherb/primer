@@ -580,6 +580,12 @@ pub async fn send_message(
     // Spawn the turn in a dedicated task so `cancel_response` can abort
     // it. The chunk emitter lives inside the spawn because closures
     // crossing the spawn boundary need owned captures.
+    //
+    // There is a microseconds-wide window between this `spawn` and the
+    // slot-stash below in which a `cancel_response` would observe an
+    // empty slot and silently no-op. Unobservable at human reaction
+    // times; closing it would mean pre-allocating a slot before the
+    // task exists, which adds complexity for no realistic gain.
     let dm_clone = Arc::clone(&dm_arc);
     let app_clone = app.clone();
     let input_clone = input.clone();
@@ -639,14 +645,28 @@ pub async fn send_message(
 }
 
 /// Sentinel returned by `send_message` when the user cancelled the
-/// turn via `cancel_response`. The frontend matches on the exact
-/// string to suppress the error banner (cancellation isn't an error
-/// the user needs to see acknowledged).
+/// turn via `cancel_response`. Deliberately a machine-readable token
+/// (`namespace:event`) rather than a user-facing sentence: the
+/// frontend matches the exact value to suppress the error banner,
+/// and any user-facing wording is the frontend's concern. If the
+/// token ever leaks past the frontend match it reads as an obvious
+/// bug rather than masquerading as a localised string.
 ///
-/// Picked to be self-explanatory in a tracing log line while still
-/// short enough to make sense in a toast if the frontend's match
-/// missed it for any reason.
-pub const CANCELLED_MESSAGE: &str = "Turn cancelled by user.";
+/// Must stay in lockstep with `CANCEL_SENTINEL` in `ui/app.js`. The
+/// `cancelled_message_is_stable_machine_token` unit test pins the
+/// value so a one-sided change here breaks CI immediately.
+pub const CANCELLED_MESSAGE: &str = "primer:turn_cancelled";
+
+/// Abort the in-flight turn associated with `active`, if any. Pure
+/// helper (no Tauri state) so unit tests can drive it directly. The
+/// `cancel_response` command is a thin lookup-then-delegate wrapper
+/// around this.
+async fn cancel_active_turn(active: &ActiveSession) {
+    let abort_guard = active.current_turn_abort.lock().await;
+    if let Some(handle) = abort_guard.as_ref() {
+        handle.abort();
+    }
+}
 
 /// Abort the in-flight turn, if any. Idempotent — calling with no
 /// active turn (or no active session) is a no-op and returns Ok.
@@ -666,10 +686,7 @@ pub const CANCELLED_MESSAGE: &str = "Turn cancelled by user.";
 pub async fn cancel_response(state: tauri::State<'_, AppState>) -> Result<(), String> {
     let guard = state.session.lock().await;
     if let Some(active) = guard.as_ref() {
-        let abort_guard = active.current_turn_abort.lock().await;
-        if let Some(handle) = abort_guard.as_ref() {
-            handle.abort();
-        }
+        cancel_active_turn(active).await;
     }
     Ok(())
 }
@@ -1443,9 +1460,7 @@ mod tests {
         // Mirror the spawn + store + await + clear sequence from
         // send_message.
         let dm_arc = Arc::clone(&active.dialogue_manager);
-        let task = tokio::spawn(async move {
-            run_turn(&dm_arc, "hello", |_, _| {}).await
-        });
+        let task = tokio::spawn(async move { run_turn(&dm_arc, "hello", |_, _| {}).await });
         *active.current_turn_abort.lock().await = Some(task.abort_handle());
 
         let result = task.await.expect("task completes without panic");
@@ -1468,13 +1483,50 @@ mod tests {
         let cfg = stub_config_with_persistence(home.path());
         let active = build_active_session(home.path(), &cfg).await.unwrap();
 
-        // Mirror what cancel_response does with the slot.
-        let abort_guard = active.current_turn_abort.lock().await;
-        if let Some(handle) = abort_guard.as_ref() {
-            handle.abort();
-        }
-        // We never panicked, and the slot is still None.
-        drop(abort_guard);
+        // Drive the production helper directly. With an empty slot
+        // this must return cleanly without panicking.
+        cancel_active_turn(&active).await;
         assert!(active.current_turn_abort.lock().await.is_none());
+    }
+
+    /// End-to-end smoke for the cancel path's effect on a live task:
+    /// spawn a pending task, stash its abort handle, drive
+    /// `cancel_active_turn`, and verify the join result reports
+    /// cancellation. Pins the abort *wiring* (not just the slot
+    /// mechanics) without needing a Tauri runtime in scope.
+    #[tokio::test]
+    async fn cancel_active_turn_aborts_pending_task() {
+        let home = TempDir::new().unwrap();
+        let cfg = stub_config_with_persistence(home.path());
+        let active = build_active_session(home.path(), &cfg).await.unwrap();
+
+        // A long sleep stands in for an in-flight respond_to_streaming.
+        // What matters is that `.abort()` on the stashed handle drops
+        // the future and yields a cancelled JoinError, which is the
+        // exact contract `send_message`'s match arm relies on.
+        let task = tokio::spawn(async {
+            tokio::time::sleep(std::time::Duration::from_secs(60)).await;
+        });
+        *active.current_turn_abort.lock().await = Some(task.abort_handle());
+        tokio::task::yield_now().await;
+
+        cancel_active_turn(&active).await;
+
+        let join_err = task.await.expect_err("task should be cancelled");
+        assert!(
+            join_err.is_cancelled(),
+            "expected cancelled JoinError, got {join_err:?}"
+        );
+    }
+
+    /// The frontend (`ui/app.js`) matches `CANCEL_SENTINEL` against
+    /// this exact string to suppress the error banner on
+    /// user-initiated cancel. A one-sided rename here without an
+    /// equivalent change in `ui/app.js` would silently re-surface
+    /// cancel messages as errors — pin the value so CI catches the
+    /// drift the moment it lands.
+    #[test]
+    fn cancelled_message_is_stable_machine_token() {
+        assert_eq!(CANCELLED_MESSAGE, "primer:turn_cancelled");
     }
 }
