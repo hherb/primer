@@ -25,5 +25,6 @@ pub fn register(builder: tauri::Builder<Wry>) -> tauri::Builder<Wry> {
         session::send_message,
         session::get_turn_signals,
         session::get_learner_state,
+        session::list_session_turns,
     ])
 }

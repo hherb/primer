@@ -785,3 +785,115 @@ body.sidebar-collapsed .sidebar {
   background: #a16207;
 }
 /* unknown / default: stays the muted base colour */
+
+/* ─── Session timeline list ─────────────────────────────────────── */
+
+.turn-list {
+  margin: 0;
+  padding: 0;
+  list-style: none;
+  display: flex;
+  flex-direction: column;
+  gap: 0.3rem;
+}
+
+.turn-list .turn-row {
+  display: grid;
+  grid-template-columns: 1.6rem auto 1fr;
+  align-items: baseline;
+  gap: 0.45rem;
+  padding: 0.45rem 0.6rem;
+  border: 1px solid var(--border);
+  border-radius: 0.45rem;
+  background: var(--bg);
+  text-align: left;
+  font: inherit;
+  font-size: 0.83rem;
+  color: var(--fg);
+  cursor: pointer;
+  transition:
+    background 120ms ease,
+    border-color 120ms ease;
+}
+
+.turn-list .turn-row:hover {
+  background: color-mix(in oklab, var(--accent) 6%, var(--bg));
+  border-color: color-mix(in oklab, var(--accent) 30%, var(--border));
+}
+
+.turn-list .turn-row:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 1px;
+}
+
+.turn-list .turn-row[data-speaker="child"] {
+  border-left: 3px solid var(--bubble-child-bg);
+}
+
+.turn-list .turn-row[data-speaker="primer"] {
+  border-left: 3px solid color-mix(in oklab, var(--fg) 40%, transparent);
+}
+
+.turn-list .turn-index {
+  font-size: 0.7rem;
+  font-variant-numeric: tabular-nums;
+  color: var(--fg-muted);
+}
+
+.turn-list .turn-speaker {
+  font-size: 0.7rem;
+  font-weight: 600;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+  color: var(--fg-muted);
+}
+
+.turn-list .turn-row[data-speaker="child"] .turn-speaker {
+  color: var(--bubble-child-bg);
+}
+
+.turn-list .turn-preview {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  display: flex;
+  flex-direction: column;
+  gap: 0.15rem;
+}
+
+.turn-list .turn-text {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.turn-list .turn-meta {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.35rem;
+  font-size: 0.7rem;
+  color: var(--fg-muted);
+}
+
+.turn-list .turn-intent {
+  display: inline-block;
+  padding: 0 0.4rem;
+  background: color-mix(in oklab, var(--accent) 10%, transparent);
+  color: var(--accent);
+  border-radius: 0.3rem;
+  font-weight: 500;
+}
+
+.turn-list .turn-concept-count::before {
+  content: "•";
+  margin-right: 0.2rem;
+}
+
+/* Highlight the bubble we just scrolled to so the user can find it
+   after the click. Added in JS for a short window then removed. */
+.bubble-row.is-spotlight .bubble {
+  outline: 2px solid var(--accent);
+  outline-offset: 2px;
+  transition: outline-color 600ms ease;
+}

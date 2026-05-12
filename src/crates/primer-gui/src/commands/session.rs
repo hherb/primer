@@ -27,9 +27,15 @@ use primer_core::vocab::due_concepts;
 use crate::state::{ActiveSession, AppState, SessionSnapshot};
 use crate::types::{
     ChunkEvent, ComprehensionSummary, ConceptBreakdown, DepthCount, DueConcept, EngagementSummary,
-    LearnerProfileView, LearnerSnapshot, LearnerSummary, SessionInfo, TurnComplete, TurnSignals,
+    LearnerProfileView, LearnerSnapshot, LearnerSummary, SessionInfo, SessionTurnSummary,
+    TurnComplete, TurnSignals,
 };
 use crate::wiring;
+
+/// Maximum characters of turn text the sidebar's Session list shows
+/// inline. Chosen so a single row at the default sidebar width
+/// doesn't wrap — the full text is in the chat bubble and on disk.
+const TURN_TEXT_PREVIEW_CHARS: usize = 80;
 
 /// Construct an `ActiveSession` from the persisted settings and store
 /// it in `AppState`. Errors surface as `String` for inline rendering.
@@ -152,6 +158,81 @@ pub async fn get_learner_state(
 
     let dm = dm_arc.lock().await;
     Ok(Some(read_learner(&dm)))
+}
+
+/// Return the turn-by-turn list that the sidebar's "Session" section
+/// renders. Reads from the in-memory `dm.session.turns` — same source
+/// the chat bubbles render from — so the list is always consistent
+/// with what's on screen without round-tripping through the DB.
+///
+/// One DM-mutex lock per refresh, same pattern as the other sidebar
+/// readers. Returns `Ok(None)` when no session is active.
+#[tauri::command]
+pub async fn list_session_turns(
+    state: tauri::State<'_, AppState>,
+) -> Result<Option<Vec<SessionTurnSummary>>, String> {
+    let session_guard = state.session.lock().await;
+    let active = match session_guard.as_ref() {
+        Some(a) => a,
+        None => return Ok(None),
+    };
+    let dm_arc = Arc::clone(&active.dialogue_manager);
+    drop(session_guard);
+
+    let dm = dm_arc.lock().await;
+    Ok(Some(read_turn_list(&dm)))
+}
+
+/// Pure shape mapping from a held DM into the sidebar turn list.
+/// Split out so a unit test can call it without a Tauri state.
+/// No `.await` — caller must already hold the DM lock.
+pub(crate) fn read_turn_list(dm: &DialogueManager) -> Vec<SessionTurnSummary> {
+    dm.session
+        .turns
+        .iter()
+        .enumerate()
+        .map(|(i, turn)| {
+            let (text_preview, truncated) =
+                truncate_to_preview(&turn.text, TURN_TEXT_PREVIEW_CHARS);
+            SessionTurnSummary {
+                index: i,
+                speaker: speaker_name(turn.speaker).to_string(),
+                text_preview,
+                truncated,
+                intent: turn.intent.map(|i| i.name().to_string()),
+                concepts: turn.concepts.clone(),
+                timestamp: turn.timestamp.to_rfc3339(),
+            }
+        })
+        .collect()
+}
+
+/// Canonical lowercase name for a `Speaker`. Mirrors the
+/// `EngagementState::name()` / `PedagogicalIntent::name()` convention
+/// used elsewhere in this crate. The returned string flows out to the
+/// frontend via [`SessionTurnSummary::speaker`] and is consumed as a
+/// `[data-speaker=…]` selector hook; do not rename.
+///
+/// `Speaker` itself has no `name()` method (only `ALL`) so this helper
+/// lives here rather than on the core enum.
+pub(crate) fn speaker_name(s: primer_core::conversation::Speaker) -> &'static str {
+    match s {
+        primer_core::conversation::Speaker::Child => "child",
+        primer_core::conversation::Speaker::Primer => "primer",
+    }
+}
+
+/// Truncate `s` to at most `max_chars` *characters* (not bytes — never
+/// splits a multibyte codepoint). Adds an ellipsis when truncated.
+/// Returns `(preview, truncated)`.
+fn truncate_to_preview(s: &str, max_chars: usize) -> (String, bool) {
+    let count = s.chars().count();
+    if count <= max_chars {
+        (s.trim().to_string(), false)
+    } else {
+        let truncated: String = s.chars().take(max_chars).collect();
+        (format!("{}…", truncated.trim_end()), true)
+    }
 }
 
 /// Pure shape mapping from a held DM into a [`LearnerSnapshot`].
@@ -516,6 +597,71 @@ mod tests {
             loaded.turns.len() >= 2,
             "session must persist both the child and primer turns; got {} turns",
             loaded.turns.len()
+        );
+    }
+
+    #[test]
+    fn truncate_short_text_passes_through() {
+        let (preview, truncated) = truncate_to_preview("hello", 80);
+        assert_eq!(preview, "hello");
+        assert!(!truncated);
+    }
+
+    #[test]
+    fn truncate_long_text_adds_ellipsis() {
+        let s = "a".repeat(200);
+        let (preview, truncated) = truncate_to_preview(&s, 80);
+        assert!(truncated);
+        assert!(preview.ends_with('…'));
+        // 80 a's + ellipsis = 81 chars
+        assert_eq!(preview.chars().count(), 81);
+    }
+
+    #[test]
+    fn truncate_respects_codepoint_boundaries() {
+        // A run of multibyte characters; max_chars is a *char* limit,
+        // so we must not split a codepoint.
+        let s = "🌟".repeat(10); // 10 chars, 40 bytes
+        let (preview, truncated) = truncate_to_preview(&s, 5);
+        assert!(truncated);
+        // 5 stars + ellipsis = 6 chars
+        assert_eq!(preview.chars().count(), 6);
+        assert!(preview.starts_with("🌟🌟🌟🌟🌟"));
+    }
+
+    #[tokio::test]
+    async fn read_turn_list_empty_for_fresh_session() {
+        let home = TempDir::new().unwrap();
+        let cfg = stub_config_with_persistence(home.path());
+        let active = build_active_session(home.path(), &cfg).await.unwrap();
+        let dm = active.dialogue_manager.lock().await;
+        let list = read_turn_list(&dm);
+        assert!(list.is_empty(), "no turns before first send_message");
+    }
+
+    #[tokio::test]
+    async fn read_turn_list_after_one_exchange() {
+        let home = TempDir::new().unwrap();
+        let cfg = stub_config_with_persistence(home.path());
+        let active = build_active_session(home.path(), &cfg).await.unwrap();
+        let dm_arc = Arc::clone(&active.dialogue_manager);
+
+        run_turn(&dm_arc, "hello", |_, _| {}).await.unwrap();
+
+        let dm = dm_arc.lock().await;
+        let list = read_turn_list(&dm);
+        assert_eq!(list.len(), 2, "one exchange = child + primer turns");
+        assert_eq!(list[0].index, 0);
+        assert_eq!(list[0].speaker, "child");
+        assert_eq!(list[0].text_preview, "hello");
+        assert!(!list[0].truncated);
+        assert!(list[0].intent.is_none(), "child turns have no intent");
+
+        assert_eq!(list[1].index, 1);
+        assert_eq!(list[1].speaker, "primer");
+        assert!(
+            list[1].intent.is_some(),
+            "primer turn carries the decided intent"
         );
     }
 

@@ -194,6 +194,26 @@
           </div>
         </div>
       </section>
+
+      <section class="sidebar-section" data-section="session">
+        <header class="sidebar-section-header">
+          <h2>Session</h2>
+          <span class="sidebar-section-hint muted" id="session-list-hint" hidden>
+            Click any row to scroll the chat to that turn.
+          </span>
+        </header>
+
+        <div class="sidebar-empty" id="session-empty">
+          <p>The turn-by-turn timeline appears here after the first exchange.</p>
+        </div>
+
+        <ol
+          class="turn-list"
+          id="session-turn-list"
+          aria-label="Turn-by-turn session timeline"
+          hidden
+        ></ol>
+      </section>
     </aside>
 
     <script src="app.js"></script>

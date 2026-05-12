@@ -58,6 +58,11 @@ const dom = {
     engagementCard: document.getElementById("learner-engagement-card"),
     engagementStrip: document.getElementById("learner-engagement-strip"),
   },
+  session: {
+    empty: document.getElementById("session-empty"),
+    hint: document.getElementById("session-list-hint"),
+    list: document.getElementById("session-turn-list"),
+  },
 };
 
 /// Maximum filled box dots — matches MAX_BOX_LEVEL in primer_core::vocab.
@@ -69,6 +74,17 @@ const MAX_BOX_LEVEL = 4;
 const state = {
   sessionId: null,
   streamingPrimerEl: null,
+  /// Next zero-based turn index in the session timeline. Grows by 2
+  /// per successful exchange (child + primer) and rolls back by 1 on a
+  /// mid-stream error (the dropped Primer turn — see CLAUDE.md
+  /// "the partial Primer turn is not recorded into the session"). Used
+  /// to tag bubble DOM elements with `data-turn-index` so the Session
+  /// sidebar's click-to-scroll can address them in O(1).
+  nextTurnIndex: 0,
+  /// setTimeout id for the spotlight-clear on click-to-scroll. Tracked
+  /// so a second click within the highlight window cancels the prior
+  /// timeout instead of letting it strip the new target's highlight.
+  spotlightTimer: null,
 };
 
 main();
@@ -167,6 +183,10 @@ async function onSubmit(e) {
     finaliseStreamingBubble({ aborted: true });
     showError(formatErr(err));
     enableComposer();
+    // Backend kept the child turn even on mid-stream failure; refresh
+    // the sidebar so the Session list reflects it. turn_complete never
+    // fired, so the standard refresh path didn't run.
+    refreshSidebar();
   }
 }
 
@@ -207,11 +227,11 @@ function setupSidebarToggle() {
   });
 }
 
-/// Refresh both sidebar sections (Current turn + Learner) in parallel.
-/// One IPC round-trip per section keeps the DM-lock duration small and
-/// lets the two sections fail independently.
+/// Refresh every sidebar section in parallel. One IPC round-trip per
+/// section keeps the DM-lock duration small (each is a brief read,
+/// not a stream) and lets the sections fail independently.
 async function refreshSidebar() {
-  await Promise.all([refreshSignals(), refreshLearner()]);
+  await Promise.all([refreshSignals(), refreshLearner(), refreshTurnList()]);
 }
 
 async function refreshSignals() {
@@ -231,6 +251,124 @@ async function refreshLearner() {
   } catch (err) {
     console.warn("get_learner_state failed:", err);
   }
+}
+
+async function refreshTurnList() {
+  try {
+    const list = await invoke("list_session_turns");
+    renderTurnList(list);
+  } catch (err) {
+    console.warn("list_session_turns failed:", err);
+  }
+}
+
+function renderTurnList(list) {
+  const s = dom.session;
+  const turns = list ?? [];
+  if (turns.length === 0) {
+    s.list.hidden = true;
+    s.list.replaceChildren();
+    s.empty.hidden = false;
+    s.hint.hidden = true;
+    return;
+  }
+  s.empty.hidden = true;
+  s.list.hidden = false;
+  s.hint.hidden = false;
+  s.list.replaceChildren(...turns.map(renderTurnRow));
+}
+
+function renderTurnRow(turn) {
+  // Use a <button> inside <li> so the row is keyboard-focusable and
+  // announced as an interactive element rather than plain text.
+  const li = document.createElement("li");
+  const btn = document.createElement("button");
+  btn.type = "button";
+  btn.className = "turn-row";
+  btn.dataset.turnIndex = String(turn.index);
+  // Backend serialises `Speaker` as lowercase `"child"` / `"primer"`
+  // via `speaker_name` in commands/session.rs — used as a `[data-speaker=…]`
+  // selector hook in styles.css.
+  btn.dataset.speaker = turn.speaker;
+  btn.setAttribute(
+    "aria-label",
+    `Turn ${turn.index + 1}, ${turn.speaker}: ${turn.text_preview}`,
+  );
+
+  const idxEl = document.createElement("span");
+  idxEl.className = "turn-index";
+  idxEl.textContent = `T${turn.index + 1}`;
+
+  const speakerEl = document.createElement("span");
+  speakerEl.className = "turn-speaker";
+  speakerEl.textContent = turn.speaker;
+
+  const previewEl = document.createElement("span");
+  previewEl.className = "turn-preview";
+
+  const textEl = document.createElement("span");
+  textEl.className = "turn-text";
+  textEl.textContent = turn.text_preview;
+  if (turn.truncated) {
+    textEl.title = `${turn.text_preview} (truncated)`;
+  }
+  previewEl.appendChild(textEl);
+
+  const intent = turn.intent;
+  const conceptCount = turn.concepts.length;
+  if (intent || conceptCount > 0) {
+    const meta = document.createElement("span");
+    meta.className = "turn-meta";
+    if (intent) {
+      const intentBadge = document.createElement("span");
+      intentBadge.className = "turn-intent";
+      intentBadge.textContent = intent;
+      meta.appendChild(intentBadge);
+    }
+    if (conceptCount > 0) {
+      const conceptEl = document.createElement("span");
+      conceptEl.className = "turn-concept-count";
+      conceptEl.textContent =
+        conceptCount === 1 ? "1 concept" : `${conceptCount} concepts`;
+      meta.appendChild(conceptEl);
+    }
+    previewEl.appendChild(meta);
+  }
+
+  btn.appendChild(idxEl);
+  btn.appendChild(speakerEl);
+  btn.appendChild(previewEl);
+  btn.addEventListener("click", () => scrollChatToTurn(turn.index));
+  li.appendChild(btn);
+  return li;
+}
+
+/// Scroll the main chat scroll area to the bubble matching the given
+/// turn index, then briefly outline it so the user can find it. The
+/// bubbles carry `data-turn-index` from append-time (with a roll-back
+/// path on mid-stream error so indices stay aligned with the backend's
+/// session turns); this is a direct DOM query, no per-row
+/// event-listener bookkeeping needed.
+function scrollChatToTurn(index) {
+  const row = dom.chatScroll.querySelector(
+    `.bubble-row[data-turn-index="${index}"]`,
+  );
+  if (!row) return;
+  row.scrollIntoView({ behavior: "smooth", block: "center" });
+  // Cancel any in-flight spotlight before scheduling this one so a
+  // rapid click sequence within the 1.6 s highlight window doesn't
+  // let an earlier timeout strip the new target's highlight.
+  if (state.spotlightTimer !== null) {
+    clearTimeout(state.spotlightTimer);
+    dom.chatScroll
+      .querySelectorAll(".bubble-row.is-spotlight")
+      .forEach((r) => r.classList.remove("is-spotlight"));
+  }
+  row.classList.add("is-spotlight");
+  state.spotlightTimer = setTimeout(() => {
+    row.classList.remove("is-spotlight");
+    state.spotlightTimer = null;
+  }, 1600);
 }
 
 function renderSignals(signals) {
@@ -510,6 +648,8 @@ function renderComprehensionItem(a) {
 function appendChildBubble(text) {
   const row = document.createElement("div");
   row.className = "bubble-row is-child";
+  row.dataset.turnIndex = String(state.nextTurnIndex);
+  state.nextTurnIndex += 1;
   const bubble = document.createElement("div");
   bubble.className = "bubble";
   bubble.textContent = text;
@@ -521,6 +661,8 @@ function appendChildBubble(text) {
 function appendStreamingPrimerBubble() {
   const row = document.createElement("div");
   row.className = "bubble-row is-primer";
+  row.dataset.turnIndex = String(state.nextTurnIndex);
+  state.nextTurnIndex += 1;
   const bubble = document.createElement("div");
   bubble.className = "bubble is-streaming";
   bubble.textContent = "";
@@ -534,11 +676,24 @@ function finaliseStreamingBubble({ aborted }) {
   const el = state.streamingPrimerEl;
   if (!el) return;
   el.classList.remove("is-streaming");
-  if (aborted && el.textContent.trim() === "") {
-    // Empty-aborted: drop the placeholder rather than leaving a blank
-    // Primer bubble. Matches DM's "partial Primer turn dropped on
-    // mid-stream error" semantic.
-    el.parentElement?.remove();
+  if (aborted) {
+    // The partial Primer turn is never persisted (CLAUDE.md: "On a
+    // mid-stream error, the partial Primer turn is not recorded into
+    // the session"). Roll back the index we provisionally claimed in
+    // `appendStreamingPrimerBubble` so the next exchange's bubbles
+    // realign with backend `session.turns` indices; otherwise the
+    // Session-sidebar click-to-scroll would target the wrong bubble.
+    state.nextTurnIndex -= 1;
+    if (el.textContent.trim() === "") {
+      // Empty-aborted: drop the placeholder entirely.
+      el.parentElement?.remove();
+    } else {
+      // Non-empty partial: keep the visible text (the child saw it)
+      // but strip its data-turn-index — there's no backend turn for
+      // this bubble to be addressed by, and leaving the attribute on
+      // would collide with the next exchange's primer bubble.
+      el.parentElement?.removeAttribute("data-turn-index");
+    }
   }
   state.streamingPrimerEl = null;
 }

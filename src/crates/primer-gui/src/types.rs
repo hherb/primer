@@ -224,3 +224,43 @@ pub struct DepthCount {
     pub depth: String,
     pub count: usize,
 }
+
+/// One row in the sidebar's "Session" turn-by-turn list.
+///
+/// Returned by `list_session_turns`; the frontend renders the list
+/// once on session start and updates it after each `primer://turn_complete`.
+/// Click-to-scroll uses [`Self::index`] as the
+/// `data-turn-index` selector on the matching chat bubble.
+///
+/// Lightweight by design — `text_preview` is truncated server-side
+/// so big sessions don't blow up the IPC payload. The full turn text
+/// is still on disk via `SessionStore::load_session` for any future
+/// "Inspect turn N" panel.
+#[derive(Debug, Clone, Serialize)]
+pub struct SessionTurnSummary {
+    /// Zero-based index in the session's turn timeline. Matches
+    /// [`TurnComplete::child_turn_index`] / `primer_turn_index`.
+    pub index: usize,
+    /// Stable lowercase identifier — `"child"` or `"primer"` — produced
+    /// by `commands::session::speaker_name`. Used directly as a
+    /// `[data-speaker=…]` selector hook on the frontend; do not rename.
+    pub speaker: String,
+    /// Truncated turn text — server-side cap matches the sidebar's
+    /// visual budget for an at-a-glance scan. The full text is in the
+    /// rendered chat bubble; this is just the row label.
+    pub text_preview: String,
+    /// `true` when the original text was truncated. Useful for the
+    /// frontend's tooltip ("…") or for a future "expand" affordance.
+    pub truncated: bool,
+    /// `PedagogicalIntent::name()` from the turn's stored intent. `None` for
+    /// child turns and for any Primer turn whose intent was never set
+    /// (only `open_session`'s greeting hits that today).
+    pub intent: Option<String>,
+    /// Concepts that the extractor backfilled onto this turn. Stable
+    /// for past turns; an in-flight current-turn entry shows what the
+    /// extractor has surfaced so far (may grow on subsequent refresh).
+    pub concepts: Vec<String>,
+    /// Wallclock at which the turn landed. Surfaced as an ISO-8601
+    /// string so the frontend can format relatively without parsing.
+    pub timestamp: String,
+}
