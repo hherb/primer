@@ -30,6 +30,7 @@ pub fn resolve_home() -> PathBuf {
 /// the unconfigured default subscriber, the same posture the CLI takes.
 pub fn run() -> Result<(), Box<dyn std::error::Error>> {
     init_tracing();
+    paths::set_packaged_seed_dir_if_present();
 
     let home = resolve_home();
     let config = config::load(&home).unwrap_or_else(|e| {

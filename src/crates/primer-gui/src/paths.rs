@@ -30,6 +30,26 @@ pub fn resolve_packaged_seed_dir(exe_path: &Path) -> Option<PathBuf> {
     find_jsonl_dir(&resources, 0, 8)
 }
 
+/// If we can resolve a packaged seed dir from the current executable,
+/// set `PRIMER_SEED_DIR` so the engine's `auto_seed_if_empty` picks
+/// it up. Safe to call when not in a `.app` — no env mutation happens
+/// in that case.
+pub fn set_packaged_seed_dir_if_present() {
+    let Ok(exe) = std::env::current_exe() else {
+        return;
+    };
+    let Some(dir) = resolve_packaged_seed_dir(&exe) else {
+        return;
+    };
+    // SAFETY: called once at startup before any threads are spawned;
+    // the Tauri runtime has not yet been built. Edition 2024 marks
+    // set_var as unsafe because it's not thread-safe.
+    unsafe {
+        std::env::set_var("PRIMER_SEED_DIR", &dir);
+    }
+    tracing::info!(seed_dir = %dir.display(), "resolved packaged seed dir");
+}
+
 /// Depth-first search for the first directory under `dir` (inclusive)
 /// containing at least one `*.jsonl` file. Bounded at `max_depth` to
 /// keep startup latency negligible.
