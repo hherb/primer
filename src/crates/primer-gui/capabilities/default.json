@@ -1,0 +1,7 @@
+{
+  "$schema": "../gen/schemas/desktop-schema.json",
+  "identifier": "default",
+  "description": "Default capability for the main Primer window: grants the core plugin set the WebView needs for invoke + event::listen + window controls.",
+  "windows": ["main"],
+  "permissions": ["core:default"]
+}
