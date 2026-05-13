@@ -37,3 +37,6 @@ pub use piper::PiperTts;
 pub mod cpal_io;
 #[cfg(feature = "cpal")]
 pub use cpal_io::{MicCapture, Resampler, SpeakerSink, push_all_with_bail, wait_for_drain};
+
+#[cfg(feature = "voice-loop")]
+pub mod voice_loop;

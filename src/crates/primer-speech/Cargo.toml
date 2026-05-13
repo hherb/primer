@@ -56,6 +56,12 @@ silero = ["dep:silero-vad-rust", "dep:ort"]
 whisper = ["dep:whisper-cpp-plus"]
 piper = ["dep:piper-rs", "dep:serde_json"]
 cpal = ["dep:cpal", "dep:ringbuf", "dep:rubato"]
+# Shared voice loop state machine (LISTEN → LATENT_THINK → SPEAK → LISTEN).
+# Pulls every speech backend feature so the state machine can compose
+# VAD → STT → DialogueManager → TTS → cpal without further conditional
+# compilation in consumers. Consumed by primer-cli (--speech mode) and
+# primer-gui (Voice mode toggle).
+voice-loop = ["silero", "whisper", "piper", "cpal"]
 
 [[example]]
 name = "tts_hello"
