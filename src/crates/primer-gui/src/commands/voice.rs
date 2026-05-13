@@ -346,6 +346,57 @@ pub async fn download_voice_assets(
     Err("voice mode not built in this binary".into())
 }
 
+/// Locale-aware copy strings for the voice-state widget.
+///
+/// Returns the six display strings (label + hint for each of the three
+/// voice states) in the learner's current locale. Not feature-gated — it
+/// is just a locale table lookup and works in default (non-speech) builds
+/// too, so the Settings → Speech badge can show the right language even
+/// when the voice loop isn't compiled in.
+#[derive(Serialize, Debug)]
+pub struct VoiceStateCopy {
+    pub listen_label: String,
+    pub listen_hint: String,
+    pub thinking_label: String,
+    pub thinking_hint: String,
+    pub speak_label: String,
+    pub speak_hint: String,
+}
+
+impl VoiceStateCopy {
+    fn for_locale(locale: &primer_core::i18n::Locale) -> Self {
+        match locale {
+            primer_core::i18n::Locale::German => Self {
+                listen_label:   "Höre zu…".into(),
+                listen_hint:    "lass dir Zeit".into(),
+                thinking_label: "Denke nach…".into(),
+                thinking_hint:  "der Primer überlegt eine Antwort".into(),
+                speak_label:    "Spreche…".into(),
+                speak_hint:     "lass den Primer ausreden".into(),
+            },
+            // English is the default for any unrecognised locale.
+            _ => Self {
+                listen_label:   "Listening…".into(),
+                listen_hint:    "take your time".into(),
+                thinking_label: "Thinking…".into(),
+                thinking_hint:  "the Primer is working on a reply".into(),
+                speak_label:    "Speaking…".into(),
+                speak_hint:     "let the Primer finish".into(),
+            },
+        }
+    }
+}
+
+#[tauri::command]
+pub async fn get_voice_state_copy(
+    state: tauri::State<'_, AppState>,
+) -> Result<VoiceStateCopy, String> {
+    let cfg = state.config.lock().await.clone();
+    let locale =
+        primer_core::i18n::Locale::from_pack_id(&cfg.learner.locale).unwrap_or_default();
+    Ok(VoiceStateCopy::for_locale(&locale))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
