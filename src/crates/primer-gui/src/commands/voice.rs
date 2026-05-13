@@ -61,15 +61,19 @@ impl From<String> for StartVoiceModeError {
 
 /// Start voice mode.
 ///
-/// Closes any active text session, closes any active voice loop, validates
-/// the config, then (in PR 4) builds the LoopBackends and spawns the voice
-/// loop. For PR 3 this command is a lifecycle-plumbing stub — asset
-/// resolution is not yet implemented and the command always returns
-/// `Err(Other { message: "asset resolution not yet implemented (PR 4)" })`.
+/// Closes any active text session, closes any active voice loop, resolves
+/// the locale's voice assets (returning `Err(AssetMissing { … })` if any
+/// are absent so the frontend can render the consent dialog), builds the
+/// local backends (mic + speaker + VAD + STT + TTS), and spawns the
+/// shared voice loop. The active session is moved into `state.session`
+/// (so sidebar / learner-state commands keep working) and the loop
+/// handle is moved into `state.voice`.
 ///
 /// Returns a [`SessionInfo`] on success so the frontend can display the
 /// active learner/backend identity in voice mode the same way it does in
-/// text mode.
+/// text mode. On `AssetMissing`, the sticky `voice_mode_enabled` flag is
+/// left at its current value so the consent dialog can render the toggle
+/// in its original position.
 #[cfg(feature = "speech")]
 #[tauri::command]
 pub async fn start_voice_mode(
@@ -171,15 +175,21 @@ pub async fn start_voice_mode(
 
     // 7. Build SessionInfo from the active session, then move both the
     //    active session (into state.session) and the loop handle (into
-    //    state.voice).
+    //    state.voice). Acquire the snapshot lock once and read all four
+    //    fields under it — re-locking per field would interleave reads
+    //    against any concurrent snapshot mutation.
+    let learner = {
+        let snap = active_session.snapshot.lock().await;
+        crate::types::LearnerSummary {
+            id: snap.learner_id,
+            name: snap.learner_name.clone(),
+            age: snap.learner_age,
+            concept_count: snap.concept_count,
+        }
+    };
     let info = SessionInfo {
         session_id: None,
-        learner: crate::types::LearnerSummary {
-            id: active_session.snapshot.lock().await.learner_id,
-            name: active_session.snapshot.lock().await.learner_name.clone(),
-            age: active_session.snapshot.lock().await.learner_age,
-            concept_count: active_session.snapshot.lock().await.concept_count,
-        },
+        learner,
         backend_kind: active_session.backend_name.clone(),
         main_model: active_session.main_model.clone(),
         locale: active_session.locale.pack_id().to_string(),

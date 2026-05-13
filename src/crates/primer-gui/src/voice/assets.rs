@@ -8,6 +8,7 @@ use std::path::PathBuf;
 
 use crate::commands::voice::MissingAsset;
 use crate::config::SpeechSettings;
+use primer_core::consts::speech::{APPROX_PIPER_CONFIG_MB, APPROX_WHISPER_SMALL_MB};
 use primer_core::i18n::Locale;
 use primer_speech::voice_loop::locale_defaults::{voice_default_for, LocaleDefault};
 
@@ -63,7 +64,7 @@ pub fn resolve_voice_assets(
             kind: "piper_config".into(),
             path: piper_config.clone(),
             suggested_url: default.map(|d| d.piper_config_url.to_string()),
-            approx_size_mb: Some(1), // .json sidecar is tiny
+            approx_size_mb: Some(APPROX_PIPER_CONFIG_MB),
         });
     }
     if !whisper_model.exists() {
@@ -94,8 +95,10 @@ pub fn resolve_voice_assets(
 fn whisper_size_mb(_d: &LocaleDefault) -> u32 {
     // Approx split: the Whisper bin is the bulk (~470 MB for small);
     // Piper medium voices are ~60 MB. Used only for consent-dialog
-    // labelling.
-    470
+    // labelling. Every shipping locale today uses a Whisper `small`
+    // variant; if a locale upgrades to `medium`/`large` add a per-id
+    // branch driven by `_d.whisper_model_id`.
+    APPROX_WHISPER_SMALL_MB
 }
 
 fn compute_paths(

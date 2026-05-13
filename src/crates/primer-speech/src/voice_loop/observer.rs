@@ -111,7 +111,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn voice_state_name_is_stable_kebab_case() {
+    fn voice_state_name_is_stable_snake_case() {
         // The frontend matches on these exact strings. A drift here
         // silently breaks the [data-state="..."] CSS selectors and
         // the JS state lookups. Pin every variant.
