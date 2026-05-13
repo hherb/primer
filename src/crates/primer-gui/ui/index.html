@@ -88,6 +88,27 @@
         ></textarea>
         <button type="submit" id="send" disabled>Send</button>
       </form>
+
+      <div class="composer composer-voice" id="composer-voice" hidden>
+        <div class="voice-state" id="voice-state" data-state="listen">
+          <div class="voice-state-icon" aria-hidden="true">
+            <div class="voice-icon-inner"></div>
+          </div>
+          <div class="voice-state-text">
+            <div class="voice-state-label" id="voice-state-label">Listening…</div>
+            <div class="voice-state-hint muted" id="voice-state-hint">take your time</div>
+          </div>
+          <button
+            type="button"
+            class="voice-stop-btn"
+            id="voice-stop"
+            title="Stop the Primer's reply"
+            aria-label="Stop"
+          >
+            ⏹ Stop
+          </button>
+        </div>
+      </div>
     </main>
 
     <aside class="sidebar" id="sidebar" aria-label="Evaluation sidebar">
