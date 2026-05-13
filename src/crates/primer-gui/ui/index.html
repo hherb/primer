@@ -587,6 +587,109 @@
       </div>
     </div>
 
+    <!-- Voice-asset consent modal. Opened by voice.js when start_voice_mode
+         returns AssetMissing. The asset rows + total size are filled from
+         the StartVoiceModeError::AssetMissing payload at open time; the
+         progress section becomes visible only once the Download button has
+         been clicked and primer://voice/download_progress events arrive. -->
+    <div
+      class="modal-backdrop"
+      id="voice-consent-backdrop"
+      hidden
+      aria-hidden="true"
+    >
+      <div
+        class="modal"
+        id="voice-consent-modal"
+        role="dialog"
+        aria-modal="true"
+        aria-labelledby="voice-consent-title"
+      >
+        <header class="modal-header">
+          <h2 id="voice-consent-title">Download voice models</h2>
+          <button
+            type="button"
+            class="modal-close"
+            id="voice-consent-close"
+            aria-label="Close"
+            title="Close"
+          >
+            ×
+          </button>
+        </header>
+
+        <div class="modal-body">
+          <p>
+            Voice mode needs Whisper (speech-to-text) and Piper
+            (text-to-speech) models for your locale (<span
+              id="voice-consent-locale"
+              >en</span
+            >). Total approximate size:
+            <strong id="voice-consent-total-size">~530 MB</strong>.
+          </p>
+          <p class="hint muted">
+            Files will be downloaded to <code>~/.cache/primer/models/</code>.
+            Source URLs are shown below; close this dialog and use Settings →
+            Speech to point at your own files instead.
+          </p>
+
+          <table class="asset-list">
+            <thead>
+              <tr>
+                <th>File</th>
+                <th>Size</th>
+                <th>Source</th>
+              </tr>
+            </thead>
+            <tbody id="voice-consent-assets">
+              <!-- Rows rendered from JS based on the AssetMissing payload. -->
+            </tbody>
+          </table>
+
+          <div id="voice-consent-progress" hidden>
+            <div class="progress-row" id="voice-consent-progress-row">
+              <span
+                class="progress-label"
+                id="voice-consent-progress-label"
+                >Downloading…</span
+              >
+              <progress
+                id="voice-consent-progress-bar"
+                value="0"
+                max="100"
+              ></progress>
+            </div>
+          </div>
+
+          <div
+            class="error-banner"
+            id="voice-consent-error"
+            role="alert"
+            hidden
+          ></div>
+        </div>
+
+        <footer class="modal-footer">
+          <div class="modal-footer-actions">
+            <button
+              type="button"
+              class="btn-tertiary"
+              id="voice-consent-cancel"
+            >
+              Cancel
+            </button>
+            <button
+              type="button"
+              class="btn-primary"
+              id="voice-consent-download"
+            >
+              Download
+            </button>
+          </div>
+        </footer>
+      </div>
+    </div>
+
     <div
       class="toast"
       id="toast"

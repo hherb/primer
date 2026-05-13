@@ -1488,3 +1488,54 @@ code {
   opacity: 1;
   transform: translateX(-50%) translateY(0);
 }
+
+/* ─── Voice-asset consent modal ────────────────────────────────── */
+
+.asset-list {
+  width: 100%;
+  border-collapse: collapse;
+  margin-top: 1rem;
+}
+
+.asset-list th,
+.asset-list td {
+  padding: 0.4rem 0.6rem;
+  border-bottom: 1px solid var(--border);
+  text-align: left;
+  font-size: 0.85rem;
+}
+
+.asset-list th {
+  font-weight: 600;
+  color: var(--fg-muted);
+}
+
+.asset-list .source-url {
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-size: 0.75rem;
+  color: var(--fg-muted);
+  word-break: break-all;
+}
+
+#voice-consent-progress {
+  margin-top: 1rem;
+  padding-top: 1rem;
+  border-top: 1px solid var(--border);
+}
+
+#voice-consent-progress-bar {
+  width: 100%;
+  height: 6px;
+}
+
+.progress-row {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+}
+
+.progress-label {
+  font-size: 0.75rem;
+  color: var(--fg-muted);
+  min-width: 120px;
+}
