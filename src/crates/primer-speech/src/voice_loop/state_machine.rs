@@ -1,33 +1,129 @@
-//! Voice round-trip REPL — the `--speech` mode of `primer-cli`.
+//! State machine implementation (LISTEN → LATENT_THINK → SPEAK → LISTEN).
 //!
-//! State machine: `LISTEN → LATENT_THINK → SPEAK → LISTEN`, with the
-//! mic open through LISTEN and LATENT_THINK so the Primer never barges
-//! in on a child mid-thought. Closes the mic on the commit boundary
-//! (first audio chunk reaches the speaker) so the child never speaks
-//! over the Primer.
-//!
-//! See `docs/superpowers/specs/2026-05-02-voice-roundtrip-poc-design.md`
-//! for the full design.
+//! Lifted from `primer-cli/src/speech_loop.rs` in PR 1 of the GUI
+//! voice-mode work. Side-effects now route through [`super::LoopObserver`]
+//! instead of inline `println!`s; the CLI's stdout output is preserved
+//! by the `StdoutObserver` adapter in `primer-cli`.
 
-use std::path::Path;
+use std::path::PathBuf;
 
 use primer_core::error::Result;
 
-/// Phrases that, if heard in the child's transcript, end the session.
-/// Case-insensitive substring match. Three flavours so the child can
-/// quit whether they say the formal "goodbye", a Primer-direct
-/// "bye primer", or the very direct "stop primer".
-const QUIT_PHRASES: &[&str] = &["goodbye", "bye primer", "stop primer"];
+use super::observer::{ExitReason, LoopObserver, TurnCompletePayload, VoiceState};
+
+/// Per-locale quit phrases. If heard in the child's transcript, the
+/// session ends. Case-insensitive, word-boundary match (see
+/// [`is_quit_phrase`]). Each locale ships its own set so a child can
+/// quit in the language they speak — without a locale-aware list, the
+/// German voice mode silently lacks any voice-keyword end affordance.
+///
+/// Adding a new locale: append a `(pack_id, &[phrase, ...])` row. The
+/// pack_id must match `Locale::pack_id()` for the corresponding locale.
+fn quit_phrases_for(locale: &primer_core::i18n::Locale) -> &'static [&'static str] {
+    match locale.pack_id() {
+        "de" => &[
+            // "Tschüss" (informal goodbye) — the most natural for a child.
+            "tschüss",
+            // Formal goodbye.
+            "auf wiedersehen",
+            // Primer-direct variants, mirroring the EN set.
+            "bye primer",
+            "stop primer",
+        ],
+        // English is the default for any unrecognised locale.
+        _ => &["goodbye", "bye primer", "stop primer"],
+    }
+}
 
 /// Spoken when the LLM call fails (rate limit, network, etc.). Goes
 /// through Piper just like any normal Primer turn — the child hears
 /// the apology, then we loop back to LISTEN.
 const FALLBACK_LINE: &str = "Sorry, I had trouble with that. Could you ask again?";
 
-/// Returns true if `transcript` contains any quit phrase (case-insensitive).
-fn is_quit_phrase(transcript: &str) -> bool {
-    let lower = transcript.to_lowercase();
-    QUIT_PHRASES.iter().any(|p| lower.contains(p))
+/// Handle an LLM error inside the LATENT_THINK select arms.
+///
+/// Surfaces the typed error to the observer, then **drops** any chunks
+/// the partial attempt managed to push into `chunk_buffer` and replaces
+/// them with a single synthetic FALLBACK_LINE chunk. The replay loop
+/// downstream will deliver that one chunk to the observer, so the GUI
+/// chat bubble shows exactly the text TTS will speak — no truncated
+/// pre-error stream stuck on screen.
+///
+/// Preserves the typed `InferenceError` variant when the responder
+/// returned a `PrimerError::Inference(_)` so the i18n layer can render
+/// the variant-specific user-facing copy (`Auth` / `RateLimited` /
+/// `ServiceUnavailable` / `NetworkUnavailable` / `ModelNotFound`). Only
+/// non-Inference `PrimerError` variants fall back to `Other` (carrying
+/// the dev-facing display string, which the i18n layer redacts before
+/// it ever reaches the user). CLAUDE.md's i18n contract forbids
+/// reintroducing a `to_string().into()` wrap on the inference path —
+/// it would flatten every typed variant to `Other`.
+///
+/// Returns the text the caller should set `accumulated` to (which then
+/// flows into TTS synthesis).
+fn handle_llm_err<O: LoopObserver>(
+    err: primer_core::error::PrimerError,
+    chunk_buffer: &std::sync::Arc<std::sync::Mutex<Vec<String>>>,
+    observer: &mut O,
+) -> String {
+    let inference_err = match err {
+        primer_core::error::PrimerError::Inference(inf) => inf,
+        other => other.to_string().into(),
+    };
+    observer.on_inference_error(&inference_err);
+    let mut chunks = chunk_buffer.lock().unwrap();
+    chunks.clear();
+    chunks.push(FALLBACK_LINE.to_string());
+    FALLBACK_LINE.to_string()
+}
+
+/// Returns true if `transcript`, after trimming surrounding whitespace
+/// and punctuation, **equals** one of `locale`'s quit phrases
+/// (case-insensitive).
+///
+/// Why exact-equality rather than `contains` or word-boundary: the
+/// pre-fix `contains` would end the session on *"I don't want to stop
+/// primer"* because the substring `"stop primer"` matched. Word-boundary
+/// matching alone doesn't help — end-of-string is itself a word boundary.
+/// The only safe contract for an auto-quit voice keyword is "the child
+/// said exactly the keyword, nothing else." Children can always say
+/// "goodbye" by itself; this also matches the way real children end
+/// conversations.
+///
+/// Trimming punctuation handles Whisper's habit of producing trailing
+/// `.` / `!` / `?` on a finalized utterance: `"Goodbye!"` still ends the
+/// session. Internal whitespace is normalised to single spaces so the
+/// transcript `"bye   primer"` matches `"bye primer"`.
+fn is_quit_phrase(transcript: &str, locale: &primer_core::i18n::Locale) -> bool {
+    let normalised = normalise_for_match(transcript);
+    quit_phrases_for(locale)
+        .iter()
+        .any(|p| normalised == normalise_for_match(p))
+}
+
+/// Lowercase, strip leading/trailing whitespace + punctuation, collapse
+/// internal whitespace to single spaces. The result is the canonical
+/// form used for quit-phrase equality.
+///
+/// `char::is_alphanumeric` is Unicode-aware so German `ü`/`ö`/`ä` are
+/// preserved; only punctuation and non-letter symbols get trimmed.
+fn normalise_for_match(s: &str) -> String {
+    let lower = s.to_lowercase();
+    let trimmed = lower.trim_matches(|c: char| !c.is_alphanumeric());
+    let mut out = String::with_capacity(trimmed.len());
+    let mut prev_was_space = false;
+    for c in trimmed.chars() {
+        if c.is_whitespace() {
+            if !prev_was_space {
+                out.push(' ');
+                prev_was_space = true;
+            }
+        } else {
+            out.push(c);
+            prev_was_space = false;
+        }
+    }
+    out
 }
 
 /// Strip markdown emphasis markers so Piper's espeak phonemizer doesn't
@@ -132,12 +228,17 @@ fn find_paired_marker(
     None
 }
 
-/// Configuration passed into `run` from `main`.
-pub struct SpeechLoopConfig<'a> {
-    pub whisper_model: &'a Path,
-    pub voice_onnx: &'a Path,
-    pub voice_config: &'a Path,
-    pub voice_id: &'a str,
+/// Configuration passed into [`run_loop`] / the higher-level `run` entry
+/// point in `primer-cli`.
+///
+/// Owns its paths and the voice id so the entire config is `'static` and
+/// can be moved into a spawned task. Previously borrowed (`&'a Path` /
+/// `&'a str`) — the spawn-based [`run_loop`] requires `'static`.
+pub struct LoopConfig {
+    pub whisper_model: PathBuf,
+    pub voice_onnx: PathBuf,
+    pub voice_config: PathBuf,
+    pub voice_id: String,
     pub mic_silence_ms: u32,
     pub verbose: bool,
     /// Active locale for TTS dispatch. Today's CLI binds this to the
@@ -149,11 +250,6 @@ pub struct SpeechLoopConfig<'a> {
 use std::sync::Arc;
 
 use primer_core::speech::{StreamingSpeechToText, StreamingTextToSpeech};
-// Production audio-thread paths call methods on `SileroVad` via the
-// `VoiceActivityDetector` trait. Imported only when the speech feature
-// is enabled — the trait is otherwise unused in this module.
-#[cfg(feature = "speech")]
-use primer_core::speech::VoiceActivityDetector;
 
 /// Bound on the VAD event channel. At ~32 events/s (silero on 512-sample
 /// chunks at 16 kHz), 256 holds ~8 seconds of accumulated events. The
@@ -163,13 +259,7 @@ use primer_core::speech::VoiceActivityDetector;
 /// The cap is sized large enough that this never triggers in steady
 /// state; if `run_loop` falls 8 s behind, the audio thread will block
 /// briefly until the consumer catches up.
-const VAD_EVENT_CHANNEL_CAPACITY: usize = 256;
-
-/// Shared receiver for the audio thread → run_loop transcript channel.
-/// `Arc<Mutex<...>>` only because the `StreamingSpeechToText` trait hands
-/// out sessions through `&self`; there is exactly one consumer.
-#[cfg(feature = "speech")]
-type TranscriptRx = Arc<std::sync::Mutex<std::sync::mpsc::Receiver<String>>>;
+pub const VAD_EVENT_CHANNEL_CAPACITY: usize = 256;
 
 /// Trait-injected backends consumed by `run_loop`. Production wires real
 /// whisper / piper instances; tests wire mocks. The VAD lives on the
@@ -303,27 +393,129 @@ pub trait Responder: Send {
     ) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<String>> + Send + 'a>>;
 }
 
-/// Drive the state machine until a quit phrase or exhausted VAD events.
-/// `events` is the source of `VadEvent`s the loop reads (production
-/// wires the audio capture task; tests wire a `tokio::sync::mpsc`
-/// pre-filled with a script).
+/// Handle returned by [`run_loop`] for external control.
 ///
-/// The `'r` lifetime on the boxed responder lets `DialogueResponder`
-/// (Task 21) borrow `&mut DialogueManager` rather than own it.
+/// `stop_tx` ends the loop entirely (CLI Ctrl+C / GUI End-voice-mode).
+/// `cancel_response_tx` aborts the in-flight LLM call + TTS synthesis
+/// and returns the loop to LISTEN (GUI Stop button, Esc keypress).
+pub struct LoopHandle {
+    pub stop_tx: tokio::sync::oneshot::Sender<()>,
+    pub cancel_response_tx: tokio::sync::mpsc::Sender<()>,
+}
+
+/// Voice loop error type. Today carries a single string variant; new
+/// variants land here when the state machine grows recoverable error
+/// paths.
+#[derive(Debug, thiserror::Error)]
+pub enum VoiceLoopError {
+    #[error("voice loop error: {0}")]
+    Other(String),
+}
+
+/// Spawn-based entry point. Returns a [`LoopHandle`] for external control
+/// and a `JoinHandle` so consumers (CLI, GUI) can wait for completion.
 ///
-/// `verbose` gates `[vad]`/`[stt]` debug lines on stderr.
-/// `[child]` and `[primer]` lines are always printed on stdout.
+/// Caller must wrap any `&mut DialogueManager` in an
+/// `Arc<Mutex<DialogueManager>>` (or analogue) so the boxed responder can
+/// satisfy `'static`. For tests that need to share borrowed state with
+/// the loop, use [`run_loop_borrowed`] instead.
+#[allow(clippy::too_many_arguments)]
+pub fn run_loop<O: LoopObserver>(
+    backends: LoopBackends,
+    events: tokio::sync::mpsc::Receiver<primer_core::speech::VadEvent>,
+    responder: Box<dyn Responder + 'static>,
+    on_committed_audio: Box<dyn FnMut(Vec<f32>) + Send>,
+    wait_for_speaker_drain: Option<DrainHook>,
+    verbose: bool,
+    is_speaking: Option<std::sync::Arc<std::sync::atomic::AtomicBool>>,
+    observer: O,
+) -> (
+    LoopHandle,
+    tokio::task::JoinHandle<std::result::Result<Vec<String>, VoiceLoopError>>,
+) {
+    let (stop_tx, stop_rx) = tokio::sync::oneshot::channel::<()>();
+    let (cancel_tx, cancel_rx) = tokio::sync::mpsc::channel::<()>(8);
+    let handle = LoopHandle {
+        stop_tx,
+        cancel_response_tx: cancel_tx,
+    };
+    let join = tokio::spawn(async move {
+        run_loop_inner(
+            backends,
+            events,
+            responder,
+            on_committed_audio,
+            wait_for_speaker_drain,
+            verbose,
+            is_speaking,
+            observer,
+            stop_rx,
+            cancel_rx,
+        )
+        .await
+        .map_err(|e| VoiceLoopError::Other(e.to_string()))
+    });
+    (handle, join)
+}
+
+/// Same state machine as [`run_loop`] but with no spawn and a borrowed
+/// responder (`'r` lifetime). Used by tests that share state with the
+/// loop on the call stack.
+#[allow(clippy::too_many_arguments)]
+pub async fn run_loop_borrowed<'r, O: LoopObserver>(
+    backends: LoopBackends,
+    events: tokio::sync::mpsc::Receiver<primer_core::speech::VadEvent>,
+    responder: Box<dyn Responder + 'r>,
+    on_committed_audio: Box<dyn FnMut(Vec<f32>) + Send>,
+    wait_for_speaker_drain: Option<DrainHook>,
+    verbose: bool,
+    is_speaking: Option<std::sync::Arc<std::sync::atomic::AtomicBool>>,
+    observer: O,
+) -> Result<Vec<String>> {
+    // No external stop / cancel channels — tests don't need them.
+    // Construct never-firing receivers so the inner function's
+    // `tokio::select!` arm on them is harmless.
+    let (_stop_tx, stop_rx) = tokio::sync::oneshot::channel::<()>();
+    let (_cancel_tx, cancel_rx) = tokio::sync::mpsc::channel::<()>(8);
+    run_loop_inner(
+        backends,
+        events,
+        responder,
+        on_committed_audio,
+        wait_for_speaker_drain,
+        verbose,
+        is_speaking,
+        observer,
+        stop_rx,
+        cancel_rx,
+    )
+    .await
+}
+
+/// Internal state-machine body shared by [`run_loop`] (spawn) and
+/// [`run_loop_borrowed`] (in-place).
+///
+/// `verbose` gates `[stt]` debug lines on stderr (the only
+/// stderr-printing site left after observer integration). Per-state
+/// transitions, transcripts, chunks, completion, errors, and exits are
+/// all delivered through `observer`.
 ///
 /// `is_speaking` is the gate the audio thread checks to decide whether to
-/// process or discard mic samples. `run_loop` flips it true at the start
-/// of SPEAK and back to false after the synthesised audio has had time
-/// to drain to the speaker. Tests pass `None` (mocks have no audio thread).
+/// process or discard mic samples. The state machine flips it true at the
+/// start of SPEAK and back to false after the synthesised audio has had
+/// time to drain to the speaker. Tests pass `None` (mocks have no audio
+/// thread).
 ///
 /// `wait_for_speaker_drain` is awaited (in production) after the flush
 /// sentinel returns and before `is_speaking` is cleared. Production wires
-/// it to a `spawn_blocking` around [`primer_speech::wait_for_drain`]; tests
-/// pass `None` (mock speakers have no real ringbuf to drain).
-pub async fn run_loop<'r>(
+/// it to a `spawn_blocking` around [`primer_speech::wait_for_drain`];
+/// tests pass `None` (mock speakers have no real ringbuf to drain).
+///
+/// `external_stop` ends the loop entirely (LISTEN, LATENT_THINK, SPEAK
+/// — all states observe it as a cancel signal). `cancel_response` aborts
+/// the in-flight LLM call + TTS synthesis and returns to LISTEN.
+#[allow(clippy::too_many_arguments)]
+async fn run_loop_inner<'r, O: LoopObserver>(
     backends: LoopBackends,
     mut events: tokio::sync::mpsc::Receiver<primer_core::speech::VadEvent>,
     mut responder: Box<dyn Responder + 'r>,
@@ -331,23 +523,47 @@ pub async fn run_loop<'r>(
     mut wait_for_speaker_drain: Option<DrainHook>,
     verbose: bool,
     is_speaking: Option<std::sync::Arc<std::sync::atomic::AtomicBool>>,
+    mut observer: O,
+    external_stop: tokio::sync::oneshot::Receiver<()>,
+    mut cancel_response: tokio::sync::mpsc::Receiver<()>,
 ) -> Result<Vec<String>> {
     use primer_core::speech::VadEvent;
 
     let mut transcripts: Vec<String> = Vec::new();
+    // Counter for `TurnCompletePayload.primer_turn_index` and
+    // `LoopObserver::on_response_chunk(primer_turn_index, ...)`. The
+    // state machine doesn't own a session id yet (the GUI plumbing in
+    // PR 3 will introduce one); `Uuid::nil()` is the placeholder.
+    let mut primer_turn_index: usize = 0;
+    // Pin the external_stop receiver so it can be polled inside the
+    // tokio::select! arms below.
+    tokio::pin!(external_stop);
 
     'outer: loop {
         // ── LISTEN ────────────────────────────────────────────────────
+        observer.on_state_change(VoiceState::Listen, None);
         let mut stt_session = backends.stt.open_session()?;
         let mut in_speech = false;
         loop {
-            let Some(event) = events.recv().await else {
-                break 'outer;
-            };
-            match event {
-                VadEvent::SpeechStart => in_speech = true,
-                VadEvent::SpeechEnd if in_speech => break,
-                _ => {}
+            // Poll events alongside the external stop signal so the loop
+            // can be terminated from the LISTEN state.
+            tokio::select! {
+                biased;
+                _ = &mut external_stop => {
+                    observer.on_state_change(VoiceState::Exit, None);
+                    observer.on_exit(ExitReason::UserStop);
+                    return Ok(transcripts);
+                }
+                evt = events.recv() => {
+                    let Some(event) = evt else {
+                        break 'outer;
+                    };
+                    match event {
+                        VadEvent::SpeechStart => in_speech = true,
+                        VadEvent::SpeechEnd if in_speech => break,
+                        _ => {}
+                    }
+                }
             }
         }
 
@@ -355,8 +571,17 @@ pub async fn run_loop<'r>(
         // Loop here so a SpeechStart-cancel can resume listening with
         // the same whisper session and re-attempt the LLM call once the
         // child finishes their continuation.
+        observer.on_state_change(VoiceState::LatentThink, None);
         let mut transcript_so_far: String;
         let mut accumulated = String::new();
+        // Per-turn chunk accumulator. Captured by the on_chunk closure
+        // passed to the responder; replayed onto the observer after the
+        // future resolves so we keep the streaming semantics (one
+        // observer.on_response_chunk per actual chunk) without trying to
+        // re-borrow `observer` mutably inside a closure that already
+        // borrows `'r`.
+        let chunk_buffer: std::sync::Arc<std::sync::Mutex<Vec<String>>> =
+            std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
         loop {
             // Peek (finalize-and-reopen since whisper-cpp-plus has no
             // partial-extract API exposed here): we accept the slight
@@ -379,31 +604,50 @@ pub async fn run_loop<'r>(
                 break;
             }
 
+            // Reset the chunk buffer at the top of each LLM attempt so
+            // a cancelled-then-retried turn delivers only the second
+            // attempt's chunks to the observer.
+            chunk_buffer.lock().unwrap().clear();
+
             // Drive the LLM. `respond` returns the full accumulated text
-            // as Ok(String); the on_chunk callback is for live streaming
-            // (e.g. terminal echo). For unit tests we ignore chunks and
-            // rely on the final Result. The borrow on `transcript_so_far`
-            // ends when this select! resolves — earlier code cloned the
-            // string redundantly because `DialogueResponder` already
-            // copies the transcript into the future internally.
-            let llm_fut = responder.respond(&transcript_so_far, Box::new(|_chunk: &str| {}));
+            // as Ok(String); the on_chunk callback captures into
+            // `chunk_buffer` for later observer replay.
+            let chunk_buffer_for_cb = std::sync::Arc::clone(&chunk_buffer);
+            let on_chunk: Box<dyn FnMut(&str) + Send + 'r> = Box::new(move |c: &str| {
+                chunk_buffer_for_cb.lock().unwrap().push(c.to_string());
+            });
+            let llm_fut = responder.respond(&transcript_so_far, on_chunk);
             tokio::pin!(llm_fut);
 
-            // Wait for either: (a) llm done, (b) VAD SpeechStart (cancel).
+            // Wait for either: (a) llm done, (b) VAD SpeechStart (cancel),
+            // (c) external stop, (d) external cancel-response.
             // If the VAD event channel is both closed AND drained, we can
             // complete the LLM unconditionally — no more events will arrive.
             // Note: is_closed() alone returns true even with buffered messages
             // (when all senders are dropped), so we must also check is_empty().
-            let cancelled = if events.is_closed() && events.is_empty() {
+            #[derive(PartialEq, Eq)]
+            enum LatentResult {
+                Completed,
+                CancelledByVad,
+                CancelledByUser,
+                Stopped,
+            }
+            let outcome: LatentResult = if events.is_closed() && events.is_empty() {
                 // No more VAD events possible: complete the LLM unconditionally.
-                accumulated = match llm_fut.await {
-                    Ok(text) => text,
-                    Err(e) => {
-                        tracing::error!("LLM error: {e}");
-                        FALLBACK_LINE.to_string()
+                // Still poll external_stop / cancel_response so the loop
+                // remains responsive to those.
+                tokio::select! {
+                    biased;
+                    _ = &mut external_stop => LatentResult::Stopped,
+                    _ = cancel_response.recv() => LatentResult::CancelledByUser,
+                    res = &mut llm_fut => {
+                        accumulated = match res {
+                            Ok(text) => text,
+                            Err(e) => handle_llm_err(e, &chunk_buffer, &mut observer),
+                        };
+                        LatentResult::Completed
                     }
-                };
-                false
+                }
             } else {
                 // `biased` ensures the LLM future gets polled before
                 // events.recv() — without it, select!'s random order can
@@ -414,84 +658,131 @@ pub async fn run_loop<'r>(
                 // the parking future has been polled at least once.
                 tokio::select! {
                     biased;
+                    _ = &mut external_stop => LatentResult::Stopped,
+                    _ = cancel_response.recv() => LatentResult::CancelledByUser,
                     res = &mut llm_fut => {
                         accumulated = match res {
                             Ok(text) => text,
-                            Err(e) => {
-                                tracing::error!("LLM error: {e}");
-                                FALLBACK_LINE.to_string()
-                            }
+                            Err(e) => handle_llm_err(e, &chunk_buffer, &mut observer),
                         };
-                        false
+                        LatentResult::Completed
                     }
                     event = events.recv() => {
                         match event {
                             Some(VadEvent::SpeechStart) => {
                                 // Cancel: drop the future, loop back, keep listening.
-                                if verbose {
-                                    eprintln!("[vad] aborted (resumed speech)");
-                                }
-                                true
+                                LatentResult::CancelledByVad
                             }
                             Some(VadEvent::SpeechEnd) | Some(VadEvent::None) => {
                                 // Spurious — shouldn't happen during LATENT_THINK
                                 // since we entered on SpeechEnd. Treat as
                                 // continue-waiting by completing the LLM.
-                                accumulated = match llm_fut.await {
-                                    Ok(text) => text,
-                                    Err(e) => {
-                                        tracing::error!("LLM error: {e}");
-                                        FALLBACK_LINE.to_string()
+                                tokio::select! {
+                                    biased;
+                                    _ = &mut external_stop => LatentResult::Stopped,
+                                    _ = cancel_response.recv() => LatentResult::CancelledByUser,
+                                    res = &mut llm_fut => {
+                                        accumulated = match res {
+                                            Ok(text) => text,
+                                            Err(e) => handle_llm_err(e, &chunk_buffer, &mut observer),
+                                        };
+                                        LatentResult::Completed
                                     }
-                                };
-                                false
+                                }
                             }
                             None => {
                                 // Channel just closed mid-select: complete the LLM.
-                                accumulated = match llm_fut.await {
-                                    Ok(text) => text,
-                                    Err(e) => {
-                                        tracing::error!("LLM error: {e}");
-                                        FALLBACK_LINE.to_string()
+                                tokio::select! {
+                                    biased;
+                                    _ = &mut external_stop => LatentResult::Stopped,
+                                    _ = cancel_response.recv() => LatentResult::CancelledByUser,
+                                    res = &mut llm_fut => {
+                                        accumulated = match res {
+                                            Ok(text) => text,
+                                            Err(e) => handle_llm_err(e, &chunk_buffer, &mut observer),
+                                        };
+                                        LatentResult::Completed
                                     }
-                                };
-                                false
+                                }
                             }
                         }
                     }
                 }
             };
 
-            if cancelled {
-                // Wait for the next SpeechEnd to retry the LLM call.
-                loop {
-                    let Some(event) = events.recv().await else {
-                        return Ok(transcripts);
-                    };
-                    if event == VadEvent::SpeechEnd {
-                        break;
-                    }
+            match outcome {
+                LatentResult::Stopped => {
+                    observer.on_state_change(VoiceState::Exit, None);
+                    observer.on_exit(ExitReason::UserStop);
+                    return Ok(transcripts);
                 }
-                continue;
+                LatentResult::CancelledByUser => {
+                    // Back to LISTEN with a `user_cancel` hint. Drop the
+                    // chunks accumulated for this aborted attempt.
+                    chunk_buffer.lock().unwrap().clear();
+                    observer.on_state_change(VoiceState::Listen, Some("user_cancel"));
+                    continue 'outer;
+                }
+                LatentResult::CancelledByVad => {
+                    // VAD-cancel-on-resumed-speech: drop chunks from the
+                    // aborted attempt, signal the LISTEN transition, then
+                    // wait for the next SpeechEnd to retry.
+                    chunk_buffer.lock().unwrap().clear();
+                    observer.on_state_change(VoiceState::Listen, Some("child_resumed"));
+                    loop {
+                        tokio::select! {
+                            biased;
+                            _ = &mut external_stop => {
+                                observer.on_state_change(VoiceState::Exit, None);
+                                observer.on_exit(ExitReason::UserStop);
+                                return Ok(transcripts);
+                            }
+                            evt = events.recv() => {
+                                let Some(event) = evt else {
+                                    observer.on_state_change(VoiceState::Exit, None);
+                                    observer.on_exit(ExitReason::UserStop);
+                                    return Ok(transcripts);
+                                };
+                                if event == VadEvent::SpeechEnd {
+                                    break;
+                                }
+                            }
+                        }
+                    }
+                    // Re-enter LATENT_THINK for the retry.
+                    observer.on_state_change(VoiceState::LatentThink, None);
+                    continue;
+                }
+                LatentResult::Completed => break,
             }
-
-            break;
         }
 
         // ── Quit check + commit transcript ────────────────────────────
         if transcript_so_far.is_empty() {
             continue;
         }
-        println!("[child] {}", transcript_so_far);
-        if is_quit_phrase(&transcript_so_far) {
+        observer.on_transcript_finalized(&transcript_so_far);
+        // Replay accumulated chunks onto the observer so streaming
+        // semantics (one observer.on_response_chunk per actual chunk)
+        // are preserved while we still get to take `observer` by `&mut`.
+        {
+            let mut chunks = chunk_buffer.lock().unwrap();
+            for c in chunks.drain(..) {
+                observer.on_response_chunk(primer_turn_index, &c);
+            }
+        }
+        if is_quit_phrase(&transcript_so_far, &backends.active_locale) {
             transcripts.push(transcript_so_far);
+            observer.on_state_change(VoiceState::Exit, None);
+            observer.on_exit(ExitReason::Keyword);
             break 'outer;
         }
+        let child_turn_index = transcripts.len();
         transcripts.push(transcript_so_far);
 
         // ── SPEAK ─────────────────────────────────────────────────────
         if !accumulated.is_empty() {
-            println!("[primer] {}", accumulated);
+            observer.on_state_change(VoiceState::Speak, None);
             // Strip markdown so Piper doesn't pronounce '*' / '`'. The
             // text shown to the user keeps the markdown; only the audio
             // input to the synthesiser is stripped.
@@ -571,622 +862,31 @@ pub async fn run_loop<'r>(
             // model.
             while events.try_recv().is_ok() {}
         }
+
+        // Always fire on_response_complete at the end of a turn, even
+        // when `accumulated` was whitespace-only and we skipped SPEAK.
+        // Consumers (GUI session journal) need to know a turn finished.
+        observer.on_response_complete(TurnCompletePayload {
+            session_id: uuid::Uuid::nil(),
+            child_turn_index,
+            primer_turn_index,
+        });
+        primer_turn_index += 1;
     }
 
+    // Outer loop exited via `events.recv()` returning None (channel
+    // drained and closed). No quit phrase, no user stop — the audio
+    // thread is gone, treat as a user-initiated end.
+    observer.on_state_change(VoiceState::Exit, None);
+    observer.on_exit(ExitReason::UserStop);
     Ok(transcripts)
 }
 
-/// Adapter that lets `&mut DialogueManager` satisfy the [`Responder`]
-/// trait. The lifetime parameter is the borrow of the manager, not of
-/// its collaborators — the manager itself is `'static` now that
-/// inference and knowledge are held as `Arc<dyn …>`.
-struct DialogueResponder<'b> {
-    dialogue: &'b mut primer_pedagogy::DialogueManager,
-}
-
-impl<'b> Responder for DialogueResponder<'b> {
-    fn respond<'r>(
-        &'r mut self,
-        transcript: &'r str,
-        mut on_chunk: Box<dyn FnMut(&str) + Send + 'r>,
-    ) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<String>> + Send + 'r>> {
-        // We own a `String` copy of the transcript inside the future so
-        // the borrow on `transcript` doesn't have to outlive the await.
-        let transcript = transcript.to_string();
-        Box::pin(async move {
-            self.dialogue
-                .respond_to_streaming(&transcript, |chunk| on_chunk(chunk))
-                .await
-        })
-    }
-}
-
-/// `StreamingSpeechToText` adapter: hands out sessions whose `finalize`
-/// pulls a transcript from a `std::sync::mpsc` channel populated by the
-/// audio capture thread. This decouples the audio thread (which owns
-/// the real `WhisperStream` and pushes mic samples into it) from
-/// `run_loop` (which only reads `VadEvent`s and calls `finalize` on the
-/// session it opened).
-///
-/// **Ordering contract:** the audio thread MUST send the transcript on
-/// `tx` BEFORE emitting `VadEvent::SpeechEnd` on the event channel. That
-/// way, by the time `run_loop` calls `session.finalize()` (after seeing
-/// `SpeechEnd`), the transcript is already buffered in the channel.
-#[cfg(feature = "speech")]
-struct ChannelStt {
-    rx: TranscriptRx,
-}
-
-#[cfg(feature = "speech")]
-impl primer_core::speech::Named for ChannelStt {
-    fn name(&self) -> &str {
-        "channel-stt"
-    }
-}
-
-#[cfg(feature = "speech")]
-impl StreamingSpeechToText for ChannelStt {
-    fn sample_rate(&self) -> u32 {
-        16_000
-    }
-    fn open_session(&self) -> Result<Box<dyn primer_core::speech::TranscriptionSession>> {
-        Ok(Box::new(ChannelSttSession {
-            rx: Arc::clone(&self.rx),
-        }))
-    }
-}
-
-#[cfg(feature = "speech")]
-struct ChannelSttSession {
-    rx: TranscriptRx,
-}
-
-#[cfg(feature = "speech")]
-impl primer_core::speech::TranscriptionSession for ChannelSttSession {
-    fn push_audio(
-        &mut self,
-        _samples: &[f32],
-    ) -> Result<Vec<primer_core::speech::TranscriptSegment>> {
-        // run_loop never calls push_audio on this session (samples are
-        // pushed directly into whisper inside the audio thread). If
-        // someone wires it up differently this is a silent no-op.
-        Ok(vec![])
-    }
-    fn finalize(self: Box<Self>) -> Result<Vec<primer_core::speech::TranscriptSegment>> {
-        // The audio thread sends BEFORE emitting SpeechEnd, so by the
-        // time run_loop calls us the transcript is normally already
-        // buffered. Spin try_recv briefly to tolerate scheduling
-        // jitter — but fail loudly rather than blocking, so a contract
-        // violation surfaces as a quick "empty utterance" instead of a
-        // half-second stall in the async runtime.
-        let rx = self.rx.lock().map_err(|_| {
-            primer_core::error::PrimerError::Speech(
-                "ChannelSttSession: transcript receiver mutex poisoned".into(),
-            )
-        })?;
-        const TRANSCRIPT_RECV_RETRIES: u32 = 5;
-        const TRANSCRIPT_RECV_BACKOFF: std::time::Duration = std::time::Duration::from_millis(2);
-        for _ in 0..TRANSCRIPT_RECV_RETRIES {
-            match rx.try_recv() {
-                Ok(text) => {
-                    return Ok(vec![primer_core::speech::TranscriptSegment {
-                        text,
-                        start_ms: 0,
-                        end_ms: 0,
-                    }]);
-                }
-                Err(std::sync::mpsc::TryRecvError::Empty) => {
-                    std::thread::sleep(TRANSCRIPT_RECV_BACKOFF);
-                }
-                Err(std::sync::mpsc::TryRecvError::Disconnected) => {
-                    return Err(primer_core::error::PrimerError::Speech(
-                        "audio thread disconnected before producing transcript".into(),
-                    ));
-                }
-            }
-        }
-        // Contract violation (no transcript queued before SpeechEnd) —
-        // empty utterance. run_loop short-circuits on empty.
-        Ok(vec![])
-    }
-}
-
-/// Entry point: run the voice REPL until Ctrl+C or a quit phrase is heard.
-#[cfg(feature = "speech")]
-pub async fn run(
-    cfg: SpeechLoopConfig<'_>,
-    dialogue: &mut primer_pedagogy::DialogueManager,
-) -> Result<()> {
-    use primer_core::speech::VadEvent;
-    use primer_speech::{
-        MicCapture, PiperTts, Resampler, SileroVad, SileroVadParams, SpeakerSink, WhisperStt,
-    };
-
-    // ── Build VAD (real, lives in audio thread) ─────────────────────
-    let vad_params = SileroVadParams {
-        min_silence_ms: cfg.mic_silence_ms,
-        ..SileroVadParams::default()
-    };
-    let mut audio_vad = SileroVad::new(vad_params)?;
-
-    // ── Build STT (real whisper.cpp; the streaming session lives in
-    //    the audio thread; run_loop sees a ChannelStt wrapper) ─────────
-    let whisper = std::sync::Arc::new(WhisperStt::new(cfg.whisper_model)?);
-
-    // ── Build TTS (real piper) ─────────────────────────────────────
-    // PIPER_ESPEAKNG_DATA_DIRECTORY is probed and set by `main()` before
-    // the tokio runtime starts (see `probe_espeak_ng_data`). Doing it here
-    // would be unsound — the runtime worker threads already exist.
-    let tts: std::sync::Arc<dyn StreamingTextToSpeech> =
-        std::sync::Arc::new(PiperTts::new(cfg.voice_onnx, cfg.voice_config)?);
-    let tts_sample_rate = tts.sample_rate();
-
-    // ── Open mic ───────────────────────────────────────────────────
-    let (mic, mic_cons) = MicCapture::start()?;
-    let mic_rate = mic.sample_rate;
-    if cfg.verbose {
-        eprintln!(
-            "[speech] mic opened: {}Hz, {} channels",
-            mic_rate, mic.channels
-        );
-    }
-
-    // ── Open speaker ───────────────────────────────────────────────
-    let (spk, spk_prod) = SpeakerSink::start()?;
-    let spk_rate = spk.sample_rate;
-    // Shared "stream errored" flag — set by cpal's err_callback if the
-    // output device disappears mid-session. The on_audio retry loop
-    // checks this so it bails instead of spinning forever on a dead
-    // stream where push_slice will return 0 indefinitely.
-    let spk_errored = spk.errored_flag();
-    // Wrap the producer in `Arc<Mutex<>>` so it can be observed both
-    // from the on_audio callback (push samples) and from the drain
-    // hook (read `occupied_len`). The mutex is uncontended in practice
-    // — on_audio runs synchronously from `run_loop`, and the drain
-    // hook is invoked only after on_audio's flush sentinel returns,
-    // so push and observe never overlap. Cost: one uncontended lock
-    // acquire per phrase, negligible at TTS rates.
-    let spk_prod = std::sync::Arc::new(std::sync::Mutex::new(spk_prod));
-    if cfg.verbose {
-        eprintln!(
-            "[speech] speaker opened: {}Hz, {} channels",
-            spk_rate, spk.channels
-        );
-    }
-
-    // ── Input resampler: mic_rate → 16 kHz for VAD/whisper ─────────
-    // We want each Resampler::process call to yield exactly
-    // CHUNK_SAMPLES (512) at 16 kHz. Pick the input chunk size as
-    // 512 * mic_rate / 16_000 (e.g. 1536 at 48 kHz).
-    let vad_rate = audio_vad.sample_rate();
-    let vad_chunk = audio_vad.chunk_samples();
-    let in_chunk_samples: usize = (vad_chunk as u64 * mic_rate as u64 / vad_rate as u64) as usize;
-    let mut input_resampler: Option<Resampler> = if mic_rate != vad_rate {
-        Some(Resampler::new(mic_rate, vad_rate, in_chunk_samples)?)
-    } else {
-        None
-    };
-
-    // ── Output resampler factory: piper_rate → spk_rate, lazy
-    //    constructed inside the on_audio callback so chunk sizing is
-    //    decided once (per chunk size). For simplicity we resample with a
-    //    fixed input chunk size that we pad/truncate the TTS chunk to. ─
-    let need_output_resample = tts_sample_rate != spk_rate;
-    // Output resampler operates on a fixed chunk size; build per-callback
-    // padding/buffering to feed it. We keep it inside a Mutex<Option<…>>
-    // so the on_audio FnMut can mutate it across calls.
-    let output_chunk_in: usize = 1024;
-    let output_resampler = std::sync::Arc::new(std::sync::Mutex::new(if need_output_resample {
-        Some(Resampler::new(tts_sample_rate, spk_rate, output_chunk_in)?)
-    } else {
-        None
-    }));
-
-    // ── Channels ───────────────────────────────────────────────────
-    let (event_tx, event_rx) = tokio::sync::mpsc::channel::<VadEvent>(VAD_EVENT_CHANNEL_CAPACITY);
-    let (transcript_tx, transcript_rx) = std::sync::mpsc::channel::<String>();
-    // Cancellation flag — set when run_loop exits to tell the audio
-    // thread to stop.
-    let stop_flag = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
-    // Speaking gate — set by run_loop's SPEAK phase, checked by the
-    // audio thread. While true, the audio thread drains the mic ringbuf
-    // but discards the samples (no VAD, no whisper push). This is the
-    // anti-feedback guard: without it, the Primer's own TTS leaks
-    // through the speaker → mic → whisper loop and gets transcribed
-    // as the next "child" utterance.
-    let is_speaking = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
-
-    // ── Spawn audio capture thread ─────────────────────────────────
-    // Owns: mic_cons, input_resampler, audio_vad, whisper (Arc),
-    //       event_tx, transcript_tx, stop_flag, is_speaking.
-    // Drives: the LISTEN-side state machine (raw mic → resample →
-    //         silero → whisper push), at audio rate.
-    let whisper_for_thread = std::sync::Arc::clone(&whisper);
-    let stop_flag_thread = std::sync::Arc::clone(&stop_flag);
-    let is_speaking_thread = std::sync::Arc::clone(&is_speaking);
-    let audio_thread = std::thread::Builder::new()
-        .name("primer-speech-audio".into())
-        .spawn(move || {
-            run_audio_thread(
-                mic_cons,
-                input_resampler.take(),
-                in_chunk_samples,
-                vad_chunk,
-                &mut audio_vad,
-                whisper_for_thread,
-                event_tx,
-                transcript_tx,
-                stop_flag_thread,
-                is_speaking_thread,
-            )
-        })
-        .map_err(|e| primer_core::error::PrimerError::Speech(format!("spawn audio thread: {e}")))?;
-
-    // ── Build LoopBackends with the channel STT wrapper ────────────
-    // Single-locale v1: the CLI's resolved locale is the active locale,
-    // and that's the only entry in the maps. PR 4 will populate
-    // additional locales when a second voice ships.
-    let voice = primer_core::speech::VoiceProfile {
-        model_id: cfg.voice_id.to_string(),
-        // Slow Piper slightly: length_scale = 1.0 / rate, so
-        // rate < 1.0 stretches each phoneme. 0.9 is barely
-        // perceptible but easier for younger children to follow.
-        rate: 0.9,
-        ..primer_core::speech::VoiceProfile::default()
-    };
-    let backends = LoopBackends::single_locale(
-        Arc::new(ChannelStt {
-            rx: Arc::new(std::sync::Mutex::new(transcript_rx)),
-        }),
-        std::sync::Arc::clone(&tts),
-        voice,
-        cfg.locale,
-    );
-
-    // Pre-flight: a missing voice for `active_locale` would otherwise
-    // surface as a `PrimerError::Speech` on the child's first sentence.
-    // `single_locale` above can't fail this check; the guard is here
-    // for any future construction path that builds the maps directly.
-    backends.ensure_active_locale_coverage()?;
-
-    // ── on_audio callback: push synth chunks to the speaker ─────────
-    // Uses a leftover buffer carried across calls so partial tails of
-    // each phrase are PREPENDED to the next call's samples instead of
-    // zero-padded. An empty input Vec is the FLUSH sentinel: zero-pad
-    // whatever's still in the leftover and process it as the very last
-    // block (this is end-of-turn, so the zero-pad artifact at the tail
-    // is silence anyway).
-    let output_resampler_for_cb = std::sync::Arc::clone(&output_resampler);
-    let mut output_leftover: Vec<f32> = Vec::with_capacity(output_chunk_in);
-    let spk_errored_for_cb = std::sync::Arc::clone(&spk_errored);
-    let spk_prod_for_cb = std::sync::Arc::clone(&spk_prod);
-    let on_audio: Box<dyn FnMut(Vec<f32>) + Send> = Box::new(move |samples| {
-        let is_flush = samples.is_empty();
-        let mut samples = samples;
-        if need_output_resample {
-            let mut guard = output_resampler_for_cb.lock().unwrap();
-            if let Some(resampler) = guard.as_mut() {
-                // Prepend leftover from prior call, then process as many
-                // full output_chunk_in blocks as possible.
-                let mut combined: Vec<f32> =
-                    Vec::with_capacity(output_leftover.len() + samples.len());
-                combined.append(&mut output_leftover);
-                combined.append(&mut samples);
-                let usable = (combined.len() / output_chunk_in) * output_chunk_in;
-                let mut out_buf: Vec<f32> = Vec::with_capacity(combined.len() * 2);
-                let mut i = 0;
-                while i + output_chunk_in <= usable {
-                    let block = &combined[i..i + output_chunk_in];
-                    match resampler.process(block) {
-                        Ok(o) => out_buf.extend(o),
-                        Err(e) => {
-                            tracing::warn!("output resampler error: {e}");
-                            return;
-                        }
-                    }
-                    i += output_chunk_in;
-                }
-                let tail: Vec<f32> = combined[usable..].to_vec();
-                if is_flush {
-                    // End of turn: zero-pad the leftover to chunk_in
-                    // and process. The zero-pad lands on trailing
-                    // silence; subsequent silence chunks push out any
-                    // remaining FFT-buffered output. process_partial()
-                    // alone proved insufficient on FftFixedIn — the
-                    // last syllable still got swallowed. Feeding 4
-                    // silence chunks (≈186 ms of input silence) reliably
-                    // drains the internal latency. Trailing silence
-                    // is harmless; cpal just plays it.
-                    if !tail.is_empty() {
-                        let mut padded = tail;
-                        padded.resize(output_chunk_in, 0.0);
-                        if let Ok(o) = resampler.process(&padded) {
-                            out_buf.extend(o);
-                        }
-                    }
-                    let silence = vec![0.0_f32; output_chunk_in];
-                    for _ in 0..4 {
-                        match resampler.process(&silence) {
-                            Ok(o) => out_buf.extend(o),
-                            Err(_) => break,
-                        }
-                    }
-                    output_leftover = Vec::new();
-                } else {
-                    output_leftover = tail;
-                }
-                samples = out_buf;
-            }
-        }
-        // Push to speaker ringbuf, blocking until it accepts every
-        // sample. The previous 1-second drop-on-timeout was the very
-        // bug we hunted for the swallowed-end-of-response: when the
-        // producer outpaces cpal's drain (synthesis is faster than
-        // playback), we briefly fill the buffer and need to wait, not
-        // give up. The retry bails when `spk_errored` flips true (cpal
-        // output stream errored, device removed, etc.) instead of
-        // spinning forever on a dead stream.
-        //
-        // The drain wait that used to sit here on the flush sentinel
-        // has moved to the `wait_for_speaker_drain` hook in `run_loop`
-        // — see [`DrainHook`]. Putting it through `spawn_blocking`
-        // keeps the synchronous wait off the tokio worker.
-        if !samples.is_empty() {
-            let mut prod = spk_prod_for_cb
-                .lock()
-                .expect("speaker producer mutex poisoned");
-            primer_speech::push_all_with_bail(
-                &mut prod,
-                &samples,
-                &spk_errored_for_cb,
-                std::time::Duration::from_millis(5),
-            );
-        }
-    });
-
-    // ── Wire DialogueManager via the Responder adapter ─────────────
-    let responder: Box<dyn Responder + '_> = Box::new(DialogueResponder { dialogue });
-
-    // ── Build the drain hook ───────────────────────────────────────
-    // Each invocation spawns a blocking task that polls the speaker
-    // ringbuf until cpal has drained it, then awaits the JoinHandle.
-    // The closures capture Arc clones so the hook is `'static + Send`
-    // (required by `spawn_blocking`). FnMut so `run_loop` can call it
-    // once per turn.
-    let spk_prod_for_drain = std::sync::Arc::clone(&spk_prod);
-    let spk_errored_for_drain = std::sync::Arc::clone(&spk_errored);
-    let drain_hook: DrainHook = Box::new(move || {
-        let prod = std::sync::Arc::clone(&spk_prod_for_drain);
-        let errored = std::sync::Arc::clone(&spk_errored_for_drain);
-        Box::pin(async move {
-            let join = tokio::task::spawn_blocking(move || {
-                let prod_guard = prod.lock().expect("speaker producer mutex poisoned");
-                let _ = primer_speech::wait_for_drain(
-                    &prod_guard,
-                    &errored,
-                    std::time::Duration::from_millis(10),
-                    3,
-                    std::time::Duration::from_millis(80),
-                    std::time::Duration::from_secs(5),
-                );
-            });
-            if let Err(e) = join.await {
-                tracing::warn!("speaker drain task did not complete: {e:?}");
-            }
-        })
-    });
-
-    // ── Drive the loop ─────────────────────────────────────────────
-    let result = run_loop(
-        backends,
-        event_rx,
-        responder,
-        on_audio,
-        Some(drain_hook),
-        cfg.verbose,
-        Some(std::sync::Arc::clone(&is_speaking)),
-    )
-    .await;
-
-    // ── Tell the audio thread to stop and wait for it ──────────────
-    stop_flag.store(true, std::sync::atomic::Ordering::SeqCst);
-    if let Err(panic) = audio_thread.join() {
-        tracing::warn!("audio thread panicked: {panic:?}");
-    }
-
-    // Keep cpal streams alive until here (drop now via end of scope).
-    drop(mic);
-    drop(spk);
-
-    let transcripts = result?;
-    if cfg.verbose {
-        eprintln!("[speech] session ended after {} turn(s)", transcripts.len());
-    }
-    Ok(())
-}
-
-/// Stub implementation when the `speech` feature is disabled. Returns
-/// an error so the binary fails fast if `--speech` is somehow set
-/// without the feature.
-#[cfg(not(feature = "speech"))]
-pub async fn run(
-    _cfg: SpeechLoopConfig<'_>,
-    _dialogue: &mut primer_pedagogy::DialogueManager,
-) -> Result<()> {
-    Err(primer_core::error::PrimerError::Speech(
-        "primer-cli was built without the `speech` feature".into(),
-    ))
-}
-
-/// Body of the audio capture thread.
-///
-/// Pulls mic samples from `mic_cons`, resamples to the VAD rate when
-/// needed, runs the VAD on fixed-size chunks, and drives the per-
-/// utterance whisper session: open on `SpeechStart`, push every chunk
-/// while in speech, finalize on `SpeechEnd` and SEND the transcript on
-/// `transcript_tx` BEFORE forwarding the `SpeechEnd` event on
-/// `event_tx`. That ordering guarantees `ChannelSttSession::finalize`
-/// (called by `run_loop` after seeing the event) finds a transcript.
-///
-/// Polling cadence: a 5 ms sleep between empty mic-buffer reads. cpal's
-/// callback fires every few ms, so this stays well within real-time
-/// tolerances. A `tokio::Notify` would be marginally better but a
-/// 5 ms idle sleep is invisible to humans.
-#[cfg(feature = "speech")]
-#[allow(clippy::too_many_arguments)]
-fn run_audio_thread(
-    mut mic_cons: ringbuf::HeapCons<f32>,
-    mut input_resampler: Option<primer_speech::Resampler>,
-    in_chunk_samples: usize,
-    vad_chunk_samples: usize,
-    vad: &mut primer_speech::SileroVad,
-    whisper: std::sync::Arc<primer_speech::WhisperStt>,
-    event_tx: tokio::sync::mpsc::Sender<primer_core::speech::VadEvent>,
-    transcript_tx: std::sync::mpsc::Sender<String>,
-    stop_flag: std::sync::Arc<std::sync::atomic::AtomicBool>,
-    is_speaking: std::sync::Arc<std::sync::atomic::AtomicBool>,
-) -> Result<()> {
-    use primer_core::speech::{StreamingSpeechToText, TranscriptionSession, VadEvent};
-    use ringbuf::traits::Consumer as _;
-
-    let mut raw_buf: Vec<f32> = Vec::with_capacity(in_chunk_samples * 2);
-    let mut vad_in_buf: Vec<f32> = Vec::with_capacity(vad_chunk_samples * 2);
-    // Reusable scratch buffer for the per-iteration VAD chunk; avoids
-    // allocating ~32 Vecs/sec for the hot path.
-    let mut vad_chunk: Vec<f32> = Vec::with_capacity(vad_chunk_samples);
-    // The active whisper session, if we're in speech.
-    let mut active_session: Option<Box<dyn TranscriptionSession>> = None;
-
-    loop {
-        if stop_flag.load(std::sync::atomic::Ordering::SeqCst) {
-            // Drain whisper if mid-utterance.
-            if let Some(s) = active_session.take() {
-                let _ = s.finalize();
-            }
-            return Ok(());
-        }
-
-        // Anti-feedback gate: while run_loop is in SPEAK, drop everything
-        // the mic captures (the Primer's own voice would otherwise be
-        // transcribed). Also discard any partial whisper session; we'll
-        // open a fresh one when the gate reopens.
-        if is_speaking.load(std::sync::atomic::Ordering::SeqCst) {
-            while mic_cons.try_pop().is_some() {}
-            if let Some(s) = active_session.take() {
-                let _ = s.finalize();
-            }
-            raw_buf.clear();
-            vad_in_buf.clear();
-            // Reset VAD's internal speech-state debouncer so we don't
-            // emit a stale SpeechEnd as soon as the gate reopens.
-            vad.reset();
-            std::thread::sleep(std::time::Duration::from_millis(20));
-            continue;
-        }
-
-        // Drain available samples from the mic ringbuf.
-        let mut produced_any = false;
-        while let Some(s) = mic_cons.try_pop() {
-            raw_buf.push(s);
-            produced_any = true;
-            if raw_buf.len() >= 8192 {
-                // Hard cap: don't let the buffer balloon if we're
-                // resampling unevenly.
-                break;
-            }
-        }
-        if !produced_any {
-            std::thread::sleep(std::time::Duration::from_millis(5));
-            continue;
-        }
-
-        // Convert raw_buf into VAD-rate chunks.
-        if let Some(resampler) = input_resampler.as_mut() {
-            // Process exactly `in_chunk_samples`-sized blocks.
-            let usable = (raw_buf.len() / in_chunk_samples) * in_chunk_samples;
-            let mut consumed = 0;
-            while consumed + in_chunk_samples <= usable {
-                let block = &raw_buf[consumed..consumed + in_chunk_samples];
-                match resampler.process(block) {
-                    Ok(out) => vad_in_buf.extend(out),
-                    Err(e) => {
-                        tracing::warn!("input resampler error: {e}");
-                        // Skip the block.
-                    }
-                }
-                consumed += in_chunk_samples;
-            }
-            // Drop consumed samples from raw_buf.
-            raw_buf.drain(..consumed);
-        } else {
-            // Native rate already matches VAD rate.
-            vad_in_buf.append(&mut raw_buf);
-        }
-
-        // Process VAD chunks while we have enough samples.
-        while vad_in_buf.len() >= vad_chunk_samples {
-            vad_chunk.clear();
-            vad_chunk.extend(vad_in_buf.drain(..vad_chunk_samples));
-            // Push into whisper if we have an active session.
-            if let Some(session) = active_session.as_mut() {
-                if let Err(e) = session.push_audio(&vad_chunk) {
-                    tracing::warn!("whisper push_audio: {e}");
-                }
-            }
-            let frame = match vad.process_chunk(&vad_chunk) {
-                Ok(f) => f,
-                Err(e) => {
-                    tracing::warn!("vad process_chunk: {e}");
-                    continue;
-                }
-            };
-            match frame.event {
-                VadEvent::SpeechStart => {
-                    // Open a fresh whisper session if one isn't already open.
-                    if active_session.is_none() {
-                        match whisper.open_session() {
-                            Ok(s) => active_session = Some(s),
-                            Err(e) => {
-                                tracing::warn!("whisper open_session: {e}");
-                            }
-                        }
-                    }
-                    if event_tx.blocking_send(VadEvent::SpeechStart).is_err() {
-                        // run_loop has dropped; exit thread.
-                        return Ok(());
-                    }
-                }
-                VadEvent::SpeechEnd => {
-                    // Finalize whisper, send transcript BEFORE the event.
-                    let segments = match active_session.take() {
-                        Some(s) => match s.finalize() {
-                            Ok(segs) => segs,
-                            Err(e) => {
-                                tracing::warn!("whisper finalize: {e}");
-                                Vec::new()
-                            }
-                        },
-                        None => Vec::new(),
-                    };
-                    let text: String = segments
-                        .iter()
-                        .map(|s| s.text.as_str())
-                        .collect::<Vec<_>>()
-                        .join("")
-                        .trim()
-                        .to_string();
-                    if transcript_tx.send(text).is_err() {
-                        return Ok(());
-                    }
-                    if event_tx.blocking_send(VadEvent::SpeechEnd).is_err() {
-                        return Ok(());
-                    }
-                }
-                VadEvent::None => {}
-            }
-        }
-    }
-}
+// NOTE: The DialogueResponder adapter, ChannelStt adapter,
+// `pub async fn run` entry point, and `run_audio_thread` body all stay
+// in `primer-cli/src/speech_loop.rs` — they are CLI-specific glue around
+// the state machine. This file owns only the state machine itself and
+// the public types/traits the CLI and GUI both consume.
 
 #[cfg(test)]
 mod mocks {
@@ -1292,6 +992,79 @@ mod mocks {
         }
     }
 
+    /// Observer-event record used by the unit tests. The original
+    /// `speech_loop.rs` asserted side-effects via captured channels;
+    /// after the observer refactor each test inspects the recorded
+    /// event stream against the expected sequence. `TurnCompletePayload`
+    /// has no `PartialEq` so the enum uses pattern-matching assertions
+    /// instead of `==`.
+    ///
+    /// `#[allow(dead_code)]` is applied because individual tests only
+    /// pattern-match a subset of fields; the unused-field analysis
+    /// fires across the whole enum.
+    #[allow(dead_code)]
+    #[derive(Debug, Clone)]
+    pub enum MockEvent {
+        StateChange {
+            state: super::VoiceState,
+            hint: Option<String>,
+        },
+        Transcript(String),
+        Chunk {
+            primer_turn_index: usize,
+            text: String,
+        },
+        Complete(super::TurnCompletePayload),
+        InferenceError(String),
+        Exit(super::ExitReason),
+    }
+
+    /// Test observer that records every callback into a shared `Vec`.
+    #[derive(Clone, Default)]
+    pub struct MockObserver(pub Arc<Mutex<Vec<MockEvent>>>);
+
+    impl MockObserver {
+        pub fn new() -> Self {
+            Self(Arc::new(Mutex::new(Vec::new())))
+        }
+        pub fn events(&self) -> Vec<MockEvent> {
+            self.0.lock().unwrap().clone()
+        }
+    }
+
+    impl super::LoopObserver for MockObserver {
+        fn on_state_change(&mut self, state: super::VoiceState, hint: Option<&str>) {
+            self.0.lock().unwrap().push(MockEvent::StateChange {
+                state,
+                hint: hint.map(String::from),
+            });
+        }
+        fn on_transcript_finalized(&mut self, text: &str) {
+            self.0
+                .lock()
+                .unwrap()
+                .push(MockEvent::Transcript(text.to_string()));
+        }
+        fn on_response_chunk(&mut self, primer_turn_index: usize, chunk: &str) {
+            self.0.lock().unwrap().push(MockEvent::Chunk {
+                primer_turn_index,
+                text: chunk.to_string(),
+            });
+        }
+        fn on_response_complete(&mut self, payload: super::TurnCompletePayload) {
+            self.0.lock().unwrap().push(MockEvent::Complete(payload));
+        }
+        fn on_inference_error(&mut self, err: &primer_core::error::InferenceError) {
+            self.0
+                .lock()
+                .unwrap()
+                .push(MockEvent::InferenceError(format!("{err:?}")));
+        }
+        fn on_exit(&mut self, reason: super::ExitReason) {
+            self.0.lock().unwrap().push(MockEvent::Exit(reason));
+        }
+    }
+
     #[test]
     fn mock_streaming_stt_finalizes_canned_text() {
         let stt = MockStreamingStt::new("hello world");
@@ -1364,12 +1137,51 @@ mod mocks {
             committed_clone.lock().unwrap().extend(samples);
         });
 
-        let result =
-            super::run_loop(backends, event_rx, responder, on_audio, None, false, None).await;
+        let observer = MockObserver::new();
+        let result = super::run_loop_borrowed(
+            backends,
+            event_rx,
+            responder,
+            on_audio,
+            None,
+            false,
+            None,
+            observer.clone(),
+        )
+        .await;
         let transcripts = result.expect("loop ok");
         assert_eq!(transcripts, vec!["hello primer".to_string()]);
         assert_eq!(*captured_transcript.lock().unwrap(), "hello primer");
         assert!(!committed.lock().unwrap().is_empty(), "audio was committed");
+
+        // Verify the observer saw a complete state journey: enter LISTEN,
+        // finalize the transcript, transition through LATENT_THINK and
+        // SPEAK, then back to LISTEN for the next utterance.
+        let events = observer.events();
+        assert!(
+            events.iter().any(|e| matches!(
+                e,
+                MockEvent::StateChange { state: super::VoiceState::Listen, .. }
+            )),
+            "saw at least one Listen state: {events:?}"
+        );
+        assert!(
+            events
+                .iter()
+                .any(|e| matches!(e, MockEvent::Transcript(t) if t == "hello primer")),
+            "transcript finalized event: {events:?}"
+        );
+        assert!(
+            events.iter().any(|e| matches!(
+                e,
+                MockEvent::StateChange { state: super::VoiceState::Speak, .. }
+            )),
+            "entered SPEAK: {events:?}"
+        );
+        assert!(
+            events.iter().any(|e| matches!(e, MockEvent::Complete(_))),
+            "fired Complete: {events:?}"
+        );
     }
 
     /// Test 4 — quit phrase short-circuits SPEAK: child says "goodbye",
@@ -1419,7 +1231,8 @@ mod mocks {
             committed_clone.lock().unwrap().extend(samples);
         });
 
-        let result = super::run_loop(
+        let observer = MockObserver::new();
+        let result = super::run_loop_borrowed(
             backends,
             event_rx,
             Box::new(EmptyResponder),
@@ -1427,6 +1240,7 @@ mod mocks {
             None,
             false,
             None,
+            observer.clone(),
         )
         .await;
         let transcripts = result.expect("loop ok");
@@ -1434,6 +1248,19 @@ mod mocks {
         assert!(
             committed.lock().unwrap().is_empty(),
             "quit phrase exits before SPEAK"
+        );
+        // Quit phrase fires Exit(Keyword) and never enters SPEAK.
+        let events = observer.events();
+        assert!(
+            events.iter().any(|e| matches!(e, MockEvent::Exit(super::ExitReason::Keyword))),
+            "Exit(Keyword) fired: {events:?}"
+        );
+        assert!(
+            !events.iter().any(|e| matches!(
+                e,
+                MockEvent::StateChange { state: super::VoiceState::Speak, .. }
+            )),
+            "did NOT enter SPEAK: {events:?}"
         );
     }
 
@@ -1529,9 +1356,10 @@ mod mocks {
             committed_clone.lock().unwrap().extend(samples);
         });
 
+        let observer = MockObserver::new();
         let result = tokio::time::timeout(
             std::time::Duration::from_secs(2),
-            super::run_loop(
+            super::run_loop_borrowed(
                 backends,
                 event_rx,
                 Box::new(CountingResponder {
@@ -1542,6 +1370,7 @@ mod mocks {
                 None,
                 false,
                 None,
+                observer.clone(),
             ),
         )
         .await
@@ -1571,6 +1400,20 @@ mod mocks {
         assert!(
             !committed.lock().unwrap().is_empty(),
             "audio committed on retry"
+        );
+        // The cancel-by-VAD path fires a Listen state_change with the
+        // "child_resumed" hint. That's the observable contract for
+        // GUIs/CLIs that want to surface the cancellation.
+        let events = observer.events();
+        assert!(
+            events.iter().any(|e| matches!(
+                e,
+                MockEvent::StateChange {
+                    state: super::VoiceState::Listen,
+                    hint: Some(h),
+                } if h == "child_resumed"
+            )),
+            "observer saw Listen state with child_resumed hint: {events:?}"
         );
     }
 
@@ -1622,7 +1465,8 @@ mod mocks {
             committed_clone.lock().unwrap().extend(samples);
         });
 
-        let result = super::run_loop(
+        let observer = MockObserver::new();
+        let result = super::run_loop_borrowed(
             backends,
             event_rx,
             Box::new(PromptResponder),
@@ -1630,6 +1474,7 @@ mod mocks {
             None,
             false,
             None,
+            observer.clone(),
         )
         .await
         .expect("loop ok");
@@ -1691,9 +1536,10 @@ mod mocks {
         // gate clears as soon as the synth chunks have been "consumed"
         // (a few ms). Generous cap, kept high to surface deadlocks
         // rather than match expected runtime.
+        let observer = MockObserver::new();
         let result = tokio::time::timeout(
             std::time::Duration::from_secs(2),
-            super::run_loop(
+            super::run_loop_borrowed(
                 backends,
                 event_rx,
                 Box::new(PromptResponder),
@@ -1701,6 +1547,7 @@ mod mocks {
                 None,
                 false,
                 Some(Arc::clone(&is_speaking)),
+                observer.clone(),
             ),
         )
         .await
@@ -1809,7 +1656,8 @@ mod mocks {
         }
 
         let on_audio: Box<dyn FnMut(Vec<f32>) + Send> = Box::new(|_samples| {});
-        let result = super::run_loop(
+        let observer = MockObserver::new();
+        let result = super::run_loop_borrowed(
             backends,
             event_rx,
             Box::new(ErrResponder),
@@ -1817,6 +1665,7 @@ mod mocks {
             None,
             false,
             None,
+            observer.clone(),
         )
         .await
         .expect("loop returns Ok despite responder error");
@@ -1828,6 +1677,12 @@ mod mocks {
             texts[0],
             super::FALLBACK_LINE,
             "fallback line was synthesised after LLM error"
+        );
+        // Observer surfaces the inference error so a GUI banner can fire.
+        let events = observer.events();
+        assert!(
+            events.iter().any(|e| matches!(e, MockEvent::InferenceError(_))),
+            "InferenceError observed: {events:?}"
         );
     }
 
@@ -1976,24 +1831,69 @@ mod markdown_tests {
 #[cfg(test)]
 mod quit_tests {
     use super::is_quit_phrase;
+    use primer_core::i18n::Locale;
 
     #[test]
     fn detects_goodbye_case_insensitive() {
-        assert!(is_quit_phrase("Goodbye!"));
-        assert!(is_quit_phrase("alright, GOODBYE then"));
+        assert!(is_quit_phrase("Goodbye!", &Locale::English));
+        assert!(is_quit_phrase("GOODBYE", &Locale::English));
     }
 
     #[test]
     fn detects_bye_primer() {
-        assert!(is_quit_phrase("bye primer"));
-        assert!(is_quit_phrase("Bye Primer."));
+        assert!(is_quit_phrase("bye primer", &Locale::English));
+        assert!(is_quit_phrase("Bye Primer.", &Locale::English));
     }
 
     #[test]
     fn ignores_unrelated_transcripts() {
-        assert!(!is_quit_phrase("why is the sky blue"));
-        assert!(!is_quit_phrase("hello"));
+        assert!(!is_quit_phrase("why is the sky blue", &Locale::English));
+        assert!(!is_quit_phrase("hello", &Locale::English));
         // "bye" alone is NOT a quit phrase — only "bye primer".
-        assert!(!is_quit_phrase("bye"));
+        assert!(!is_quit_phrase("bye", &Locale::English));
+    }
+
+    /// Embedded-phrase guard: a quit phrase embedded inside a longer
+    /// utterance must NOT terminate the session. The pre-fix substring
+    /// `contains` would have ended the session on either of these —
+    /// exactly the opposite of the child's intent. Word-boundary
+    /// matching alone wouldn't fix this (end-of-string is itself a
+    /// word boundary); equality-after-normalisation does.
+    #[test]
+    fn embedded_quit_phrase_does_not_end_session() {
+        assert!(!is_quit_phrase(
+            "I don't want to stop primer",
+            &Locale::English
+        ));
+        assert!(!is_quit_phrase("alright goodbye then", &Locale::English));
+        // ... but the phrase as a complete utterance ends the session.
+        assert!(is_quit_phrase("stop primer", &Locale::English));
+        // Punctuation around the phrase is fine (Whisper often appends).
+        assert!(is_quit_phrase("Stop primer!", &Locale::English));
+        // Collapsed internal whitespace is fine too.
+        assert!(is_quit_phrase("  bye   primer  ", &Locale::English));
+    }
+
+    /// German locale ships its own quit phrases. A German-speaking child
+    /// who says "tschüss" or "auf wiedersehen" must be able to end the
+    /// session by voice — and an English "goodbye" should NOT match in
+    /// a German session.
+    #[test]
+    fn german_locale_uses_german_quit_phrases() {
+        assert!(is_quit_phrase("tschüss", &Locale::German));
+        assert!(is_quit_phrase("Tschüss!", &Locale::German));
+        assert!(is_quit_phrase("auf wiedersehen", &Locale::German));
+        assert!(is_quit_phrase("Auf Wiedersehen.", &Locale::German));
+        // English-only phrases don't end a German session.
+        assert!(!is_quit_phrase("goodbye", &Locale::German));
+        // Primer-direct variants are universal (English loanwords).
+        assert!(is_quit_phrase("bye primer", &Locale::German));
+    }
+
+    /// English locale must NOT match German-only phrases.
+    #[test]
+    fn english_locale_rejects_german_only_phrases() {
+        assert!(!is_quit_phrase("tschüss", &Locale::English));
+        assert!(!is_quit_phrase("auf wiedersehen", &Locale::English));
     }
 }

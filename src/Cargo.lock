@@ -3422,6 +3422,7 @@ name = "primer-gui"
 version = "0.1.0"
 dependencies = [
  "chrono",
+ "futures",
  "primer-classifier",
  "primer-comprehension",
  "primer-core",
@@ -3432,7 +3433,9 @@ dependencies = [
  "primer-kb-load",
  "primer-knowledge",
  "primer-pedagogy",
+ "primer-speech",
  "primer-storage",
+ "reqwest 0.12.28",
  "serde",
  "serde_json",
  "tauri",
@@ -3534,6 +3537,7 @@ dependencies = [
  "thiserror 2.0.18",
  "tokio",
  "tracing",
+ "uuid",
  "whisper-cpp-plus",
 ]
 

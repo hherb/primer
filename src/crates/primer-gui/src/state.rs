@@ -54,6 +54,13 @@ pub struct AppState {
     /// The currently open session, if any. `None` between
     /// `close_session` and the next `start_session` / `resume_session`.
     pub session: Mutex<Option<ActiveSession>>,
+
+    /// The currently active voice loop, if any. Only present when the
+    /// binary was built with `--features speech` AND the user started
+    /// voice mode via `start_voice_mode`. `None` on default builds and
+    /// when voice mode is inactive.
+    #[cfg(feature = "speech")]
+    pub voice: Mutex<Option<ActiveVoiceLoop>>,
 }
 
 impl AppState {
@@ -65,8 +72,40 @@ impl AppState {
             home,
             config: Mutex::new(config),
             session: Mutex::new(None),
+            #[cfg(feature = "speech")]
+            voice: Mutex::new(None),
         }
     }
+}
+
+/// Handle to an active voice loop — wraps the spawned task handle plus
+/// the channels that let the GUI stop the loop or cancel an in-flight
+/// LLM call.
+///
+/// The reason this struct is cfg-guarded rather than always-present-but-
+/// None is that `VoiceLoopError` only exists when the `voice-loop` speech
+/// feature is compiled in. Gating the whole slot is cleaner than inventing
+/// a stub type.
+#[cfg(feature = "speech")]
+pub struct ActiveVoiceLoop {
+    /// Join handle for the spawned voice-loop task. Dropping it aborts
+    /// the task (tokio semantics); the `stop_voice_mode` command sends
+    /// to `stop_tx` first to let the loop exit cleanly, then joins with
+    /// a 5-second timeout before dropping.
+    pub join: tokio::task::JoinHandle<
+        Result<(), primer_speech::voice_loop::VoiceLoopError>,
+    >,
+    /// One-shot sender that signals the loop to exit at the next
+    /// LISTEN→LATENT_THINK boundary. The loop drains TTS and saves the
+    /// session before returning.
+    pub stop_tx: tokio::sync::oneshot::Sender<()>,
+    /// Multi-message sender (capacity 8) that cancels the in-flight LLM
+    /// call and TTS synthesis mid-turn. Non-blocking send: if the channel
+    /// is full (user mashed Cancel repeatedly) one cancel is still enough.
+    pub cancel_response_tx: tokio::sync::mpsc::Sender<()>,
+    /// Snapshot of the session info at the time voice mode was started.
+    /// Used by `start_voice_mode` to return a `SessionInfo` to the caller.
+    pub info: crate::types::SessionInfo,
 }
 
 /// The active session — wraps a long-lived `DialogueManager` plus the

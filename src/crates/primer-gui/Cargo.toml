@@ -42,6 +42,17 @@ primer-comprehension.workspace = true
 primer-embedding.workspace = true
 primer-inference = { path = "../primer-inference" }
 
+# Voice mode — opt-in via the `speech` feature. Pulls every speech backend
+# feature so the GUI binary can drive VAD → STT → DialogueManager → TTS
+# → cpal without further conditional compilation. Mirrors primer-cli's
+# `speech` feature.
+reqwest = { workspace = true, features = ["stream"], optional = true }
+primer-speech = { path = "../primer-speech", optional = true }
+# Used by the streaming voice-asset download to poll reqwest's bytes_stream.
+# Gated on `speech` because that's the only feature that activates
+# voice/download.rs.
+futures = { workspace = true, optional = true }
+
 tokio.workspace = true
 uuid.workspace = true
 chrono.workspace = true
@@ -59,3 +70,17 @@ embedding = ["primer-engine/embedding"]
 
 # Lightweight Ollama-backed embedder.
 ollama-embedding = ["primer-engine/ollama-embedding"]
+
+# Voice mode — pulls every speech backend feature so the GUI binary can
+# drive the LISTEN → LATENT_THINK → SPEAK → LISTEN state machine end-to-
+# end. Also pulls reqwest for streaming asset downloads (PR 4).
+speech = [
+    "primer-speech/silero",
+    "primer-speech/whisper",
+    "primer-speech/piper",
+    "primer-speech/cpal",
+    "primer-speech/voice-loop",
+    "dep:reqwest",
+    "dep:primer-speech",
+    "dep:futures",
+]

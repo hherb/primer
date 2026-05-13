@@ -41,6 +41,7 @@ pub struct GuiConfig {
     pub breaks: BreakConfig,
     pub persistence: PersistenceConfig,
     pub ui: UiConfig,
+    pub speech: SpeechSettings,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -288,6 +289,48 @@ impl Default for UiConfig {
     }
 }
 
+/// Voice-mode settings.
+///
+/// `voice_mode_enabled` is the sticky toggle (per device, not per
+/// learner — see spec rationale). `overrides` is keyed by
+/// `Locale::pack_id()` so switching locales doesn't clobber the path
+/// the user typed in for the other one.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct SpeechSettings {
+    pub voice_mode_enabled: bool,
+    pub disable_auto_download: bool,
+    /// Milliseconds of post-end-of-speech silence the VAD waits before
+    /// firing SpeechEnd. Default reads from
+    /// `primer_core::consts::speech::DEFAULT_MIC_SILENCE_MS`.
+    pub mic_silence_ms: u32,
+    /// Per-locale path / voice-id overrides. Keyed by `Locale::pack_id()`.
+    pub overrides: std::collections::BTreeMap<String, SpeechLocaleOverride>,
+}
+
+impl Default for SpeechSettings {
+    fn default() -> Self {
+        Self {
+            voice_mode_enabled: false,
+            disable_auto_download: false,
+            mic_silence_ms: primer_core::consts::speech::DEFAULT_MIC_SILENCE_MS,
+            overrides: std::collections::BTreeMap::new(),
+        }
+    }
+}
+
+/// Per-locale path/voice override for `SpeechSettings`. `None` on any
+/// field means "fall through to the locale default" (see
+/// `primer_speech::voice_loop::locale_defaults::voice_default_for`).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(default)]
+pub struct SpeechLocaleOverride {
+    pub piper_onnx_path: Option<PathBuf>,
+    pub piper_config_path: Option<PathBuf>,
+    pub whisper_model_path: Option<PathBuf>,
+    pub voice_id: Option<String>,
+}
+
 /// Errors load/save can produce. Distinguished from a missing file
 /// (which is returned as `Ok(Default::default())` so the GUI always
 /// has *something* to render).
@@ -415,6 +458,7 @@ pub struct GuiConfigView {
     pub breaks: BreakConfig,
     pub persistence: PersistenceConfig,
     pub ui: UiConfig,
+    pub speech: SpeechSettings,
 }
 
 /// Frontend-safe projection of [`BackendConfig`] (read path).
@@ -444,6 +488,7 @@ impl From<&GuiConfig> for GuiConfigView {
             breaks: c.breaks.clone(),
             persistence: c.persistence.clone(),
             ui: c.ui.clone(),
+            speech: c.speech.clone(),
         }
     }
 }
@@ -465,6 +510,7 @@ pub struct GuiConfigUpdate {
     pub breaks: BreakConfig,
     pub persistence: PersistenceConfig,
     pub ui: UiConfig,
+    pub speech: SpeechSettings,
 }
 
 /// Update intent for [`BackendConfig`] (write path).
@@ -500,6 +546,7 @@ impl GuiConfigUpdate {
             breaks: self.breaks,
             persistence: self.persistence,
             ui: self.ui,
+            speech: self.speech,
         }
     }
 }
@@ -684,7 +731,8 @@ mod tests {
             "vocab": {"max_per_prompt": null},
             "breaks": {"after_mins": 30},
             "persistence": {"session_db": null, "knowledge_db": null, "no_persist": false},
-            "ui": {"sidebar_open": true, "last_section": "current_turn"}
+            "ui": {"sidebar_open": true, "last_section": "current_turn"},
+            "speech": {"voice_mode_enabled": false, "disable_auto_download": false, "mic_silence_ms": 600, "overrides": {}}
         }"#;
         let update: GuiConfigUpdate = serde_json::from_str(update_json).unwrap();
         let resolved = update.into_config(&current);
@@ -745,5 +793,96 @@ mod tests {
             cmp.timeout_ms,
             primer_comprehension::consts::DEFAULT_BLOCKING_TIMEOUT_MS
         );
+    }
+
+    #[test]
+    fn speech_settings_default_has_600ms_silence() {
+        let s = SpeechSettings::default();
+        assert!(!s.voice_mode_enabled, "voice mode is off by default");
+        assert!(!s.disable_auto_download, "auto-download is offered by default");
+        assert_eq!(
+            s.mic_silence_ms,
+            primer_core::consts::speech::DEFAULT_MIC_SILENCE_MS,
+            "mic_silence_ms default reads from primer_core consts",
+        );
+        assert!(s.overrides.is_empty(), "no per-locale overrides by default");
+    }
+
+    #[test]
+    fn speech_settings_round_trips_through_disk() {
+        let dir = TempDir::new().unwrap();
+        let mut cfg = GuiConfig::default();
+        cfg.speech.voice_mode_enabled = true;
+        cfg.speech.mic_silence_ms = 750;
+        cfg.speech.overrides.insert(
+            "de".to_string(),
+            SpeechLocaleOverride {
+                piper_onnx_path: Some("/tmp/de.onnx".into()),
+                piper_config_path: Some("/tmp/de.onnx.json".into()),
+                whisper_model_path: None,
+                voice_id: Some("de_DE-thorsten-medium".to_string()),
+            },
+        );
+
+        save(dir.path(), &cfg).unwrap();
+        let round_trip = load(dir.path()).unwrap();
+        assert_eq!(round_trip, cfg);
+    }
+
+    #[test]
+    fn older_config_without_speech_block_loads_with_defaults() {
+        // An on-disk config from before PR 2 has no `speech` field. Loading
+        // it must succeed and inject SpeechSettings::default() without
+        // requiring a migration step.
+        let dir = TempDir::new().unwrap();
+        let path = config_path(dir.path());
+        fs::create_dir_all(path.parent().unwrap()).unwrap();
+        fs::write(
+            &path,
+            r#"{"learner": {"name": "Ada", "age": 7, "locale": "en"}}"#,
+        )
+        .unwrap();
+
+        let cfg = load(dir.path()).unwrap();
+        assert_eq!(cfg.learner.name, "Ada");
+        assert_eq!(cfg.speech, SpeechSettings::default());
+    }
+
+    #[test]
+    fn speech_settings_round_trip_through_view_and_update() {
+        let mut cfg = GuiConfig::default();
+        cfg.speech.voice_mode_enabled = true;
+        cfg.speech.mic_silence_ms = 800;
+
+        let view: GuiConfigView = (&cfg).into();
+        assert_eq!(view.speech, cfg.speech);
+
+        let update_json = serde_json::to_string(&serde_json::json!({
+            "learner": {"name": "Binti", "age": 8, "locale": "en"},
+            "backend": {
+                "kind": "stub", "model": null,
+                "ollama_url": "http://localhost:11434",
+                "api_key_source": {"kind": "keep"},
+            },
+            "classifier": {"match_main": true, "kind": null, "model": null, "timeout_ms": 3000},
+            "extractor": {"match_main": true, "kind": null, "model": null, "timeout_ms": 5000},
+            "comprehension": {"match_main": true, "kind": null, "model": null, "timeout_ms": 5000},
+            "embedder": {"kind": "none", "model": null, "ollama_url": null},
+            "vocab": {"max_per_prompt": null},
+            "breaks": {"after_mins": 30},
+            "persistence": {"session_db": null, "knowledge_db": null, "no_persist": false},
+            "ui": {"sidebar_open": true, "last_section": "current_turn"},
+            "speech": {
+                "voice_mode_enabled": true,
+                "disable_auto_download": false,
+                "mic_silence_ms": 800,
+                "overrides": {}
+            }
+        }))
+        .unwrap();
+        let update: GuiConfigUpdate = serde_json::from_str(&update_json).unwrap();
+        let resolved = update.into_config(&cfg);
+        assert!(resolved.speech.voice_mode_enabled);
+        assert_eq!(resolved.speech.mic_silence_ms, 800);
     }
 }

@@ -18,6 +18,17 @@
       <div class="header-actions">
         <button
           type="button"
+          class="header-btn voice-toggle"
+          id="voice-mode-toggle"
+          aria-pressed="false"
+          title="Switch to voice mode for this learner"
+          disabled
+        >
+          <span class="voice-toggle-icon" aria-hidden="true">🎙</span>
+          <span class="voice-toggle-label" id="voice-toggle-label">Voice mode</span>
+        </button>
+        <button
+          type="button"
           class="header-btn"
           id="switch-session"
           title="Return to the session picker to switch or start fresh"
@@ -77,6 +88,27 @@
         ></textarea>
         <button type="submit" id="send" disabled>Send</button>
       </form>
+
+      <div class="composer composer-voice" id="composer-voice" hidden>
+        <div class="voice-state" id="voice-state" data-state="listen">
+          <div class="voice-state-icon" aria-hidden="true">
+            <div class="voice-icon-inner"></div>
+          </div>
+          <div class="voice-state-text">
+            <div class="voice-state-label" id="voice-state-label">Listening…</div>
+            <div class="voice-state-hint muted" id="voice-state-hint">take your time</div>
+          </div>
+          <button
+            type="button"
+            class="voice-stop-btn"
+            id="voice-stop"
+            title="Stop the Primer's reply"
+            aria-label="Stop"
+          >
+            ⏹ Stop
+          </button>
+        </div>
+      </div>
     </main>
 
     <aside class="sidebar" id="sidebar" aria-label="Evaluation sidebar">
@@ -526,13 +558,44 @@
             </div>
           </details>
 
-          <details class="settings-group is-coming-soon">
-            <summary>Speech (coming soon)</summary>
-            <p class="hint muted">
-              Voice mode (Listen / Think / Speak) is not yet wired into the
-              GUI. To try it today, use the CLI:
-              <code>cargo run --bin primer --features primer-cli/speech -- --speech …</code>
+          <details class="settings-group" id="speech-settings-group">
+            <summary>Speech</summary>
+            <p class="hint muted" id="speech-availability-hint" hidden>
+              Voice mode is not built into this binary. Rebuild with
+              <code>--features primer-gui/speech</code> to enable.
             </p>
+            <div id="speech-settings-fields">
+              <div class="settings-grid">
+                <label class="field">
+                  <span>Mic silence (ms)</span>
+                  <input
+                    type="number"
+                    id="f-speech-mic-silence-ms"
+                    min="100"
+                    max="3000"
+                    step="50"
+                    placeholder="600"
+                  />
+                </label>
+                <label class="check field-full">
+                  <input type="checkbox" id="f-speech-disable-auto-download" />
+                  <span>Don't offer auto-download; require explicit file paths</span>
+                </label>
+              </div>
+              <p class="hint muted">
+                Voice mode auto-downloads the default Whisper + Piper assets for
+                your locale to <code>~/.cache/primer/models/</code> on first launch.
+                Tick the box above to disable the offer (the start-voice-mode
+                command will then surface missing files as a plain error pointing
+                back to this dialog).
+              </p>
+
+              <h3 class="settings-subhead">Per-locale overrides</h3>
+              <div id="f-speech-overrides">
+                <!-- One sub-card per locale; rendered from JS so adding a locale
+                     pack only requires updating LOCALE_CHOICES in settings.js. -->
+              </div>
+            </div>
           </details>
         </form>
 
@@ -550,6 +613,109 @@
             </button>
             <button type="button" class="btn-primary" id="settings-save-restart">
               Save &amp; start new session
+            </button>
+          </div>
+        </footer>
+      </div>
+    </div>
+
+    <!-- Voice-asset consent modal. Opened by voice.js when start_voice_mode
+         returns AssetMissing. The asset rows + total size are filled from
+         the StartVoiceModeError::AssetMissing payload at open time; the
+         progress section becomes visible only once the Download button has
+         been clicked and primer://voice/download_progress events arrive. -->
+    <div
+      class="modal-backdrop"
+      id="voice-consent-backdrop"
+      hidden
+      aria-hidden="true"
+    >
+      <div
+        class="modal"
+        id="voice-consent-modal"
+        role="dialog"
+        aria-modal="true"
+        aria-labelledby="voice-consent-title"
+      >
+        <header class="modal-header">
+          <h2 id="voice-consent-title">Download voice models</h2>
+          <button
+            type="button"
+            class="modal-close"
+            id="voice-consent-close"
+            aria-label="Close"
+            title="Close"
+          >
+            ×
+          </button>
+        </header>
+
+        <div class="modal-body">
+          <p>
+            Voice mode needs Whisper (speech-to-text) and Piper
+            (text-to-speech) models for your locale (<span
+              id="voice-consent-locale"
+              >en</span
+            >). Total approximate size:
+            <strong id="voice-consent-total-size">~530 MB</strong>.
+          </p>
+          <p class="hint muted">
+            Files will be downloaded to <code>~/.cache/primer/models/</code>.
+            Source URLs are shown below; close this dialog and use Settings →
+            Speech to point at your own files instead.
+          </p>
+
+          <table class="asset-list">
+            <thead>
+              <tr>
+                <th>File</th>
+                <th>Size</th>
+                <th>Source</th>
+              </tr>
+            </thead>
+            <tbody id="voice-consent-assets">
+              <!-- Rows rendered from JS based on the AssetMissing payload. -->
+            </tbody>
+          </table>
+
+          <div id="voice-consent-progress" hidden>
+            <div class="progress-row" id="voice-consent-progress-row">
+              <span
+                class="progress-label"
+                id="voice-consent-progress-label"
+                >Downloading…</span
+              >
+              <progress
+                id="voice-consent-progress-bar"
+                value="0"
+                max="100"
+              ></progress>
+            </div>
+          </div>
+
+          <div
+            class="error-banner"
+            id="voice-consent-error"
+            role="alert"
+            hidden
+          ></div>
+        </div>
+
+        <footer class="modal-footer">
+          <div class="modal-footer-actions">
+            <button
+              type="button"
+              class="btn-tertiary"
+              id="voice-consent-cancel"
+            >
+              Cancel
+            </button>
+            <button
+              type="button"
+              class="btn-primary"
+              id="voice-consent-download"
+            >
+              Download
             </button>
           </div>
         </footer>
@@ -607,5 +773,6 @@
     <script src="picker.js"></script>
     <script src="settings.js"></script>
     <script src="app.js"></script>
+    <script src="voice.js"></script>
   </body>
 </html>

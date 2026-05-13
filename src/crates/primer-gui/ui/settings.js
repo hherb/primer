@@ -63,6 +63,9 @@ const dom = {
     sessionDb: document.getElementById("f-persistence-session-db"),
     knowledgeDb: document.getElementById("f-persistence-knowledge-db"),
     noPersist: document.getElementById("f-persistence-no-persist"),
+    speechMicSilenceMs: document.getElementById("f-speech-mic-silence-ms"),
+    speechDisableAutoDownload: document.getElementById("f-speech-disable-auto-download"),
+    speechOverrides: document.getElementById("f-speech-overrides"),
   },
 };
 
@@ -87,6 +90,11 @@ const state = {
   /// values verbatim on save rather than substituting defaults — which
   /// would clobber the user's last-active sidebar section.
   lastUi: null,
+  /// Snapshot of `voice_mode_enabled` from the most recent `get_settings`.
+  /// The modal doesn't expose a toggle for this (it will be a header
+  /// button in PR 3+), so we round-trip it verbatim — never reset it
+  /// to false when the user saves the speech settings form.
+  lastVoiceModeEnabled: false,
 };
 
 // Initial DOM wiring — runs at script-load time. The modal stays
@@ -221,6 +229,80 @@ function populate(view) {
   f.knowledgeDb.value = view.persistence.knowledge_db ?? "";
   f.noPersist.checked = view.persistence.no_persist === true;
   applyNoPersistReveal();
+
+  // Speech
+  state.lastVoiceModeEnabled = view.speech?.voice_mode_enabled === true;
+  f.speechMicSilenceMs.value = view.speech?.mic_silence_ms ?? 600;
+  f.speechDisableAutoDownload.checked = view.speech?.disable_auto_download === true;
+  populateSpeechOverrides(view.speech?.overrides ?? {});
+
+  // Voice-mode status badge — read-only hint so the user understands
+  // the header toggle owns the voice_mode_enabled flip, not this form.
+  const speechBlock = document.getElementById("speech-settings-fields");
+  if (speechBlock) {
+    // Remove any previous badge before re-inserting (re-open modal path).
+    const existing = speechBlock.querySelector(".voice-mode-status-badge");
+    if (existing) existing.remove();
+    const status = document.createElement("p");
+    status.className = "hint muted voice-mode-status-badge";
+    status.textContent = state.lastVoiceModeEnabled
+      ? "Voice mode is ON — toggle it off via the header button"
+      : "Voice mode is off — toggle it on via the header button";
+    speechBlock.insertBefore(status, speechBlock.firstChild);
+  }
+}
+
+function populateSpeechOverrides(overrides) {
+  const container = dom.fields.speechOverrides;
+  container.replaceChildren();
+  for (const { id: locale } of LOCALE_CHOICES) {
+    const ov = overrides[locale] ?? {};
+    const card = document.createElement("div");
+    card.className = "settings-grid";
+    card.dataset.locale = locale;
+    card.innerHTML = `
+      <h4>${locale.toUpperCase()}</h4>
+      <label class="field field-full">
+        <span>Piper voice id</span>
+        <input type="text" data-field="voice_id" placeholder="(locale default)" value="${ov.voice_id ?? ""}" />
+      </label>
+      <label class="field field-full">
+        <span>Piper .onnx path</span>
+        <input type="text" data-field="piper_onnx_path" placeholder="(default cache location)" value="${ov.piper_onnx_path ?? ""}" />
+      </label>
+      <label class="field field-full">
+        <span>Piper .onnx.json path</span>
+        <input type="text" data-field="piper_config_path" placeholder="(default cache location)" value="${ov.piper_config_path ?? ""}" />
+      </label>
+      <label class="field field-full">
+        <span>Whisper model path</span>
+        <input type="text" data-field="whisper_model_path" placeholder="(default cache location)" value="${ov.whisper_model_path ?? ""}" />
+      </label>
+    `;
+    container.appendChild(card);
+  }
+}
+
+function gatherSpeechOverrides() {
+  const overrides = {};
+  const cards = dom.fields.speechOverrides.querySelectorAll("[data-locale]");
+  for (const card of cards) {
+    const locale = card.dataset.locale;
+    const voiceId = card.querySelector('[data-field="voice_id"]').value.trim();
+    const piperOnnx = card.querySelector('[data-field="piper_onnx_path"]').value.trim();
+    const piperConfig = card.querySelector('[data-field="piper_config_path"]').value.trim();
+    const whisper = card.querySelector('[data-field="whisper_model_path"]').value.trim();
+    // Only include locale in overrides if at least one field is non-empty.
+    if (voiceId || piperOnnx || piperConfig || whisper) {
+      overrides[locale] = {
+        voice_id: voiceId || null,
+        piper_onnx_path: piperOnnx || null,
+        piper_config_path: piperConfig || null,
+        whisper_model_path: whisper || null,
+      };
+    }
+  }
+  return overrides;
 }
 
 function wireNoPersistToggle() {
@@ -458,6 +540,15 @@ function gather() {
     ui: state.lastUi ?? {
       sidebar_open: !document.body.classList.contains("sidebar-collapsed"),
       last_section: "current_turn",
+    },
+    speech: {
+      // voice_mode_enabled is owned by a header toggle (PR 3+), not this
+      // form — round-trip the persisted value so saving speech settings
+      // never silently switches voice mode off.
+      voice_mode_enabled: state.lastVoiceModeEnabled,
+      disable_auto_download: dom.fields.speechDisableAutoDownload.checked,
+      mic_silence_ms: parseIntOrZero(dom.fields.speechMicSilenceMs.value) || 600,
+      overrides: gatherSpeechOverrides(),
     },
   };
 }

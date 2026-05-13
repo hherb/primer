@@ -21,6 +21,10 @@ pub struct SessionInfo {
     pub main_model: String,
     /// Locale pack id ("en", "de", ...).
     pub locale: String,
+    /// Whether this binary was built with the `speech` cargo feature.
+    /// The frontend uses this to enable/disable the header voice-mode
+    /// toggle. `false` on default builds.
+    pub voice_mode_available: bool,
 }
 
 #[derive(Debug, Clone, Serialize)]

@@ -543,7 +543,12 @@ pub(crate) fn read_signals(dm: &DialogueManager) -> TurnSignals {
 /// lock will WAIT for any in-flight `send_message` to finish — exactly
 /// the right behaviour so a "Close" click never aborts a partially-
 /// streamed response.
-async fn close_session_inner(state: &tauri::State<'_, AppState>) -> Result<(), String> {
+///
+/// Also called by `commands::voice::start_voice_mode` so that switching
+/// to voice mode cleanly drains any active text session first.
+pub(crate) async fn close_session_inner(
+    state: &tauri::State<'_, AppState>,
+) -> Result<(), String> {
     let active = state.session.lock().await.take();
     if let Some(active) = active {
         let mut dm = active.dialogue_manager.lock().await;
@@ -826,6 +831,7 @@ async fn info_from(active: &ActiveSession) -> SessionInfo {
         backend_kind: active.backend_name.clone(),
         main_model: active.main_model.clone(),
         locale: active.locale.pack_id().to_string(),
+        voice_mode_available: cfg!(feature = "speech"),
     }
 }
 
@@ -1581,5 +1587,15 @@ mod tests {
     #[test]
     fn cancelled_message_is_stable_machine_token() {
         assert_eq!(CANCELLED_MESSAGE, "primer:turn_cancelled");
+    }
+
+    #[tokio::test]
+    async fn session_info_carries_voice_mode_available_flag() {
+        let home = TempDir::new().unwrap();
+        let cfg = stub_config_with_persistence(home.path());
+        let active = build_active_session(home.path(), &cfg).await.unwrap();
+        let info = info_from(&active).await;
+        // The flag matches whatever feature the test binary was built with.
+        assert_eq!(info.voice_mode_available, cfg!(feature = "speech"));
     }
 }

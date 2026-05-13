@@ -43,3 +43,8 @@ scripts/apple-notarize-env.sh
 # Python bytecode caches
 __pycache__/
 *.pyc
+
+# Superpowers brainstorming session content (visual-companion mockups,
+# per-session state). Persisted under .superpowers/brainstorm/ so
+# mockups survive server restarts; never useful to ship in the repo.
+.superpowers/
