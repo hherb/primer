@@ -4,7 +4,7 @@ use uuid::Uuid;
 
 /// State of the voice loop's main state machine.
 ///
-/// Wire format (stable): the `name()` method returns kebab-case strings
+/// Wire format (stable): the `name()` method returns snake_case strings
 /// that the GUI's `primer://voice/state_change` event payload carries
 /// across IPC. Frontend CSS selectors and JS state lookups depend on
 /// these exact values — do not rename without bumping the IPC contract.
@@ -22,7 +22,7 @@ pub enum VoiceState {
 }
 
 impl VoiceState {
-    /// Stable kebab-case wire string. Used as the IPC payload value AND
+    /// Stable snake_case wire string. Used as the IPC payload value AND
     /// as the `[data-state="..."]` attribute in the frontend.
     pub fn name(&self) -> &'static str {
         match self {
@@ -48,6 +48,10 @@ pub enum ExitReason {
 }
 
 impl ExitReason {
+    /// Stable snake_case wire string. `UserStop` trims to `"user"` (not
+    /// `"user_stop"`) because the GUI exit event payload reads more
+    /// cleanly as `{reason: "user"}` than `{reason: "user_stop"}` —
+    /// "user" reads as the agent, "user_stop" reads as the action.
     pub fn name(&self) -> &'static str {
         match self {
             Self::UserStop => "user",
