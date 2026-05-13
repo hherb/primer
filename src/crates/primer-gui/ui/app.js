@@ -917,6 +917,58 @@ function finaliseStreamingBubble({ aborted }) {
   state.streamingPrimerEl = null;
 }
 
+/// Append a text chunk to the streaming Primer bubble for `turnIndex`.
+///
+/// Called by voice.js for `primer://voice/response_chunk` events. On the
+/// first chunk for a given index, a new streaming bubble is created; on
+/// subsequent chunks the existing bubble's text is extended.  When the
+/// response_complete event fires, voice.js calls primerRefreshSidebar and
+/// the bubble remains on screen in its final (non-streaming) state.
+function appendPrimerChunk(turnIndex, text) {
+  // If a streaming bubble for this turn index is already alive, append to it.
+  if (
+    state.streamingPrimerEl &&
+    state.streamingPrimerEl.parentElement &&
+    state.streamingPrimerEl.parentElement.dataset.turnIndex === String(turnIndex)
+  ) {
+    state.streamingPrimerEl.textContent += text;
+    scrollToBottom();
+    return;
+  }
+  // Finalise any pre-existing streaming bubble from a prior turn (guard
+  // against a missed response_complete in the text path).
+  if (state.streamingPrimerEl) {
+    state.streamingPrimerEl.classList.remove("is-streaming");
+    state.streamingPrimerEl = null;
+  }
+  // Start a new streaming bubble with the given turn index.
+  hideEmptyState();
+  const row = document.createElement("div");
+  row.className = "bubble-row is-primer";
+  row.dataset.turnIndex = String(turnIndex);
+  const bubble = document.createElement("div");
+  bubble.className = "bubble is-streaming";
+  bubble.textContent = text;
+  row.appendChild(bubble);
+  dom.chatScroll.appendChild(row);
+  state.streamingPrimerEl = bubble;
+  scrollToBottom();
+}
+
+/// Simple toast for voice.js (settings.js has its own local showToast).
+let _appToastTimer = null;
+function showToast(msg) {
+  const el = document.getElementById("toast");
+  if (!el) return;
+  el.textContent = msg;
+  el.hidden = false;
+  if (_appToastTimer !== null) clearTimeout(_appToastTimer);
+  _appToastTimer = setTimeout(() => {
+    el.hidden = true;
+    _appToastTimer = null;
+  }, 2500);
+}
+
 function hideEmptyState() {
   if (dom.emptyState && !dom.emptyState.hidden) {
     dom.emptyState.hidden = true;
@@ -957,5 +1009,14 @@ function escapeHtml(s) {
     .replace(/"/g, "&quot;")
     .replace(/'/g, "&#39;");
 }
+
+// ─── Window-level exports for voice.js ──────────────────────────────
+// voice.js is an IIFE (like this file) and loaded after app.js, so it
+// reads these from `window` rather than sharing a module scope.
+window.primerAppendChildBubble = appendChildBubble;
+window.primerAppendPrimerChunk  = appendPrimerChunk;
+window.primerRefreshSidebar     = refreshSidebar;
+window.primerShowError          = showError;
+window.primerShowToast          = showToast;
 
 })();
