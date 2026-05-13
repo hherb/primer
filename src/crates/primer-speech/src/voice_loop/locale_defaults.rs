@@ -12,7 +12,12 @@
 use primer_core::i18n::Locale;
 
 /// Default voice + STT pinning for one locale pack.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+///
+/// Not `Copy` on purpose: a future override field that carries an owned
+/// type (e.g. `Option<String>`) would break callers that implicitly copy.
+/// `voice_default_for` returns `&'static LocaleDefault` so no caller
+/// needs to copy today.
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct LocaleDefault {
     /// Piper voice id matching the .onnx filename stem.
     pub piper_voice_id: &'static str,
@@ -110,8 +115,11 @@ mod tests {
                 id,
                 d.approx_total_mb,
             );
+            // Whisper large-v3 is ~1.5 GB; a Piper medium voice is ~60 MB.
+            // A 1600 MB ceiling covers any plausible bundle while flagging
+            // an accidental order-of-magnitude typo.
             assert!(
-                d.approx_total_mb <= 2000,
+                d.approx_total_mb <= 1600,
                 "{} default total of {} MB is suspiciously high",
                 id,
                 d.approx_total_mb,
