@@ -59,9 +59,12 @@ ollama-embedding = ["primer-embedding/ollama", "primer-engine/ollama-embedding"]
 # Voice REPL via --speech. Pulls every speech backend feature so the
 # state machine can compose VAD → STT → DialogueManager → TTS → cpal
 # without further conditional compilation in the binary.
+# `voice-loop` is the lifted shared state machine in primer-speech;
+# it implies silero + whisper + piper + cpal so we list it once here.
 speech = [
     "primer-speech/silero",
     "primer-speech/whisper",
     "primer-speech/piper",
     "primer-speech/cpal",
+    "primer-speech/voice-loop",
 ]
