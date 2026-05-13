@@ -235,6 +235,21 @@ function populate(view) {
   f.speechMicSilenceMs.value = view.speech?.mic_silence_ms ?? 600;
   f.speechDisableAutoDownload.checked = view.speech?.disable_auto_download === true;
   populateSpeechOverrides(view.speech?.overrides ?? {});
+
+  // Voice-mode status badge — read-only hint so the user understands
+  // the header toggle owns the voice_mode_enabled flip, not this form.
+  const speechBlock = document.getElementById("speech-settings-fields");
+  if (speechBlock) {
+    // Remove any previous badge before re-inserting (re-open modal path).
+    const existing = speechBlock.querySelector(".voice-mode-status-badge");
+    if (existing) existing.remove();
+    const status = document.createElement("p");
+    status.className = "hint muted voice-mode-status-badge";
+    status.textContent = state.lastVoiceModeEnabled
+      ? "Voice mode is ON — toggle it off via the header button"
+      : "Voice mode is off — toggle it on via the header button";
+    speechBlock.insertBefore(status, speechBlock.firstChild);
+  }
 }
 
 function populateSpeechOverrides(overrides) {
