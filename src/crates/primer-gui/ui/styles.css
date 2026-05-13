@@ -1539,3 +1539,19 @@ code {
   color: var(--fg-muted);
   min-width: 120px;
 }
+
+/* ─── Voice-mode header toggle ──────────────────────────────────── */
+
+.voice-toggle[aria-pressed="true"] {
+  background: #2563eb;
+  color: white;
+  border-color: #1e40af;
+}
+.voice-toggle[aria-pressed="true"] .voice-toggle-icon {
+  /* Inactive 🎙 grayed by header-btn base, active stays full-colour */
+  filter: none;
+}
+.voice-toggle:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}

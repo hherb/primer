@@ -18,6 +18,17 @@
       <div class="header-actions">
         <button
           type="button"
+          class="header-btn voice-toggle"
+          id="voice-mode-toggle"
+          aria-pressed="false"
+          title="Switch to voice mode for this learner"
+          disabled
+        >
+          <span class="voice-toggle-icon" aria-hidden="true">🎙</span>
+          <span class="voice-toggle-label" id="voice-toggle-label">Voice mode</span>
+        </button>
+        <button
+          type="button"
           class="header-btn"
           id="switch-session"
           title="Return to the session picker to switch or start fresh"
