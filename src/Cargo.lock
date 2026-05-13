@@ -3422,6 +3422,7 @@ name = "primer-gui"
 version = "0.1.0"
 dependencies = [
  "chrono",
+ "futures",
  "primer-classifier",
  "primer-comprehension",
  "primer-core",

@@ -34,5 +34,6 @@ pub fn register(builder: tauri::Builder<Wry>) -> tauri::Builder<Wry> {
         voice::start_voice_mode,
         voice::stop_voice_mode,
         voice::cancel_voice_response,
+        voice::download_voice_assets,
     ])
 }

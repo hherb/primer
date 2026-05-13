@@ -7,7 +7,7 @@
 //! All commands are gated by `#[cfg(feature = "speech")]`; the non-speech
 //! build provides stubs returning `Err(NotBuilt)` or `Ok(())`.
 
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use tauri::AppHandle;
 
 use crate::state::AppState;
@@ -34,7 +34,11 @@ pub enum StartVoiceModeError {
 }
 
 /// One missing asset entry in [`StartVoiceModeError::AssetMissing`].
-#[derive(Serialize, Clone, Debug)]
+///
+/// `Deserialize` is required because the frontend echoes the original
+/// asset list back into `download_voice_assets` after the user consents
+/// to the download.
+#[derive(Serialize, Deserialize, Clone, Debug)]
 pub struct MissingAsset {
     /// Asset type identifier. Stable strings: `"piper_onnx"`,
     /// `"piper_config"`, `"whisper_model"`.
@@ -308,6 +312,38 @@ pub async fn cancel_voice_response(state: tauri::State<'_, AppState>) -> Result<
 #[tauri::command]
 pub async fn cancel_voice_response(_state: tauri::State<'_, AppState>) -> Result<(), String> {
     Ok(())
+}
+
+/// Download every [`MissingAsset`] in `missing`. Emits
+/// `primer://voice/download_progress` events as each file streams in.
+/// Returns `Ok(())` on full success or `Err(String)` on the first
+/// failure; the consent modal renders the error inline.
+///
+/// Idempotent at the resolver layer: if a file already exists on disk
+/// it would not appear in `missing` and is silently skipped here.
+#[cfg(feature = "speech")]
+#[tauri::command]
+pub async fn download_voice_assets(
+    _state: tauri::State<'_, AppState>,
+    app: AppHandle,
+    missing: Vec<MissingAsset>,
+) -> Result<(), String> {
+    for asset in &missing {
+        crate::voice::download::download_one(&app, asset).await?;
+    }
+    Ok(())
+}
+
+/// Stub for builds without the speech feature. Returns an error so the
+/// frontend doesn't silently noop.
+#[cfg(not(feature = "speech"))]
+#[tauri::command]
+pub async fn download_voice_assets(
+    _state: tauri::State<'_, AppState>,
+    _app: AppHandle,
+    _missing: Vec<MissingAsset>,
+) -> Result<(), String> {
+    Err("voice mode not built in this binary".into())
 }
 
 #[cfg(test)]

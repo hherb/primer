@@ -48,6 +48,10 @@ primer-inference = { path = "../primer-inference" }
 # `speech` feature.
 reqwest = { workspace = true, features = ["stream"], optional = true }
 primer-speech = { path = "../primer-speech", optional = true }
+# Used by the streaming voice-asset download to poll reqwest's bytes_stream.
+# Gated on `speech` because that's the only feature that activates
+# voice/download.rs.
+futures = { workspace = true, optional = true }
 
 tokio.workspace = true
 uuid.workspace = true
@@ -78,4 +82,5 @@ speech = [
     "primer-speech/voice-loop",
     "dep:reqwest",
     "dep:primer-speech",
+    "dep:futures",
 ]

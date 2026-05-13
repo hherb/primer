@@ -5,6 +5,8 @@
 //! - [`assets`] — voice-asset path resolver + `AssetMissing` shape.
 //! - [`backends`] — thin wrapper around
 //!   `primer_speech::voice_loop::build_local_backends` (cpal + VAD + STT + TTS).
+//! - [`download`] — streaming voice-asset downloader powering the
+//!   `download_voice_assets` Tauri command.
 //! - [`responder`] — `ArcDmResponder`: a `Responder` impl that locks a
 //!   shared `Arc<Mutex<DialogueManager>>` per turn.
 //!
@@ -16,6 +18,8 @@
 pub mod assets;
 #[cfg(feature = "speech")]
 pub mod backends;
+#[cfg(feature = "speech")]
+pub mod download;
 #[cfg(feature = "speech")]
 pub mod observer;
 #[cfg(feature = "speech")]
