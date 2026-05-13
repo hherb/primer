@@ -23,6 +23,11 @@ fn copy_seed_resources() {
         panic!("expected seed source dir not found: {}", src.display());
     }
 
+    // Track the dir itself so adding/removing a *.jsonl re-fires the
+    // build script; the per-file rerun-if-changed lines below only
+    // catch edits to files that existed at last run.
+    println!("cargo:rerun-if-changed={}", src.display());
+
     if dst.exists() {
         std::fs::remove_dir_all(&dst)
             .unwrap_or_else(|e| panic!("clean {}: {e}", dst.display()));

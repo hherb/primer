@@ -52,7 +52,9 @@ pub fn set_packaged_seed_dir_if_present() {
 
 /// Depth-first search for the first directory under `dir` (inclusive)
 /// containing at least one `*.jsonl` file. Bounded at `max_depth` to
-/// keep startup latency negligible.
+/// keep startup latency negligible. Subdirs are visited in sorted
+/// order so results are deterministic across filesystems whose
+/// `read_dir` enumeration order differs (HFS+ vs APFS vs Linux ext4).
 fn find_jsonl_dir(dir: &Path, depth: u32, max_depth: u32) -> Option<PathBuf> {
     if depth > max_depth {
         return None;
@@ -71,6 +73,7 @@ fn find_jsonl_dir(dir: &Path, depth: u32, max_depth: u32) -> Option<PathBuf> {
     if has_jsonl {
         return Some(dir.to_path_buf());
     }
+    subdirs.sort();
     for sub in subdirs {
         if let Some(p) = find_jsonl_dir(&sub, depth + 1, max_depth) {
             return Some(p);
@@ -158,5 +161,58 @@ mod tests {
         let exe = macos.join("primer-gui");
         fs::write(&exe, b"").unwrap();
         assert!(resolve_packaged_seed_dir(&exe).is_none());
+    }
+
+    #[test]
+    fn finds_jsonl_at_max_depth_boundary() {
+        // resolve_packaged_seed_dir starts find_jsonl_dir at depth=0
+        // inside Resources/, so a jsonl_depth of 8 lands exactly at
+        // the depth=8 limit (still permitted) — the deepest layout
+        // the current cap accepts.
+        let temp = TempDir::new().unwrap();
+        let exe = create_app_layout(temp.path(), 8);
+        let Some(dir) = resolve_packaged_seed_dir(&exe) else {
+            panic!("expected Some at max-depth boundary");
+        };
+        assert!(dir.join("seed_passages.en.jsonl").exists());
+    }
+
+    #[test]
+    fn returns_none_beyond_max_depth() {
+        // jsonl_depth=9 is one past the cap — the search must abandon
+        // before reaching it. Defends against quietly raising the cap
+        // without a paired test.
+        let temp = TempDir::new().unwrap();
+        let exe = create_app_layout(temp.path(), 9);
+        assert!(resolve_packaged_seed_dir(&exe).is_none());
+    }
+
+    #[test]
+    fn subdir_traversal_is_sorted() {
+        // Build a Resources/ tree with two sibling subdirs, both
+        // containing a jsonl. The DFS should pick the lexicographically
+        // first one regardless of read_dir order. Without the sort,
+        // this is filesystem-dependent.
+        let temp = TempDir::new().unwrap();
+        let app = temp.path().join("Primer.app");
+        let macos = app.join("Contents").join("MacOS");
+        let resources = app.join("Contents").join("Resources");
+        fs::create_dir_all(&macos).unwrap();
+        let a = resources.join("aaa");
+        let z = resources.join("zzz");
+        fs::create_dir_all(&a).unwrap();
+        fs::create_dir_all(&z).unwrap();
+        fs::write(a.join("seed.jsonl"), b"{}\n").unwrap();
+        fs::write(z.join("seed.jsonl"), b"{}\n").unwrap();
+        let exe = macos.join("primer-gui");
+        fs::write(&exe, b"").unwrap();
+
+        let Some(found) = resolve_packaged_seed_dir(&exe) else {
+            panic!("expected Some");
+        };
+        assert!(
+            found.ends_with("aaa"),
+            "expected sorted DFS to pick 'aaa' first, got {found:?}"
+        );
     }
 }
