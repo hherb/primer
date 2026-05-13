@@ -162,6 +162,21 @@ pub mod retrieval {
     pub const KB_BM25_ONLY_MIN_SCORE: f64 = 0.5;
 }
 
+/// Speech-mode tunables. Mirrors the CLI's `--mic-silence-ms` flag and
+/// any future GUI-level speech defaults.
+pub mod speech {
+    /// Milliseconds of post-end-of-speech silence VAD waits before
+    /// firing SpeechEnd. The CLI's `--mic-silence-ms` defaults to
+    /// this value; the GUI's `SpeechSettings::mic_silence_ms` default
+    /// reads it via this constant.
+    ///
+    /// Lifted from a 600 ms default at the original `--speech` POC
+    /// (PR for spec 2026-05-02). Tuning rationale: silero's 300 ms
+    /// default is too aggressive given cancel-on-resume; 600 ms
+    /// reduces false trips without hurting perceived response time.
+    pub const DEFAULT_MIC_SILENCE_MS: u32 = 600;
+}
+
 /// Defaults shared across the CLI, GUI, and frontend for the learner
 /// profile. Kept here so a brand-new install behaves identically across
 /// every entry point — and so the JS picker has a documented Rust
