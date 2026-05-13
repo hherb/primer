@@ -130,9 +130,15 @@
         if ($("voice-consent-download")) $("voice-consent-download").onclick = null;
       };
 
-      const onCancel = () => {
+      const onCancel = async () => {
         backdrop.hidden = true;
         cleanup();
+        // Persist voice_mode_enabled=false so the next GUI launch doesn't
+        // re-prompt the consent dialog. stop_voice_mode is idempotent and
+        // flips the sticky flag off via gui-config.json. Without this, a
+        // child or parent who chose "not now" would see the modal every
+        // launch with no way to dismiss it durably.
+        await invoke("stop_voice_mode").catch(() => {});
         resolve();
       };
 

@@ -114,10 +114,10 @@ fn compute_paths(
 
     let piper_onnx = override_entry
         .and_then(|o| o.piper_onnx_path.clone())
-        .unwrap_or_else(|| voice_dir.join(format!("{}.onnx", voice_id)));
+        .unwrap_or_else(|| voice_dir.join(format!("{voice_id}.onnx")));
     let piper_config = override_entry
         .and_then(|o| o.piper_config_path.clone())
-        .unwrap_or_else(|| voice_dir.join(format!("{}.onnx.json", voice_id)));
+        .unwrap_or_else(|| voice_dir.join(format!("{voice_id}.onnx.json")));
     let whisper_model = override_entry
         .and_then(|o| o.whisper_model_path.clone())
         .unwrap_or_else(|| {
