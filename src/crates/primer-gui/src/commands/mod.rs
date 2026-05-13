@@ -7,6 +7,7 @@
 
 pub mod session;
 pub mod settings;
+pub mod voice;
 
 use tauri::Wry;
 
@@ -30,5 +31,8 @@ pub fn register(builder: tauri::Builder<Wry>) -> tauri::Builder<Wry> {
         session::get_learner_state,
         session::list_session_turns,
         session::get_full_session_turns,
+        voice::start_voice_mode,
+        voice::stop_voice_mode,
+        voice::cancel_voice_response,
     ])
 }

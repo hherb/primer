@@ -543,7 +543,12 @@ pub(crate) fn read_signals(dm: &DialogueManager) -> TurnSignals {
 /// lock will WAIT for any in-flight `send_message` to finish — exactly
 /// the right behaviour so a "Close" click never aborts a partially-
 /// streamed response.
-async fn close_session_inner(state: &tauri::State<'_, AppState>) -> Result<(), String> {
+///
+/// Also called by `commands::voice::start_voice_mode` so that switching
+/// to voice mode cleanly drains any active text session first.
+pub(crate) async fn close_session_inner(
+    state: &tauri::State<'_, AppState>,
+) -> Result<(), String> {
     let active = state.session.lock().await.take();
     if let Some(active) = active {
         let mut dm = active.dialogue_manager.lock().await;
