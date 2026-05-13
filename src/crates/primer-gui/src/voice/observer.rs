@@ -3,6 +3,7 @@
 use serde::Serialize;
 use tauri::Emitter;
 
+use primer_core::i18n::{render_inference_error, Locale};
 use primer_speech::voice_loop::{ExitReason, LoopObserver, TurnCompletePayload, VoiceState};
 
 #[derive(Serialize, Clone)]
@@ -42,11 +43,18 @@ pub struct VoiceInferenceErrorEvent {
 
 pub struct TauriEventObserver<R: tauri::Runtime = tauri::Wry> {
     app: tauri::AppHandle<R>,
+    /// Locale used to render user-facing strings for events that carry
+    /// any (currently just `on_inference_error`). Bound at construction
+    /// time from the session's resolved locale. The CLAUDE.md i18n
+    /// contract is that `InferenceError::Other`'s inner string is
+    /// dev-facing only and must never reach users; `render_inference_error`
+    /// substitutes a generic message for that case.
+    locale: Locale,
 }
 
 impl<R: tauri::Runtime> TauriEventObserver<R> {
-    pub fn new(app: tauri::AppHandle<R>) -> Self {
-        Self { app }
+    pub fn new(app: tauri::AppHandle<R>, locale: Locale) -> Self {
+        Self { app, locale }
     }
 }
 
@@ -92,8 +100,14 @@ impl<R: tauri::Runtime + 'static> LoopObserver for TauriEventObserver<R> {
     }
 
     fn on_inference_error(&mut self, err: &primer_core::error::InferenceError) {
+        // User-facing rendering: render_inference_error substitutes a
+        // generic message for InferenceError::Other (the dev-only
+        // variant) so its inner string never leaks across the IPC
+        // boundary. The full Debug form is logged separately for
+        // dev observability.
+        tracing::warn!(target: "primer_gui::voice", "inference error: {err:?}");
         let evt = VoiceInferenceErrorEvent {
-            message: format!("{err:?}"),
+            message: render_inference_error(err, &self.locale),
         };
         if let Err(e) = self.app.emit("primer://voice/inference_error", &evt) {
             tracing::warn!("emit primer://voice/inference_error failed: {e}");
