@@ -23,8 +23,7 @@ use primer_core::speech::StreamingTextToSpeech;
 #[cfg(feature = "speech")]
 use primer_core::speech::VoiceActivityDetector;
 use primer_pedagogy::DialogueManager;
-use primer_speech::voice_loop::{LoopBackends, run_loop_borrowed};
-use primer_speech::voice_loop::state_machine::VAD_EVENT_CHANNEL_CAPACITY;
+use primer_speech::voice_loop::{LoopBackends, VAD_EVENT_CHANNEL_CAPACITY, run_loop_borrowed};
 
 pub use stdout_observer::StdoutObserver;
 

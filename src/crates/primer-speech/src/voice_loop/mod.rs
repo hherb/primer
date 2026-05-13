@@ -21,5 +21,5 @@ pub use locale_defaults::{voice_default_for, LocaleDefault, LOCALE_DEFAULTS};
 pub use observer::{ExitReason, LoopObserver, TurnCompletePayload, VoiceState};
 pub use state_machine::{
     run_loop, run_loop_borrowed, DrainHook, LoopBackends, LoopConfig, LoopHandle, Responder,
-    VoiceLoopError,
+    VoiceLoopError, VAD_EVENT_CHANNEL_CAPACITY,
 };
