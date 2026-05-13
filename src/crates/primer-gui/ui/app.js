@@ -433,6 +433,12 @@ function setupTurnCompleteListener() {
     // here shouldn't deny the user the chat surface.
     refreshSidebar();
   });
+  // Voice turns produce the same Turn records as text turns, so the same
+  // sidebar refresh applies. The voice event carries session_id +
+  // child_turn_index + primer_turn_index; we only need the refresh here.
+  listen("primer://voice/response_complete", (_event) => {
+    refreshSidebar();
+  });
 }
 
 function setupSidebarToggle() {
