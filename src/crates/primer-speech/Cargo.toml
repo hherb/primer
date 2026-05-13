@@ -10,6 +10,7 @@ async-trait.workspace = true
 tokio.workspace = true
 tracing.workspace = true
 thiserror.workspace = true
+uuid.workspace = true
 
 # Silero VAD — bundled ONNX weights, opt-in via the `silero` feature so the
 # ort/ndarray dep tree only compiles for users who want VAD.
