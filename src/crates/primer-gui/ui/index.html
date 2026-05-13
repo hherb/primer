@@ -526,13 +526,44 @@
             </div>
           </details>
 
-          <details class="settings-group is-coming-soon">
-            <summary>Speech (coming soon)</summary>
-            <p class="hint muted">
-              Voice mode (Listen / Think / Speak) is not yet wired into the
-              GUI. To try it today, use the CLI:
-              <code>cargo run --bin primer --features primer-cli/speech -- --speech …</code>
+          <details class="settings-group" id="speech-settings-group">
+            <summary>Speech</summary>
+            <p class="hint muted" id="speech-availability-hint" hidden>
+              Voice mode is not built into this binary. Rebuild with
+              <code>--features primer-gui/speech</code> to enable.
             </p>
+            <div id="speech-settings-fields">
+              <div class="settings-grid">
+                <label class="field">
+                  <span>Mic silence (ms)</span>
+                  <input
+                    type="number"
+                    id="f-speech-mic-silence-ms"
+                    min="100"
+                    max="3000"
+                    step="50"
+                    placeholder="600"
+                  />
+                </label>
+                <label class="check field-full">
+                  <input type="checkbox" id="f-speech-disable-auto-download" />
+                  <span>Don't offer auto-download; require explicit file paths</span>
+                </label>
+              </div>
+              <p class="hint muted">
+                Voice mode auto-downloads the default Whisper + Piper assets for
+                your locale to <code>~/.cache/primer/models/</code> on first launch.
+                Tick the box above to disable the offer (the start-voice-mode
+                command will then surface missing files as a plain error pointing
+                back to this dialog).
+              </p>
+
+              <h3 class="settings-subhead">Per-locale overrides</h3>
+              <div id="f-speech-overrides">
+                <!-- One sub-card per locale; rendered from JS so adding a locale
+                     pack only requires updating LOCALE_CHOICES in settings.js. -->
+              </div>
+            </div>
           </details>
         </form>
 
