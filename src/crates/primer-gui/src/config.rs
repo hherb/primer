@@ -458,6 +458,7 @@ pub struct GuiConfigView {
     pub breaks: BreakConfig,
     pub persistence: PersistenceConfig,
     pub ui: UiConfig,
+    pub speech: SpeechSettings,
 }
 
 /// Frontend-safe projection of [`BackendConfig`] (read path).
@@ -487,6 +488,7 @@ impl From<&GuiConfig> for GuiConfigView {
             breaks: c.breaks.clone(),
             persistence: c.persistence.clone(),
             ui: c.ui.clone(),
+            speech: c.speech.clone(),
         }
     }
 }
@@ -508,6 +510,7 @@ pub struct GuiConfigUpdate {
     pub breaks: BreakConfig,
     pub persistence: PersistenceConfig,
     pub ui: UiConfig,
+    pub speech: SpeechSettings,
 }
 
 /// Update intent for [`BackendConfig`] (write path).
@@ -543,10 +546,7 @@ impl GuiConfigUpdate {
             breaks: self.breaks,
             persistence: self.persistence,
             ui: self.ui,
-            // Speech is carried forward from current until Task 2.3 adds
-            // `speech` to `GuiConfigUpdate`; at that point this becomes
-            // `speech: self.speech`.
-            speech: current.speech.clone(),
+            speech: self.speech,
         }
     }
 }
@@ -731,7 +731,8 @@ mod tests {
             "vocab": {"max_per_prompt": null},
             "breaks": {"after_mins": 30},
             "persistence": {"session_db": null, "knowledge_db": null, "no_persist": false},
-            "ui": {"sidebar_open": true, "last_section": "current_turn"}
+            "ui": {"sidebar_open": true, "last_section": "current_turn"},
+            "speech": {"voice_mode_enabled": false, "disable_auto_download": false, "mic_silence_ms": 600, "overrides": {}}
         }"#;
         let update: GuiConfigUpdate = serde_json::from_str(update_json).unwrap();
         let resolved = update.into_config(&current);
@@ -845,5 +846,43 @@ mod tests {
         let cfg = load(dir.path()).unwrap();
         assert_eq!(cfg.learner.name, "Ada");
         assert_eq!(cfg.speech, SpeechSettings::default());
+    }
+
+    #[test]
+    fn speech_settings_round_trip_through_view_and_update() {
+        let mut cfg = GuiConfig::default();
+        cfg.speech.voice_mode_enabled = true;
+        cfg.speech.mic_silence_ms = 800;
+
+        let view: GuiConfigView = (&cfg).into();
+        assert_eq!(view.speech, cfg.speech);
+
+        let update_json = serde_json::to_string(&serde_json::json!({
+            "learner": {"name": "Binti", "age": 8, "locale": "en"},
+            "backend": {
+                "kind": "stub", "model": null,
+                "ollama_url": "http://localhost:11434",
+                "api_key_source": {"kind": "keep"},
+            },
+            "classifier": {"match_main": true, "kind": null, "model": null, "timeout_ms": 3000},
+            "extractor": {"match_main": true, "kind": null, "model": null, "timeout_ms": 5000},
+            "comprehension": {"match_main": true, "kind": null, "model": null, "timeout_ms": 5000},
+            "embedder": {"kind": "none", "model": null, "ollama_url": null},
+            "vocab": {"max_per_prompt": null},
+            "breaks": {"after_mins": 30},
+            "persistence": {"session_db": null, "knowledge_db": null, "no_persist": false},
+            "ui": {"sidebar_open": true, "last_section": "current_turn"},
+            "speech": {
+                "voice_mode_enabled": true,
+                "disable_auto_download": false,
+                "mic_silence_ms": 800,
+                "overrides": {}
+            }
+        }))
+        .unwrap();
+        let update: GuiConfigUpdate = serde_json::from_str(&update_json).unwrap();
+        let resolved = update.into_config(&cfg);
+        assert!(resolved.speech.voice_mode_enabled);
+        assert_eq!(resolved.speech.mic_silence_ms, 800);
     }
 }
