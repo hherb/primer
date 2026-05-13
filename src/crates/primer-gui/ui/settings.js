@@ -12,7 +12,10 @@
 // The inline API key never round-trips: the view says only "is a key
 // set", and the update path defaults to `ApiKeyUpdate::Keep` unless
 // the user explicitly typed a new key or switched to env.
-
+//
+// IIFE wrap: see picker.js header — top-level `const invoke` collides
+// across classic scripts otherwise.
+(() => {
 const { invoke } = window.__TAURI__.core;
 
 // Locale list must stay in sync with `primer_core::i18n::Locale::ALL`.
@@ -550,3 +553,5 @@ function formatErr(err) {
     return String(err);
   }
 }
+
+})();

@@ -577,6 +577,30 @@ mod tests {
     }
 
     #[test]
+    fn german_pack_instructs_informal_register() {
+        // The base prompt MUST explicitly tell the model to address the
+        // child with the informal "du", never the formal "Sie". German
+        // children are universally duzed outside formal institutions;
+        // small local models default to Sie for assistant↔user without
+        // an explicit instruction. Regression guard for the bug where
+        // granite4.1:8b-q8_0 addressed the child with "Sie".
+        let pack = german_pack();
+        let s = pack.render_base("Lieschen", 8);
+        assert!(
+            s.contains("ANREDE"),
+            "base prompt should carry an explicit ANREDE block: {s}"
+        );
+        assert!(
+            s.contains("informellen „du\""),
+            "base prompt should name informal „du\" by exact word: {s}"
+        );
+        assert!(
+            s.contains("NIEMALS"),
+            "base prompt should forbid „Sie\" emphatically (NIEMALS): {s}"
+        );
+    }
+
+    #[test]
     fn german_pack_age_band_selection() {
         let pack = german_pack();
         // Pick a unique German marker per band.

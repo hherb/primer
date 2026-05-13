@@ -1,0 +1,40 @@
+#!/usr/bin/env bash
+# Apple notarization credentials for `scripts/build-dmg.sh`.
+#
+# To activate on this machine:
+#   1. Copy this file to scripts/apple-notarize-env.sh
+#   2. Pick ONE of the two credential paths below and fill in the values.
+#      Leave the OTHER set commented out (or set to empty strings) so
+#      Tauri's bundler picks the path you intend.
+#   3. Anything in the non-".example" copy stays out of git automatically.
+#
+# Path A (recommended for ad-hoc dev distribution) — Apple ID + app-
+#   specific password. Generate the password at
+#       https://account.apple.com  →  Sign-In and Security
+#                                   →  App-Specific Passwords
+#                                   →  "+ Generate Password"
+#   labelled e.g. "Primer notarization". Apple shows the password ONCE
+#   in the format xxxx-xxxx-xxxx-xxxx — copy it then.
+#
+# Path B (better for routine / CI use) — App Store Connect API key.
+#   Create at https://appstoreconnect.apple.com → Users and Access
+#   → Integrations / Keys → "+" → role "Developer". Download the .p8
+#   file (one-time chance) and note the Key ID + Issuer ID. Save the
+#   .p8 somewhere stable outside the repo.
+
+# ─── Path A: Apple ID + app-specific password ─────────────────────────
+# Replace the placeholders below. Team ID is your Developer Program team
+# (see `security find-identity -p codesigning -v` — the (XXXXXXXXXX) at
+# the end of your "Developer ID Application" cert).
+
+export APPLE_ID="you@example.com"
+export APPLE_PASSWORD="xxxx-xxxx-xxxx-xxxx"
+export APPLE_TEAM_ID="X5DWXB4283"
+
+# ─── Path B: App Store Connect API key ────────────────────────────────
+# Uncomment and fill in if you prefer the API-key flow. Leave Path A
+# blank in that case — Tauri picks whichever trio is fully populated.
+
+# export APPLE_API_ISSUER="00000000-0000-0000-0000-000000000000"
+# export APPLE_API_KEY="XXXXXXXXXX"
+# export APPLE_API_KEY_PATH="$HOME/.appstoreconnect/AuthKey_XXXXXXXXXX.p8"

@@ -69,33 +69,60 @@ pub async fn close_session(state: tauri::State<'_, AppState>) -> Result<(), Stri
 /// Resume a previously-saved session by UUID, replacing any active one.
 ///
 /// Drops any current session (drains its background tasks first), then
-/// builds a fresh `ActiveSession` from the persisted GuiConfig, loads
+/// probes the session's persisted locale, builds a fresh
+/// `ActiveSession` using THAT locale (not the GUI's current cfg), loads
 /// the named session from disk, and applies it via
 /// `DialogueManager::resume_session` — which refreshes the rolling
 /// summary if it's stale and rehydrates the classifier trajectory.
 ///
+/// **Locale inheritance.** The persisted learner row carries the locale
+/// every prior turn was tagged under. The GUI's current `cfg.learner.locale`
+/// is meant for NEW sessions only — using it for a resume would let
+/// new concepts extracted in the resumed session land with the wrong
+/// `concept_language_tag` and silently corrupt the longitudinal record.
+/// So resume_session inherits the session's locale and ignores cfg's
+/// for THIS run. The persisted cfg on disk stays untouched; future
+/// `start_session` calls still use cfg's locale.
+///
+/// This differs from the CLI, which errors on locale mismatch and asks
+/// the user to drop `--language` or specify the saved one. The CLI has
+/// an explicit `--language` flag the user typed; the GUI has neither
+/// flag nor mechanism to "drop" anything, so auto-detect is the only
+/// non-hostile behaviour.
+///
 /// Errors:
 /// - `session_id` not a valid UUID → inline error.
 /// - No session with that id on disk → "session not found" error.
-/// - Locale mismatch: the loaded learner's stored locale differs from
-///   the GUI's current `learner.locale` setting (mirrors the CLI's
-///   `--resume` guard — prevents silent `concept_language_tag`
-///   corruption when new concepts get tagged under the wrong locale).
 /// - Construction failure (embedder, model resolution, etc.) → wiring-level error.
 #[tauri::command]
 pub async fn resume_session(
     state: tauri::State<'_, AppState>,
     session_id: String,
 ) -> Result<SessionInfo, String> {
-    use primer_core::i18n::Locale;
-    use primer_engine::verify_resume_locale_match;
-
     let uuid = Uuid::parse_str(&session_id)
         .map_err(|e| format!("invalid session id {session_id:?}: {e}"))?;
 
     close_session_inner(&state).await?;
 
-    let cfg = state.config.lock().await.clone();
+    let mut cfg = state.config.lock().await.clone();
+
+    // Probe the session DB to read the learner row's persisted locale
+    // BEFORE building the full active session. If it differs from cfg's,
+    // override cfg.learner.locale for THIS resume so the KB + session
+    // store + prompt pack all line up with the saved data. The user's
+    // persisted gui-config.json is untouched.
+    if let Some(session_locale) = probe_learner_locale(&state.home, &cfg).await? {
+        if session_locale.pack_id() != cfg.learner.locale {
+            tracing::info!(
+                target: "primer_gui::resume",
+                cfg_locale = %cfg.learner.locale,
+                session_locale = session_locale.pack_id(),
+                "resume: inheriting session's saved locale (differs from cfg)"
+            );
+            cfg.learner.locale = session_locale.pack_id().to_string();
+        }
+    }
+
     let active = wiring::build_active_session(&state.home, &cfg).await?;
 
     let loaded = active
@@ -104,17 +131,6 @@ pub async fn resume_session(
         .await
         .map_err(|e| format!("load_session failed: {e}"))?
         .ok_or_else(|| format!("no session found with id {uuid}"))?;
-
-    // Locale-mismatch guard. `build_active_session` already loaded the
-    // persisted learner row and seeded `dm.learner.profile.locale` from
-    // it; the GUI's currently-configured locale comes from cfg. If they
-    // differ we must abort BEFORE swapping the loaded session in — once
-    // resume_session lands, any new concepts extracted in the resumed
-    // session would be tagged with the wrong concept_language_tag and
-    // silently corrupt the longitudinal learner data.
-    let cfg_locale = Locale::from_pack_id(&cfg.learner.locale).unwrap_or_default();
-    let learner_locale = active.dialogue_manager.lock().await.learner.profile.locale;
-    verify_resume_locale_match(cfg_locale, learner_locale, uuid)?;
 
     // Replace DM's freshly-minted session with the loaded one. After
     // this returns, dm.session.id == uuid and recent_assessments are
@@ -534,6 +550,53 @@ async fn close_session_inner(state: &tauri::State<'_, AppState>) -> Result<(), S
         dm.close_session().await;
     }
     Ok(())
+}
+
+/// Read the persisted learner's locale from disk without constructing
+/// a full active session. Returns `Ok(None)` when there's no on-disk
+/// session DB to probe (fresh install, or `no_persist` is on) — both
+/// cases mean cfg's locale wins by default. Errors bubble up as
+/// user-facing strings so they can land in the resume failure banner.
+///
+/// The store is opened with `Locale::default()` because the probe is a
+/// pure read: `LearnerStore::load_learner` doesn't touch the locale
+/// field at all (it returns whatever's stored in `learners.locale`).
+/// Using a deterministic locale here also keeps `--reembed`-style
+/// concept-tag writes that *do* depend on the store's locale out of
+/// this read-only code path.
+async fn probe_learner_locale(
+    home: &std::path::Path,
+    cfg: &crate::config::GuiConfig,
+) -> Result<Option<primer_core::i18n::Locale>, String> {
+    use primer_core::storage::LearnerStore;
+
+    if cfg.persistence.no_persist {
+        return Ok(None);
+    }
+    let session_path = primer_engine::resolve_session_db_path(
+        cfg.persistence.session_db.clone(),
+        home,
+        &cfg.learner.name,
+        false,
+    );
+    if !session_path.exists() {
+        return Ok(None);
+    }
+    let store = primer_storage::SqliteSessionStore::open_for_locale(
+        &session_path,
+        primer_core::i18n::Locale::default(),
+    )
+    .map_err(|e| {
+        format!(
+            "probe: opening session-db {} for locale read: {e}",
+            session_path.display()
+        )
+    })?;
+    let learner = store
+        .load_learner()
+        .await
+        .map_err(|e| format!("probe: load_learner: {e}"))?;
+    Ok(learner.map(|l| l.profile.locale))
 }
 
 /// Drive one streaming dialogue turn end-to-end.
@@ -962,62 +1025,52 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn resume_rejects_locale_mismatch() {
-        // Mirrors the locale-mismatch guard in resume_session: persist a
-        // session+learner under locale=en, build a second ActiveSession
-        // with cfg.learner.locale=de, then assert the same check the
-        // Tauri command runs (`verify_resume_locale_match`) fires
-        // BEFORE swap-in. Catches silent concept_language_tag corruption
-        // — the bug class the CLI's --resume guard already prevents.
-        use primer_engine::verify_resume_locale_match;
-
+    async fn probe_learner_locale_reads_stored_locale() {
+        // Resume-on-mismatch behaviour: instead of erroring like the CLI,
+        // the GUI probes the persisted learner's locale on disk and uses
+        // THAT for the resume regardless of cfg.learner.locale. This test
+        // exercises the probe helper directly — same pattern the Tauri
+        // command's resume path uses. The companion concept_language_tag
+        // invariant is preserved because the rebuilt ActiveSession opens
+        // the store under the probed (saved) locale, so any newly
+        // extracted concepts in the resumed session land with the
+        // matching tag.
         let home = TempDir::new().unwrap();
 
-        // Step 1: build under English so the learner row + a session
-        // row both land with locale=en.
+        // Step 1: build + save under English so the learner row lands
+        // with locale=en.
         let cfg_en = stub_config_with_persistence(home.path());
         let active_en = build_active_session(home.path(), &cfg_en).await.unwrap();
         let dm_en = Arc::clone(&active_en.dialogue_manager);
-        let payload = run_turn(&dm_en, "hello", |_, _| {}).await.unwrap();
-        let persisted_id = payload.session_id;
+        run_turn(&dm_en, "hello", |_, _| {}).await.unwrap();
         dm_en.lock().await.close_session().await;
         drop(active_en);
 
-        // Step 2: rebuild with the same persistence path but a German
-        // cfg locale. The persisted learner row already carries
-        // locale=en, so the freshly-built DM's learner.profile.locale
-        // is still English after wiring's load_learner runs.
+        // Step 2: probe with a cfg that asks for German. The probe
+        // should return English (the stored locale), not German (cfg's
+        // request).
         let mut cfg_de = stub_config_with_persistence(home.path());
         cfg_de.learner.locale = "de".to_string();
-        let active_de = build_active_session(home.path(), &cfg_de).await.unwrap();
-        let learner_locale = active_de
-            .dialogue_manager
-            .lock()
+        let probed = super::probe_learner_locale(home.path(), &cfg_de)
             .await
-            .learner
-            .profile
-            .locale;
+            .unwrap();
         assert_eq!(
-            learner_locale,
-            primer_core::i18n::Locale::English,
-            "persisted learner row's locale survives the cfg-locale change"
+            probed,
+            Some(primer_core::i18n::Locale::English),
+            "probe returns the persisted locale, not cfg's"
         );
 
-        // Step 3: same call the Tauri command makes — must error before
-        // any session swap-in happens.
-        let cfg_locale = primer_core::i18n::Locale::from_pack_id(&cfg_de.learner.locale).unwrap();
-        let err = verify_resume_locale_match(cfg_locale, learner_locale, persisted_id).unwrap_err();
+        // Step 3: a probe on a fresh home with a fresh cfg (no session
+        // DB yet) returns None so the resume path falls through to
+        // cfg's locale.
+        let fresh = TempDir::new().unwrap();
+        let cfg_fresh = stub_config_with_persistence(fresh.path());
+        let probed_fresh = super::probe_learner_locale(fresh.path(), &cfg_fresh)
+            .await
+            .unwrap();
         assert!(
-            err.contains(&persisted_id.to_string()),
-            "names the session being resumed: {err}"
-        );
-        assert!(
-            err.contains("'en'"),
-            "names the learner's stored locale: {err}"
-        );
-        assert!(
-            err.contains("'de'"),
-            "names the conflicting cfg locale: {err}"
+            probed_fresh.is_none(),
+            "no session DB → probe returns None: got {probed_fresh:?}"
         );
     }
 

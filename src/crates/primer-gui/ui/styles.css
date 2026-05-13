@@ -64,6 +64,15 @@
   box-sizing: border-box;
 }
 
+/* Defensive: ensure the HTML `hidden` attribute actually hides an
+   element even when a class rule sets `display: flex` or similar.
+   At equal specificity the author rule overrides the UA `[hidden]`
+   rule, which would otherwise leave .modal-backdrop / .picker-screen
+   permanently visible. */
+[hidden] {
+  display: none !important;
+}
+
 html,
 body {
   margin: 0;

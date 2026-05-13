@@ -10,7 +10,13 @@
 // re-fetches the sessions list and re-renders. That keeps "what's on
 // the picker" trivially aligned with disk; a session deleted out of
 // band between two shows will simply disappear from the list.
-
+//
+// IIFE wrap: classic scripts share one global lexical environment, so
+// top-level `const invoke` in each of picker.js / settings.js / app.js
+// would collide as "duplicate variable" SyntaxErrors. Each file scopes
+// its top-level bindings inside its own function. Globals exposed for
+// inter-script communication still go on `window.*`.
+(() => {
 const { invoke } = window.__TAURI__.core;
 
 // Default placeholder name a fresh learner profile carries until the
@@ -265,3 +271,5 @@ function formatErr(err) {
     return String(err);
   }
 }
+
+})();
