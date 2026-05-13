@@ -13,6 +13,9 @@ use tauri::AppHandle;
 use crate::state::AppState;
 use crate::types::SessionInfo;
 
+#[cfg(feature = "speech")]
+use std::sync::Arc;
+
 /// Structured error returned by `start_voice_mode`.
 ///
 /// Uses `#[serde(tag = "kind", rename_all = "snake_case")]` so the
@@ -67,8 +70,10 @@ impl From<String> for StartVoiceModeError {
 #[tauri::command]
 pub async fn start_voice_mode(
     state: tauri::State<'_, AppState>,
-    _app: AppHandle,
+    app: AppHandle,
 ) -> Result<SessionInfo, StartVoiceModeError> {
+    use primer_core::i18n::Locale;
+
     // 1. Close any active text session (drains background tasks).
     super::session::close_session_inner(&state)
         .await
@@ -80,19 +85,123 @@ pub async fn start_voice_mode(
     let cfg = state.config.lock().await.clone();
 
     // 3. Build the active session via the shared wiring so DM
-    //    construction is identical to text mode.
+    //    construction is identical to text mode. The active session is
+    //    moved into `state.session` so `current_session_info` /
+    //    `get_learner_state` / sidebar refresh commands keep working
+    //    while voice mode runs.
     let active_session = crate::wiring::build_active_session(&state.home, &cfg)
         .await
         .map_err(StartVoiceModeError::from)?;
 
-    // 4. PR 4 will plug in real asset resolution here. For PR 3,
-    //    hard-fail with a clear "not implemented" so the lifecycle
-    //    plumbing is the only thing under test. PR 4's task 4.3
-    //    replaces this stub.
-    let _ = active_session; // silence unused-warning until PR 4 wires this in
-    Err(StartVoiceModeError::Other {
-        message: "asset resolution not yet implemented (PR 4)".into(),
-    })
+    // 4. Resolve voice assets for the active locale.
+    let locale = Locale::from_pack_id(&cfg.learner.locale).unwrap_or_default();
+    let assets =
+        crate::voice::assets::resolve_voice_assets(&state.home, &cfg.speech, &locale).map_err(
+            |missing| StartVoiceModeError::AssetMissing {
+                entries: missing.entries,
+            },
+        )?;
+
+    // 5. Build the local backends (cpal mic + speaker, VAD, STT, TTS,
+    //    audio thread, on_audio, drain hook). Lives in primer-speech;
+    //    GUI wraps via voice::backends::build_loop_backends.
+    let mut local =
+        crate::voice::backends::build_loop_backends(&assets, locale, cfg.speech.mic_silence_ms)
+            .await
+            .map_err(|e| StartVoiceModeError::from(format!("backend init: {e}")))?;
+
+    let backends = local
+        .backends
+        .take()
+        .expect("build_local_backends always returns backends");
+    let event_rx = local
+        .event_rx
+        .take()
+        .expect("build_local_backends always returns event_rx");
+    let on_audio = local
+        .on_audio
+        .take()
+        .expect("build_local_backends always returns on_audio");
+    let drain_hook = local
+        .drain_hook
+        .take()
+        .expect("build_local_backends always returns drain_hook");
+    let is_speaking = Arc::clone(&local.is_speaking);
+
+    // 6. Construct the responder + observer + spawn the loop.
+    let dm_arc = Arc::clone(&active_session.dialogue_manager);
+    let observer = crate::voice::observer::TauriEventObserver::new(app.clone(), locale);
+    let responder: Box<dyn primer_speech::voice_loop::Responder + 'static> =
+        Box::new(crate::voice::responder::ArcDmResponder::new(dm_arc));
+
+    let (handle, join) = primer_speech::voice_loop::run_loop(
+        backends,
+        event_rx,
+        responder,
+        on_audio,
+        Some(drain_hook),
+        false, // verbose: GUI logs via tracing, never stderr
+        Some(is_speaking),
+        observer,
+    );
+
+    // The audio thread + cpal streams live inside `local`; the spawned
+    // run_loop task holds the responder + backends. The voice-mode
+    // shutdown path runs `local.shutdown()` after the loop joins, so
+    // ownership of `local` must survive until then — we stash it inside
+    // a tokio task wrapper that joins both.
+    let wrapped_join = tokio::spawn(async move {
+        let result = join.await;
+        // Now that the loop has exited, signal the audio thread + drop
+        // cpal streams.
+        local.shutdown();
+        drop(local);
+        match result {
+            Ok(Ok(_transcripts)) => Ok(()),
+            Ok(Err(e)) => Err(e),
+            Err(e) => Err(primer_speech::voice_loop::VoiceLoopError::Other(format!(
+                "voice loop task panicked: {e}"
+            ))),
+        }
+    });
+
+    // 7. Build SessionInfo from the active session, then move both the
+    //    active session (into state.session) and the loop handle (into
+    //    state.voice).
+    let info = SessionInfo {
+        session_id: None,
+        learner: crate::types::LearnerSummary {
+            id: active_session.snapshot.lock().await.learner_id,
+            name: active_session.snapshot.lock().await.learner_name.clone(),
+            age: active_session.snapshot.lock().await.learner_age,
+            concept_count: active_session.snapshot.lock().await.concept_count,
+        },
+        backend_kind: active_session.backend_name.clone(),
+        main_model: active_session.main_model.clone(),
+        locale: active_session.locale.pack_id().to_string(),
+        voice_mode_available: true,
+    };
+
+    *state.session.lock().await = Some(active_session);
+    *state.voice.lock().await = Some(crate::state::ActiveVoiceLoop {
+        join: wrapped_join,
+        stop_tx: handle.stop_tx,
+        cancel_response_tx: handle.cancel_response_tx,
+        info: info.clone(),
+    });
+
+    // 8. Flip the sticky-toggle on successful start. Failure to persist
+    //    is logged but not propagated — the voice loop is already
+    //    running and the user expects voice mode to work.
+    {
+        let mut c = state.config.lock().await;
+        c.speech.voice_mode_enabled = true;
+        if let Err(e) = crate::config::save(&state.home, &c) {
+            tracing::warn!("persist speech.voice_mode_enabled=true failed: {e}");
+        }
+    }
+
+    Ok(info)
 }
 
 /// Stub for builds without the speech feature.
@@ -125,6 +234,14 @@ pub async fn stop_voice_mode(_state: tauri::State<'_, AppState>) -> Result<(), S
 
 /// Internal helper so `start_voice_mode` can close any active loop
 /// before spawning a new one.
+///
+/// Flips `speech.voice_mode_enabled = false` on the way out, AFTER the
+/// loop has actually been joined (or timed out). That keeps the sticky
+/// toggle aligned with what the user just did: pressing Stop persists
+/// the off-state durably, while a start-failure leaves the prior value
+/// untouched so the consent-dialog reach-back from `start_voice_mode`'s
+/// `AssetMissing` path continues to render the toggle in its original
+/// position.
 #[cfg(feature = "speech")]
 pub(crate) async fn stop_voice_mode_inner(state: &AppState) -> Result<(), String> {
     let Some(active) = state.voice.lock().await.take() else {
@@ -134,7 +251,30 @@ pub(crate) async fn stop_voice_mode_inner(state: &AppState) -> Result<(), String
     let _ = active.stop_tx.send(());
     // Bound the join wait: a stuck audio thread cannot hang the GUI.
     let timeout = std::time::Duration::from_secs(5);
-    match tokio::time::timeout(timeout, active.join).await {
+    let join_result = tokio::time::timeout(timeout, active.join).await;
+
+    // Flip the sticky toggle off — voice mode just stopped. Persist
+    // failure is logged but doesn't propagate; the in-memory state is
+    // already correct and the next save_settings will pick it up.
+    {
+        let mut c = state.config.lock().await;
+        c.speech.voice_mode_enabled = false;
+        if let Err(e) = crate::config::save(&state.home, &c) {
+            tracing::warn!("persist speech.voice_mode_enabled=false failed: {e}");
+        }
+    }
+
+    // Also drop the underlying active session (the DM that the voice
+    // responder was holding). The voice loop already exited, so the
+    // Arc<Mutex<DM>> the responder captured drops at the same time as
+    // the join future above — pulling the ActiveSession out of
+    // state.session now releases the GUI's last strong ref.
+    if let Some(active_session) = state.session.lock().await.take() {
+        let mut dm = active_session.dialogue_manager.lock().await;
+        dm.close_session().await;
+    }
+
+    match join_result {
         Ok(Ok(Ok(()))) => Ok(()),
         Ok(Ok(Err(e))) => Err(format!("voice loop returned error: {e}")),
         Ok(Err(e)) => Err(format!("voice loop join failed: {e}")),
