@@ -19,7 +19,7 @@
 
 use std::cmp::Ordering;
 
-use crate::common::{BenchQuery, Cluster};
+use super::{BenchQuery, Cluster};
 use primer_core::i18n::Locale;
 use primer_core::knowledge::{KnowledgeBase, RetrievalParams};
 use primer_kb_load::auto_seed_if_empty;
@@ -324,6 +324,67 @@ pub async fn run_bm25_sweep(cfg: Bm25SweepConfig<'_>) {
     assert_eq!(recomputed.strict_pass, winner.strict_pass);
 }
 
+#[cfg(test)]
+mod bm25_selection_tests {
+    //! Characterisation tests for [`pick_bm25_winner`].
+    //!
+    //! Pins the lex-selection rule: max strict_recall → max loose_recall
+    //! → min top_k → max min_score. Each test isolates one axis with all
+    //! other axes equal, so any future hand-edit that inverts a
+    //! `.then(...)` clause fails loudly here instead of silently shifting
+    //! the algorithmic winner reported by the sweep diagnostics.
+    use super::*;
+
+    fn cell(
+        top_k: usize,
+        min_score: f64,
+        loose_pass: usize,
+        strict_pass: usize,
+    ) -> Bm25CellMetrics {
+        Bm25CellMetrics {
+            top_k,
+            min_score,
+            loose_pass,
+            loose_total: 10,
+            strict_pass,
+            strict_total: 5,
+            per_cluster: Vec::new(),
+        }
+    }
+
+    #[test]
+    fn strict_recall_wins_over_loose_recall() {
+        // (loose=0, strict=2) beats (loose=10, strict=1).
+        let cells = vec![cell(5, 0.5, 10, 1), cell(5, 0.5, 0, 2)];
+        let winner = pick_bm25_winner(&cells);
+        assert_eq!(winner.strict_pass, 2);
+    }
+
+    #[test]
+    fn loose_recall_breaks_strict_tie() {
+        // strict equal → max loose wins.
+        let cells = vec![cell(5, 0.5, 3, 1), cell(5, 0.5, 5, 1)];
+        let winner = pick_bm25_winner(&cells);
+        assert_eq!(winner.loose_pass, 5);
+    }
+
+    #[test]
+    fn smaller_top_k_breaks_recall_tie() {
+        // strict + loose equal → min top_k wins.
+        let cells = vec![cell(10, 0.5, 5, 1), cell(3, 0.5, 5, 1)];
+        let winner = pick_bm25_winner(&cells);
+        assert_eq!(winner.top_k, 3);
+    }
+
+    #[test]
+    fn larger_min_score_breaks_top_k_tie() {
+        // strict + loose + top_k equal → max min_score wins.
+        let cells = vec![cell(5, 0.5, 5, 1), cell(5, 1.5, 5, 1)];
+        let winner = pick_bm25_winner(&cells);
+        assert!((winner.min_score - 1.5).abs() < f64::EPSILON);
+    }
+}
+
 // === Hybrid sweep ===
 
 #[cfg(feature = "fastembed")]
@@ -344,8 +405,11 @@ mod hybrid {
     /// RRF k constant explored. 60.0 is the production default; smaller
     /// weights the very top of each leg more, larger flattens.
     pub const HYBRID_RRF_K_GRID: &[f64] = &[30.0, 60.0, 90.0];
-    /// RRF k value used as the tie-break preference (production default).
-    pub const HYBRID_PREFERRED_RRF_K: f64 = 60.0;
+    /// RRF k value used as the tie-break preference. Coupled at compile
+    /// time to the production default so a future change to
+    /// [`primer_core::consts::retrieval::RRF_K`] doesn't silently drift
+    /// from the sweep's tie-break preference.
+    pub const HYBRID_PREFERRED_RRF_K: f64 = primer_core::consts::retrieval::RRF_K;
     /// Width of the dashed separator line under the hybrid table header.
     pub const HYBRID_DASH_WIDTH: usize = 70;
 
@@ -545,6 +609,74 @@ mod hybrid {
             winner.loose_recall() * 100.0,
         );
         println!(">>> {}", cfg.closing_note);
+    }
+
+    #[cfg(test)]
+    mod selection_tests {
+        //! Characterisation tests for [`pick_hybrid_winner`].
+        //!
+        //! Pins the lex-selection rule: max strict_recall → max loose_recall
+        //! → min final_top_k → RRF k closest to [`HYBRID_PREFERRED_RRF_K`].
+        //! Each test isolates one axis so a future hand-edit that inverts
+        //! a `.then(...)` clause fails loudly here.
+        use super::*;
+
+        fn cell(
+            final_top_k: usize,
+            rrf_k: f64,
+            loose_pass: usize,
+            strict_pass: usize,
+        ) -> HybridCellMetrics {
+            HybridCellMetrics {
+                bm25_top_k: 30,
+                vector_top_k: 30,
+                final_top_k,
+                rrf_k,
+                loose_pass,
+                loose_total: 10,
+                strict_pass,
+                strict_total: 5,
+            }
+        }
+
+        #[test]
+        fn strict_recall_wins_over_loose_recall() {
+            let cells = vec![cell(5, 60.0, 10, 1), cell(5, 60.0, 0, 2)];
+            let winner = pick_hybrid_winner(&cells);
+            assert_eq!(winner.strict_pass, 2);
+        }
+
+        #[test]
+        fn loose_recall_breaks_strict_tie() {
+            let cells = vec![cell(5, 60.0, 3, 1), cell(5, 60.0, 5, 1)];
+            let winner = pick_hybrid_winner(&cells);
+            assert_eq!(winner.loose_pass, 5);
+        }
+
+        #[test]
+        fn smaller_final_top_k_breaks_recall_tie() {
+            let cells = vec![cell(5, 60.0, 5, 1), cell(3, 60.0, 5, 1)];
+            let winner = pick_hybrid_winner(&cells);
+            assert_eq!(winner.final_top_k, 3);
+        }
+
+        #[test]
+        fn preferred_rrf_k_wins_over_distant_rrf_k() {
+            // strict + loose + final_top_k equal → rrf_k closest to
+            // HYBRID_PREFERRED_RRF_K wins. Production default is 60.
+            let cells = vec![
+                cell(5, 30.0, 5, 1),
+                cell(5, 60.0, 5, 1),
+                cell(5, 90.0, 5, 1),
+            ];
+            let winner = pick_hybrid_winner(&cells);
+            assert!(
+                (winner.rrf_k - HYBRID_PREFERRED_RRF_K).abs() < f64::EPSILON,
+                "winner rrf_k={} should match HYBRID_PREFERRED_RRF_K={}",
+                winner.rrf_k,
+                HYBRID_PREFERRED_RRF_K,
+            );
+        }
     }
 }
 
