@@ -148,7 +148,13 @@
         const errBanner = $("voice-consent-error");
         if (errBanner) errBanner.hidden = true;
         try {
-          await invoke("download_voice_assets", { missing: entries });
+          // IPC trust boundary: echo only the asset `kind` strings; the
+          // host re-resolves `path` and `suggested_url` server-side via
+          // `resolve_requested_kinds`. A compromised webview cannot
+          // direct the host to write outside `~/.cache/primer/models/`.
+          await invoke("download_voice_assets", {
+            kinds: entries.map((e) => e.kind),
+          });
           backdrop.hidden = true;
           cleanup();
           // Retry start_voice_mode now that assets are local.

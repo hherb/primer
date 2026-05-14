@@ -92,6 +92,38 @@ pub fn resolve_voice_assets(
     }
 }
 
+/// Re-resolve a frontend-supplied list of asset kinds against the server's
+/// own view of the active locale's voice assets.
+///
+/// **Why:** keeps the IPC trust boundary tight. The frontend echoes only
+/// `kind` strings (`"piper_onnx"`, `"piper_config"`, `"whisper_model"`)
+/// from the original `AssetMissing` payload; `path` and `suggested_url`
+/// are *not* round-tripped through the webview. A compromised webview
+/// therefore cannot direct the host to write outside `cache_root(home)`
+/// or to fetch from a non-canonical URL — both come from the server's
+/// own [`resolve_voice_assets`] call.
+///
+/// Returns the subset of currently-missing entries whose `kind` matches
+/// one of `requested_kinds`. Unknown / already-present kinds are silently
+/// dropped (safe — there is nothing to download). An `Ok(ResolvedAssets)`
+/// from the inner resolver (all three files present) yields an empty
+/// `Vec`, so the caller can unconditionally iterate the result.
+pub fn resolve_requested_kinds(
+    home: &std::path::Path,
+    speech: &SpeechSettings,
+    locale: &Locale,
+    requested_kinds: &[String],
+) -> Vec<MissingAsset> {
+    let missing = match resolve_voice_assets(home, speech, locale) {
+        Ok(_) => return Vec::new(),
+        Err(am) => am.entries,
+    };
+    missing
+        .into_iter()
+        .filter(|entry| requested_kinds.iter().any(|k| k == &entry.kind))
+        .collect()
+}
+
 fn whisper_size_mb(_d: &LocaleDefault) -> u32 {
     // Approx split: the Whisper bin is the bulk (~470 MB for small);
     // Piper medium voices are ~60 MB. Used only for consent-dialog
@@ -209,5 +241,96 @@ mod tests {
             root,
             std::path::Path::new("/some/home/.cache/primer/models")
         );
+    }
+
+    /// Hostile-payload defence: a frontend-supplied unknown kind must not
+    /// produce an entry the host would download. Resolver knows only
+    /// `piper_onnx` / `piper_config` / `whisper_model`; anything else is
+    /// dropped silently.
+    #[test]
+    fn resolve_requested_kinds_drops_unknown_kinds() {
+        let home = TempDir::new().unwrap();
+        let speech = SpeechSettings::default();
+        let requested = vec![
+            "whisper_model".to_string(),
+            "executable_payload".to_string(),
+            "../../../etc/passwd".to_string(),
+        ];
+        let result = resolve_requested_kinds(home.path(), &speech, &Locale::English, &requested);
+        let kinds: Vec<&str> = result.iter().map(|e| e.kind.as_str()).collect();
+        assert_eq!(
+            kinds,
+            vec!["whisper_model"],
+            "only the server-known missing kind is returned"
+        );
+    }
+
+    /// All three legitimate kinds requested on a fresh home → all three
+    /// resolver-emitted entries returned.
+    #[test]
+    fn resolve_requested_kinds_returns_all_three_when_all_missing() {
+        let home = TempDir::new().unwrap();
+        let speech = SpeechSettings::default();
+        let requested = vec![
+            "piper_onnx".to_string(),
+            "piper_config".to_string(),
+            "whisper_model".to_string(),
+        ];
+        let result = resolve_requested_kinds(home.path(), &speech, &Locale::English, &requested);
+        assert_eq!(result.len(), 3);
+    }
+
+    /// When every asset is already on disk, the resolver returns Ok and
+    /// the helper short-circuits to an empty Vec — no downloads happen.
+    #[test]
+    fn resolve_requested_kinds_returns_empty_when_all_present() {
+        let home = TempDir::new().unwrap();
+        let voice_dir = home.path().join(".cache/primer/models/voice/en");
+        let whisper_dir = home.path().join(".cache/primer/models/whisper");
+        std::fs::create_dir_all(&voice_dir).unwrap();
+        std::fs::create_dir_all(&whisper_dir).unwrap();
+        std::fs::write(voice_dir.join("en_GB-alba-medium.onnx"), b"").unwrap();
+        std::fs::write(voice_dir.join("en_GB-alba-medium.onnx.json"), b"").unwrap();
+        std::fs::write(whisper_dir.join("ggml-small.en.bin"), b"").unwrap();
+
+        let speech = SpeechSettings::default();
+        let requested = vec!["whisper_model".to_string()];
+        let result = resolve_requested_kinds(home.path(), &speech, &Locale::English, &requested);
+        assert!(result.is_empty(), "no assets missing → nothing to download");
+    }
+
+    /// Every server-resolved path must live under `cache_root(home)`. A
+    /// hostile webview cannot inject a `..`-prefixed path through the
+    /// IPC because the path field no longer crosses the trust boundary —
+    /// it is computed server-side by [`compute_paths`].
+    #[test]
+    fn resolve_requested_kinds_paths_are_under_cache_root() {
+        let home = TempDir::new().unwrap();
+        let speech = SpeechSettings::default();
+        let requested = vec![
+            "piper_onnx".to_string(),
+            "piper_config".to_string(),
+            "whisper_model".to_string(),
+        ];
+        let result = resolve_requested_kinds(home.path(), &speech, &Locale::English, &requested);
+        let root = cache_root(home.path());
+        for entry in &result {
+            assert!(
+                entry.path.starts_with(&root),
+                "server-resolved path {} must live under cache root {}",
+                entry.path.display(),
+                root.display(),
+            );
+        }
+    }
+
+    /// Empty input → empty output. Defensive: a frontend that already
+    /// re-checked locally has nothing to ask the server to fetch.
+    #[test]
+    fn resolve_requested_kinds_empty_input_returns_empty() {
+        let home = TempDir::new().unwrap();
+        let speech = SpeechSettings::default();
+        let result = resolve_requested_kinds(home.path(), &speech, &Locale::English, &[]);
+        assert!(result.is_empty());
     }
 }
