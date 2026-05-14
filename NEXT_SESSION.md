@@ -1,25 +1,29 @@
 # Primer — Next Session Brief
 
 **Audience:** future Claude Code session continuing work on this repo.
-**Last updated:** 2026-05-14T1543+0800 (after opening PR #101 — moving `VoiceStateCopy` display strings out of `commands/voice.rs` into the prompt-pack `[voice_state]` table; commit `3fd1903` on `i18n/voice-state-copy-91`; closes #91).
+**Last updated:** 2026-05-14T1612+0800 (after pushing one additional fix to PR #101 — decoupling the GUI's voice-toggle availability from session state; commit `e33f0d4` on `i18n/voice-state-copy-91` on top of `3fd1903`; closes #91 plus the toggle-disabled smoke-test fallout).
 
 ## First moves when you start
 
 1. Read [CLAUDE.md](CLAUDE.md) — repo conventions, gotchas, build commands. **Workspace root is `src/`, not the repo root.** Every cargo command runs from `src/`. Always invoke as `~/.cargo/bin/cargo` (Homebrew rust shadows PATH and silently downgrades to 1.86, breaking silero).
-2. From `src/`: `~/.cargo/bin/cargo build && ~/.cargo/bin/cargo test --workspace`. Should be green: **772 Rust tests** under default features (up from the previous 767 once PR #101 merges; the +5 is from the 2 GUI regression witnesses plus 3 pack-side tests covering English + German `voice_state` lookup and the empty-field error path). 3 ignored. With `--features primer-gui/speech` an additional 5 unit tests in `voice/assets.rs` run for a total of 92 primer-gui tests on that feature (up from 89; +3 from this PR's GUI-side additions). Add `--features primer-kb-load/fastembed` for the embedding-backed sweeps + the real-BGE-M3 recall tests (downloads BGE-M3 ~570 MB on first run; cached afterwards). Plus **135 Python tests** in `data/ingest/` (unchanged this session — Rust-only work).
+2. From `src/`: `~/.cargo/bin/cargo build && ~/.cargo/bin/cargo test --workspace`. Should be green: **773 Rust tests** under default features (up from the previous 767 once PR #101 merges; the +6 is from the 2 GUI regression witnesses, 3 pack-side tests covering English + German `voice_state` lookup and the empty-field error path, plus the `voice_mode_available_matches_cfg_feature_speech` test pinning the new capability command's output to the cfg flag). 3 ignored. With `--features primer-gui/speech` an additional 5 unit tests in `voice/assets.rs` run for a total of 93 primer-gui tests on that feature (up from 89; +4 from this PR's GUI-side additions). Add `--features primer-kb-load/fastembed` for the embedding-backed sweeps + the real-BGE-M3 recall tests (downloads BGE-M3 ~570 MB on first run; cached afterwards). Plus **135 Python tests** in `data/ingest/` (unchanged this session — Rust-only work).
 3. **Don't assume nothing changed since this brief was written.** Read the current state of files you intend to touch first — Horst may have made interim changes. Always verify open-issue claims and `git log origin/main` since this brief's "last updated" timestamp before starting.
 
 ## Branch status
 
-`i18n/voice-state-copy-91` carries 1 commit, pushed, and on **PR #101** (https://github.com/hherb/primer/pull/101). Built off `origin/main` at `b7b4a5a` (PR #99 squash — voice IPC path re-resolution hardening). Once #101 merges, the branch can be deleted.
+`i18n/voice-state-copy-91` carries 3 commits, pushed, and on **PR #101** (https://github.com/hherb/primer/pull/101). Built off `origin/main` at `b7b4a5a` (PR #99 squash — voice IPC path re-resolution hardening). Once #101 merges, the branch can be deleted.
 
 ## What we shipped this session
 
-**Moved the six voice-mode UI display strings the GUI's `get_voice_state_copy` Tauri command serves out of a hardcoded `match` in `commands/voice.rs` and into the `[voice_state]` table of each `primer-pedagogy/prompts/<pack>.toml`.** Adding a new locale (e.g. Hindi) now requires no Rust change for voice-state copy — just the new pack's `[voice_state]` table.
+**Primary work:** moved the six voice-mode UI display strings the GUI's `get_voice_state_copy` Tauri command serves out of a hardcoded `match` in `commands/voice.rs` and into the `[voice_state]` table of each `primer-pedagogy/prompts/<pack>.toml`. Adding a new locale (e.g. Hindi) now requires no Rust change for voice-state copy — just the new pack's `[voice_state]` table.
+
+**Smoke-test fallout fix (same PR):** the GUI's voice toggle was permanently disabled on the session-picker screen because `restoreOnLaunch` read the `voice_mode_available` flag off `current_session_info`, which returns `null` when no session is active. Added a dedicated `voice_mode_available` Tauri command that returns `cfg!(feature = "speech")` (compile-time constant, no session needed) and switched the frontend to call it.
 
 **Commits on `i18n/voice-state-copy-91`:**
 
 - `3fd1903` — `i18n(voice): move VoiceStateCopy display strings into prompt packs (closes #91)`
+- `f647cd3` — `docs: update NEXT_SESSION.md + handoff for PR #101`
+- `e33f0d4` — `fix(gui): decouple voice-toggle availability from session state`
 
 **Concrete deliverables:**
 
@@ -28,17 +32,24 @@
 - **`validate_voice_state_section`** at [src/crates/primer-pedagogy/src/prompt_pack.rs](src/crates/primer-pedagogy/src/prompt_pack.rs) rejects empty values in any of the six fields at load time. Consumers render the strings unconditionally — a silent empty would produce a blank UI label rather than a clear pack-shape error.
 - **`VoiceStateCopy::for_locale` rewritten** at [src/crates/primer-gui/src/commands/voice.rs:405-426](src/crates/primer-gui/src/commands/voice.rs#L405-L426) to call `primer_pedagogy::prompt_pack::load_cached(*locale).expect(...)` then clone the six strings. Mirrors the `.expect()` pattern at `dialogue_manager::lifecycle::DialogueManager::new` — embedded packs are validated at build time so a load failure here would be a structural codebase bug, not a user-recoverable condition.
 - **CLAUDE.md gotcha entry** added at [CLAUDE.md:111](CLAUDE.md#L111) documenting the new i18n location and the no-Rust-change rule for new locales.
-- **5 new tests:** 2 GUI regression witnesses (`voice_state_copy_english_strings_pinned`, `voice_state_copy_german_strings_pinned` in `commands/voice.rs`) pinning the pre-refactor strings byte-identically — these stay green before AND after the pack switchover; 3 pack-side tests (`english_pack_exposes_voice_state_labels`, `german_pack_exposes_voice_state_labels`, `empty_voice_state_field_returns_err` in `prompt_pack.rs`) covering the new accessor and the empty-field error path. Future drift now fails at the pack layer first rather than only at the GUI bridge.
+- **6 new tests:** 2 GUI regression witnesses (`voice_state_copy_english_strings_pinned`, `voice_state_copy_german_strings_pinned` in `commands/voice.rs`) pinning the pre-refactor strings byte-identically — these stay green before AND after the pack switchover; 3 pack-side tests (`english_pack_exposes_voice_state_labels`, `german_pack_exposes_voice_state_labels`, `empty_voice_state_field_returns_err` in `prompt_pack.rs`) covering the new accessor and the empty-field error path; 1 capability-command test (`voice_mode_available_matches_cfg_feature_speech`) pinning the new `voice_mode_available` Tauri command's output to the `cfg!(feature = "speech")` compile-time constant. Future drift now fails at the pack layer first (rather than only at the GUI bridge) AND the toggle-availability path has explicit cfg-flag coverage.
+
+**Smoke-fix deliverables (commit `e33f0d4`):**
+
+- **New `voice_mode_available` Tauri command** at [src/crates/primer-gui/src/commands/voice.rs](src/crates/primer-gui/src/commands/voice.rs) returning `cfg!(feature = "speech")`. Independent of session state so the frontend can decide toggle availability at launch without waiting for a session.
+- **Registered in the builder** at [src/crates/primer-gui/src/commands/mod.rs](src/crates/primer-gui/src/commands/mod.rs).
+- **Frontend update** at [src/crates/primer-gui/ui/voice.js](src/crates/primer-gui/ui/voice.js#L273-L289): `restoreOnLaunch` now calls `voice_mode_available` instead of pulling the flag off `current_session_info`. The previously-misleading "Voice mode is not built into this binary" tooltip now only fires when the binary genuinely lacks the speech feature.
+- The `SessionInfo.voice_mode_available` field is kept (widely consumed by sidebar/refresh paths) but the frontend stops using its value in the launch path.
 
 **Verification:**
 
-- `~/.cargo/bin/cargo test --workspace` → 772 passed / 0 failed / 3 ignored (default features; +5 from baseline 767)
-- `~/.cargo/bin/cargo test -p primer-gui --features speech` → 92 passed / 0 failed / 0 ignored (+3 from baseline 89)
+- `~/.cargo/bin/cargo test --workspace` → 773 passed / 0 failed / 3 ignored (default features; +6 from baseline 767)
+- `~/.cargo/bin/cargo test -p primer-gui --features speech` → 93 passed / 0 failed / 0 ignored (+4 from baseline 89)
 - `~/.cargo/bin/cargo fmt --all -- --check` clean
 - `RUSTFLAGS="-D warnings" ~/.cargo/bin/cargo clippy --workspace --all-targets` clean (default features)
 - `RUSTFLAGS="-D warnings" ~/.cargo/bin/cargo clippy --workspace --all-targets --features primer-gui/speech` clean
 
-**Net diff:** 6 files changed, 260 insertions(+), 18 deletions(-).
+**Net diff (across both commits):** 9 files changed, 294 insertions(+), 20 deletions(-).
 
 **Design choices that may be relevant later:**
 
@@ -109,6 +120,7 @@ Carried-forward open items (still relevant from prior sessions):
 - **`VoiceStateCopy::for_locale` is now a thin clone over `voice_state_labels()`** — six `.clone()` calls of `String`s. The struct could in principle hold `Arc<str>` slices into the pack to skip the clones, but the call site is `get_voice_state_copy`, which fires only on Settings modal open and voice-mode toggle — both off the hot path, with frequencies measured in user-actions-per-minute. Premature.
 - **Manual smoke not run yet.** The PR description checklist marks the in-app smoke as `[ ]` deliberately — the changeset is small, well-tested, and pure refactor with byte-identical regression witnesses on both ends of the bridge, but voice mode needs a clean GUI launch under `--features speech` and a toggle to confirm the LISTEN / THINKING / SPEAK indicator strings render byte-identically under both `--language en` and `--language de`. Quick eyeball confirmation; should be done before merge.
 - **The pack-pattern is now well-defended.** Three sibling sections (`labels`, `sections`, now `voice_state`) all carry locale-keyed display strings. Adding a fourth — for example, settings-modal strings (a natural #91 follow-on if the settings panel grows GUI-side i18n needs) — would follow the same pattern: data struct in `primer-pedagogy`, accessor on `PromptPack`, validator at load, GUI-side thin clone. No structural changes to the pack-pattern needed; just data adds.
+- **Toggle-availability bug was caught only by the manual smoke test, not by any automated suite.** No Rust test could have caught it because the bug lived in `restoreOnLaunch` (JS) reading the wrong field off a JSON IPC payload — both ends of the call were structurally fine. The defensive fix at the Rust layer (a dedicated capability command) makes the right test possible (cfg-flag mirror, now in place), but the regression class — "frontend pulls the right value off the wrong shape" — is uncovered by either Rust unit tests or pack-side cfg-flag tests. A future Playwright-style integration suite would close this; not in scope this PR.
 
 ## Patterns to reuse, not reinvent
 
@@ -155,10 +167,10 @@ git log --oneline -10            # the PR-101 squash-merge commit should be near
 
 cd src
 ~/.cargo/bin/cargo build --workspace && ~/.cargo/bin/cargo test --workspace
-# Expected: 772 passed, 0 failed, 3 ignored (default features).
+# Expected: 773 passed, 0 failed, 3 ignored (default features).
 
 ~/.cargo/bin/cargo test -p primer-gui --features speech
-# Expected: 92 passed, 0 failed, 0 ignored.
+# Expected: 93 passed, 0 failed, 0 ignored.
 
 ~/.cargo/bin/cargo fmt --all -- --check
 # Expected: clean.
