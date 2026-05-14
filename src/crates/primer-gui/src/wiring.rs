@@ -137,6 +137,29 @@ pub async fn build_active_session(
     // ─── Learner model ───────────────────────────────────────────────
     let learner = match session_store.load_learner().await {
         Ok(Some(existing)) => {
+            // Hard-fail on locale mismatch. The persisted learner already
+            // carries `concept_language_tag` rows under its stored locale;
+            // silently adopting a new locale would tag every new concept
+            // under a different language, corrupting the longitudinal
+            // vocabulary record (see the locale-is-per-learner gotcha in
+            // CLAUDE.md). Mirrors the CLI's `verify_resume_locale_match`
+            // discipline, but adapted for the GUI's start-new-session path
+            // where the user-actionable resolutions are "revert Settings"
+            // or "remove the persisted learner DB file".
+            if existing.profile.locale != locale {
+                return Err(format!(
+                    "Settings → Locale is {:?} but the persisted learner at {} \
+                     was created under locale {:?}. Either revert Settings → Locale \
+                     to {:?}, or remove that DB file to start a fresh learner under \
+                     {:?}. Silent re-tagging is refused because it would corrupt the \
+                     longitudinal concept-language record.",
+                    locale.pack_id(),
+                    session_path.display(),
+                    existing.profile.locale.pack_id(),
+                    existing.profile.locale.pack_id(),
+                    locale.pack_id(),
+                ));
+            }
             let reconciled =
                 reconcile_persisted_learner(existing, &learner_config.name, learner_config.age);
             if let Err(e) = session_store.save_learner(&reconciled).await {
@@ -479,6 +502,66 @@ mod tests {
         let s2 = build_active_session(home.path(), &cfg).await.unwrap();
         let id2 = s2.dialogue_manager.lock().await.learner.profile.id;
         assert_eq!(id2, first_id, "learner UUID stable across reopens");
+    }
+
+    #[tokio::test]
+    async fn locale_mismatch_on_existing_learner_returns_error() {
+        // First open creates a learner persisted under locale "en".
+        // Second open with the same session DB but a different
+        // `cfg.learner.locale` must error rather than silently inheriting
+        // the persisted locale — otherwise KB/STT/TTS would run under the
+        // new locale while the LLM's prompt pack stays English, producing
+        // the bug where German speech round-trips through an English LLM
+        // response (manual smoke test, PR #101).
+        let home = TempDir::new().unwrap();
+        let session_db = home.path().join("locale_mismatch.db");
+
+        let mut cfg = GuiConfig::default();
+        cfg.learner.name = "Binti".to_string();
+        cfg.learner.locale = "en".to_string();
+        cfg.persistence.session_db = Some(session_db.clone());
+
+        let _ = build_active_session(home.path(), &cfg)
+            .await
+            .expect("first open succeeds");
+
+        // Second open: same name (same on-disk DB), different locale.
+        let mut cfg2 = cfg.clone();
+        cfg2.learner.locale = "de".to_string();
+        let err = build_active_session(home.path(), &cfg2)
+            .await
+            .expect_err("expected locale-mismatch error");
+        assert!(
+            err.contains("\"de\"") && err.contains("\"en\""),
+            "error must name both locales: {err}"
+        );
+        assert!(
+            err.contains("revert") || err.contains("remove"),
+            "error must point at the two resolutions: {err}"
+        );
+    }
+
+    #[tokio::test]
+    async fn locale_matches_after_existing_open() {
+        // Symmetric green-path: re-opening with the SAME locale must
+        // succeed (i.e. the mismatch guard isn't a regression for the
+        // ordinary "open the same learner twice" flow).
+        let home = TempDir::new().unwrap();
+        let session_db = home.path().join("locale_match.db");
+
+        let mut cfg = GuiConfig::default();
+        cfg.learner.name = "Binti".to_string();
+        cfg.learner.locale = "de".to_string();
+        cfg.persistence.session_db = Some(session_db.clone());
+
+        let _ = build_active_session(home.path(), &cfg)
+            .await
+            .expect("first open succeeds");
+        let s2 = build_active_session(home.path(), &cfg)
+            .await
+            .expect("second open with same locale succeeds");
+        let dm = s2.dialogue_manager.lock().await;
+        assert_eq!(dm.learner.profile.locale.pack_id(), "de");
     }
 
     #[tokio::test]
