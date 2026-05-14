@@ -193,6 +193,45 @@ pub const QUERIES_DE: &[BenchQuery] = &[
         canonical_id: None,
         cluster: Cluster::EarthWeather,
     },
+    // ── Child-language stress paraphrases (issue #64) ─────────────
+    // Authored to use child-style vocabulary that deliberately does
+    // NOT appear in the canonical Klexikon article's lead text. The
+    // BM25 leg is therefore measured against vocabulary it was not
+    // given, motivating the hybrid lift. Mirrors the EN issue #45
+    // paraphrase shape ("what makes my tummy growl…", etc.). Required
+    // substrings are drawn from the canonical article's lead so the
+    // loose check measures "retrieval surfaced the right article" not
+    // "the query happened to share vocabulary with the corpus".
+    BenchQuery {
+        query: "warum macht mein bauch komische geräusche wenn ich hunger habe",
+        required: &["nahrung", "darm"],
+        canonical_id: Some("wiki-klexikon:de:verdauung"),
+        cluster: Cluster::Body,
+    },
+    BenchQuery {
+        query: "wieso wird es im sommer länger hell als im winter",
+        required: &["achse", "schief"],
+        canonical_id: Some("wiki-klexikon:de:jahreszeiten"),
+        cluster: Cluster::Space,
+    },
+    BenchQuery {
+        query: "warum bekomme ich gänsehaut wenn mir kalt ist",
+        required: &["organ", "pigment"],
+        canonical_id: Some("wiki-klexikon:de:haut"),
+        cluster: Cluster::Body,
+    },
+    BenchQuery {
+        query: "warum gibt es ebbe und flut am meer",
+        required: &["satellit", "kreist"],
+        canonical_id: Some("wiki-klexikon:de:mond"),
+        cluster: Cluster::Space,
+    },
+    BenchQuery {
+        query: "warum sind blätter im herbst bunt",
+        required: &["laub", "herbst"],
+        canonical_id: Some("wiki-klexikon:de:baum"),
+        cluster: Cluster::Life,
+    },
 ];
 
 /// German queries the production BM25-only retrieval defaults
@@ -201,17 +240,53 @@ pub const QUERIES_DE: &[BenchQuery] = &[
 /// measures against them. The BM25-only regression test in
 /// `retrieval_quality_de.rs` excludes these from its assertion.
 ///
-/// Entries are populated by running the BM25-only test against the
-/// initial dataset; each surviving entry should carry a one-line
-/// rationale pointing at the corpus gap or query-vocabulary mismatch.
-pub const KNOWN_FAILING_QUERIES_DE: &[&str] = &[];
+/// Populated by running the BM25-only test against the dataset; each
+/// entry carries a one-line rationale pointing at the corpus gap or
+/// query-vocabulary mismatch.
+pub const KNOWN_FAILING_QUERIES_DE: &[&str] = &[
+    // Issue #64 stress paraphrases. BM25 at production defaults
+    // (top_k=5, min_score=0.5) surfaces lexically adjacent passages
+    // rather than the semantically correct one. The hybrid path lifts
+    // them via the dense leg — see retrieval_quality_hybrid_de.rs and
+    // the empty KNOWN_FAILING_QUERIES_DE_HYBRID list below.
+    //
+    // Lexical near-misses observed when run on the 66-passage corpus:
+    //   bauch-geräusche  → energie/schall/saugetiere/planet/ohr
+    //   gänsehaut-kalt   → energie/planet/klima/temperatur/schnee
+    //   ebbe-flut-meer   → meer/fluss/wetter/insekten/fische
+    "warum macht mein bauch komische geräusche wenn ich hunger habe",
+    "warum bekomme ich gänsehaut wenn mir kalt ist",
+    "warum gibt es ebbe und flut am meer",
+];
 
 /// German queries the hybrid (BM25 + dense-vector RRF) retrieval path
-/// with production `HybridParams::default()` cannot satisfy. Empty by
-/// default — every new entry represents either a real semantic
-/// regression or a corpus-coverage gap the dense leg cannot bridge.
-/// Investigate before adding.
-pub const KNOWN_FAILING_QUERIES_DE_HYBRID: &[&str] = &[];
+/// with production `HybridParams::default()` cannot satisfy. Every entry
+/// represents either a real semantic regression or a corpus-coverage gap
+/// the dense leg cannot bridge — investigate before adding.
+pub const KNOWN_FAILING_QUERIES_DE_HYBRID: &[&str] = &[
+    // Issue #64 corpus-coverage gaps. The hybrid path correctly
+    // matches the *semantic context* (kalt/Temperatur for gänsehaut;
+    // Meer/Wasser for ebbe-flut) but the canonical Klexikon article
+    // never discusses the targeted reflex/phenomenon, so no embedding
+    // can bridge to it:
+    //
+    //   • `wiki-klexikon:de:haut` does not describe the goosebumps
+    //     reflex — only skin layers, pigments, and Sonnenbrand. The
+    //     hybrid path returns temperatur/klima/schnee/wüste/feuer.
+    //
+    //   • `wiki-klexikon:de:mond` does not discuss tides — only
+    //     orbit, phases, eclipses, and other planets' moons. The
+    //     hybrid path returns fluss/meer/wetter/regen/fische.
+    //
+    // Mirrors the EN-side precedent: pre-issue-#45, the EN benchmark
+    // had similar corpus gaps that motivated hand-drafted seed
+    // expansion. Resolution for DE is option (b) from issue #64:
+    // leave with rationale until/unless a hand-drafted German seed
+    // layer ships alongside Klexikon — there is no current plan to
+    // do so (Klexikon IS the children's wiki for German).
+    "warum bekomme ich gänsehaut wenn mir kalt ist",
+    "warum gibt es ebbe und flut am meer",
+];
 
 #[cfg(test)]
 mod sanity_tests {
