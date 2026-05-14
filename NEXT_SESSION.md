@@ -1,7 +1,7 @@
 # Primer — Next Session Brief
 
 **Audience:** future Claude Code session continuing work on this repo.
-**Last updated:** 2026-05-14T0856+0800 (after opening PR #94 — `cargo fmt` across workspace to unblock CI; commit `4db02ec` on `chore/cargo-fmt-main`).
+**Last updated:** 2026-05-14T0915+0800 (after opening PR #94 — `cargo fmt` + clippy `-D warnings` fixes to unblock CI; commits `4db02ec` + `0970524` on `chore/cargo-fmt-main`).
 
 ## First moves when you start
 
@@ -17,29 +17,31 @@
 
 ## What we shipped this session
 
-**Unblocked CI on `main`.** `cargo fmt --check` had been failing on every push to main since 2026-05-12 because pre-existing fmt drift in voice-mode and GUI code (PRs #79/#82/#83/#85/#89) never went through `cargo fmt`. Every subsequent PR carried a red CI mark for reasons unrelated to its own changes; signal had been eroded for ~5 days.
+**Unblocked CI on `main`.** CI had been failing on every push to main since 2026-05-12 — first on `cargo fmt --check` (pre-existing drift), and as that fix exposed, also on `cargo clippy` (CI runs with `RUSTFLAGS: -D warnings` which promotes lints to hard errors). Every subsequent PR carried a red CI mark for reasons unrelated to its own changes; signal had been eroded for ~5 days.
 
 **Commits on `chore/cargo-fmt-main`:**
 
 - `4db02ec` — `chore: cargo fmt across workspace to unblock CI`
+- `0970524` — `chore: clippy --fix uninlined_format_args in test code`
 
 **Concrete deliverables:**
 
-- `~/.cargo/bin/cargo fmt --all` applied across the workspace. 13 files touched, all in voice/GUI code: `primer-cli/src/speech_loop/mod.rs`, `primer-gui/build.rs`, `primer-gui/src/{commands/session,commands/voice,config,lib,state}.rs`, `primer-gui/src/voice/{assets,download,observer}.rs`, `primer-speech/src/voice_loop/{backends,mod,state_machine}.rs`.
-- Pure mechanical reformatting: multi-line `#[cfg(all(feature = ..., feature = ...))]` expansion, alphabetically-sorted `use` lists (rustfmt 2024 edition's default), standard line-length wrapping. No semantic changes.
+- **Fmt fix:** `~/.cargo/bin/cargo fmt --all` applied across the workspace. 13 files touched, all in voice/GUI code: `primer-cli/src/speech_loop/mod.rs`, `primer-gui/build.rs`, `primer-gui/src/{commands/session,commands/voice,config,lib,state}.rs`, `primer-gui/src/voice/{assets,download,observer}.rs`, `primer-speech/src/voice_loop/{backends,mod,state_machine}.rs`. Pure mechanical reformatting: multi-line `#[cfg(all(feature = ..., feature = ...))]` expansion, alphabetically-sorted `use` lists (rustfmt 2024 edition's default), standard line-length wrapping. No semantic changes.
+- **Clippy fix:** `~/.cargo/bin/cargo clippy --fix --workspace --all-targets` applied. 18 sites auto-fixed across 4 test files (`primer-pedagogy/src/dialogue_manager/tests/background_tests.rs`, `primer-kb-load/tests/bm25_floor_tripwire.rs`, `primer-kb-load/tests/common/{de,mod}.rs`): `format!("...{:?}", x)` → `format!("...{x:?}")` and equivalent for `assert!` / `assert_eq!` message strings. Pure mechanical rewrites that locally are warnings and on CI are errors.
 
 **Verification:**
 
 - `~/.cargo/bin/cargo fmt --all -- --check` clean (was failing before)
-- `~/.cargo/bin/cargo clippy --workspace --all-targets` exit 0 (warnings unchanged from baseline; clippy lints aren't promoted to errors by CI)
-- `~/.cargo/bin/cargo test --workspace --no-fail-fast` → 739 passed / 0 failed / 3 ignored (baseline unchanged)
+- `RUSTFLAGS="-D warnings" ~/.cargo/bin/cargo clippy --workspace --all-targets` exit 0 (was failing with 18 errors under CI's rustflags before)
+- `~/.cargo/bin/cargo test --workspace --no-fail-fast` → 739 passed / 0 failed / 3 ignored (baseline unchanged across both commits)
 
-**Net diff:** 13 files changed, 85 insertions, 65 deletions.
+**Net diff:** 17 files changed, 105 insertions, 111 deletions across both commits.
 
 **Design choices that may be relevant later:**
 
-- **No follow-up `cargo fmt` rule added.** The rustfmt 2024-edition defaults (notably alphabetical import sort) only manifest when someone runs `cargo fmt`; the CI check catches drift but doesn't auto-format. A pre-commit hook that runs `cargo fmt --check` locally would prevent drift from landing in the first place, but adding it touches developer-workflow expectations and isn't a one-line change — defer until the next time drift happens.
-- **All 13 files belong to recent voice/GUI work.** This isn't a codebase-wide accumulation; it's specifically the post-PR-#79 work that landed without the author running `cargo fmt`. Consider it a signal that the GUI/voice workflow doesn't go through the same local check as Rust-core work — worth flagging in any future agent-instruction iteration.
+- **The CI-local gap is structural.** CI sets `RUSTFLAGS: -D warnings` in `.github/workflows/ci.yml`, which both rustc and clippy respect — turning every warning into a hard error. Locally, without the flag set, both tools emit the same diagnostics but exit 0. The clippy `uninlined_format_args` warnings had accumulated locally as benign noise but were instant CI failures the moment the fmt gate cleared.
+- **No follow-up `cargo fmt` rule added.** The rustfmt 2024-edition defaults (notably alphabetical import sort) only manifest when someone runs `cargo fmt`; the CI check catches drift but doesn't auto-format. A pre-commit hook that runs `cargo fmt --check` and `RUSTFLAGS="-D warnings" cargo clippy --workspace --all-targets` locally would prevent drift from landing in the first place, but adding it touches developer-workflow expectations and isn't a one-line change — defer until the next time drift happens.
+- **The voice/GUI code was the source of fmt drift; the test code was the source of clippy drift.** Different code areas, different review patterns, same underlying cause: no local pre-merge gate. Worth flagging in any future agent-instruction iteration.
 
 ## What's next
 
@@ -101,7 +103,8 @@ Carried-forward open items (still relevant from prior sessions):
 
 **New observations from this session:**
 
-- **The fmt-strict CI step is already wired but local workflow doesn't honour it.** `.github/workflows/ci.yml` runs `cargo fmt --all -- --check` as the first step after toolchain install; it had been failing for ~5 days before this session noticed. The cost of a red CI is real (every PR-author has to mentally distinguish "my CI red" from "pre-existing main red") but the local workflow has no equivalent gate. A pre-commit hook is the cheapest fix; adding it is a workflow-policy decision and deferred for now.
+- **The fmt+clippy strict CI is already wired but local workflow doesn't honour it.** `.github/workflows/ci.yml` runs `cargo fmt --all -- --check` and `cargo clippy --workspace --all-targets` as the first two steps after toolchain install. With `RUSTFLAGS: -D warnings` set globally for the job, BOTH steps fail on issues that locally surface only as warnings. The cost of a red CI is real (every PR-author has to mentally distinguish "my CI red" from "pre-existing main red") but the local workflow has no equivalent gate. A pre-commit hook is the cheapest fix; adding it is a workflow-policy decision and deferred.
+- **The fmt fix exposed a second CI blocker.** When `cargo fmt --check` started passing, CI advanced to `cargo clippy`, which then failed with 18 `uninlined_format_args` errors. Cascade-style: one fix unblocks the next CI step, which reveals the next blocker. Each individual fix is mechanical, but the layering means "unblock CI" is really N PRs deep until each step passes. This is layer 1 (fmt) + layer 2 (clippy `-D warnings`). Layer 3+ won't be known until #94 merges and main rebuilds clean.
 - **Rustfmt 2024-edition's alphabetical import sort is a frequent drift source.** Nine of the 13 reformatted hunks were `use foo::{Bar, Baz}` → `use foo::{Baz, Bar}` (or vice-versa) — drift triggered the moment an author adds or removes an import without re-running `cargo fmt`. Worth being aware of when reviewing GUI/voice diffs: a 1-line import re-sort isn't a semantic change.
 - **NEXT_SESSION.md "follow-up issue" language can be deceptive.** The prior brief described the fmt drift as a "should be filed as a follow-up issue" item, which downgraded it from "real blocker" to "TODO" mentally. It was actually already a real CI blocker the entire time. When prior briefs flag a problem, verify whether it's still latent or has become active.
 
@@ -152,8 +155,8 @@ cd src
 ~/.cargo/bin/cargo fmt --all -- --check
 # Expected: clean (after PR #94 merges; was failing before).
 
-~/.cargo/bin/cargo clippy --workspace --all-targets
-# Expected: warnings only, exit 0.
+RUSTFLAGS="-D warnings" ~/.cargo/bin/cargo clippy --workspace --all-targets
+# Expected: clean exit 0 (mirrors CI; was failing with 18 errors before #94).
 ```
 
 To re-run the German regression benchmarks (both flavours):
