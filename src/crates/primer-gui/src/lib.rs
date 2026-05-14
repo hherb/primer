@@ -32,6 +32,14 @@ pub fn resolve_home() -> PathBuf {
 pub fn run() -> Result<(), Box<dyn std::error::Error>> {
     init_tracing();
     paths::set_packaged_seed_dir_if_present();
+    // Must run before Tauri spawns any worker threads — `set_var` is
+    // unsafe under concurrent libc-getenv on Unix. The Piper TTS in
+    // voice mode needs the system `espeak-ng-data` directory; without
+    // it, phoneme lookup fails at synthesis time (the `espeak-rs-sys`
+    // bundled subset ships without `phontab` and other core files).
+    // Mirrors the CLI's `probe_espeak_ng_data` at primer-cli/src/main.rs.
+    #[cfg(feature = "speech")]
+    probe_espeak_ng_data();
 
     let home = resolve_home();
     let config = config::load(&home).unwrap_or_else(|e| {
@@ -57,4 +65,53 @@ fn init_tracing() {
     if let Err(e) = tracing_subscriber::fmt().with_env_filter(filter).try_init() {
         eprintln!("tracing init failed: {e}");
     }
+}
+
+/// Probe common system locations for an `espeak-ng-data` directory and
+/// set `PIPER_ESPEAKNG_DATA_DIRECTORY` to the parent of the first complete
+/// one found. `espeak-rs-sys` ships an incomplete subset (missing `phontab`
+/// and other core files); without a system install Piper's phonemizer
+/// fails. Skipped if the env var is already set externally.
+///
+/// MUST run before Tauri (and any tokio runtime threads) start.
+/// `set_var` is `unsafe` because concurrent `getenv` from any other
+/// thread is UB on Unix libc. Called from the synchronous prefix of
+/// [`run`] before the Tauri builder kicks off any worker thread.
+///
+/// Mirrors `primer-cli/src/main.rs::probe_espeak_ng_data` byte-for-byte
+/// except for the verbose flag — the GUI logs hits via `tracing::info!`
+/// instead of stderr.
+#[cfg(feature = "speech")]
+fn probe_espeak_ng_data() {
+    if std::env::var_os("PIPER_ESPEAKNG_DATA_DIRECTORY").is_some() {
+        return;
+    }
+    const ESPEAK_PARENT_CANDIDATES: &[&str] = &[
+        "/opt/homebrew/share", // macOS Apple Silicon (brew install espeak-ng)
+        "/usr/local/share",    // macOS Intel / generic
+        "/usr/share",          // Linux (apt/dnf install espeak-ng-data)
+    ];
+    for parent in ESPEAK_PARENT_CANDIDATES {
+        let probe = std::path::Path::new(parent).join("espeak-ng-data/phontab");
+        if probe.is_file() {
+            tracing::info!(
+                target: "primer-gui::startup",
+                "found espeak-ng-data under {parent}; setting PIPER_ESPEAKNG_DATA_DIRECTORY"
+            );
+            // SAFETY: we are running before the Tauri builder (and any
+            // tokio runtime, worker threads, or third-party library
+            // threads) have been started. No other thread can be
+            // calling getenv concurrently, so this `set_var` is sound.
+            unsafe {
+                std::env::set_var("PIPER_ESPEAKNG_DATA_DIRECTORY", parent);
+            }
+            return;
+        }
+    }
+    tracing::warn!(
+        target: "primer-gui::startup",
+        "no system espeak-ng-data found under {ESPEAK_PARENT_CANDIDATES:?}; \
+         Piper TTS will fail at synthesis time. Install via `brew install espeak-ng` \
+         (macOS) or `apt install espeak-ng-data` (Linux)."
+    );
 }
