@@ -368,7 +368,7 @@ pub async fn download_voice_assets(
     let to_download =
         crate::voice::assets::resolve_requested_kinds(&state.home, &cfg.speech, &locale, &kinds);
     for asset in &to_download {
-        crate::voice::download::download_one(&app, asset).await?;
+        crate::voice::download::download_one(&app, asset, cfg.speech.download_timeout_secs).await?;
     }
     Ok(())
 }

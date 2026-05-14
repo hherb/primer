@@ -304,8 +304,18 @@ pub struct SpeechSettings {
     /// firing SpeechEnd. Default reads from
     /// `primer_core::consts::speech::DEFAULT_MIC_SILENCE_MS`.
     pub mic_silence_ms: u32,
+    /// Overall request timeout, in seconds, for each voice-asset
+    /// download. `0` means "no timeout" (NOT recommended — a stalled
+    /// connection then locks the consent modal indefinitely). Default
+    /// reads from `primer_core::consts::speech::DEFAULT_DOWNLOAD_TIMEOUT_SECS`.
+    #[serde(default = "default_download_timeout_secs")]
+    pub download_timeout_secs: u64,
     /// Per-locale path / voice-id overrides. Keyed by `Locale::pack_id()`.
     pub overrides: std::collections::BTreeMap<String, SpeechLocaleOverride>,
+}
+
+fn default_download_timeout_secs() -> u64 {
+    primer_core::consts::speech::DEFAULT_DOWNLOAD_TIMEOUT_SECS
 }
 
 impl Default for SpeechSettings {
@@ -314,6 +324,7 @@ impl Default for SpeechSettings {
             voice_mode_enabled: false,
             disable_auto_download: false,
             mic_silence_ms: primer_core::consts::speech::DEFAULT_MIC_SILENCE_MS,
+            download_timeout_secs: default_download_timeout_secs(),
             overrides: std::collections::BTreeMap::new(),
         }
     }
@@ -809,6 +820,47 @@ mod tests {
             "mic_silence_ms default reads from primer_core consts",
         );
         assert!(s.overrides.is_empty(), "no per-locale overrides by default");
+    }
+
+    #[test]
+    fn speech_settings_default_download_timeout_reads_from_consts() {
+        let s = SpeechSettings::default();
+        assert_eq!(
+            s.download_timeout_secs,
+            primer_core::consts::speech::DEFAULT_DOWNLOAD_TIMEOUT_SECS,
+            "download_timeout_secs default reads from primer_core consts",
+        );
+    }
+
+    #[test]
+    fn older_config_without_download_timeout_loads_with_default() {
+        // An on-disk speech block from before issue #92 has no
+        // `download_timeout_secs` field. Loading it must succeed and
+        // inject the default without requiring a migration step.
+        let dir = TempDir::new().unwrap();
+        let path = config_path(dir.path());
+        fs::create_dir_all(path.parent().unwrap()).unwrap();
+        fs::write(
+            &path,
+            r#"{
+                "learner": {"name": "Ada", "age": 7, "locale": "en"},
+                "speech": {
+                    "voice_mode_enabled": true,
+                    "disable_auto_download": false,
+                    "mic_silence_ms": 750,
+                    "overrides": {}
+                }
+            }"#,
+        )
+        .unwrap();
+
+        let cfg = load(dir.path()).unwrap();
+        assert!(cfg.speech.voice_mode_enabled);
+        assert_eq!(cfg.speech.mic_silence_ms, 750);
+        assert_eq!(
+            cfg.speech.download_timeout_secs,
+            primer_core::consts::speech::DEFAULT_DOWNLOAD_TIMEOUT_SECS,
+        );
     }
 
     #[test]

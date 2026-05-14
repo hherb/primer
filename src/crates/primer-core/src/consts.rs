@@ -190,6 +190,35 @@ pub mod speech {
     /// metadata); a single MiB is a comfortable upper-bound estimate
     /// for the consent modal's download budget.
     pub const APPROX_PIPER_CONFIG_MB: u32 = 1;
+
+    /// Overall request timeout for voice-asset downloads, in seconds.
+    /// Whisper `small` at ~3 Mbps takes ~22 minutes; 30 min is a humane
+    /// cap that catches a stalled TCP connection (NAT idle-timeout,
+    /// captive portal limbo) without aborting a slow but progressing
+    /// transfer. Configurable per install via
+    /// `SpeechSettings.download_timeout_secs` in `gui-config.json`.
+    pub const DEFAULT_DOWNLOAD_TIMEOUT_SECS: u64 = 30 * 60;
+
+    /// Safety multiplier (expressed as a percentage of the declared
+    /// `approx_size_mb`) used to compute the maximum number of bytes
+    /// the downloader will accept before aborting. A redirected URL
+    /// (e.g. canonical Hugging Face URL replaced with an attacker page
+    /// serving a 50 GB ISO) would otherwise fill the disk. The 50 %
+    /// headroom covers the fact that `approx_size_mb` is rounded down
+    /// to the nearest MiB and that on-disk size can legitimately
+    /// exceed the rounded estimate by a few percent.
+    pub const DOWNLOAD_SIZE_SAFETY_MULTIPLIER_PCT: u64 = 150;
+
+    /// Bytes per MiB. Named so the `× 1_048_576` factors throughout the
+    /// download-cap math read as unit conversions rather than magic
+    /// numbers.
+    pub const BYTES_PER_MIB: u64 = 1_048_576;
+
+    /// Divisor used when converting a percentage to a fraction (i.e. 100).
+    /// Pairs with [`DOWNLOAD_SIZE_SAFETY_MULTIPLIER_PCT`] so the
+    /// `× pct / 100` formula reads as percentage-of arithmetic rather
+    /// than a bare literal.
+    pub const PERCENT_DIVISOR: u64 = 100;
 }
 
 /// Defaults shared across the CLI, GUI, and frontend for the learner
