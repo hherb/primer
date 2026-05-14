@@ -14,6 +14,7 @@
 #![allow(dead_code)] // not every BenchQuery field is read by every consumer
 
 pub mod de;
+pub mod sweep;
 
 /// `top_k` used by the canonical-id-exists sanity probes (both EN and
 /// DE). Set well above the size of any single seed corpus shipped so
