@@ -142,11 +142,20 @@
         resolve();
       };
 
+      const downloadBtn = $("voice-consent-download");
       const onDownload = async () => {
         if (progressSect) progressSect.hidden = false;
         if (progressBar)  progressBar.value = 0;
         const errBanner = $("voice-consent-error");
         if (errBanner) errBanner.hidden = true;
+        // Disable the Download button during the in-flight invoke. Without
+        // this, a rapid double-click fires two concurrent
+        // download_voice_assets invocations that race on the same
+        // `<dest>.partial` files in voice/download.rs — undefined behaviour
+        // in the worst case, redundant network traffic at best. Re-enabled
+        // on error so the user can retry. On success the modal is hidden
+        // and the button reference goes out of scope with this promise.
+        if (downloadBtn) downloadBtn.disabled = true;
         try {
           // IPC trust boundary: echo only the asset `kind` strings; the
           // host re-resolves `path` and `suggested_url` server-side via
@@ -173,6 +182,19 @@
           } else {
             showError(msg);
           }
+          // Reset the progress UI so a retry click starts from a clean
+          // slate visually, instead of from the partial-bar of the failed
+          // attempt. The progress listener subscription is intentionally
+          // NOT torn down here — `unlistenProgress` was set up once at
+          // modal show and the same subscription serves both the failed
+          // attempt and any retry. It is unsubscribed by `cleanup()` via
+          // the Cancel/Close paths or the success path above.
+          if (progressBar)   progressBar.value = 0;
+          if (progressLabel) progressLabel.textContent = "";
+          if (progressSect)  progressSect.hidden = true;
+          // Re-enable so the user can retry. Cancel/Close still work
+          // because cleanup() didn't run — the modal stays interactive.
+          if (downloadBtn) downloadBtn.disabled = false;
         }
       };
 
