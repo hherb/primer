@@ -3,7 +3,7 @@
 use serde::Serialize;
 use tauri::Emitter;
 
-use primer_core::i18n::{render_inference_error, Locale};
+use primer_core::i18n::{Locale, render_inference_error};
 use primer_speech::voice_loop::{ExitReason, LoopObserver, TurnCompletePayload, VoiceState};
 
 #[derive(Serialize, Clone)]

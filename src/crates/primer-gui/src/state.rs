@@ -92,9 +92,7 @@ pub struct ActiveVoiceLoop {
     /// the task (tokio semantics); the `stop_voice_mode` command sends
     /// to `stop_tx` first to let the loop exit cleanly, then joins with
     /// a 5-second timeout before dropping.
-    pub join: tokio::task::JoinHandle<
-        Result<(), primer_speech::voice_loop::VoiceLoopError>,
-    >,
+    pub join: tokio::task::JoinHandle<Result<(), primer_speech::voice_loop::VoiceLoopError>>,
     /// One-shot sender that signals the loop to exit at the next
     /// LISTEN→LATENT_THINK boundary. The loop drains TTS and saves the
     /// session before returning.

@@ -1161,7 +1161,10 @@ mod mocks {
         assert!(
             events.iter().any(|e| matches!(
                 e,
-                MockEvent::StateChange { state: super::VoiceState::Listen, .. }
+                MockEvent::StateChange {
+                    state: super::VoiceState::Listen,
+                    ..
+                }
             )),
             "saw at least one Listen state: {events:?}"
         );
@@ -1174,7 +1177,10 @@ mod mocks {
         assert!(
             events.iter().any(|e| matches!(
                 e,
-                MockEvent::StateChange { state: super::VoiceState::Speak, .. }
+                MockEvent::StateChange {
+                    state: super::VoiceState::Speak,
+                    ..
+                }
             )),
             "entered SPEAK: {events:?}"
         );
@@ -1252,13 +1258,18 @@ mod mocks {
         // Quit phrase fires Exit(Keyword) and never enters SPEAK.
         let events = observer.events();
         assert!(
-            events.iter().any(|e| matches!(e, MockEvent::Exit(super::ExitReason::Keyword))),
+            events
+                .iter()
+                .any(|e| matches!(e, MockEvent::Exit(super::ExitReason::Keyword))),
             "Exit(Keyword) fired: {events:?}"
         );
         assert!(
             !events.iter().any(|e| matches!(
                 e,
-                MockEvent::StateChange { state: super::VoiceState::Speak, .. }
+                MockEvent::StateChange {
+                    state: super::VoiceState::Speak,
+                    ..
+                }
             )),
             "did NOT enter SPEAK: {events:?}"
         );
@@ -1681,7 +1692,9 @@ mod mocks {
         // Observer surfaces the inference error so a GUI banner can fire.
         let events = observer.events();
         assert!(
-            events.iter().any(|e| matches!(e, MockEvent::InferenceError(_))),
+            events
+                .iter()
+                .any(|e| matches!(e, MockEvent::InferenceError(_))),
             "InferenceError observed: {events:?}"
         );
     }

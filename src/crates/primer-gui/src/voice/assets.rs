@@ -10,7 +10,7 @@ use crate::commands::voice::MissingAsset;
 use crate::config::SpeechSettings;
 use primer_core::consts::speech::{APPROX_PIPER_CONFIG_MB, APPROX_WHISPER_SMALL_MB};
 use primer_core::i18n::Locale;
-use primer_speech::voice_loop::locale_defaults::{voice_default_for, LocaleDefault};
+use primer_speech::voice_loop::locale_defaults::{LocaleDefault, voice_default_for};
 
 /// Resolved paths for one voice mode session.
 #[derive(Debug, Clone)]
@@ -144,7 +144,11 @@ mod tests {
         let home = TempDir::new().unwrap();
         let speech = SpeechSettings::default();
         let err = resolve_voice_assets(home.path(), &speech, &Locale::English).unwrap_err();
-        assert_eq!(err.entries.len(), 3, "all three files missing on a fresh home");
+        assert_eq!(
+            err.entries.len(),
+            3,
+            "all three files missing on a fresh home"
+        );
         assert_eq!(err.locale, "en");
         assert!(err.approx_total_mb >= 400);
         let kinds: Vec<&str> = err.entries.iter().map(|e| e.kind.as_str()).collect();
@@ -201,6 +205,9 @@ mod tests {
     fn cache_root_is_under_home() {
         let home = std::path::Path::new("/some/home");
         let root = cache_root(home);
-        assert_eq!(root, std::path::Path::new("/some/home/.cache/primer/models"));
+        assert_eq!(
+            root,
+            std::path::Path::new("/some/home/.cache/primer/models")
+        );
     }
 }

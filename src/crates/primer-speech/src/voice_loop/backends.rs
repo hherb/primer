@@ -14,21 +14,24 @@
 //! returns and then call [`LocalBackends::shutdown`] to drain the audio
 //! thread cleanly.
 
-#![cfg(all(feature = "silero", feature = "whisper", feature = "piper", feature = "cpal"))]
+#![cfg(all(
+    feature = "silero",
+    feature = "whisper",
+    feature = "piper",
+    feature = "cpal"
+))]
 
 use std::path::Path;
 use std::sync::Arc;
 
 use primer_core::error::{PrimerError, Result};
 use primer_core::speech::{
-    Named, StreamingSpeechToText, StreamingTextToSpeech, TranscriptionSession, TranscriptSegment,
+    Named, StreamingSpeechToText, StreamingTextToSpeech, TranscriptSegment, TranscriptionSession,
     VadEvent, VoiceActivityDetector, VoiceProfile,
 };
 
-use crate::voice_loop::{LoopBackends, DrainHook, VAD_EVENT_CHANNEL_CAPACITY};
-use crate::{
-    MicCapture, PiperTts, Resampler, SileroVad, SileroVadParams, SpeakerSink, WhisperStt,
-};
+use crate::voice_loop::{DrainHook, LoopBackends, VAD_EVENT_CHANNEL_CAPACITY};
+use crate::{MicCapture, PiperTts, Resampler, SileroVad, SileroVadParams, SpeakerSink, WhisperStt};
 
 /// Shared receiver for the audio-thread → voice-loop transcript channel.
 /// `Arc<Mutex<...>>` because the `StreamingSpeechToText` trait hands out
@@ -357,8 +360,7 @@ pub async fn build_local_backends(
     let whisper = Arc::new(WhisperStt::new(whisper_model)?);
 
     // ── Build TTS (piper) ────────────────────────────────────────
-    let tts: Arc<dyn StreamingTextToSpeech> =
-        Arc::new(PiperTts::new(piper_onnx, piper_config)?);
+    let tts: Arc<dyn StreamingTextToSpeech> = Arc::new(PiperTts::new(piper_onnx, piper_config)?);
     let tts_sample_rate = tts.sample_rate();
 
     // ── Open mic ────────────────────────────────────────────────
@@ -403,8 +405,7 @@ pub async fn build_local_backends(
     }));
 
     // ── Channels ────────────────────────────────────────────────
-    let (event_tx, event_rx) =
-        tokio::sync::mpsc::channel::<VadEvent>(VAD_EVENT_CHANNEL_CAPACITY);
+    let (event_tx, event_rx) = tokio::sync::mpsc::channel::<VadEvent>(VAD_EVENT_CHANNEL_CAPACITY);
     let (transcript_tx, transcript_rx) = std::sync::mpsc::channel::<String>();
     let stop_flag = Arc::new(std::sync::atomic::AtomicBool::new(false));
     let is_speaking = Arc::new(std::sync::atomic::AtomicBool::new(false));

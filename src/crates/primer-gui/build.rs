@@ -29,13 +29,11 @@ fn copy_seed_resources() {
     println!("cargo:rerun-if-changed={}", src.display());
 
     if dst.exists() {
-        std::fs::remove_dir_all(&dst)
-            .unwrap_or_else(|e| panic!("clean {}: {e}", dst.display()));
+        std::fs::remove_dir_all(&dst).unwrap_or_else(|e| panic!("clean {}: {e}", dst.display()));
     }
     std::fs::create_dir_all(&dst).unwrap_or_else(|e| panic!("create {}: {e}", dst.display()));
 
-    let entries = std::fs::read_dir(&src)
-        .unwrap_or_else(|e| panic!("read {}: {e}", src.display()));
+    let entries = std::fs::read_dir(&src).unwrap_or_else(|e| panic!("read {}: {e}", src.display()));
     for entry in entries {
         let entry = entry.expect("read_dir entry");
         let path = entry.path();

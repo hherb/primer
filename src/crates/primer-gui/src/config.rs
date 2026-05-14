@@ -799,7 +799,10 @@ mod tests {
     fn speech_settings_default_has_600ms_silence() {
         let s = SpeechSettings::default();
         assert!(!s.voice_mode_enabled, "voice mode is off by default");
-        assert!(!s.disable_auto_download, "auto-download is offered by default");
+        assert!(
+            !s.disable_auto_download,
+            "auto-download is offered by default"
+        );
         assert_eq!(
             s.mic_silence_ms,
             primer_core::consts::speech::DEFAULT_MIC_SILENCE_MS,

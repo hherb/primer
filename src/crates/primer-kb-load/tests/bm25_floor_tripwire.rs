@@ -131,13 +131,9 @@ async fn bm25_score_floor_tripwire() {
     let median_floor = KB_BM25_ONLY_MIN_SCORE * TRIPWIRE_MEDIAN_MARGIN;
 
     println!("\n=== BM25 score floor tripwire ===\n");
+    println!("floor (KB_BM25_ONLY_MIN_SCORE):       {KB_BM25_ONLY_MIN_SCORE:.2}");
     println!(
-        "floor (KB_BM25_ONLY_MIN_SCORE):       {:.2}",
-        KB_BM25_ONLY_MIN_SCORE
-    );
-    println!(
-        "margin (TRIPWIRE_MEDIAN_MARGIN):      {:.1}x  →  required median > {:.2}",
-        TRIPWIRE_MEDIAN_MARGIN, median_floor
+        "margin (TRIPWIRE_MEDIAN_MARGIN):      {TRIPWIRE_MEDIAN_MARGIN:.1}x  →  required median > {median_floor:.2}"
     );
     println!(
         "scores collected:                     {} queries × top_k={} = {} top-K scores",
@@ -156,36 +152,29 @@ async fn bm25_score_floor_tripwire() {
         median_all,
         pass_or_fail(median_all > median_floor)
     );
-    println!("min top-1 (lowest top-1 across queries): {:.2}", min_top1);
+    println!("min top-1 (lowest top-1 across queries): {min_top1:.2}");
     println!();
 
     assert!(
         min_all > KB_BM25_ONLY_MIN_SCORE,
-        "minimum BM25 score across {} top-K hits ({:.4}) does not exceed \
-         KB_BM25_ONLY_MIN_SCORE ({:.2}). The defensive floor in \
+        "minimum BM25 score across {total} top-K hits ({min_all:.4}) does not exceed \
+         KB_BM25_ONLY_MIN_SCORE ({KB_BM25_ONLY_MIN_SCORE:.2}). The defensive floor in \
          primer-core/src/consts.rs::KB_BM25_ONLY_MIN_SCORE is now \
          filtering genuine top-K hits — affected queries silently lose \
          a top-K passage. Either lower the floor (and rerun the sweep \
          at tests/retrieval_sweep.rs to pick a new defensive value) or \
          document the corpus expansion that motivated keeping it.",
-        total,
-        min_all,
-        KB_BM25_ONLY_MIN_SCORE,
     );
     assert!(
         median_all > median_floor,
-        "median BM25 score across {} top-K hits ({:.4}) does not exceed \
-         {:.1}x the floor ({:.2} required). Corpus expansion has \
+        "median BM25 score across {total} top-K hits ({median_all:.4}) does not exceed \
+         {TRIPWIRE_MEDIAN_MARGIN:.1}x the floor ({median_floor:.2} required). Corpus expansion has \
          narrowed the safety margin between typical BM25 scores and \
          KB_BM25_ONLY_MIN_SCORE. Revisit the const before the \
          minimum-check trips: rerun tests/retrieval_sweep.rs to confirm \
          the floor is still a no-op, then either lower the floor or \
          tighten TRIPWIRE_MEDIAN_MARGIN if the new corpus baseline is \
          intentionally lower.",
-        total,
-        median_all,
-        TRIPWIRE_MEDIAN_MARGIN,
-        median_floor,
     );
 }
 
