@@ -599,13 +599,11 @@ async fn pending_extraction_applied_to_learner_at_next_turn() {
         .collect();
     assert!(
         names.contains("gravity"),
-        "child concept 'gravity' should be applied to learner; got: {:?}",
-        names
+        "child concept 'gravity' should be applied to learner; got: {names:?}"
     );
     assert!(
         names.contains("physics"),
-        "primer concept 'physics' should be applied to learner; got: {:?}",
-        names
+        "primer concept 'physics' should be applied to learner; got: {names:?}"
     );
 }
 
@@ -675,8 +673,7 @@ async fn post_response_chain_persists_extraction_and_comprehension() {
         captures
             .iter()
             .any(|(_, names)| names.contains(&"gravity".to_string())),
-        "expected child capture of 'gravity'; got {:?}",
-        captures
+        "expected child capture of 'gravity'; got {captures:?}"
     );
 
     // Comprehension persisted via save_comprehensions.
@@ -684,8 +681,7 @@ async fn post_response_chain_persists_extraction_and_comprehension() {
     assert_eq!(
         comp_captures.len(),
         1,
-        "expected one save_comprehensions call; got {:?}",
-        comp_captures
+        "expected one save_comprehensions call; got {comp_captures:?}"
     );
     let (primer_idx, assessments, classifier_id) = &comp_captures[0];
     assert_eq!(*primer_idx, 1, "primer turn index should be 1");
@@ -776,7 +772,6 @@ async fn post_response_chain_skips_comprehension_on_empty_extraction() {
     let comp_captures = store.captured_comprehensions();
     assert!(
         comp_captures.is_empty(),
-        "save_comprehensions must not be invoked when extraction is empty; got {:?}",
-        comp_captures
+        "save_comprehensions must not be invoked when extraction is empty; got {comp_captures:?}"
     );
 }

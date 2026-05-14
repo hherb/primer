@@ -699,9 +699,7 @@ mod sanity_tests {
             let count = QUERIES.iter().filter(|q| q.cluster == cluster).count();
             assert!(
                 count >= 3,
-                "cluster {:?} has only {} queries; need at least 3 for per-cluster recall to be meaningful",
-                cluster,
-                count
+                "cluster {cluster:?} has only {count} queries; need at least 3 for per-cluster recall to be meaningful"
             );
         }
     }
@@ -711,8 +709,7 @@ mod sanity_tests {
         let strict_count = QUERIES.iter().filter(|q| q.canonical_id.is_some()).count();
         assert!(
             strict_count >= 15,
-            "strict subset has only {} entries; need at least 15 for the sweep's strict-recall signal",
-            strict_count
+            "strict subset has only {strict_count} entries; need at least 15 for the sweep's strict-recall signal"
         );
     }
 
@@ -728,16 +725,14 @@ mod sanity_tests {
             let found = QUERIES.iter().any(|q| q.query == *failing);
             assert!(
                 found,
-                "KNOWN_FAILING_QUERIES entry {:?} does not appear in QUERIES — typo or stale entry",
-                failing
+                "KNOWN_FAILING_QUERIES entry {failing:?} does not appear in QUERIES — typo or stale entry"
             );
         }
         for failing in KNOWN_FAILING_QUERIES_HYBRID {
             let found = QUERIES.iter().any(|q| q.query == *failing);
             assert!(
                 found,
-                "KNOWN_FAILING_QUERIES_HYBRID entry {:?} does not appear in QUERIES — typo or stale entry",
-                failing
+                "KNOWN_FAILING_QUERIES_HYBRID entry {failing:?} does not appear in QUERIES — typo or stale entry"
             );
         }
     }
