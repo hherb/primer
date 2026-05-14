@@ -403,25 +403,22 @@ pub struct VoiceStateCopy {
 }
 
 impl VoiceStateCopy {
+    /// Build the locale-aware copy by reading the active prompt pack's
+    /// `[voice_state]` table. The embedded packs are validated at build
+    /// time so a load failure here would be a structural codebase bug,
+    /// not a user-recoverable condition — mirrors the established pattern
+    /// at `dialogue_manager::lifecycle::DialogueManager::new`.
     fn for_locale(locale: &primer_core::i18n::Locale) -> Self {
-        match locale {
-            primer_core::i18n::Locale::German => Self {
-                listen_label: "Höre zu…".into(),
-                listen_hint: "lass dir Zeit".into(),
-                thinking_label: "Denke nach…".into(),
-                thinking_hint: "der Primer überlegt eine Antwort".into(),
-                speak_label: "Spreche…".into(),
-                speak_hint: "lass den Primer ausreden".into(),
-            },
-            // English is the default for any unrecognised locale.
-            _ => Self {
-                listen_label: "Listening…".into(),
-                listen_hint: "take your time".into(),
-                thinking_label: "Thinking…".into(),
-                thinking_hint: "the Primer is working on a reply".into(),
-                speak_label: "Speaking…".into(),
-                speak_hint: "let the Primer finish".into(),
-            },
+        let pack = primer_pedagogy::prompt_pack::load_cached(*locale)
+            .expect("prompt pack load failed; this should be impossible at runtime");
+        let labels = pack.voice_state_labels();
+        Self {
+            listen_label: labels.listen_label.clone(),
+            listen_hint: labels.listen_hint.clone(),
+            thinking_label: labels.thinking_label.clone(),
+            thinking_hint: labels.thinking_hint.clone(),
+            speak_label: labels.speak_label.clone(),
+            speak_hint: labels.speak_hint.clone(),
         }
     }
 }
@@ -433,6 +430,20 @@ pub async fn get_voice_state_copy(
     let cfg = state.config.lock().await.clone();
     let locale = primer_core::i18n::Locale::from_pack_id(&cfg.learner.locale).unwrap_or_default();
     Ok(VoiceStateCopy::for_locale(&locale))
+}
+
+/// Whether voice mode is built into this binary.
+///
+/// Returns `cfg!(feature = "speech")` — a compile-time constant. Independent
+/// of any session state so the frontend can enable / disable the voice
+/// toggle at launch without waiting for a session to start. Previously the
+/// frontend read this flag off `current_session_info`, which left the
+/// toggle permanently disabled on the session-picker screen (no active
+/// session at launch → `null` → `state.available = false` → tooltip
+/// incorrectly says "Voice mode is not built into this binary").
+#[tauri::command]
+pub async fn voice_mode_available() -> Result<bool, String> {
+    Ok(cfg!(feature = "speech"))
 }
 
 #[cfg(test)]
@@ -465,6 +476,47 @@ mod tests {
     // need to round-trip the type back, define a separate echoed-
     // identity DTO instead of re-deriving `Deserialize` here.
     static_assertions::assert_not_impl_any!(MissingAsset: serde::de::DeserializeOwned);
+
+    /// Pin the existing English `VoiceStateCopy` strings byte-identically.
+    /// This is the regression witness for the i18n refactor that moves the
+    /// six display strings into `primer_pedagogy::prompt_pack`. The pack
+    /// values must reproduce these strings exactly; any drift here would
+    /// silently change UI copy.
+    #[test]
+    fn voice_state_copy_english_strings_pinned() {
+        let copy = VoiceStateCopy::for_locale(&primer_core::i18n::Locale::English);
+        assert_eq!(copy.listen_label, "Listening…");
+        assert_eq!(copy.listen_hint, "take your time");
+        assert_eq!(copy.thinking_label, "Thinking…");
+        assert_eq!(copy.thinking_hint, "the Primer is working on a reply");
+        assert_eq!(copy.speak_label, "Speaking…");
+        assert_eq!(copy.speak_hint, "let the Primer finish");
+    }
+
+    /// Pin the existing German `VoiceStateCopy` strings byte-identically.
+    /// Sibling of [`voice_state_copy_english_strings_pinned`] — see that
+    /// test's doc for rationale.
+    #[test]
+    fn voice_state_copy_german_strings_pinned() {
+        let copy = VoiceStateCopy::for_locale(&primer_core::i18n::Locale::German);
+        assert_eq!(copy.listen_label, "Höre zu…");
+        assert_eq!(copy.listen_hint, "lass dir Zeit");
+        assert_eq!(copy.thinking_label, "Denke nach…");
+        assert_eq!(copy.thinking_hint, "der Primer überlegt eine Antwort");
+        assert_eq!(copy.speak_label, "Spreche…");
+        assert_eq!(copy.speak_hint, "lass den Primer ausreden");
+    }
+
+    /// `voice_mode_available` must mirror `cfg!(feature = "speech")` exactly.
+    /// The frontend uses this flag at launch (independent of session state)
+    /// to enable / disable the voice toggle. Drift here would silently
+    /// break the consent-modal flow or the never-enabled regression that
+    /// motivated splitting this off from `current_session_info`.
+    #[tokio::test]
+    async fn voice_mode_available_matches_cfg_feature_speech() {
+        let result = voice_mode_available().await.expect("command never errors");
+        assert_eq!(result, cfg!(feature = "speech"));
+    }
 
     /// Pin the `StartVoiceModeError` tag format. The frontend branches on
     /// `err.kind` — a rename or format change here silently breaks the

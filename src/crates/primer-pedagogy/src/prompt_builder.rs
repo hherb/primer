@@ -1106,6 +1106,14 @@ primer = "Primer"
 
 [question_detection]
 factual_prefixes = []
+
+[voice_state]
+listen_label = "x"
+listen_hint = "x"
+thinking_label = "x"
+thinking_hint = "x"
+speak_label = "x"
+speak_hint = "x"
 "#;
         let pack = TomlPromptPack::from_toml_str(Locale::English, body)
             .expect("synthetic pack with empty prefixes loads");

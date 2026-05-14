@@ -76,6 +76,15 @@ impl WhisperStt {
         self.language = lang.into();
         self
     }
+
+    /// Currently-configured transcription language (ISO 639-1).
+    /// Returns the default (`"en"`) when [`with_language`] was never called.
+    /// Public so callers — most importantly `build_local_backends` — can
+    /// be tested for correct locale propagation without loading a real
+    /// Whisper context end-to-end.
+    pub fn language(&self) -> &str {
+        &self.language
+    }
 }
 
 impl Named for WhisperStt {
@@ -166,5 +175,23 @@ fn to_transcript_segment(seg: Segment) -> TranscriptSegment {
         text: seg.text,
         start_ms: clamp_signed_ms_to_u64(seg.start_ms),
         end_ms: clamp_signed_ms_to_u64(seg.end_ms),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use primer_core::i18n::Locale;
+
+    /// Pin `Locale::pack_id()` to ISO-639-1 codes that Whisper accepts
+    /// as transcription language. `build_local_backends` passes this
+    /// value through to [`WhisperStt::with_language`] so multilingual
+    /// Whisper models transcribe in the learner's locale instead of the
+    /// default `"en"`. Regression guard for the bug where German speech
+    /// was transcribed as English under the multilingual `small.bin`
+    /// model because the locale was never wired through.
+    #[test]
+    fn pack_id_is_iso_639_1_for_whisper() {
+        assert_eq!(Locale::English.pack_id(), "en");
+        assert_eq!(Locale::German.pack_id(), "de");
     }
 }

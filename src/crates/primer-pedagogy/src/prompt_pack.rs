@@ -69,6 +69,30 @@ pub trait PromptPack: Send + Sync {
     /// matching doesn't apply — `decide_intent` falls back to the
     /// LLM-based classifier in that case.
     fn factual_prefixes(&self) -> &[String];
+    /// Display strings for the three voice-mode UI states
+    /// (LISTEN / LATENT_THINK / SPEAK). Locale-keyed. Consumed by the
+    /// GUI's `get_voice_state_copy` Tauri command. No placeholders —
+    /// every field is a literal display string. Empty fields are a
+    /// pack-shape error caught at load time, so callers can render the
+    /// returned references unconditionally.
+    fn voice_state_labels(&self) -> &VoiceStateLabels;
+}
+
+/// Display strings for the voice-mode UI states.
+///
+/// Locale-keyed copy for the three states the voice loop cycles through —
+/// LISTEN, LATENT_THINK, SPEAK. Each state has a short label (above the
+/// indicator) and a longer hint (below). Populated from the
+/// `[voice_state]` table of the active prompt pack; the GUI consumes
+/// these via `PromptPack::voice_state_labels`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct VoiceStateLabels {
+    pub listen_label: String,
+    pub listen_hint: String,
+    pub thinking_label: String,
+    pub thinking_hint: String,
+    pub speak_label: String,
+    pub speak_hint: String,
 }
 
 /// Per-locale packs embedded at compile time so a binary can ship
@@ -172,6 +196,7 @@ pub struct TomlPromptPack {
     child_label: String,
     primer_label: String,
     factual_prefixes: Vec<String>,
+    voice_state_labels: VoiceStateLabels,
 }
 
 impl TomlPromptPack {
@@ -269,6 +294,29 @@ impl TomlPromptPack {
         )?;
         validate_placeholders("labels.child", &raw.labels.child, &[])?;
         validate_placeholders("labels.primer", &raw.labels.primer, &[])?;
+        // No placeholders allowed in any voice_state field — every value
+        // is a literal display string. Empty values are a pack-shape
+        // error because consumers render the strings without checking
+        // whether they're populated.
+        validate_voice_state_section(&raw.voice_state)?;
+        validate_placeholders(
+            "voice_state.listen_label",
+            &raw.voice_state.listen_label,
+            &[],
+        )?;
+        validate_placeholders("voice_state.listen_hint", &raw.voice_state.listen_hint, &[])?;
+        validate_placeholders(
+            "voice_state.thinking_label",
+            &raw.voice_state.thinking_label,
+            &[],
+        )?;
+        validate_placeholders(
+            "voice_state.thinking_hint",
+            &raw.voice_state.thinking_hint,
+            &[],
+        )?;
+        validate_placeholders("voice_state.speak_label", &raw.voice_state.speak_label, &[])?;
+        validate_placeholders("voice_state.speak_hint", &raw.voice_state.speak_hint, &[])?;
 
         // Stage the parsed intent strings keyed by canonical name so we
         // can validate completeness before materialising the indexed
@@ -314,6 +362,14 @@ impl TomlPromptPack {
             child_label: raw.labels.child,
             primer_label: raw.labels.primer,
             factual_prefixes: raw.question_detection.factual_prefixes,
+            voice_state_labels: VoiceStateLabels {
+                listen_label: raw.voice_state.listen_label,
+                listen_hint: raw.voice_state.listen_hint,
+                thinking_label: raw.voice_state.thinking_label,
+                thinking_hint: raw.voice_state.thinking_hint,
+                speak_label: raw.voice_state.speak_label,
+                speak_hint: raw.voice_state.speak_hint,
+            },
         })
     }
 
@@ -386,6 +442,9 @@ impl PromptPack for TomlPromptPack {
     fn factual_prefixes(&self) -> &[String] {
         &self.factual_prefixes
     }
+    fn voice_state_labels(&self) -> &VoiceStateLabels {
+        &self.voice_state_labels
+    }
 }
 
 // ─── Raw TOML deserialisation types ─────────────────────────────────────────
@@ -400,6 +459,7 @@ struct PackFile {
     sections: SectionsSection,
     labels: LabelsSection,
     question_detection: QuestionDetectionSection,
+    voice_state: VoiceStateSection,
 }
 
 /// File-level documentation for translators. Cross-checked at load time
@@ -450,6 +510,37 @@ struct LabelsSection {
 #[derive(Deserialize)]
 struct QuestionDetectionSection {
     factual_prefixes: Vec<String>,
+}
+
+#[derive(Deserialize)]
+struct VoiceStateSection {
+    listen_label: String,
+    listen_hint: String,
+    thinking_label: String,
+    thinking_hint: String,
+    speak_label: String,
+    speak_hint: String,
+}
+
+/// Reject an empty value in any `[voice_state]` field. Renders unconditionally
+/// (no `Option<&str>` plumbing in consumers), so an empty string would silently
+/// produce a missing UI label rather than a clear pack-shape error at load time.
+fn validate_voice_state_section(section: &VoiceStateSection) -> Result<()> {
+    for (field, value) in [
+        ("voice_state.listen_label", &section.listen_label),
+        ("voice_state.listen_hint", &section.listen_hint),
+        ("voice_state.thinking_label", &section.thinking_label),
+        ("voice_state.thinking_hint", &section.thinking_hint),
+        ("voice_state.speak_label", &section.speak_label),
+        ("voice_state.speak_hint", &section.speak_hint),
+    ] {
+        if value.is_empty() {
+            return Err(PrimerError::Config(format!(
+                "prompt pack: field {field} must not be empty"
+            )));
+        }
+    }
+    Ok(())
 }
 
 // ─── Intent key mapping ─────────────────────────────────────────────────────
@@ -716,6 +807,14 @@ primer = "Primer"
 
 [question_detection]
 factual_prefixes = []
+
+[voice_state]
+listen_label = "x"
+listen_hint = "x"
+thinking_label = "x"
+thinking_hint = "x"
+speak_label = "x"
+speak_hint = "x"
 "#,
             INTENT_KEYS = all_intents_zeroed_toml(),
         );
@@ -862,6 +961,14 @@ primer = "Primer"
 
 [question_detection]
 factual_prefixes = []
+
+[voice_state]
+listen_label = "x"
+listen_hint = "x"
+thinking_label = "x"
+thinking_hint = "x"
+speak_label = "x"
+speak_hint = "x"
 "#,
             INTENT_KEYS = all_intents_zeroed_toml(),
         );
@@ -911,6 +1018,14 @@ primer = "Primer"
 
 [question_detection]
 factual_prefixes = []
+
+[voice_state]
+listen_label = "x"
+listen_hint = "x"
+thinking_label = "x"
+thinking_hint = "x"
+speak_label = "x"
+speak_hint = "x"
 "#;
         let result = TomlPromptPack::from_toml_str(Locale::English, body);
         let err = result.err().expect("expected missing-intent error");
@@ -970,6 +1085,14 @@ primer = "Primer"
 
 [question_detection]
 factual_prefixes = {factual_prefixes_array}
+
+[voice_state]
+listen_label = "x"
+listen_hint = "x"
+thinking_label = "x"
+thinking_hint = "x"
+speak_label = "x"
+speak_hint = "x"
 "#,
             INTENT_KEYS = all_intents_zeroed_toml(),
         )
@@ -1126,6 +1249,55 @@ factual_prefixes = {factual_prefixes_array}
         let pack = load(Locale::English).unwrap();
         let rendered = pack.break_suggestion_intro(45);
         assert!(rendered.contains("45"), "{rendered:?}");
+    }
+
+    /// The English pack's [voice_state] table holds the same byte-identical
+    /// strings the GUI used to hardcode in `VoiceStateCopy::for_locale`
+    /// before the i18n move. Any drift here will be flagged in the GUI's
+    /// `voice_state_copy_english_strings_pinned` regression witness too,
+    /// but pinning at the pack layer first localises a future failure to
+    /// the en.toml file rather than the GUI bridge.
+    #[test]
+    fn english_pack_exposes_voice_state_labels() {
+        let pack = english_pack();
+        let labels = pack.voice_state_labels();
+        assert_eq!(labels.listen_label, "Listening…");
+        assert_eq!(labels.listen_hint, "take your time");
+        assert_eq!(labels.thinking_label, "Thinking…");
+        assert_eq!(labels.thinking_hint, "the Primer is working on a reply");
+        assert_eq!(labels.speak_label, "Speaking…");
+        assert_eq!(labels.speak_hint, "let the Primer finish");
+    }
+
+    /// Sibling of [`english_pack_exposes_voice_state_labels`] — pins the
+    /// byte-identical German strings the GUI used to hardcode before the
+    /// i18n move.
+    #[test]
+    fn german_pack_exposes_voice_state_labels() {
+        let pack = german_pack();
+        let labels = pack.voice_state_labels();
+        assert_eq!(labels.listen_label, "Höre zu…");
+        assert_eq!(labels.listen_hint, "lass dir Zeit");
+        assert_eq!(labels.thinking_label, "Denke nach…");
+        assert_eq!(labels.thinking_hint, "der Primer überlegt eine Antwort");
+        assert_eq!(labels.speak_label, "Spreche…");
+        assert_eq!(labels.speak_hint, "lass den Primer ausreden");
+    }
+
+    /// Empty values in any [voice_state] field are a pack-shape error.
+    /// Consumers render the strings without checking for emptiness, so a
+    /// silent empty would produce a blank UI label rather than failing
+    /// loudly at startup.
+    #[test]
+    fn empty_voice_state_field_returns_err() {
+        let body = synthetic_pack_body("en", "English", "en-US", "[]");
+        let bad = body.replace(r#"listen_label = "x""#, r#"listen_label = """#);
+        let err = TomlPromptPack::from_toml_str(Locale::English, &bad)
+            .err()
+            .expect("expected empty voice_state field to fail");
+        let s = format!("{err}");
+        assert!(s.contains("voice_state.listen_label"), "got: {s}");
+        assert!(s.contains("must not be empty"), "got: {s}");
     }
 
     #[test]

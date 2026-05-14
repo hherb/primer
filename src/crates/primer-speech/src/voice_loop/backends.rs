@@ -357,7 +357,15 @@ pub async fn build_local_backends(
     let mut audio_vad = SileroVad::new(vad_params)?;
 
     // ── Build STT (whisper.cpp) ──────────────────────────────────
-    let whisper = Arc::new(WhisperStt::new(whisper_model)?);
+    // Pass the learner's locale as the transcription language so a
+    // multilingual model (e.g. `ggml-small.bin` for `de`) actually
+    // transcribes in that language. Without this, Whisper falls back
+    // to its `"en"` default, forces non-English audio into approximate
+    // English, and the LLM never sees the original utterance — silent
+    // failure for every non-English locale. `Locale::pack_id()` returns
+    // ISO-639-1 ("en", "de", …) which is exactly the form Whisper
+    // accepts; pinned in `whisper::tests::pack_id_is_iso_639_1_for_whisper`.
+    let whisper = Arc::new(WhisperStt::new(whisper_model)?.with_language(locale.pack_id()));
 
     // ── Build TTS (piper) ────────────────────────────────────────
     let tts: Arc<dyn StreamingTextToSpeech> = Arc::new(PiperTts::new(piper_onnx, piper_config)?);

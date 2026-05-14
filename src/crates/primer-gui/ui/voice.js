@@ -271,8 +271,14 @@
   // === Sticky-toggle restoration on launch ===
 
   async function restoreOnLaunch() {
-    const info = await invoke("current_session_info").catch(() => null);
-    state.available = info && info.voice_mode_available === true;
+    // Read the speech-feature flag from the dedicated capability command,
+    // not from `current_session_info`. The session-info command returns
+    // null when no session is active (e.g. on the session picker at
+    // launch), which previously left the voice toggle permanently
+    // disabled and showed the misleading "Voice mode is not built into
+    // this binary" tooltip even on speech-enabled binaries.
+    const available = await invoke("voice_mode_available").catch(() => false);
+    state.available = available === true;
     const toggle = $("voice-mode-toggle");
     if (!toggle) return;
     toggle.disabled = !state.available;

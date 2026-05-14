@@ -208,3 +208,20 @@ factual_prefixes = [
     "wo ist ",
     "wer ist ",
 ]
+
+# --- BEDIENOBERFLÄCHEN-TEXT FÜR DEN SPRACHMODUS ---
+# Anzeigetexte für die drei Sprachmodus-Zustände der GUI (LISTEN,
+# LATENT_THINK, SPEAK). Jeder Zustand hat eine kurze Bezeichnung
+# (über der Anzeige) und einen längeren Hinweis (darunter).
+#
+# Übersetzungshinweis: beide Felder bleiben kurz. Die Bezeichnung passt
+# in eine kurze Zeile; der Hinweis ist eine sanfte Beruhigung für das
+# Kind („lass dir Zeit", „lass den Primer ausreden"), keine Anweisung.
+# Keine Platzhalter erlaubt. Leere Werte sind ein Ladefehler.
+[voice_state]
+listen_label = "Höre zu…"
+listen_hint = "lass dir Zeit"
+thinking_label = "Denke nach…"
+thinking_hint = "der Primer überlegt eine Antwort"
+speak_label = "Spreche…"
+speak_hint = "lass den Primer ausreden"

@@ -190,3 +190,20 @@ factual_prefixes = [
     "how is ",
     "how are ",
 ]
+
+# --- VOICE-MODE UI STATE COPY ---
+# Display strings for the three voice-mode states the GUI cycles through
+# (LISTEN, LATENT_THINK, SPEAK). Each state has a short label shown above
+# the state indicator and a longer hint shown below.
+#
+# TRANSLATORS: keep both fields short. The label fits on one short line;
+# the hint is a soft reassurance to the child ("take your time", "let
+# the Primer finish"), not an instruction. No placeholders are allowed.
+# Empty values are a load-time error.
+[voice_state]
+listen_label = "Listening…"
+listen_hint = "take your time"
+thinking_label = "Thinking…"
+thinking_hint = "the Primer is working on a reply"
+speak_label = "Speaking…"
+speak_hint = "let the Primer finish"
