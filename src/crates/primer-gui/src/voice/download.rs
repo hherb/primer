@@ -217,6 +217,10 @@ where
         // before opening with truncate.
         if let Err(e) = tokio::fs::remove_file(&partial).await {
             if e.kind() != std::io::ErrorKind::NotFound {
+                tracing::warn!(
+                    "failed to remove stale partial {} before restart: {e}",
+                    partial.display(),
+                );
                 return Err(DownloadError::Io(format!(
                     "rm stale partial {}: {e}",
                     partial.display()
@@ -244,6 +248,11 @@ where
             let chunk = chunk.map_err(map_reqwest_err)?;
             bytes_done = bytes_done.saturating_add(chunk.len() as u64);
             if let Some(cap) = max_bytes {
+                // Cumulative cap: `bytes_done` starts at `partial_size`
+                // on resume, so this bounds the total on-disk footprint
+                // across attempts, not per-attempt. A redirected URL
+                // serving a >cap payload aborts even if some of the
+                // bytes arrived on a prior run.
                 if bytes_done > cap {
                     return Err(DownloadError::Oversize {
                         received: bytes_done,
@@ -352,7 +361,15 @@ pub async fn download_one<R: tauri::Runtime>(
 
     let asset_id = asset.kind.clone();
     let app_for_progress = app.clone();
-    let on_progress = move |bytes_done: u64, bytes_total: Option<u64>| {
+    // Track the most recent (bytes_done, bytes_total) so the final
+    // failure event carries the progress we actually reached, not (0, None).
+    // The frontend's last in-flight event already has the same numbers, but
+    // a consumer that only reads the failure event (e.g. a future log
+    // forwarder, or a UI that suppresses progress while a modal is dismissed)
+    // needs the offset to render "stopped at X of Y" copy.
+    let mut last_progress: (u64, Option<u64>) = (0, None);
+    let on_progress = |bytes_done: u64, bytes_total: Option<u64>| {
+        last_progress = (bytes_done, bytes_total);
         let evt = DownloadProgressEvent {
             asset_id: asset_id.clone(),
             bytes_done,
@@ -364,7 +381,7 @@ pub async fn download_one<R: tauri::Runtime>(
 
     let result = stream_to_path(&client, url, &asset.path, max_bytes, on_progress).await;
     if let Err(ref e) = result {
-        emit_failure(app, &asset.kind, 0, None, e);
+        emit_failure(app, &asset.kind, last_progress.0, last_progress.1, e);
     }
     result.map_err(|e| e.to_string())
 }
@@ -788,6 +805,65 @@ mod tests {
             DownloadError::HttpStatus(code) => assert_eq!(code, 404),
             other => panic!("expected HttpStatus(404), got {other:?}"),
         }
+    }
+
+    /// Server closes the socket mid-body after writing headers + a
+    /// fraction of the declared Content-Length. reqwest yields a stream
+    /// error; we classify it as `Network` (not `Timeout`) and the partial
+    /// is preserved so the next attempt resumes from the byte offset we
+    /// reached.
+    #[tokio::test]
+    async fn stream_to_path_preserves_partial_on_midstream_network_error() {
+        let dir = TempDir::new().unwrap();
+        let dest = dir.path().join("model.bin");
+        let partial = partial_path_for(&dest);
+
+        // Server announces 1000 bytes but writes only 50 then closes.
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        tokio::spawn(async move {
+            let (mut sock, _) = listener.accept().await.unwrap();
+            let mut buf = [0u8; 4096];
+            let mut request = String::new();
+            loop {
+                let n = match sock.read(&mut buf).await {
+                    Ok(0) => break,
+                    Ok(n) => n,
+                    Err(_) => break,
+                };
+                request.push_str(&String::from_utf8_lossy(&buf[..n]));
+                if request.contains("\r\n\r\n") {
+                    break;
+                }
+            }
+            let headers = "HTTP/1.1 200 OK\r\nContent-Length: 1000\r\nContent-Type: application/octet-stream\r\n\r\n";
+            let _ = sock.write_all(headers.as_bytes()).await;
+            let _ = sock.write_all(&[b'M'; 50]).await;
+            // Drop the socket abruptly mid-body.
+            let _ = sock.shutdown().await;
+            drop(sock);
+        });
+
+        let client = reqwest::Client::new();
+        let url = format!("http://{addr}/asset.bin");
+        let err = stream_to_path(&client, &url, &dest, None, |_, _| {})
+            .await
+            .expect_err("truncated body must surface as an error");
+        assert!(
+            matches!(err, DownloadError::Network(_)),
+            "midstream socket close must classify as Network, got {err:?}",
+        );
+        assert!(
+            partial.exists(),
+            "partial must survive a network error so the next attempt resumes",
+        );
+        let preserved = tokio::fs::read(&partial).await.unwrap();
+        assert_eq!(
+            preserved.len(),
+            50,
+            "preserved partial must hold the bytes that arrived before the close",
+        );
+        assert_eq!(&preserved[..], &[b'M'; 50][..]);
     }
 
     #[tokio::test]
