@@ -1,7 +1,7 @@
 # Primer — Next Session Brief
 
 **Audience:** future Claude Code session continuing work on this repo.
-**Last updated:** 2026-05-14T1654+0800 (after pushing two additional fixes to PR #101 — decoupling the GUI's voice-toggle availability from session state at commit `e33f0d4`, plus wiring locale to Whisper STT + adding the espeak-ng probe to the GUI at commit `ee0fe44`. All on `i18n/voice-state-copy-91`; closes #91 plus three smoke-test fallout fixes).
+**Last updated:** 2026-05-14T1721+0800 (after pushing three smoke-test fallout fixes to PR #101 on top of the i18n move — voice-toggle availability decoupled at `e33f0d4`, locale wired to Whisper + espeak-ng probe added at `ee0fe44`, and locale-mismatch hard-fail in `build_active_session` at `00395b6`. All on `i18n/voice-state-copy-91`; closes #91 plus four smoke-test fallout fixes).
 
 ## First moves when you start
 
@@ -11,17 +11,18 @@
 
 ## Branch status
 
-`i18n/voice-state-copy-91` carries 5 commits, pushed, and on **PR #101** (https://github.com/hherb/primer/pull/101). Built off `origin/main` at `b7b4a5a` (PR #99 squash — voice IPC path re-resolution hardening). Once #101 merges, the branch can be deleted.
+`i18n/voice-state-copy-91` carries 7 commits, pushed, and on **PR #101** (https://github.com/hherb/primer/pull/101). Built off `origin/main` at `b7b4a5a` (PR #99 squash — voice IPC path re-resolution hardening). Once #101 merges, the branch can be deleted.
 
 ## What we shipped this session
 
 **Primary work:** moved the six voice-mode UI display strings the GUI's `get_voice_state_copy` Tauri command serves out of a hardcoded `match` in `commands/voice.rs` and into the `[voice_state]` table of each `primer-pedagogy/prompts/<pack>.toml`. Adding a new locale (e.g. Hindi) now requires no Rust change for voice-state copy — just the new pack's `[voice_state]` table.
 
-**Three smoke-test fallout fixes (same PR):**
+**Four smoke-test fallout fixes (same PR):**
 
 1. **Voice-toggle availability decoupled from session state.** The GUI's voice toggle was permanently disabled on the session-picker screen because `restoreOnLaunch` read the `voice_mode_available` flag off `current_session_info`, which returns `null` when no session is active. Added a dedicated `voice_mode_available` Tauri command that returns `cfg!(feature = "speech")` (compile-time constant, no session needed) and switched the frontend to call it.
 2. **espeak-ng-data probe added to the GUI.** Without it, the GUI's Piper TTS crashed with `Error processing file '.../espeak-ng-data/phontab': No such file or directory.` The CLI has had this probe for months — it scans `/opt/homebrew/share`, `/usr/local/share`, `/usr/share` for a complete `espeak-ng-data/` directory and sets `PIPER_ESPEAKNG_DATA_DIRECTORY` before tokio spawns workers. Ported to the GUI's `lib::run` (before the Tauri builder).
 3. **Whisper transcription language wired from the active locale.** `build_local_backends` constructed `WhisperStt::new(model)?` without `.with_language(...)`. WhisperStt's default is `"en"`, so the multilingual `ggml-small.bin` model used for German was forced into English transcription mode — German speech ("Kannst Du mich hören?") came out as English ("Can you hear me?") and the LLM responded in English on a German-locale session. Fix: `.with_language(locale.pack_id())` — ISO-639-1, exactly the form Whisper accepts. New regression test `whisper::tests::pack_id_is_iso_639_1_for_whisper` pins the contract.
+4. **Locale-mismatch hard-fail in `build_active_session`.** Even after fix #3, the LLM still responded in English on a German-locale session — because `reconcile_persisted_learner` merges `name` and `age` from config but silently keeps the persisted `learner.profile.locale`. So KB / STT / TTS run under the cfg locale (de) while the dialogue manager's prompt pack stays under the persisted locale (en). Fixed by erroring out when `cfg.learner.locale != existing.profile.locale`, mirroring the CLI's `verify_resume_locale_match` discipline. User-actionable error message: revert Settings → Locale to the persisted value, or remove `~/.primer/<slug>.db` to start a fresh learner under the new locale.
 
 **Commits on `i18n/voice-state-copy-91`:**
 
@@ -30,6 +31,8 @@
 - `e33f0d4` — `fix(gui): decouple voice-toggle availability from session state`
 - `d3faa62` — `docs: refresh handoff + NEXT_SESSION.md for voice-toggle availability fix`
 - `ee0fe44` — `fix(voice): wire locale to Whisper + probe espeak-ng-data in GUI`
+- `2c904e7` — `docs: refresh handoff + CLAUDE.md gotchas for voice-mode fixes`
+- `00395b6` — `fix(gui): hard-fail on locale mismatch in build_active_session (smoke #3)`
 
 **Concrete deliverables:**
 
@@ -38,7 +41,7 @@
 - **`validate_voice_state_section`** at [src/crates/primer-pedagogy/src/prompt_pack.rs](src/crates/primer-pedagogy/src/prompt_pack.rs) rejects empty values in any of the six fields at load time. Consumers render the strings unconditionally — a silent empty would produce a blank UI label rather than a clear pack-shape error.
 - **`VoiceStateCopy::for_locale` rewritten** at [src/crates/primer-gui/src/commands/voice.rs:405-426](src/crates/primer-gui/src/commands/voice.rs#L405-L426) to call `primer_pedagogy::prompt_pack::load_cached(*locale).expect(...)` then clone the six strings. Mirrors the `.expect()` pattern at `dialogue_manager::lifecycle::DialogueManager::new` — embedded packs are validated at build time so a load failure here would be a structural codebase bug, not a user-recoverable condition.
 - **CLAUDE.md gotcha entry** added at [CLAUDE.md:111](CLAUDE.md#L111) documenting the new i18n location and the no-Rust-change rule for new locales.
-- **6 new tests:** 2 GUI regression witnesses (`voice_state_copy_english_strings_pinned`, `voice_state_copy_german_strings_pinned` in `commands/voice.rs`) pinning the pre-refactor strings byte-identically — these stay green before AND after the pack switchover; 3 pack-side tests (`english_pack_exposes_voice_state_labels`, `german_pack_exposes_voice_state_labels`, `empty_voice_state_field_returns_err` in `prompt_pack.rs`) covering the new accessor and the empty-field error path; 1 capability-command test (`voice_mode_available_matches_cfg_feature_speech`) pinning the new `voice_mode_available` Tauri command's output to the `cfg!(feature = "speech")` compile-time constant. Plus the speech-feature-gated `whisper::tests::pack_id_is_iso_639_1_for_whisper` (only runs with `--features whisper`) pinning the Locale → Whisper-language contract. Future drift fails at the pack layer first (rather than only at the GUI bridge), the toggle-availability path has explicit cfg-flag coverage, AND the locale-to-Whisper wiring has a regression guard at the data contract level.
+- **8 new tests:** 2 GUI regression witnesses (`voice_state_copy_english_strings_pinned`, `voice_state_copy_german_strings_pinned` in `commands/voice.rs`) pinning the pre-refactor strings byte-identically — these stay green before AND after the pack switchover; 3 pack-side tests (`english_pack_exposes_voice_state_labels`, `german_pack_exposes_voice_state_labels`, `empty_voice_state_field_returns_err` in `prompt_pack.rs`) covering the new accessor and the empty-field error path; 1 capability-command test (`voice_mode_available_matches_cfg_feature_speech`) pinning the new `voice_mode_available` Tauri command's output to the `cfg!(feature = "speech")` compile-time constant. Plus the speech-feature-gated `whisper::tests::pack_id_is_iso_639_1_for_whisper` (only runs with `--features whisper`) pinning the Locale → Whisper-language contract. Plus two `wiring::tests` covering the locale-mismatch hard-fail (`locale_mismatch_on_existing_learner_returns_error`) and the green-path regression guard (`locale_matches_after_existing_open`). Future drift fails at the pack layer first (rather than only at the GUI bridge), the toggle-availability path has explicit cfg-flag coverage, the locale-to-Whisper wiring has a regression guard at the data contract level, AND the silent-locale-drift class of bugs is now structurally impossible at session-construction time.
 
 **Smoke-fix deliverables (commit `e33f0d4`):**
 
@@ -57,13 +60,13 @@
 
 **Verification:**
 
-- `~/.cargo/bin/cargo test --workspace` → 773 passed / 0 failed / 3 ignored (default features; +6 from baseline 767)
-- `~/.cargo/bin/cargo test -p primer-gui --features speech` → 93 passed / 0 failed / 0 ignored (+4 from baseline 89)
+- `~/.cargo/bin/cargo test --workspace` → 775 passed / 0 failed / 3 ignored (default features; +8 from baseline 767)
+- `~/.cargo/bin/cargo test -p primer-gui --features speech` → 95 passed / 0 failed / 0 ignored (+6 from baseline 89)
 - `~/.cargo/bin/cargo fmt --all -- --check` clean
 - `RUSTFLAGS="-D warnings" ~/.cargo/bin/cargo clippy --workspace --all-targets` clean (default features)
 - `RUSTFLAGS="-D warnings" ~/.cargo/bin/cargo clippy --workspace --all-targets --features primer-gui/speech` clean
 
-**Net diff (across the four code commits):** 12 files changed, 387 insertions(+), 21 deletions(-).
+**Net diff (across the five code commits):** 13 files changed, 469 insertions(+), 22 deletions(-).
 
 **Design choices that may be relevant later:**
 
@@ -182,10 +185,10 @@ git log --oneline -10            # the PR-101 squash-merge commit should be near
 
 cd src
 ~/.cargo/bin/cargo build --workspace && ~/.cargo/bin/cargo test --workspace
-# Expected: 773 passed, 0 failed, 3 ignored (default features).
+# Expected: 775 passed, 0 failed, 3 ignored (default features).
 
 ~/.cargo/bin/cargo test -p primer-gui --features speech
-# Expected: 93 passed, 0 failed, 0 ignored.
+# Expected: 95 passed, 0 failed, 0 ignored.
 
 ~/.cargo/bin/cargo fmt --all -- --check
 # Expected: clean.
