@@ -16,6 +16,18 @@ use crate::types::SessionInfo;
 #[cfg(feature = "speech")]
 use std::sync::Arc;
 
+/// Asset-kind identifiers. Shared source of truth between the
+/// emit site (`voice::assets::resolve_voice_assets`) and the filter site
+/// (`voice::assets::resolve_requested_kinds`). Lives here — not under
+/// `voice::assets` — because it describes the IPC shape itself and must
+/// be addressable in default (non-speech) builds too (the
+/// `MissingAsset` type and its serialisation test are always compiled).
+pub mod kind {
+    pub const PIPER_ONNX: &str = "piper_onnx";
+    pub const PIPER_CONFIG: &str = "piper_config";
+    pub const WHISPER_MODEL: &str = "whisper_model";
+}
+
 /// Structured error returned by `start_voice_mode`.
 ///
 /// Uses `#[serde(tag = "kind", rename_all = "snake_case")]` so the
@@ -433,7 +445,7 @@ mod tests {
     #[test]
     fn missing_asset_serialises_with_snake_case_kind() {
         let m = MissingAsset {
-            kind: "whisper_model".into(),
+            kind: super::kind::WHISPER_MODEL.into(),
             path: "/tmp/foo.bin".into(),
             suggested_url: Some("https://example.com/foo.bin".into()),
             approx_size_mb: Some(470),
@@ -442,6 +454,17 @@ mod tests {
         assert_eq!(json["kind"], "whisper_model");
         assert_eq!(json["approx_size_mb"], 470);
     }
+
+    // Trust-boundary invariant: `MissingAsset` must NEVER implement
+    // `Deserialize`. The IPC direction is server→webview only — if a
+    // future contributor re-derives `Deserialize` (e.g. "just to
+    // round-trip through a frontend cache"), the trust-boundary
+    // hardening from #90 silently regresses. This compile-time check is
+    // the load-bearing structural guarantee; the doc comment on
+    // `MissingAsset` itself explains the rationale. If you genuinely
+    // need to round-trip the type back, define a separate echoed-
+    // identity DTO instead of re-deriving `Deserialize` here.
+    static_assertions::assert_not_impl_any!(MissingAsset: serde::de::DeserializeOwned);
 
     /// Pin the `StartVoiceModeError` tag format. The frontend branches on
     /// `err.kind` — a rename or format change here silently breaks the

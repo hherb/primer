@@ -6,11 +6,19 @@
 
 use std::path::PathBuf;
 
-use crate::commands::voice::MissingAsset;
+use crate::commands::voice::{MissingAsset, kind};
 use crate::config::SpeechSettings;
 use primer_core::consts::speech::{APPROX_PIPER_CONFIG_MB, APPROX_WHISPER_SMALL_MB};
 use primer_core::i18n::Locale;
 use primer_speech::voice_loop::locale_defaults::{LocaleDefault, voice_default_for};
+
+/// Maximum number of `kinds` the IPC will accept in a single
+/// `download_voice_assets` call. The legitimate set has exactly three
+/// entries; this cap is belt-and-suspenders insurance against a buggy or
+/// hostile webview submitting a giant payload that would burn memory in
+/// the filter loop. Anything above this bound is treated as
+/// "nothing to download" — safe in both directions.
+pub const MAX_REQUESTED_KINDS: usize = 16;
 
 /// Resolved paths for one voice mode session.
 #[derive(Debug, Clone)]
@@ -46,22 +54,28 @@ pub fn resolve_voice_assets(
     let (piper_onnx, piper_config, whisper_model, voice_id) =
         compute_paths(home, locale, default, override_entry);
 
+    // Every shipping locale today uses a Whisper `small` variant; if a
+    // locale upgrades to `medium`/`large` replace the
+    // `APPROX_WHISPER_SMALL_MB` references below with a per-id lookup
+    // keyed on `d.whisper_model_id`.
     let mut missing = Vec::new();
     if !piper_onnx.exists() {
         missing.push(MissingAsset {
-            kind: "piper_onnx".into(),
+            kind: kind::PIPER_ONNX.into(),
             path: piper_onnx.clone(),
             suggested_url: default.map(|d| d.piper_onnx_url.to_string()),
             approx_size_mb: default.map(|d| {
-                // Piper voice ~ total - whisper_size_mb. Floor at 1 MB so
-                // a freak total ≤ whisper_size_mb never overflows.
-                d.approx_total_mb.saturating_sub(whisper_size_mb(d)).max(1)
+                // Piper voice ~ total - whisper. Floor at 1 MB so a freak
+                // total ≤ whisper size never produces a misleading 0.
+                d.approx_total_mb
+                    .saturating_sub(APPROX_WHISPER_SMALL_MB)
+                    .max(1)
             }),
         });
     }
     if !piper_config.exists() {
         missing.push(MissingAsset {
-            kind: "piper_config".into(),
+            kind: kind::PIPER_CONFIG.into(),
             path: piper_config.clone(),
             suggested_url: default.map(|d| d.piper_config_url.to_string()),
             approx_size_mb: Some(APPROX_PIPER_CONFIG_MB),
@@ -69,10 +83,10 @@ pub fn resolve_voice_assets(
     }
     if !whisper_model.exists() {
         missing.push(MissingAsset {
-            kind: "whisper_model".into(),
+            kind: kind::WHISPER_MODEL.into(),
             path: whisper_model.clone(),
             suggested_url: default.map(|d| d.whisper_url.to_string()),
-            approx_size_mb: default.map(whisper_size_mb),
+            approx_size_mb: default.map(|_| APPROX_WHISPER_SMALL_MB),
         });
     }
 
@@ -114,6 +128,12 @@ pub fn resolve_requested_kinds(
     locale: &Locale,
     requested_kinds: &[String],
 ) -> Vec<MissingAsset> {
+    // Cap the request size so a buggy webview submitting a million-entry
+    // list cannot blow up the filter. The legitimate set has 3 entries;
+    // [`MAX_REQUESTED_KINDS`] is comfortably above that.
+    if requested_kinds.len() > MAX_REQUESTED_KINDS {
+        return Vec::new();
+    }
     let missing = match resolve_voice_assets(home, speech, locale) {
         Ok(_) => return Vec::new(),
         Err(am) => am.entries,
@@ -122,15 +142,6 @@ pub fn resolve_requested_kinds(
         .into_iter()
         .filter(|entry| requested_kinds.iter().any(|k| k == &entry.kind))
         .collect()
-}
-
-fn whisper_size_mb(_d: &LocaleDefault) -> u32 {
-    // Approx split: the Whisper bin is the bulk (~470 MB for small);
-    // Piper medium voices are ~60 MB. Used only for consent-dialog
-    // labelling. Every shipping locale today uses a Whisper `small`
-    // variant; if a locale upgrades to `medium`/`large` add a per-id
-    // branch driven by `_d.whisper_model_id`.
-    APPROX_WHISPER_SMALL_MB
 }
 
 fn compute_paths(
@@ -332,5 +343,37 @@ mod tests {
         let speech = SpeechSettings::default();
         let result = resolve_requested_kinds(home.path(), &speech, &Locale::English, &[]);
         assert!(result.is_empty());
+    }
+
+    /// A request exceeding [`MAX_REQUESTED_KINDS`] is dropped wholesale —
+    /// a buggy / hostile webview submitting a million-entry list cannot
+    /// burn host memory in the filter loop. Verified at the bound + 1
+    /// to pin the comparison operator (>, not >=).
+    #[test]
+    fn resolve_requested_kinds_drops_oversized_request() {
+        let home = TempDir::new().unwrap();
+        let speech = SpeechSettings::default();
+        let too_many: Vec<String> = (0..=MAX_REQUESTED_KINDS)
+            .map(|_| kind::WHISPER_MODEL.into())
+            .collect();
+        assert_eq!(too_many.len(), MAX_REQUESTED_KINDS + 1);
+        let result = resolve_requested_kinds(home.path(), &speech, &Locale::English, &too_many);
+        assert!(
+            result.is_empty(),
+            "request above MAX_REQUESTED_KINDS must be dropped"
+        );
+
+        // At the cap exactly, the resolver still runs.
+        let at_cap: Vec<String> = (0..MAX_REQUESTED_KINDS)
+            .map(|_| kind::WHISPER_MODEL.into())
+            .collect();
+        assert_eq!(at_cap.len(), MAX_REQUESTED_KINDS);
+        let result_at_cap =
+            resolve_requested_kinds(home.path(), &speech, &Locale::English, &at_cap);
+        assert_eq!(
+            result_at_cap.len(),
+            1,
+            "request at the cap is still processed and dedupes to the single missing kind"
+        );
     }
 }
