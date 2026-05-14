@@ -432,6 +432,20 @@ pub async fn get_voice_state_copy(
     Ok(VoiceStateCopy::for_locale(&locale))
 }
 
+/// Whether voice mode is built into this binary.
+///
+/// Returns `cfg!(feature = "speech")` — a compile-time constant. Independent
+/// of any session state so the frontend can enable / disable the voice
+/// toggle at launch without waiting for a session to start. Previously the
+/// frontend read this flag off `current_session_info`, which left the
+/// toggle permanently disabled on the session-picker screen (no active
+/// session at launch → `null` → `state.available = false` → tooltip
+/// incorrectly says "Voice mode is not built into this binary").
+#[tauri::command]
+pub async fn voice_mode_available() -> Result<bool, String> {
+    Ok(cfg!(feature = "speech"))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -491,6 +505,17 @@ mod tests {
         assert_eq!(copy.thinking_hint, "der Primer überlegt eine Antwort");
         assert_eq!(copy.speak_label, "Spreche…");
         assert_eq!(copy.speak_hint, "lass den Primer ausreden");
+    }
+
+    /// `voice_mode_available` must mirror `cfg!(feature = "speech")` exactly.
+    /// The frontend uses this flag at launch (independent of session state)
+    /// to enable / disable the voice toggle. Drift here would silently
+    /// break the consent-modal flow or the never-enabled regression that
+    /// motivated splitting this off from `current_session_info`.
+    #[tokio::test]
+    async fn voice_mode_available_matches_cfg_feature_speech() {
+        let result = voice_mode_available().await.expect("command never errors");
+        assert_eq!(result, cfg!(feature = "speech"));
     }
 
     /// Pin the `StartVoiceModeError` tag format. The frontend branches on
