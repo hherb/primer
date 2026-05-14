@@ -394,6 +394,21 @@ fn build_client(timeout_secs: u64) -> Result<reqwest::Client, reqwest::Error> {
     b.build()
 }
 
+/// Pick the `bytes_done` to report on a failure event.
+///
+/// For [`DownloadError::Oversize`] the variant's own `received` field
+/// is the offset that triggered the abort — one chunk past the most
+/// recent `on_progress` call (the cap check fires before the per-chunk
+/// progress callback). For every other failure kind, the last observed
+/// progress offset is the right value: it reflects whatever the stream
+/// loop wrote to disk before the failure.
+fn reported_bytes_done_on_failure(last_progress: u64, err: &DownloadError) -> u64 {
+    match err {
+        DownloadError::Oversize { received, .. } => *received,
+        _ => last_progress,
+    }
+}
+
 fn emit_failure<R: tauri::Runtime>(
     app: &AppHandle<R>,
     asset_id: &str,
@@ -403,7 +418,7 @@ fn emit_failure<R: tauri::Runtime>(
 ) {
     let evt = DownloadProgressEvent {
         asset_id: asset_id.to_string(),
-        bytes_done,
+        bytes_done: reported_bytes_done_on_failure(bytes_done, err),
         bytes_total,
         error: Some(err.kind().to_string()),
     };
@@ -526,6 +541,48 @@ mod tests {
         assert_eq!(parse_content_range_total("bytes 50-99/*"), None);
         assert_eq!(parse_content_range_total("malformed"), None);
         assert_eq!(parse_content_range_total(""), None);
+    }
+
+    #[test]
+    fn reported_bytes_done_uses_oversize_received_offset() {
+        // The cap check fires before the per-chunk progress callback,
+        // so on Oversize the last-observed `on_progress` offset is one
+        // chunk behind the offset that actually triggered the abort.
+        // The variant's `received` field carries the true offset; the
+        // failure event must surface that, not the stale callback value.
+        let err = DownloadError::Oversize {
+            received: 2_000,
+            cap: 1_000,
+        };
+        assert_eq!(reported_bytes_done_on_failure(512, &err), 2_000);
+    }
+
+    #[test]
+    fn reported_bytes_done_uses_last_progress_for_non_oversize() {
+        // Every other failure kind is reported AFTER `on_progress`
+        // (network errors arise inside `stream.next()`; I/O after
+        // `file.write_all`), so the last-observed offset is the offset
+        // we want to report.
+        assert_eq!(
+            reported_bytes_done_on_failure(12_345, &DownloadError::Timeout),
+            12_345,
+        );
+        assert_eq!(
+            reported_bytes_done_on_failure(7, &DownloadError::HttpStatus(404)),
+            7,
+        );
+        assert_eq!(
+            reported_bytes_done_on_failure(99, &DownloadError::Network("x".into())),
+            99,
+        );
+        assert_eq!(
+            reported_bytes_done_on_failure(42, &DownloadError::Io("x".into())),
+            42,
+        );
+        assert_eq!(
+            reported_bytes_done_on_failure(0, &DownloadError::NoUrl("k".into())),
+            0,
+        );
     }
 
     #[test]
@@ -680,7 +737,9 @@ mod tests {
         // Server returns 50 bytes of "B" with Content-Range 50-99/100.
         let tail = vec![b'B'; 50];
         let tail_for_handler = tail.clone();
-        let (addr, captured) = spawn_one_shot(move |req| {
+        // The handler asserts on the request itself; we don't need to
+        // re-inspect `captured` after the call returns.
+        let (addr, _captured) = spawn_one_shot(move |req| {
             assert!(
                 req.to_lowercase().contains("range: bytes=50-"),
                 "client must send Range header on resume; got: {req}"
@@ -699,7 +758,6 @@ mod tests {
         assert_eq!(on_disk.len(), 100);
         assert_eq!(&on_disk[..50], &[b'A'; 50][..]);
         assert_eq!(&on_disk[50..], &[b'B'; 50][..]);
-        drop(captured);
     }
 
     #[tokio::test]
@@ -771,7 +829,11 @@ mod tests {
 
         let addr = spawn_stalled_server().await;
         let client = reqwest::Client::builder()
-            .timeout(Duration::from_millis(150))
+            // 500 ms is comfortably under any real-network round-trip and
+            // well above the localhost connect-setup time even on a loaded
+            // CI runner; the original 150 ms occasionally flaked under
+            // contention.
+            .timeout(Duration::from_millis(500))
             .build()
             .unwrap();
         let url = format!("http://{addr}/asset.bin");
