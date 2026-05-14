@@ -113,10 +113,7 @@ pub async fn run(cfg: SpeechLoopConfig<'_>, dialogue: &mut DialogueManager) -> R
 /// an error so the binary fails fast if `--speech` is somehow set
 /// without the feature.
 #[cfg(not(feature = "speech"))]
-pub async fn run(
-    _cfg: SpeechLoopConfig<'_>,
-    _dialogue: &mut DialogueManager,
-) -> Result<()> {
+pub async fn run(_cfg: SpeechLoopConfig<'_>, _dialogue: &mut DialogueManager) -> Result<()> {
     Err(primer_core::error::PrimerError::Speech(
         "primer-cli was built without the `speech` feature".into(),
     ))

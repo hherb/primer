@@ -17,15 +17,25 @@ pub mod locale_defaults;
 pub mod observer;
 pub mod state_machine;
 
-#[cfg(all(feature = "silero", feature = "whisper", feature = "piper", feature = "cpal"))]
+#[cfg(all(
+    feature = "silero",
+    feature = "whisper",
+    feature = "piper",
+    feature = "cpal"
+))]
 pub mod backends;
 
-pub use locale_defaults::{voice_default_for, LocaleDefault, LOCALE_DEFAULTS};
+pub use locale_defaults::{LOCALE_DEFAULTS, LocaleDefault, voice_default_for};
 pub use observer::{ExitReason, LoopObserver, TurnCompletePayload, VoiceState};
 pub use state_machine::{
-    run_loop, run_loop_borrowed, DrainHook, LoopBackends, LoopConfig, LoopHandle, Responder,
-    VoiceLoopError, VAD_EVENT_CHANNEL_CAPACITY,
+    DrainHook, LoopBackends, LoopConfig, LoopHandle, Responder, VAD_EVENT_CHANNEL_CAPACITY,
+    VoiceLoopError, run_loop, run_loop_borrowed,
 };
 
-#[cfg(all(feature = "silero", feature = "whisper", feature = "piper", feature = "cpal"))]
-pub use backends::{build_local_backends, ChannelStt, LocalBackends};
+#[cfg(all(
+    feature = "silero",
+    feature = "whisper",
+    feature = "piper",
+    feature = "cpal"
+))]
+pub use backends::{ChannelStt, LocalBackends, build_local_backends};

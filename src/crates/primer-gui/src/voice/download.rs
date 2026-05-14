@@ -95,17 +95,15 @@ pub async fn download_one<R: tauri::Runtime>(
             };
             let _ = app.emit("primer://voice/download_progress", &evt);
         }
-        file.flush()
-            .await
-            .map_err(|e| format!("flush: {e}"))?;
+        file.flush().await.map_err(|e| format!("flush: {e}"))?;
         drop(file);
 
         // Atomic rename so a killed download leaves no half-files at
         // the destination path. (The `.partial` file is cleaned up by
         // the surrounding error path on failure.)
-        tokio::fs::rename(&partial, dest).await.map_err(|e| {
-            format!("rename {} -> {}: {e}", partial.display(), dest.display())
-        })?;
+        tokio::fs::rename(&partial, dest)
+            .await
+            .map_err(|e| format!("rename {} -> {}: {e}", partial.display(), dest.display()))?;
         Ok(())
     }
     .await;

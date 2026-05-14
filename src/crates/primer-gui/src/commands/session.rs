@@ -546,9 +546,7 @@ pub(crate) fn read_signals(dm: &DialogueManager) -> TurnSignals {
 ///
 /// Also called by `commands::voice::start_voice_mode` so that switching
 /// to voice mode cleanly drains any active text session first.
-pub(crate) async fn close_session_inner(
-    state: &tauri::State<'_, AppState>,
-) -> Result<(), String> {
+pub(crate) async fn close_session_inner(state: &tauri::State<'_, AppState>) -> Result<(), String> {
     let active = state.session.lock().await.take();
     if let Some(active) = active {
         let mut dm = active.dialogue_manager.lock().await;

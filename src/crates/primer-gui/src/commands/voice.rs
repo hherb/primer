@@ -103,12 +103,10 @@ pub async fn start_voice_mode(
 
     // 4. Resolve voice assets for the active locale.
     let locale = Locale::from_pack_id(&cfg.learner.locale).unwrap_or_default();
-    let assets =
-        crate::voice::assets::resolve_voice_assets(&state.home, &cfg.speech, &locale).map_err(
-            |missing| StartVoiceModeError::AssetMissing {
-                entries: missing.entries,
-            },
-        )?;
+    let assets = crate::voice::assets::resolve_voice_assets(&state.home, &cfg.speech, &locale)
+        .map_err(|missing| StartVoiceModeError::AssetMissing {
+            entries: missing.entries,
+        })?;
 
     // 5. Build the local backends (cpal mic + speaker, VAD, STT, TTS,
     //    audio thread, on_audio, drain hook). Lives in primer-speech;
@@ -377,21 +375,21 @@ impl VoiceStateCopy {
     fn for_locale(locale: &primer_core::i18n::Locale) -> Self {
         match locale {
             primer_core::i18n::Locale::German => Self {
-                listen_label:   "Höre zu…".into(),
-                listen_hint:    "lass dir Zeit".into(),
+                listen_label: "Höre zu…".into(),
+                listen_hint: "lass dir Zeit".into(),
                 thinking_label: "Denke nach…".into(),
-                thinking_hint:  "der Primer überlegt eine Antwort".into(),
-                speak_label:    "Spreche…".into(),
-                speak_hint:     "lass den Primer ausreden".into(),
+                thinking_hint: "der Primer überlegt eine Antwort".into(),
+                speak_label: "Spreche…".into(),
+                speak_hint: "lass den Primer ausreden".into(),
             },
             // English is the default for any unrecognised locale.
             _ => Self {
-                listen_label:   "Listening…".into(),
-                listen_hint:    "take your time".into(),
+                listen_label: "Listening…".into(),
+                listen_hint: "take your time".into(),
                 thinking_label: "Thinking…".into(),
-                thinking_hint:  "the Primer is working on a reply".into(),
-                speak_label:    "Speaking…".into(),
-                speak_hint:     "let the Primer finish".into(),
+                thinking_hint: "the Primer is working on a reply".into(),
+                speak_label: "Speaking…".into(),
+                speak_hint: "let the Primer finish".into(),
             },
         }
     }
@@ -402,8 +400,7 @@ pub async fn get_voice_state_copy(
     state: tauri::State<'_, AppState>,
 ) -> Result<VoiceStateCopy, String> {
     let cfg = state.config.lock().await.clone();
-    let locale =
-        primer_core::i18n::Locale::from_pack_id(&cfg.learner.locale).unwrap_or_default();
+    let locale = primer_core::i18n::Locale::from_pack_id(&cfg.learner.locale).unwrap_or_default();
     Ok(VoiceStateCopy::for_locale(&locale))
 }
 
