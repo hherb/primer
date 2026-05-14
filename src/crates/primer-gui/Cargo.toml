@@ -59,6 +59,11 @@ chrono.workspace = true
 
 [dev-dependencies]
 tempfile.workspace = true
+# Compile-time trait-bound assertions. Used to pin the IPC-direction
+# invariant that `MissingAsset` does NOT implement `Deserialize` — see
+# the static_assertions::assert_not_impl_any! call in
+# commands/voice.rs::tests.
+static_assertions = "1"
 
 [features]
 default = []

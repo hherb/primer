@@ -7,7 +7,7 @@
 //! All commands are gated by `#[cfg(feature = "speech")]`; the non-speech
 //! build provides stubs returning `Err(NotBuilt)` or `Ok(())`.
 
-use serde::{Deserialize, Serialize};
+use serde::Serialize;
 use tauri::AppHandle;
 
 use crate::state::AppState;
@@ -15,6 +15,18 @@ use crate::types::SessionInfo;
 
 #[cfg(feature = "speech")]
 use std::sync::Arc;
+
+/// Asset-kind identifiers. Shared source of truth between the
+/// emit site (`voice::assets::resolve_voice_assets`) and the filter site
+/// (`voice::assets::resolve_requested_kinds`). Lives here — not under
+/// `voice::assets` — because it describes the IPC shape itself and must
+/// be addressable in default (non-speech) builds too (the
+/// `MissingAsset` type and its serialisation test are always compiled).
+pub mod kind {
+    pub const PIPER_ONNX: &str = "piper_onnx";
+    pub const PIPER_CONFIG: &str = "piper_config";
+    pub const WHISPER_MODEL: &str = "whisper_model";
+}
 
 /// Structured error returned by `start_voice_mode`.
 ///
@@ -35,10 +47,14 @@ pub enum StartVoiceModeError {
 
 /// One missing asset entry in [`StartVoiceModeError::AssetMissing`].
 ///
-/// `Deserialize` is required because the frontend echoes the original
-/// asset list back into `download_voice_assets` after the user consents
-/// to the download.
-#[derive(Serialize, Deserialize, Clone, Debug)]
+/// **IPC direction is server→webview only.** `Deserialize` is deliberately
+/// NOT derived: the frontend echoes back only the `kind` strings, and the
+/// server re-resolves `path` + `suggested_url` server-side via
+/// [`crate::voice::assets::resolve_requested_kinds`]. This keeps the IPC
+/// trust boundary tight — a compromised webview cannot direct the host to
+/// write outside `~/.cache/primer/models/` or to fetch from a non-canonical
+/// URL because those fields never cross the trust boundary as input.
+#[derive(Serialize, Clone, Debug)]
 pub struct MissingAsset {
     /// Asset type identifier. Stable strings: `"piper_onnx"`,
     /// `"piper_config"`, `"whisper_model"`.
@@ -322,21 +338,36 @@ pub async fn cancel_voice_response(_state: tauri::State<'_, AppState>) -> Result
     Ok(())
 }
 
-/// Download every [`MissingAsset`] in `missing`. Emits
-/// `primer://voice/download_progress` events as each file streams in.
-/// Returns `Ok(())` on full success or `Err(String)` on the first
-/// failure; the consent modal renders the error inline.
+/// Download the voice assets matching the frontend-requested `kinds`.
 ///
-/// Idempotent at the resolver layer: if a file already exists on disk
-/// it would not appear in `missing` and is silently skipped here.
+/// **Hardened IPC:** the frontend echoes only the `kind` strings from the
+/// original `AssetMissing.entries`; the server re-resolves `path` +
+/// `suggested_url` via [`crate::voice::assets::resolve_requested_kinds`].
+/// A compromised webview therefore cannot direct the host to write outside
+/// `~/.cache/primer/models/` or fetch from a non-canonical URL — the path
+/// and URL never cross the trust boundary as input.
+///
+/// Emits `primer://voice/download_progress` events as each file streams
+/// in. Returns `Ok(())` on full success (or when nothing is missing —
+/// e.g. another process completed the download concurrently) or
+/// `Err(String)` on the first failure; the consent modal renders the
+/// error inline.
+///
+/// Unknown / already-present kinds are silently dropped (safe — there
+/// is nothing to download).
 #[cfg(feature = "speech")]
 #[tauri::command]
 pub async fn download_voice_assets(
-    _state: tauri::State<'_, AppState>,
+    state: tauri::State<'_, AppState>,
     app: AppHandle,
-    missing: Vec<MissingAsset>,
+    kinds: Vec<String>,
 ) -> Result<(), String> {
-    for asset in &missing {
+    use primer_core::i18n::Locale;
+    let cfg = state.config.lock().await.clone();
+    let locale = Locale::from_pack_id(&cfg.learner.locale).unwrap_or_default();
+    let to_download =
+        crate::voice::assets::resolve_requested_kinds(&state.home, &cfg.speech, &locale, &kinds);
+    for asset in &to_download {
         crate::voice::download::download_one(&app, asset).await?;
     }
     Ok(())
@@ -349,7 +380,7 @@ pub async fn download_voice_assets(
 pub async fn download_voice_assets(
     _state: tauri::State<'_, AppState>,
     _app: AppHandle,
-    _missing: Vec<MissingAsset>,
+    _kinds: Vec<String>,
 ) -> Result<(), String> {
     Err("voice mode not built in this binary".into())
 }
@@ -414,7 +445,7 @@ mod tests {
     #[test]
     fn missing_asset_serialises_with_snake_case_kind() {
         let m = MissingAsset {
-            kind: "whisper_model".into(),
+            kind: super::kind::WHISPER_MODEL.into(),
             path: "/tmp/foo.bin".into(),
             suggested_url: Some("https://example.com/foo.bin".into()),
             approx_size_mb: Some(470),
@@ -423,6 +454,17 @@ mod tests {
         assert_eq!(json["kind"], "whisper_model");
         assert_eq!(json["approx_size_mb"], 470);
     }
+
+    // Trust-boundary invariant: `MissingAsset` must NEVER implement
+    // `Deserialize`. The IPC direction is server→webview only — if a
+    // future contributor re-derives `Deserialize` (e.g. "just to
+    // round-trip through a frontend cache"), the trust-boundary
+    // hardening from #90 silently regresses. This compile-time check is
+    // the load-bearing structural guarantee; the doc comment on
+    // `MissingAsset` itself explains the rationale. If you genuinely
+    // need to round-trip the type back, define a separate echoed-
+    // identity DTO instead of re-deriving `Deserialize` here.
+    static_assertions::assert_not_impl_any!(MissingAsset: serde::de::DeserializeOwned);
 
     /// Pin the `StartVoiceModeError` tag format. The frontend branches on
     /// `err.kind` — a rename or format change here silently breaks the
