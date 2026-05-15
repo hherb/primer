@@ -236,14 +236,14 @@ impl DialogueManager {
         if let Some(ref store) = self.storage {
             let session_id = self.session.id;
             let turn_count = self.session.turns.len();
-            tracing::info!(
+            tracing::debug!(
                 target: "primer_pedagogy::persistence",
                 session_id = %session_id,
                 turn_count,
                 "close_session: saving final state"
             );
             match store.save_session(&self.session).await {
-                Ok(()) => tracing::info!(
+                Ok(()) => tracing::debug!(
                     target: "primer_pedagogy::persistence",
                     session_id = %session_id,
                     turn_count,
