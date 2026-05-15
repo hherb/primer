@@ -27,9 +27,9 @@ use primer_core::knowledge::KnowledgeBase;
 use primer_core::storage::{LearnerStore, SessionStore};
 use primer_engine::{
     BackendParams, IN_MEMORY, build_backend, build_classifier, build_comprehension,
-    build_extractor, build_fastembed_embedder, build_ollama_embedder, create_learner_with_id,
-    reconcile_persisted_learner, resolve_session_db_path, should_show_first_run_banner,
-    verify_resume_locale_match,
+    build_extractor, build_fastembed_embedder, build_ollama_embedder,
+    build_openai_compat_embedder, create_learner_with_id, reconcile_persisted_learner,
+    resolve_session_db_path, should_show_first_run_banner, verify_resume_locale_match,
 };
 use primer_extractor::{ConceptExtractor, ExtractorSettings};
 use primer_knowledge::SqliteKnowledgeBase;
@@ -209,6 +209,16 @@ struct Cli {
     /// `stub`/`fastembed` backends.
     #[arg(long, value_name = "URL")]
     embedder_ollama_url: Option<String>,
+
+    /// Override the URL for `--embedder-backend openai-compat`.
+    /// Defaults to `--openai-compat-url` if set, otherwise
+    /// `http://localhost:8000`.
+    #[arg(long, value_name = "URL")]
+    embedder_openai_compat_url: Option<String>,
+
+    /// Model name for `--embedder-backend openai-compat` (required).
+    #[arg(long, value_name = "NAME")]
+    embedder_openai_compat_model: Option<String>,
 
     /// Print pedagogical decisions (intent chosen, classifier output,
     /// extractor output, comprehension output) alongside the conversation,
@@ -749,9 +759,30 @@ async fn async_main() -> anyhow::Result<()> {
                 std::process::exit(1);
             }
         },
+        "openai-compat" => {
+            let url = cli
+                .embedder_openai_compat_url
+                .as_deref()
+                .or(Some(cli.openai_compat_url.as_str()));
+            match build_openai_compat_embedder(
+                url,
+                cli.embedder_openai_compat_model
+                    .as_deref()
+                    .or(cli.embedder_model.as_deref()),
+                cli.openai_compat_api_key.clone(),
+            )
+            .await
+            {
+                Ok(opt) => opt,
+                Err(e) => {
+                    eprintln!("Error: {e}");
+                    std::process::exit(1);
+                }
+            }
+        }
         other => {
             eprintln!(
-                "Error: unknown --embedder-backend {other:?}; expected one of none, stub, fastembed, ollama"
+                "Error: unknown --embedder-backend {other:?}; expected one of none, stub, fastembed, ollama, openai-compat"
             );
             std::process::exit(1);
         }

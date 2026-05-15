@@ -56,6 +56,9 @@ embedding = ["primer-embedding/fastembed", "primer-engine/embedding"]
 # recommended runtime backend.
 ollama-embedding = ["primer-embedding/ollama", "primer-engine/ollama-embedding"]
 
+# OpenAI-compatible embedder (oMLX, LM Studio, vLLM, Together, etc.).
+openai-compat-embedding = ["primer-embedding/openai-compat", "primer-engine/openai-compat-embedding"]
+
 # Voice REPL via --speech. Pulls every speech backend feature so the
 # state machine can compose VAD → STT → DialogueManager → TTS → cpal
 # without further conditional compilation in the binary.

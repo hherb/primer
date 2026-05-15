@@ -376,6 +376,45 @@ pub async fn build_ollama_embedder(
     )
 }
 
+#[cfg(feature = "openai-compat-embedding")]
+pub async fn build_openai_compat_embedder(
+    url: Option<&str>,
+    model: Option<&str>,
+    api_key: Option<String>,
+) -> std::result::Result<Option<Arc<dyn primer_core::embedder::Embedder>>, String> {
+    use primer_embedding::{DEFAULT_OPENAI_COMPAT_URL, OpenAiCompatEmbedder};
+    let url = url.unwrap_or(DEFAULT_OPENAI_COMPAT_URL);
+    let model = model.ok_or_else(|| {
+        "--embedder-openai-compat-model is required when --embedder-backend is openai-compat"
+            .to_string()
+    })?;
+    match OpenAiCompatEmbedder::new(url, model, api_key).await {
+        Ok(b) => {
+            eprintln!("Embedder: openai-compat {model} at {url}");
+            Ok(Some(Arc::new(b) as _))
+        }
+        Err(e) => {
+            eprintln!(
+                "openai-compat embedder init failed ({e}); falling back to BM25-only retrieval."
+            );
+            Ok(None)
+        }
+    }
+}
+
+#[cfg(not(feature = "openai-compat-embedding"))]
+pub async fn build_openai_compat_embedder(
+    _url: Option<&str>,
+    _model: Option<&str>,
+    _api_key: Option<String>,
+) -> std::result::Result<Option<Arc<dyn primer_core::embedder::Embedder>>, String> {
+    Err(
+        "openai-compat embedder requires the `openai-compat-embedding` cargo feature. \
+         Build with `cargo run --features primer-cli/openai-compat-embedding -- ...`"
+            .to_string(),
+    )
+}
+
 #[cfg(test)]
 mod classifier_construction_tests {
     use super::*;

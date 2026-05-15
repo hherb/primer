@@ -30,3 +30,6 @@ embedding = ["primer-embedding/fastembed"]
 
 # Lightweight Ollama-backed embedder.
 ollama-embedding = ["primer-embedding/ollama"]
+
+# OpenAI-compatible embedder (oMLX, LM Studio, vLLM, Together, etc.).
+openai-compat-embedding = ["primer-embedding/openai-compat"]
