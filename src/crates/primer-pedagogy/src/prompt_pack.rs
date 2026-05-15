@@ -140,11 +140,13 @@ pub struct VoiceStateLabels {
 /// `PRIMER_PROMPTS_DIR`.
 const EN_TOML: &str = include_str!("../prompts/en.toml");
 const DE_TOML: &str = include_str!("../prompts/de.toml");
+const HI_TOML: &str = include_str!("../prompts/hi.toml");
 
 fn embedded_pack(locale: Locale) -> &'static str {
     match locale {
         Locale::English => EN_TOML,
         Locale::German => DE_TOML,
+        Locale::Hindi => HI_TOML,
     }
 }
 
@@ -235,6 +237,7 @@ pub fn load_cached(locale: Locale) -> Result<Arc<dyn PromptPack>> {
     }
     static EN_PACK: OnceLock<Arc<dyn PromptPack>> = OnceLock::new();
     static DE_PACK: OnceLock<Arc<dyn PromptPack>> = OnceLock::new();
+    static HI_PACK: OnceLock<Arc<dyn PromptPack>> = OnceLock::new();
     let pack = match locale {
         Locale::English => {
             if let Some(p) = EN_PACK.get() {
@@ -251,6 +254,15 @@ pub fn load_cached(locale: Locale) -> Result<Arc<dyn PromptPack>> {
             } else {
                 let p = load(locale)?;
                 let _ = DE_PACK.set(Arc::clone(&p));
+                p
+            }
+        }
+        Locale::Hindi => {
+            if let Some(p) = HI_PACK.get() {
+                Arc::clone(p)
+            } else {
+                let p = load(locale)?;
+                let _ = HI_PACK.set(Arc::clone(&p));
                 p
             }
         }
@@ -1470,6 +1482,131 @@ speak_hint = "x"
         let pack = load(Locale::English).unwrap();
         let rendered = pack.break_suggestion_intro(0);
         assert!(rendered.contains('0'), "{rendered:?}");
+    }
+
+    fn hindi_pack() -> Arc<dyn PromptPack> {
+        load(Locale::Hindi).expect("hindi pack loads")
+    }
+
+    #[test]
+    fn hindi_pack_loads_in_preview_status() {
+        let pack = hindi_pack();
+        assert_eq!(pack.locale(), Locale::Hindi);
+        assert_eq!(pack.status(), PackStatus::Preview);
+    }
+
+    #[test]
+    fn hindi_pack_intent_lookups_all_populated() {
+        let pack = hindi_pack();
+        for &intent in ALL_INTENTS {
+            let s = pack.intent_instruction(intent);
+            assert!(!s.is_empty(), "missing instruction for {intent:?}");
+            assert!(
+                s.chars().any(|c| ('\u{0900}'..='\u{097F}').contains(&c)),
+                "no Devanagari in intent {intent:?}: {s}"
+            );
+        }
+    }
+
+    #[test]
+    fn hindi_pack_voice_state_section_complete() {
+        let pack = hindi_pack();
+        let labels = pack.voice_state_labels();
+        for (name, value) in [
+            ("listen_label", &labels.listen_label),
+            ("listen_hint", &labels.listen_hint),
+            ("thinking_label", &labels.thinking_label),
+            ("thinking_hint", &labels.thinking_hint),
+            ("speak_label", &labels.speak_label),
+            ("speak_hint", &labels.speak_hint),
+        ] {
+            assert!(!value.is_empty(), "voice_state.{name} is empty");
+            assert!(
+                value
+                    .chars()
+                    .any(|c| ('\u{0900}'..='\u{097F}').contains(&c)),
+                "no Devanagari in voice_state.{name}: {value}"
+            );
+        }
+    }
+
+    #[test]
+    fn hindi_pack_renders_base_with_name_and_age() {
+        let pack = hindi_pack();
+        let s = pack.render_base("Aarav", 8);
+        assert!(s.contains("Aarav"), "got: {s}");
+        assert!(s.contains("8"), "got: {s}");
+        assert!(
+            !s.contains("{name}") && !s.contains("{age}") && !s.contains("{language_guidance}"),
+            "all placeholders substituted: {s}"
+        );
+    }
+
+    #[test]
+    fn hindi_pack_knowledge_intro_substitutes_age() {
+        let pack = hindi_pack();
+        let s = pack.knowledge_intro(8);
+        assert!(s.contains("8"), "got: {s}");
+        assert!(!s.contains("{age}"));
+    }
+
+    #[test]
+    fn hindi_pack_break_suggestion_intro_substitutes_minutes() {
+        let pack = hindi_pack();
+        let s = pack.break_suggestion_intro(30);
+        assert!(s.contains("30"), "got: {s}");
+        assert!(!s.contains("{minutes}"));
+    }
+
+    /// Calling load_cached(Hindi) twice in the same process must emit
+    /// exactly one warn event (target = "primer::prompt_pack"). The Hindi
+    /// pack is the only Preview locale at the time of this test, so any
+    /// warn at that target during repeated loads is the gated event.
+    #[test]
+    fn hindi_load_cached_warns_exactly_once_per_locale() {
+        use std::sync::{Arc, Mutex};
+        use tracing::{Level, subscriber::with_default};
+
+        struct Counter(Arc<Mutex<usize>>);
+
+        impl<S> tracing_subscriber::Layer<S> for Counter
+        where
+            S: tracing::Subscriber,
+        {
+            fn on_event(
+                &self,
+                event: &tracing::Event<'_>,
+                _ctx: tracing_subscriber::layer::Context<'_, S>,
+            ) {
+                let m = event.metadata();
+                if m.level() == &Level::WARN && m.target() == "primer::prompt_pack" {
+                    *self.0.lock().unwrap() += 1;
+                }
+            }
+        }
+
+        if std::env::var_os("PRIMER_PROMPTS_DIR").is_some() {
+            return;
+        }
+
+        reset_preview_warn_once_for_test(Locale::Hindi);
+
+        let count = Arc::new(Mutex::new(0usize));
+        let layer = Counter(Arc::clone(&count));
+        use tracing_subscriber::prelude::*;
+        let subscriber = tracing_subscriber::registry().with(layer);
+
+        with_default(subscriber, || {
+            let _ = load_cached(Locale::Hindi).expect("first load_cached");
+            let _ = load_cached(Locale::Hindi).expect("second load_cached");
+            let _ = load_cached(Locale::Hindi).expect("third load_cached");
+        });
+
+        assert_eq!(
+            *count.lock().unwrap(),
+            1,
+            "expected exactly one warn for repeated load_cached(Hindi)"
+        );
     }
 
     /// Variant of `synthetic_pack_body` that lets callers inject a

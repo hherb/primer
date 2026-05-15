@@ -45,6 +45,12 @@ pub enum Locale {
     #[default]
     English,
     German,
+    /// Preview locale — present in the enum, accessible via `from_pack_id("hi")`,
+    /// but deliberately excluded from `Locale::ALL` until a native speaker
+    /// reviews the machine-translated prompt pack. CLI/GUI pickers iterate
+    /// `Locale::ALL`, so end users never reach this until that review lands.
+    /// See `docs/localisation/hi/README.md`.
+    Hindi,
 }
 
 impl Locale {
@@ -59,6 +65,7 @@ impl Locale {
         match self {
             Self::English => "English",
             Self::German => "German",
+            Self::Hindi => "Hindi",
         }
     }
 
@@ -69,6 +76,7 @@ impl Locale {
         match self {
             Self::English => "en-US",
             Self::German => "de-DE",
+            Self::Hindi => "hi-IN",
         }
     }
 
@@ -80,6 +88,7 @@ impl Locale {
         match self {
             Self::English => "en",
             Self::German => "de",
+            Self::Hindi => "hi",
         }
     }
 
@@ -90,6 +99,7 @@ impl Locale {
         match s {
             "en" => Some(Self::English),
             "de" => Some(Self::German),
+            "hi" => Some(Self::Hindi),
             _ => None,
         }
     }
@@ -101,6 +111,7 @@ pub fn render_inference_error(err: &InferenceError, locale: &Locale) -> String {
     match locale {
         Locale::English => render_english(err),
         Locale::German => render_german(err),
+        Locale::Hindi => render_hindi(err),
     }
 }
 
@@ -176,6 +187,40 @@ fn render_german(err: &InferenceError) -> String {
             format!("Modell '{model}' ist nicht verfügbar. Für Ollama führe `ollama pull {model}` aus.")
         }
         Other(_) => "Etwas Unerwartetes ist schiefgelaufen. Bitte versuche es erneut. (Details in den Logs.)".into(),
+    }
+}
+
+/// Hindi rendering. Uses the informal `तुम` register — consistent with
+/// the hi.toml prompt-pack precedent and the broader children's-product
+/// convention of avoiding the formal `आप`. Marked preview-quality: this
+/// content is machine-translated, awaiting native-speaker review.
+fn render_hindi(err: &InferenceError) -> String {
+    use InferenceError::*;
+    match err {
+        Auth => {
+            "प्रमाणीकरण विफल। कृपया अपने .env या ~/.primer_env में ANTHROPIC_API_KEY की जाँच करो।".into()
+        }
+        RateLimited {
+            retry_after: Some(d),
+        } => {
+            let secs = d.as_secs();
+            if secs == 1 {
+                "सेवा अभी व्यस्त है। कृपया 1 सेकंड बाद दोबारा कोशिश करो।".into()
+            } else {
+                format!("सेवा अभी व्यस्त है। कृपया {secs} सेकंड बाद दोबारा कोशिश करो।")
+            }
+        }
+        RateLimited { retry_after: None } => {
+            "सेवा अभी व्यस्त है। कृपया थोड़ी देर बाद दोबारा कोशिश करो।".into()
+        }
+        ServiceUnavailable => {
+            "सेवा अस्थायी रूप से उपलब्ध नहीं है। कृपया थोड़ी देर बाद दोबारा कोशिश करो।".into()
+        }
+        NetworkUnavailable => "सेवा तक पहुँचा नहीं जा सका। कृपया अपना नेटवर्क कनेक्शन जाँचो।".into(),
+        ModelNotFound { model } => {
+            format!("मॉडल '{model}' उपलब्ध नहीं है। Ollama के लिए `ollama pull {model}` चलाओ।")
+        }
+        Other(_) => "कुछ अप्रत्याशित हुआ। कृपया फिर से कोशिश करो। (विवरण लॉग में हैं।)".into(),
     }
 }
 
@@ -273,6 +318,79 @@ mod tests {
     fn locale_from_pack_id_unknown_returns_none() {
         assert_eq!(Locale::from_pack_id("zz"), None);
         assert_eq!(Locale::from_pack_id(""), None);
+    }
+
+    #[test]
+    fn locale_hindi_pack_id_and_bcp47() {
+        assert_eq!(Locale::Hindi.pack_id(), "hi");
+        assert_eq!(Locale::Hindi.bcp47(), "hi-IN");
+        assert_eq!(Locale::Hindi.name(), "Hindi");
+        assert_eq!(Locale::from_pack_id("hi"), Some(Locale::Hindi));
+    }
+
+    /// Hindi is gated as a preview locale: present in the enum, available
+    /// via --language hi for developers, but excluded from Locale::ALL so
+    /// CLI/GUI pickers don't surface it to end users. Flipping ALL is the
+    /// native-speaker-review PR.
+    #[test]
+    fn locale_all_excludes_hindi_until_translation_reviewed() {
+        assert_eq!(Locale::ALL.len(), 2);
+        assert!(!Locale::ALL.contains(&Locale::Hindi));
+    }
+
+    /// Each Hindi inference-error variant returns a non-empty string with
+    /// at least one Devanagari character. Guards against accidental
+    /// English fall-through.
+    #[test]
+    fn hindi_inference_errors_contain_devanagari() {
+        use std::time::Duration;
+        let cases: Vec<InferenceError> = vec![
+            InferenceError::Auth,
+            InferenceError::RateLimited { retry_after: None },
+            InferenceError::RateLimited {
+                retry_after: Some(Duration::from_secs(1)),
+            },
+            InferenceError::RateLimited {
+                retry_after: Some(Duration::from_secs(5)),
+            },
+            InferenceError::ServiceUnavailable,
+            InferenceError::NetworkUnavailable,
+            InferenceError::ModelNotFound {
+                model: "llama3.2".into(),
+            },
+            InferenceError::Other("RAW_DEV_STRING".into()),
+        ];
+        for err in cases {
+            let s = render_inference_error(&err, &Locale::Hindi);
+            assert!(!s.is_empty(), "empty render_hindi for {err:?}");
+            assert!(
+                s.chars().any(|c| ('\u{0900}'..='\u{097F}').contains(&c)),
+                "no Devanagari in render_hindi for {err:?}: {s}"
+            );
+        }
+    }
+
+    #[test]
+    fn hindi_model_not_found_includes_model_name() {
+        let s = render_inference_error(
+            &InferenceError::ModelNotFound {
+                model: "llama3.2".into(),
+            },
+            &Locale::Hindi,
+        );
+        assert!(s.contains("llama3.2"), "got: {s}");
+    }
+
+    #[test]
+    fn hindi_other_does_not_leak_inner_dev_string() {
+        let s = render_inference_error(
+            &InferenceError::Other("RAW_DEV_STRING_FOO".into()),
+            &Locale::Hindi,
+        );
+        assert!(
+            !s.contains("RAW_DEV_STRING_FOO"),
+            "Other's inner string must not reach users; got: {s}"
+        );
     }
 
     #[test]
