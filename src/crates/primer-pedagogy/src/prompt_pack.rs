@@ -161,10 +161,16 @@ fn preview_warned_gate() -> &'static Mutex<HashSet<Locale>> {
 /// names the locale's pack_id so `tail -f` of logs can tell apart
 /// concurrent preview locales.
 fn emit_preview_warning_if_first(locale: Locale) {
-    let mut seen = preview_warned_gate()
-        .lock()
-        .expect("preview gate mutex poisoned");
-    if seen.insert(locale) {
+    // Decide whether to emit inside a tight scope so the mutex guard is
+    // released before `tracing::warn!` runs (a synchronously-writing
+    // subscriber would otherwise hold the gate for the warn's duration).
+    // Poison fallback: treat as "first time" and warn anyway — the spec
+    // requires degrading gracefully, never silencing.
+    let is_first = match preview_warned_gate().lock() {
+        Ok(mut seen) => seen.insert(locale),
+        Err(_) => true,
+    };
+    if is_first {
         tracing::warn!(
             target: "primer::prompt_pack",
             locale = locale.pack_id(),
@@ -180,11 +186,6 @@ pub(super) fn reset_preview_warn_once_for_test(locale: Locale) {
         .lock()
         .expect("preview gate mutex poisoned");
     seen.remove(&locale);
-}
-
-#[cfg(test)]
-pub(super) fn emit_preview_warning_if_first_for_test(locale: Locale) {
-    emit_preview_warning_if_first(locale);
 }
 
 /// Load the prompt pack for `locale`, freshly parsing every call.
@@ -1166,9 +1167,7 @@ speak_hint = "x"
 
     #[test]
     fn pack_status_explicit_stable_loads_as_stable() {
-        let body = synthetic_pack_body_with_status(
-            "en", "English", "en-US", "[]", Some("stable"),
-        );
+        let body = synthetic_pack_body_with_status("en", "English", "en-US", "[]", Some("stable"));
         let pack = TomlPromptPack::from_toml_str(Locale::English, &body)
             .expect("explicit status=stable should load");
         assert_eq!(pack.status(), PackStatus::Stable);
@@ -1176,9 +1175,7 @@ speak_hint = "x"
 
     #[test]
     fn pack_status_explicit_preview_loads_as_preview() {
-        let body = synthetic_pack_body_with_status(
-            "en", "English", "en-US", "[]", Some("preview"),
-        );
+        let body = synthetic_pack_body_with_status("en", "English", "en-US", "[]", Some("preview"));
         let pack = TomlPromptPack::from_toml_str(Locale::English, &body)
             .expect("explicit status=preview should load");
         assert_eq!(pack.status(), PackStatus::Preview);
@@ -1186,16 +1183,17 @@ speak_hint = "x"
 
     #[test]
     fn pack_status_rejects_unknown_value() {
-        let body = synthetic_pack_body_with_status(
-            "en", "English", "en-US", "[]", Some("wip"),
-        );
+        let body = synthetic_pack_body_with_status("en", "English", "en-US", "[]", Some("wip"));
         let err = TomlPromptPack::from_toml_str(Locale::English, &body)
             .err()
             .expect("expected unknown-status error");
         let s = format!("{err}");
         assert!(s.contains("status"), "got: {s}");
         assert!(s.contains("wip"), "got: {s}");
-        assert!(s.contains("allowed"), "error should name the allow-list: {s}");
+        assert!(
+            s.contains("allowed"),
+            "error should name the allow-list: {s}"
+        );
         assert!(s.contains("stable"), "error should name valid values: {s}");
         assert!(s.contains("preview"), "error should name valid values: {s}");
     }
@@ -1205,10 +1203,9 @@ speak_hint = "x"
         // Use a captured-tracing subscriber to count events. Reset the
         // per-locale warn-once gate via the test-only helper so this test
         // is order-independent.
-        use tracing::{subscriber::with_default, Level};
         use std::sync::{Arc, Mutex};
+        use tracing::{Level, subscriber::with_default};
 
-        #[derive(Default)]
         struct Counter(Arc<Mutex<usize>>);
 
         impl<S> tracing_subscriber::Layer<S> for Counter
@@ -1247,12 +1244,12 @@ speak_hint = "x"
             // We need a Preview English pack to exercise the warn path,
             // but the embedded EN pack is Stable. Easiest path: bypass
             // the cache via from_toml_str on a synthetic preview body
-            // and emit the warning manually through the helper we'll
-            // expose for this test.
-            // -- This test asserts the helper's idempotence.
-            emit_preview_warning_if_first_for_test(Locale::English);
-            emit_preview_warning_if_first_for_test(Locale::English);
-            emit_preview_warning_if_first_for_test(Locale::English);
+            // and emit the warning manually — the test is a child module
+            // so it can call the module-private function directly.
+            // -- This test asserts the function's idempotence.
+            emit_preview_warning_if_first(Locale::English);
+            emit_preview_warning_if_first(Locale::English);
+            emit_preview_warning_if_first(Locale::English);
         });
 
         assert_eq!(

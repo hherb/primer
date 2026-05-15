@@ -22,4 +22,5 @@ thiserror.workspace = true
 
 [dev-dependencies]
 primer-storage.workspace = true
+# Not .workspace = true: workspace pins only env-filter; we need registry here.
 tracing-subscriber = { version = "0.3", features = ["registry"] }
