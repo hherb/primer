@@ -239,8 +239,22 @@ impl DialogueManager {
     /// directly. Failures `tracing::warn!` and never block.
     async fn persist_turn(&mut self) {
         if let Some(ref store) = self.storage {
-            if let Err(e) = store.save_session(&self.session).await {
-                tracing::warn!("session save failed: {e}");
+            let session_id = self.session.id;
+            let turn_count = self.session.turns.len();
+            tracing::info!(
+                target: "primer_pedagogy::persistence",
+                session_id = %session_id,
+                turn_count,
+                "persist_turn: saving session"
+            );
+            match store.save_session(&self.session).await {
+                Ok(()) => tracing::info!(
+                    target: "primer_pedagogy::persistence",
+                    session_id = %session_id,
+                    turn_count,
+                    "persist_turn: save ok"
+                ),
+                Err(e) => tracing::warn!("session save failed: {e}"),
             }
         }
         if self.learner_dirty {
