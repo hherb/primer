@@ -236,17 +236,6 @@ mod tests {
     }
 
     #[test]
-    fn locale_all_contains_only_production_ready_locales() {
-        // Hindi is in the enum (preview), but deliberately excluded from
-        // `Locale::ALL` so CLI/GUI pickers don't surface it. Flipping this
-        // assertion is part of the native-speaker-review PR that promotes
-        // Hindi from preview to stable.
-        assert_eq!(Locale::ALL.len(), 2);
-        assert!(Locale::ALL.contains(&Locale::English));
-        assert!(Locale::ALL.contains(&Locale::German));
-    }
-
-    #[test]
     fn locale_german_pack_id_and_bcp47() {
         assert_eq!(Locale::German.pack_id(), "de");
         assert_eq!(Locale::German.bcp47(), "de-DE");
@@ -335,10 +324,14 @@ mod tests {
     /// Hindi is gated as a preview locale: present in the enum, available
     /// via --language hi for developers, but excluded from Locale::ALL so
     /// CLI/GUI pickers don't surface it to end users. Flipping ALL is the
-    /// native-speaker-review PR.
+    /// native-speaker-review PR. Pins both the length (no accidental
+    /// addition) and Hindi absence (the specific gate) so this is the
+    /// single source of truth for `ALL`'s composition.
     #[test]
     fn locale_all_excludes_hindi_until_translation_reviewed() {
         assert_eq!(Locale::ALL.len(), 2);
+        assert!(Locale::ALL.contains(&Locale::English));
+        assert!(Locale::ALL.contains(&Locale::German));
         assert!(!Locale::ALL.contains(&Locale::Hindi));
     }
 

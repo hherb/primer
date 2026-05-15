@@ -26,6 +26,19 @@ pub struct OpenAiCompatEmbedder {
 }
 
 impl OpenAiCompatEmbedder {
+    /// Build a new embedder against `base_url` using `model_name`.
+    ///
+    /// **Performs one HTTP round-trip at construction** to probe the
+    /// model's output dim. With the 30s client timeout, a slow remote
+    /// provider can stall startup by up to half a minute. This matches
+    /// the `OllamaEmbedder` behaviour and is acceptable because: the
+    /// CLI surface advertises the embedder construction explicitly
+    /// (`eprintln!("Embedder: openai-compat …")`), and the dim is
+    /// required up-front by the rest of the pipeline (knowledge-base
+    /// schema records it; session storage validates against it). A
+    /// lazy-dim variant would let cold starts unblock but at the cost
+    /// of pushing the failure point past first-use — defer until
+    /// startup latency is profiled.
     pub async fn new(base_url: &str, model_name: &str, api_key: Option<String>) -> Result<Self> {
         let client = reqwest::Client::builder()
             .timeout(Duration::from_secs(30))
@@ -81,18 +94,7 @@ impl Embedder for OpenAiCompatEmbedder {
             texts,
         )
         .await?;
-        for (i, v) in vecs.iter().enumerate() {
-            if v.len() != self.dim {
-                return Err(PrimerError::Inference(
-                    format!(
-                        "openai-compat returned vector[{i}] of len {} but probe declared dim {}",
-                        v.len(),
-                        self.dim
-                    )
-                    .into(),
-                ));
-            }
-        }
+        validate_embed_response(&vecs, texts.len(), self.dim)?;
         Ok(vecs)
     }
 
@@ -127,9 +129,58 @@ struct EmbeddingData {
 }
 
 // ---------------------------------------------------------------------------
+// Response validation
+// ---------------------------------------------------------------------------
+
+/// Verify a batch response is well-shaped: vector count matches the input
+/// batch size, and every vector has the dim the probe established.
+///
+/// A server returning fewer (or more) vectors than inputs would silently
+/// mis-align with the caller's positional persistence (`save_turn_embedding`
+/// writes one vector per source text by position), so a mismatch must
+/// hard-error rather than degrade.
+fn validate_embed_response(
+    vecs: &[Vec<f32>],
+    expected_count: usize,
+    expected_dim: usize,
+) -> Result<()> {
+    if vecs.len() != expected_count {
+        return Err(PrimerError::Inference(
+            format!(
+                "openai-compat returned {} vectors for {} inputs",
+                vecs.len(),
+                expected_count
+            )
+            .into(),
+        ));
+    }
+    for (i, v) in vecs.iter().enumerate() {
+        if v.len() != expected_dim {
+            return Err(PrimerError::Inference(
+                format!(
+                    "openai-compat returned vector[{i}] of len {} but probe declared dim {expected_dim}",
+                    v.len(),
+                )
+                .into(),
+            ));
+        }
+    }
+    Ok(())
+}
+
+// ---------------------------------------------------------------------------
 // Shared batch helper
 // ---------------------------------------------------------------------------
 
+/// Send one batch to `/v1/embeddings` and return the vectors in input order.
+///
+/// **No retry on purpose:** embedding is fire-and-forget background work
+/// after each turn. A failure surfaces as one turn without a vector,
+/// which degrades long-term retrieval for that single turn to BM25-only;
+/// the conversation flow is unaffected. Adding retry would slow down
+/// detection of a misconfigured server without buying anything for the
+/// happy path. Compare to the inference backend, which retries because
+/// a failure there blocks the child's turn entirely.
 async fn embed_batch(
     client: &reqwest::Client,
     base_url: &str,
@@ -197,6 +248,48 @@ mod tests {
         assert_eq!(resp.data.len(), 2);
         assert_eq!(resp.data[0].index, 1);
         assert_eq!(resp.data[1].index, 0);
+    }
+
+    #[test]
+    fn validate_embed_response_accepts_well_shaped_batch() {
+        let vecs = vec![vec![0.1, 0.2, 0.3], vec![0.4, 0.5, 0.6]];
+        assert!(validate_embed_response(&vecs, 2, 3).is_ok());
+    }
+
+    #[test]
+    fn validate_embed_response_rejects_short_batch() {
+        // Server returned 1 vector for a 3-text request — silent mis-alignment
+        // is the bug we're guarding against.
+        let vecs = vec![vec![0.1, 0.2, 0.3]];
+        let err = validate_embed_response(&vecs, 3, 3)
+            .err()
+            .expect("must err");
+        let s = format!("{err}");
+        assert!(s.contains("1 vectors"), "got: {s}");
+        assert!(s.contains("3 inputs"), "got: {s}");
+    }
+
+    #[test]
+    fn validate_embed_response_rejects_long_batch() {
+        let vecs = vec![vec![0.1; 3], vec![0.2; 3], vec![0.3; 3]];
+        let err = validate_embed_response(&vecs, 2, 3)
+            .err()
+            .expect("must err");
+        let s = format!("{err}");
+        assert!(s.contains("3 vectors"), "got: {s}");
+        assert!(s.contains("2 inputs"), "got: {s}");
+    }
+
+    #[test]
+    fn validate_embed_response_rejects_wrong_dim() {
+        let vecs = vec![vec![0.1, 0.2, 0.3], vec![0.4, 0.5]];
+        let err = validate_embed_response(&vecs, 2, 3)
+            .err()
+            .expect("must err");
+        let s = format!("{err}");
+        assert!(s.contains("vector[1]"), "got: {s}");
+        assert!(s.contains("len 2"), "got: {s}");
+        assert!(s.contains("dim 3"), "got: {s}");
     }
 
     #[test]

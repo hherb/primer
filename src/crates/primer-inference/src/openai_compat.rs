@@ -111,6 +111,14 @@ fn parse_openai_compat_chunk(data: &str) -> Result<Option<TokenChunk>> {
 
 /// Translate a non-success HTTP response from an OpenAI-compatible
 /// server into an `InferenceError`. Pure — no I/O, no `Self`.
+///
+/// 404 is classified as `ModelNotFound` only when the body matches one
+/// of the canonical model-not-found phrasings emitted by the major
+/// OpenAI-compat servers we target (OpenAI, oMLX, LM Studio, vLLM,
+/// llama.cpp `--server`, Together, Groq, OpenRouter). A 404 with a
+/// generic body (e.g. a misconfigured reverse proxy returning a plain
+/// "Not Found") falls through to `Other` so the user sees a real error
+/// rather than a misleading `ollama pull <model>` suggestion.
 pub(crate) fn classify_openai_compat_status(
     status: reqwest::StatusCode,
     headers: &reqwest::header::HeaderMap,
@@ -124,17 +132,27 @@ pub(crate) fn classify_openai_compat_status(
         429 => RateLimited {
             retry_after: parse_retry_after(headers),
         },
-        404 if body_lower.contains("model") && body_lower.contains("does not exist") => {
-            ModelNotFound {
-                model: requested_model.to_string(),
-            }
-        }
-        404 if body_lower.contains("model") && body_lower.contains("not") => ModelNotFound {
+        404 if is_model_not_found_body(&body_lower) => ModelNotFound {
             model: requested_model.to_string(),
         },
         500..=599 => ServiceUnavailable,
         _ => Other(format!("OpenAI-compat returned {status}: {body}")),
     }
+}
+
+/// Whether a 404 response body looks like a model-not-found error from
+/// an OpenAI-compatible server. Match against a closed list of canonical
+/// phrasings instead of the previous loose `contains("model") &&
+/// contains("not")` rule, which would match generic 404 bodies like
+/// "did you mean to add the model_not_found handler?".
+fn is_model_not_found_body(body_lower: &str) -> bool {
+    const PATTERNS: &[&str] = &[
+        "does not exist",  // OpenAI canonical
+        "model not found", // vLLM, llama.cpp, Together
+        "unknown model",   // Groq, some LM Studio versions
+        "no such model",   // oMLX, OpenRouter
+    ];
+    PATTERNS.iter().any(|p| body_lower.contains(p))
 }
 
 // ---------------------------------------------------------------------------
@@ -508,6 +526,60 @@ mod tests {
                 "m",
             );
             assert!(matches!(e, InferenceError::Other(_)));
+        }
+
+        /// A 404 whose body merely mentions both "model" and "not" but
+        /// not in a model-not-found context must NOT be classified as
+        /// `ModelNotFound`. Guards against the old loose `contains("model")
+        /// && contains("not")` rule.
+        #[test]
+        fn classifies_404_with_unrelated_model_and_not_keywords_as_other() {
+            let e = classify_openai_compat_status(
+                StatusCode::NOT_FOUND,
+                &empty_headers(),
+                "did you mean to add the model_not_found handler?",
+                "m",
+            );
+            assert!(
+                matches!(e, InferenceError::Other(_)),
+                "expected Other, got {e:?}"
+            );
+        }
+
+        #[test]
+        fn classifies_404_model_not_found_vllm_phrasing() {
+            let e = classify_openai_compat_status(
+                StatusCode::NOT_FOUND,
+                &empty_headers(),
+                r#"{"error":"model not found: foo"}"#,
+                "foo",
+            );
+            match e {
+                InferenceError::ModelNotFound { model } => assert_eq!(model, "foo"),
+                other => panic!("expected ModelNotFound, got {other:?}"),
+            }
+        }
+
+        #[test]
+        fn classifies_404_model_not_found_groq_phrasing() {
+            let e = classify_openai_compat_status(
+                StatusCode::NOT_FOUND,
+                &empty_headers(),
+                r#"{"error":{"message":"unknown model foo"}}"#,
+                "foo",
+            );
+            assert!(matches!(e, InferenceError::ModelNotFound { .. }));
+        }
+
+        #[test]
+        fn classifies_404_model_not_found_omlx_phrasing() {
+            let e = classify_openai_compat_status(
+                StatusCode::NOT_FOUND,
+                &empty_headers(),
+                "no such model: foo",
+                "foo",
+            );
+            assert!(matches!(e, InferenceError::ModelNotFound { .. }));
         }
 
         #[test]
