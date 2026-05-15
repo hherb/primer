@@ -26,11 +26,7 @@ pub struct OpenAiCompatEmbedder {
 }
 
 impl OpenAiCompatEmbedder {
-    pub async fn new(
-        base_url: &str,
-        model_name: &str,
-        api_key: Option<String>,
-    ) -> Result<Self> {
+    pub async fn new(base_url: &str, model_name: &str, api_key: Option<String>) -> Result<Self> {
         let client = reqwest::Client::builder()
             .timeout(Duration::from_secs(30))
             .build()
@@ -40,14 +36,18 @@ impl OpenAiCompatEmbedder {
                 )
             })?;
 
-        let probe_vec =
-            embed_batch(&client, base_url, model_name, api_key.as_deref(), &["primer"]).await?;
+        let probe_vec = embed_batch(
+            &client,
+            base_url,
+            model_name,
+            api_key.as_deref(),
+            &["primer"],
+        )
+        .await?;
         let dim = probe_vec
             .first()
             .ok_or_else(|| {
-                PrimerError::Inference(
-                    "openai-compat embedder probe returned no vectors".into(),
-                )
+                PrimerError::Inference("openai-compat embedder probe returned no vectors".into())
             })?
             .len();
 
@@ -158,9 +158,7 @@ async fn embed_batch(
         ));
     }
     let body: EmbeddingResponse = resp.json().await.map_err(|e| {
-        PrimerError::Inference(
-            format!("openai-compat embedding response parse error: {e}").into(),
-        )
+        PrimerError::Inference(format!("openai-compat embedding response parse error: {e}").into())
     })?;
 
     let mut sorted = body.data;

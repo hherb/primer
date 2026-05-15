@@ -89,9 +89,7 @@ fn parse_openai_compat_chunk(data: &str) -> Result<Option<TokenChunk>> {
         }));
     }
     let chunk: ChatCompletionChunk = serde_json::from_str(data).map_err(|e| {
-        PrimerError::Inference(
-            format!("OpenAI-compat SSE parse error: {e}; data: {data}").into(),
-        )
+        PrimerError::Inference(format!("OpenAI-compat SSE parse error: {e}; data: {data}").into())
     })?;
     let choice = match chunk.choices.first() {
         Some(c) => c,
@@ -385,8 +383,7 @@ mod tests {
 
     #[test]
     fn parse_chunk_extracts_content() {
-        let data =
-            r#"{"id":"x","choices":[{"delta":{"content":"Hi"},"finish_reason":null}]}"#;
+        let data = r#"{"id":"x","choices":[{"delta":{"content":"Hi"},"finish_reason":null}]}"#;
         let chunk = parse_openai_compat_chunk(data).unwrap().unwrap();
         assert_eq!(chunk.text, "Hi");
         assert!(!chunk.done);
@@ -394,8 +391,7 @@ mod tests {
 
     #[test]
     fn parse_chunk_done_on_finish_reason() {
-        let data =
-            r#"{"id":"x","choices":[{"delta":{"content":""},"finish_reason":"stop"}]}"#;
+        let data = r#"{"id":"x","choices":[{"delta":{"content":""},"finish_reason":"stop"}]}"#;
         let chunk = parse_openai_compat_chunk(data).unwrap().unwrap();
         assert!(chunk.done);
     }
@@ -409,8 +405,7 @@ mod tests {
 
     #[test]
     fn parse_chunk_skips_role_only_delta() {
-        let data =
-            r#"{"id":"x","choices":[{"delta":{"role":"assistant"},"finish_reason":null}]}"#;
+        let data = r#"{"id":"x","choices":[{"delta":{"role":"assistant"},"finish_reason":null}]}"#;
         assert!(parse_openai_compat_chunk(data).unwrap().is_none());
     }
 
@@ -429,8 +424,8 @@ mod tests {
 
     mod classify_tests {
         use primer_core::error::InferenceError;
-        use reqwest::header::{HeaderMap, HeaderValue};
         use reqwest::StatusCode;
+        use reqwest::header::{HeaderMap, HeaderValue};
         use std::time::Duration;
 
         use super::super::classify_openai_compat_status;
@@ -447,23 +442,14 @@ mod tests {
 
         #[test]
         fn classifies_401_as_auth() {
-            let e = classify_openai_compat_status(
-                StatusCode::UNAUTHORIZED,
-                &empty_headers(),
-                "",
-                "m",
-            );
+            let e =
+                classify_openai_compat_status(StatusCode::UNAUTHORIZED, &empty_headers(), "", "m");
             assert!(matches!(e, InferenceError::Auth));
         }
 
         #[test]
         fn classifies_403_as_auth() {
-            let e = classify_openai_compat_status(
-                StatusCode::FORBIDDEN,
-                &empty_headers(),
-                "",
-                "m",
-            );
+            let e = classify_openai_compat_status(StatusCode::FORBIDDEN, &empty_headers(), "", "m");
             assert!(matches!(e, InferenceError::Auth));
         }
 

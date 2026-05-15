@@ -27,9 +27,9 @@ use primer_core::knowledge::KnowledgeBase;
 use primer_core::storage::{LearnerStore, SessionStore};
 use primer_engine::{
     BackendParams, IN_MEMORY, build_backend, build_classifier, build_comprehension,
-    build_extractor, build_fastembed_embedder, build_ollama_embedder,
-    build_openai_compat_embedder, create_learner_with_id, reconcile_persisted_learner,
-    resolve_session_db_path, should_show_first_run_banner, verify_resume_locale_match,
+    build_extractor, build_fastembed_embedder, build_ollama_embedder, build_openai_compat_embedder,
+    create_learner_with_id, reconcile_persisted_learner, resolve_session_db_path,
+    should_show_first_run_banner, verify_resume_locale_match,
 };
 use primer_extractor::{ConceptExtractor, ExtractorSettings};
 use primer_knowledge::SqliteKnowledgeBase;
@@ -54,7 +54,11 @@ struct Cli {
 
     /// OpenAI-compatible server URL (used when --backend openai-compat).
     /// Works with oMLX, LM Studio, vLLM, llama.cpp --server, etc.
-    #[arg(long, default_value = "http://localhost:8000", env = "OPENAI_COMPAT_URL")]
+    #[arg(
+        long,
+        default_value = "http://localhost:8000",
+        env = "OPENAI_COMPAT_URL"
+    )]
     openai_compat_url: String,
 
     /// API key for OpenAI-compatible servers that require auth
