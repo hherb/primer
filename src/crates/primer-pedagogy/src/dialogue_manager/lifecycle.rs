@@ -234,14 +234,28 @@ impl DialogueManager {
 
         self.session.ended_at = Some(Utc::now());
         if let Some(ref store) = self.storage {
+            let session_id = self.session.id;
+            let turn_count = self.session.turns.len();
             tracing::info!(
                 target: "primer_pedagogy::persistence",
-                session_id = %self.session.id,
-                turn_count = self.session.turns.len(),
+                session_id = %session_id,
+                turn_count,
                 "close_session: saving final state"
             );
-            if let Err(e) = store.save_session(&self.session).await {
-                tracing::warn!("session save failed during close: {e}");
+            match store.save_session(&self.session).await {
+                Ok(()) => tracing::info!(
+                    target: "primer_pedagogy::persistence",
+                    session_id = %session_id,
+                    turn_count,
+                    "close_session: save ok"
+                ),
+                Err(e) => tracing::warn!(
+                    target: "primer_pedagogy::persistence",
+                    session_id = %session_id,
+                    turn_count,
+                    error = %e,
+                    "close_session: save failed"
+                ),
             }
         }
         if let Some(ref ls) = self.learner_store {

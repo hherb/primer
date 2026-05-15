@@ -254,7 +254,13 @@ impl DialogueManager {
                     turn_count,
                     "persist_turn: save ok"
                 ),
-                Err(e) => tracing::warn!("session save failed: {e}"),
+                Err(e) => tracing::warn!(
+                    target: "primer_pedagogy::persistence",
+                    session_id = %session_id,
+                    turn_count,
+                    error = %e,
+                    "persist_turn: save failed"
+                ),
             }
         }
         if self.learner_dirty {
