@@ -17,6 +17,7 @@ Hands-on observations from running the Primer's German locale (Klexikon-backed k
 | `granite4.1:8b-q8_0` | Consistent German | Adult vocabulary | — | Not recommended — language level too high for children |
 | `gpt-oss:20b` | Poor; drifts back to English | — | — | Not recommended — fails the primary locale requirement |
 | `qwen3.6:35b-a3b-q8_0` | Sticks very well to German | Mostly child-appropriate | — | Usable, but a bit repetitive |
+| `gemma4:e4b` | Consistent German | Child appropriate | fast | Not reasoning as well as Mistral, but good choice for constrained hardware |
 
 ## How to add an entry
 
