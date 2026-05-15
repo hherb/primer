@@ -34,6 +34,36 @@ use primer_core::i18n::Locale;
 use primer_core::learner::EngagementState;
 use serde::Deserialize;
 
+/// Lifecycle status of a prompt pack. Set explicitly in `[meta] status`
+/// or implicitly absent (which means `Stable`). The loader emits a
+/// one-time warning per `(process, locale)` pair on `Preview` packs to
+/// flag that the strings have not been through native-speaker review.
+///
+/// Allow-list: only `"stable"` and `"preview"` are accepted as TOML
+/// values. Adding a new variant is a deliberate, two-place change:
+/// the enum and the validator's `from_toml_str` arm.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PackStatus {
+    Stable,
+    Preview,
+}
+
+impl PackStatus {
+    /// Parse the optional `[meta] status` value into the enum.
+    /// Absence (`None`) and `"stable"` both map to `Stable`; only
+    /// `"preview"` maps to `Preview`. Any other string is a load-time
+    /// error so the validator catches typos.
+    fn from_meta(raw: Option<&str>) -> Result<Self> {
+        match raw {
+            None | Some("stable") => Ok(Self::Stable),
+            Some("preview") => Ok(Self::Preview),
+            Some(other) => Err(PrimerError::Config(format!(
+                "prompt pack: unknown [meta] status {other:?}; allowed: \"stable\", \"preview\""
+            ))),
+        }
+    }
+}
+
 /// The trait the prompt builder consumes. All methods are infallible
 /// reads against an already-validated pack.
 pub trait PromptPack: Send + Sync {
@@ -76,6 +106,11 @@ pub trait PromptPack: Send + Sync {
     /// pack-shape error caught at load time, so callers can render the
     /// returned references unconditionally.
     fn voice_state_labels(&self) -> &VoiceStateLabels;
+    /// Lifecycle status of this pack. `Stable` for packs reviewed by a
+    /// native speaker (the default when `[meta] status` is absent).
+    /// `Preview` for machine-translated content awaiting review — the
+    /// loader emits a one-time warning when these load.
+    fn status(&self) -> PackStatus;
 }
 
 /// Display strings for the voice-mode UI states.
@@ -197,6 +232,7 @@ pub struct TomlPromptPack {
     primer_label: String,
     factual_prefixes: Vec<String>,
     voice_state_labels: VoiceStateLabels,
+    status: PackStatus,
 }
 
 impl TomlPromptPack {
@@ -236,6 +272,8 @@ impl TomlPromptPack {
                 locale.bcp47()
             )));
         }
+
+        let status = PackStatus::from_meta(raw.meta.status.as_deref())?;
 
         // Per-field placeholder allowlists. A typo here returns Err
         // with the field name and offending token so a broken pack
@@ -370,6 +408,7 @@ impl TomlPromptPack {
                 speak_label: raw.voice_state.speak_label,
                 speak_hint: raw.voice_state.speak_hint,
             },
+            status,
         })
     }
 
@@ -445,6 +484,9 @@ impl PromptPack for TomlPromptPack {
     fn voice_state_labels(&self) -> &VoiceStateLabels {
         &self.voice_state_labels
     }
+    fn status(&self) -> PackStatus {
+        self.status
+    }
 }
 
 // ─── Raw TOML deserialisation types ─────────────────────────────────────────
@@ -471,6 +513,8 @@ struct MetaSection {
     language: String,
     language_name: String,
     bcp47: String,
+    #[serde(default)]
+    status: Option<String>,
 }
 
 #[derive(Deserialize)]
@@ -1098,6 +1142,51 @@ speak_hint = "x"
         )
     }
 
+    #[test]
+    fn pack_status_defaults_to_stable_when_field_absent_for_english() {
+        let pack = english_pack();
+        assert_eq!(pack.status(), PackStatus::Stable);
+    }
+
+    #[test]
+    fn pack_status_defaults_to_stable_when_field_absent_for_german() {
+        let pack = german_pack();
+        assert_eq!(pack.status(), PackStatus::Stable);
+    }
+
+    #[test]
+    fn pack_status_explicit_stable_loads_as_stable() {
+        let body = synthetic_pack_body_with_status(
+            "en", "English", "en-US", "[]", Some("stable"),
+        );
+        let pack = TomlPromptPack::from_toml_str(Locale::English, &body)
+            .expect("explicit status=stable should load");
+        assert_eq!(pack.status(), PackStatus::Stable);
+    }
+
+    #[test]
+    fn pack_status_explicit_preview_loads_as_preview() {
+        let body = synthetic_pack_body_with_status(
+            "en", "English", "en-US", "[]", Some("preview"),
+        );
+        let pack = TomlPromptPack::from_toml_str(Locale::English, &body)
+            .expect("explicit status=preview should load");
+        assert_eq!(pack.status(), PackStatus::Preview);
+    }
+
+    #[test]
+    fn pack_status_rejects_unknown_value() {
+        let body = synthetic_pack_body_with_status(
+            "en", "English", "en-US", "[]", Some("wip"),
+        );
+        let err = TomlPromptPack::from_toml_str(Locale::English, &body)
+            .err()
+            .expect("expected unknown-status error");
+        let s = format!("{err}");
+        assert!(s.contains("status"), "got: {s}");
+        assert!(s.contains("wip"), "got: {s}");
+    }
+
     /// The English pack's `[meta]` block must agree with `Locale::English`
     /// across all three projections — language id, display name, and
     /// BCP-47 tag. This is what the meta-consistency check inside
@@ -1309,5 +1398,68 @@ speak_hint = "x"
         let pack = load(Locale::English).unwrap();
         let rendered = pack.break_suggestion_intro(0);
         assert!(rendered.contains('0'), "{rendered:?}");
+    }
+
+    /// Variant of `synthetic_pack_body` that lets callers inject a
+    /// `[meta] status = "..."` line. `None` omits the line entirely
+    /// (verifies the "absent => Stable" default).
+    fn synthetic_pack_body_with_status(
+        meta_language: &str,
+        meta_language_name: &str,
+        meta_bcp47: &str,
+        factual_prefixes_array: &str,
+        status: Option<&str>,
+    ) -> String {
+        let status_line = match status {
+            Some(s) => format!("status = \"{s}\"\n"),
+            None => String::new(),
+        };
+        format!(
+            r#"
+[meta]
+language = "{meta_language}"
+language_name = "{meta_language_name}"
+bcp47 = "{meta_bcp47}"
+{status_line}
+[system_prompt]
+base = "x"
+
+[language_guidance]
+ages_0_6 = ""
+ages_7_9 = ""
+ages_10_12 = ""
+ages_13_plus = ""
+
+[intent]
+{INTENT_KEYS}
+
+[engagement]
+frustrated = ""
+disengaging = ""
+
+[sections]
+knowledge_intro = ""
+summary_intro = ""
+retrieved_intro = ""
+vocab_review_intro = ""
+break_suggestion_intro = ""
+
+[labels]
+child = "Child"
+primer = "Primer"
+
+[question_detection]
+factual_prefixes = {factual_prefixes_array}
+
+[voice_state]
+listen_label = "x"
+listen_hint = "x"
+thinking_label = "x"
+thinking_hint = "x"
+speak_label = "x"
+speak_hint = "x"
+"#,
+            INTENT_KEYS = all_intents_zeroed_toml(),
+        )
     }
 }
