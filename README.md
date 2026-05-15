@@ -261,9 +261,18 @@ Project-local `.env` wins over the home file. Both are gitignored. See `.env.exa
 ### CLI options
 
 ```
---backend <stub|cloud|ollama>   Inference backend (default: stub)
---model <id>                    Model id (cloud default: claude-sonnet-4-6; required for ollama)
+--backend <stub|cloud|ollama|openai-compat>
+                                Inference backend (default: stub)
+--model <id>                    Model id (cloud default: claude-sonnet-4-6;
+                                required for ollama and openai-compat)
 --ollama-url <url>              Ollama server URL (default: http://localhost:11434)
+--openai-compat-url <url>       OpenAI-compatible server URL
+                                (default: http://localhost:8000; or env OPENAI_COMPAT_URL).
+                                Works with oMLX, LM Studio, vLLM, llama.cpp --server,
+                                Together, Groq, OpenRouter.
+--openai-compat-api-key <key>   Bearer token for the OpenAI-compatible server
+                                (or env OPENAI_COMPAT_API_KEY). Optional for local
+                                servers; required for remote providers.
 --name <name>                   Child's name for the learner profile (default: Explorer)
 --age <age>                     Child's age in years (default: 8)
 --knowledge-db <path>           Path to SQLite knowledge base (default: in-memory)
@@ -286,15 +295,22 @@ Project-local `.env` wins over the home file. Both are gitignored. See `.env.exa
 --verbose                       Print pedagogical decisions ([intent], [classifier], [extractor]) to
                                 stderr alongside the conversation. Stdout stays clean.
 --session-break-after-mins N    Minutes between break-suggestion nudges (default 30; must be ≥1).
---embedder-backend <name>       Embedder backend for hybrid retrieval: none|stub|fastembed|ollama
+--embedder-backend <name>       Embedder backend for hybrid retrieval:
+                                none|stub|fastembed|ollama|openai-compat
                                 (default: none = BM25-only, the pre-Phase-0.2.5 behaviour). `stub`
                                 is for testing the hybrid pipeline only; `fastembed` requires
                                 --features primer-cli/embedding (downloads BGE-M3, ~570 MB on
-                                first run); `ollama` requires --features primer-cli/ollama-embedding.
+                                first run); `ollama` requires --features primer-cli/ollama-embedding;
+                                `openai-compat` requires --features primer-cli/openai-compat-embedding.
 --embedder-model <id>           Embedder model name. Defaults: `bge-m3` for fastembed,
                                 `nomic-embed-text` for ollama.
 --embedder-ollama-url <url>     Ollama endpoint for `--embedder-backend ollama`
                                 (default: http://localhost:11434).
+--embedder-openai-compat-url <url>
+                                OpenAI-compatible /v1/embeddings endpoint
+                                (falls back to --openai-compat-url).
+--embedder-openai-compat-model <name>
+                                Required when --embedder-backend openai-compat.
 ```
 
 Voice-mode flags (only when built with `--features primer-cli/speech`):
