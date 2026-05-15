@@ -6,6 +6,7 @@
 //! accepts text input and produces text output. Speech integration
 //! happens in Phase 1 when hardware audio is connected.
 
+pub mod locale_defaults;
 pub mod phrase_split;
 pub mod stub;
 pub mod time_ms;
