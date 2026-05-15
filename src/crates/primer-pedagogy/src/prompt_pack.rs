@@ -1093,52 +1093,12 @@ speak_hint = "x"
         meta_bcp47: &str,
         factual_prefixes_array: &str,
     ) -> String {
-        format!(
-            r#"
-[meta]
-language = "{meta_language}"
-language_name = "{meta_language_name}"
-bcp47 = "{meta_bcp47}"
-
-[system_prompt]
-base = "x"
-
-[language_guidance]
-ages_0_6 = ""
-ages_7_9 = ""
-ages_10_12 = ""
-ages_13_plus = ""
-
-[intent]
-{INTENT_KEYS}
-
-[engagement]
-frustrated = ""
-disengaging = ""
-
-[sections]
-knowledge_intro = ""
-summary_intro = ""
-retrieved_intro = ""
-vocab_review_intro = ""
-break_suggestion_intro = ""
-
-[labels]
-child = "Child"
-primer = "Primer"
-
-[question_detection]
-factual_prefixes = {factual_prefixes_array}
-
-[voice_state]
-listen_label = "x"
-listen_hint = "x"
-thinking_label = "x"
-thinking_hint = "x"
-speak_label = "x"
-speak_hint = "x"
-"#,
-            INTENT_KEYS = all_intents_zeroed_toml(),
+        synthetic_pack_body_with_status(
+            meta_language,
+            meta_language_name,
+            meta_bcp47,
+            factual_prefixes_array,
+            None,
         )
     }
 
