@@ -24,3 +24,8 @@ pub use fastembed_backend::{BGE_M3_MODEL_ID, FastEmbedBackend};
 pub mod ollama;
 #[cfg(feature = "ollama")]
 pub use ollama::{DEFAULT_OLLAMA_MODEL, DEFAULT_OLLAMA_URL, OllamaEmbedder};
+
+#[cfg(feature = "openai-compat")]
+pub mod openai_compat;
+#[cfg(feature = "openai-compat")]
+pub use openai_compat::{DEFAULT_OPENAI_COMPAT_URL, OpenAiCompatEmbedder};

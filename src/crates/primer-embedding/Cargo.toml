@@ -19,6 +19,7 @@ edition.workspace = true
 default = []
 fastembed = ["dep:fastembed", "dep:dirs"]
 ollama = ["dep:reqwest", "dep:serde", "dep:serde_json"]
+openai-compat = ["dep:reqwest", "dep:serde", "dep:serde_json"]
 
 [dependencies]
 primer-core.workspace = true
