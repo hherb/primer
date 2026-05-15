@@ -30,6 +30,8 @@ use primer_inference::stub::StubBackend;
 pub struct BackendParams {
     pub api_key: Option<String>,
     pub ollama_url: String,
+    pub openai_compat_url: String,
+    pub openai_compat_api_key: Option<String>,
     pub classifier_backend: Option<String>,
     pub classifier_model: Option<String>,
     pub extractor_backend: Option<String>,
@@ -65,6 +67,13 @@ pub async fn build_backend(
             params.ollama_url.clone(),
             model,
         ))),
+        "openai-compat" => Ok(Arc::new(
+            primer_inference::openai_compat::OpenAiCompatBackend::new(
+                params.openai_compat_url.clone(),
+                model,
+                params.openai_compat_api_key.clone(),
+            ),
+        )),
         other => Err(PrimerError::Inference(
             format!("unknown backend: {other}").into(),
         )),
@@ -379,6 +388,8 @@ mod classifier_construction_tests {
         BackendParams {
             api_key: None,
             ollama_url: "http://localhost:11434".into(),
+            openai_compat_url: "http://localhost:8000".into(),
+            openai_compat_api_key: None,
             classifier_backend: classifier_backend.map(String::from),
             classifier_model: classifier_model.map(String::from),
             extractor_backend: None,
@@ -528,6 +539,8 @@ mod extractor_construction_tests {
         BackendParams {
             api_key: Some("k".into()),
             ollama_url: "http://localhost:11434".into(),
+            openai_compat_url: "http://localhost:8000".into(),
+            openai_compat_api_key: None,
             classifier_backend: None,
             classifier_model: None,
             extractor_backend: extractor_backend.map(String::from),
@@ -633,6 +646,8 @@ mod comprehension_construction_tests {
         BackendParams {
             api_key: Some("k".into()),
             ollama_url: "http://localhost:11434".into(),
+            openai_compat_url: "http://localhost:8000".into(),
+            openai_compat_api_key: None,
             classifier_backend: None,
             classifier_model: None,
             extractor_backend: None,
