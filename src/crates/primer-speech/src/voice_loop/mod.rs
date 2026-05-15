@@ -24,13 +24,6 @@ pub mod state_machine;
 ))]
 pub mod backends;
 
-// locale_defaults lives at the crate root so its tests run in the default
-// (no-feature) workspace build. Re-export here so callers that import via
-// `voice_loop::locale_defaults` continue to work unchanged.
-/// Re-export the module itself so `voice_loop::locale_defaults::*` paths
-/// used in documentation and existing imports resolve.
-pub use crate::locale_defaults;
-pub use crate::locale_defaults::{LOCALE_DEFAULTS, LocaleDefault, voice_default_for};
 pub use observer::{ExitReason, LoopObserver, TurnCompletePayload, VoiceState};
 pub use state_machine::{
     DrainHook, LoopBackends, LoopConfig, LoopHandle, Responder, VAD_EVENT_CHANNEL_CAPACITY,
