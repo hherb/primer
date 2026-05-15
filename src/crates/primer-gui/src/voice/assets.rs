@@ -10,7 +10,7 @@ use crate::commands::voice::{MissingAsset, kind};
 use crate::config::SpeechSettings;
 use primer_core::consts::speech::{APPROX_PIPER_CONFIG_MB, APPROX_WHISPER_SMALL_MB};
 use primer_core::i18n::Locale;
-use primer_speech::voice_loop::locale_defaults::{LocaleDefault, voice_default_for};
+use primer_speech::locale_defaults::{LocaleDefault, voice_default_for};
 
 /// Maximum number of `kinds` the IPC will accept in a single
 /// `download_voice_assets` call. The legitimate set has exactly three

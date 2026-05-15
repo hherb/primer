@@ -25,14 +25,49 @@
 //! treatment applies to missing-intent and meta-inconsistency errors —
 //! every pack-shape problem is a single error variant.
 
-use std::collections::BTreeMap;
-use std::sync::{Arc, OnceLock};
+use std::collections::{BTreeMap, HashSet};
+use std::sync::{Arc, Mutex, OnceLock};
 
 use primer_core::conversation::PedagogicalIntent;
 use primer_core::error::{PrimerError, Result};
 use primer_core::i18n::Locale;
 use primer_core::learner::EngagementState;
 use serde::Deserialize;
+
+/// Lifecycle status of a prompt pack. Set explicitly in `[meta] status`
+/// or implicitly absent (which means `Stable`). The loader emits a
+/// one-time warning per `(process, locale)` pair on `Preview` packs to
+/// flag that the strings have not been through native-speaker review.
+///
+/// Allow-list: only `"stable"` and `"preview"` are accepted as TOML
+/// values. Adding a new variant is a deliberate, two-place change:
+/// the enum and the validator's `from_toml_str` arm.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PackStatus {
+    /// Default. All user-visible strings have been reviewed by a native speaker.
+    /// Absent `[meta] status` in a pack TOML maps to `Stable`.
+    Stable,
+    /// Machine-translated draft awaiting native-speaker review. `load_cached`
+    /// emits a one-time `tracing::warn!` per `(process, locale)` pair when a
+    /// `Preview` pack loads, so logs make the unreviewed status obvious.
+    Preview,
+}
+
+impl PackStatus {
+    /// Parse the optional `[meta] status` value into the enum.
+    /// Absence (`None`) and `"stable"` both map to `Stable`; only
+    /// `"preview"` maps to `Preview`. Any other string is a load-time
+    /// error so the validator catches typos.
+    fn from_meta(raw: Option<&str>) -> Result<Self> {
+        match raw {
+            None | Some("stable") => Ok(Self::Stable),
+            Some("preview") => Ok(Self::Preview),
+            Some(other) => Err(PrimerError::Config(format!(
+                "prompt pack: unknown [meta] status {other:?}; allowed: \"stable\", \"preview\""
+            ))),
+        }
+    }
+}
 
 /// The trait the prompt builder consumes. All methods are infallible
 /// reads against an already-validated pack.
@@ -76,6 +111,11 @@ pub trait PromptPack: Send + Sync {
     /// pack-shape error caught at load time, so callers can render the
     /// returned references unconditionally.
     fn voice_state_labels(&self) -> &VoiceStateLabels;
+    /// Lifecycle status of this pack. `Stable` for packs reviewed by a
+    /// native speaker (the default when `[meta] status` is absent).
+    /// `Preview` for machine-translated content awaiting review — the
+    /// loader emits a one-time warning when these load.
+    fn status(&self) -> PackStatus;
 }
 
 /// Display strings for the voice-mode UI states.
@@ -100,12 +140,54 @@ pub struct VoiceStateLabels {
 /// `PRIMER_PROMPTS_DIR`.
 const EN_TOML: &str = include_str!("../prompts/en.toml");
 const DE_TOML: &str = include_str!("../prompts/de.toml");
+const HI_TOML: &str = include_str!("../prompts/hi.toml");
 
 fn embedded_pack(locale: Locale) -> &'static str {
     match locale {
         Locale::English => EN_TOML,
         Locale::German => DE_TOML,
+        Locale::Hindi => HI_TOML,
     }
+}
+
+/// Per-process gate: tracks which preview locales have already emitted
+/// their one-time warning. Populated by `emit_preview_warning_if_first`;
+/// consulted by `load_cached`.
+fn preview_warned_gate() -> &'static Mutex<HashSet<Locale>> {
+    static GATE: OnceLock<Mutex<HashSet<Locale>>> = OnceLock::new();
+    GATE.get_or_init(|| Mutex::new(HashSet::new()))
+}
+
+/// Emit the preview-status warning for `locale` if it hasn't been emitted
+/// before in this process. Idempotent across calls; the warning text
+/// names the locale's pack_id so `tail -f` of logs can tell apart
+/// concurrent preview locales.
+fn emit_preview_warning_if_first(locale: Locale) {
+    // Decide whether to emit inside a tight scope so the mutex guard is
+    // released before `tracing::warn!` runs (a synchronously-writing
+    // subscriber would otherwise hold the gate for the warn's duration).
+    // Poison fallback: treat as "first time" and warn anyway — the spec
+    // requires degrading gracefully, never silencing.
+    let is_first = match preview_warned_gate().lock() {
+        Ok(mut seen) => seen.insert(locale),
+        Err(_) => true,
+    };
+    if is_first {
+        tracing::warn!(
+            target: "primer::prompt_pack",
+            locale = locale.pack_id(),
+            "prompt pack is in preview status — machine-translated content awaiting native-speaker review. \
+             This locale is not in Locale::ALL and is not advertised to end users."
+        );
+    }
+}
+
+#[cfg(test)]
+pub(super) fn reset_preview_warn_once_for_test(locale: Locale) {
+    let mut seen = preview_warned_gate()
+        .lock()
+        .expect("preview gate mutex poisoned");
+    seen.remove(&locale);
 }
 
 /// Load the prompt pack for `locale`, freshly parsing every call.
@@ -155,24 +237,40 @@ pub fn load_cached(locale: Locale) -> Result<Arc<dyn PromptPack>> {
     }
     static EN_PACK: OnceLock<Arc<dyn PromptPack>> = OnceLock::new();
     static DE_PACK: OnceLock<Arc<dyn PromptPack>> = OnceLock::new();
-    match locale {
+    static HI_PACK: OnceLock<Arc<dyn PromptPack>> = OnceLock::new();
+    let pack = match locale {
         Locale::English => {
             if let Some(p) = EN_PACK.get() {
-                return Ok(Arc::clone(p));
+                Arc::clone(p)
+            } else {
+                let p = load(locale)?;
+                let _ = EN_PACK.set(Arc::clone(&p));
+                p
             }
-            let p = load(locale)?;
-            let _ = EN_PACK.set(Arc::clone(&p));
-            Ok(p)
         }
         Locale::German => {
             if let Some(p) = DE_PACK.get() {
-                return Ok(Arc::clone(p));
+                Arc::clone(p)
+            } else {
+                let p = load(locale)?;
+                let _ = DE_PACK.set(Arc::clone(&p));
+                p
             }
-            let p = load(locale)?;
-            let _ = DE_PACK.set(Arc::clone(&p));
-            Ok(p)
         }
+        Locale::Hindi => {
+            if let Some(p) = HI_PACK.get() {
+                Arc::clone(p)
+            } else {
+                let p = load(locale)?;
+                let _ = HI_PACK.set(Arc::clone(&p));
+                p
+            }
+        }
+    };
+    if pack.status() == PackStatus::Preview {
+        emit_preview_warning_if_first(locale);
     }
+    Ok(pack)
 }
 
 /// `TomlPromptPack` is the only `PromptPack` impl shipped today; the
@@ -197,6 +295,7 @@ pub struct TomlPromptPack {
     primer_label: String,
     factual_prefixes: Vec<String>,
     voice_state_labels: VoiceStateLabels,
+    status: PackStatus,
 }
 
 impl TomlPromptPack {
@@ -236,6 +335,8 @@ impl TomlPromptPack {
                 locale.bcp47()
             )));
         }
+
+        let status = PackStatus::from_meta(raw.meta.status.as_deref())?;
 
         // Per-field placeholder allowlists. A typo here returns Err
         // with the field name and offending token so a broken pack
@@ -370,6 +471,7 @@ impl TomlPromptPack {
                 speak_label: raw.voice_state.speak_label,
                 speak_hint: raw.voice_state.speak_hint,
             },
+            status,
         })
     }
 
@@ -445,6 +547,9 @@ impl PromptPack for TomlPromptPack {
     fn voice_state_labels(&self) -> &VoiceStateLabels {
         &self.voice_state_labels
     }
+    fn status(&self) -> PackStatus {
+        self.status
+    }
 }
 
 // ─── Raw TOML deserialisation types ─────────────────────────────────────────
@@ -471,6 +576,8 @@ struct MetaSection {
     language: String,
     language_name: String,
     bcp47: String,
+    #[serde(default)]
+    status: Option<String>,
 }
 
 #[derive(Deserialize)]
@@ -1049,53 +1156,119 @@ speak_hint = "x"
         meta_bcp47: &str,
         factual_prefixes_array: &str,
     ) -> String {
-        format!(
-            r#"
-[meta]
-language = "{meta_language}"
-language_name = "{meta_language_name}"
-bcp47 = "{meta_bcp47}"
-
-[system_prompt]
-base = "x"
-
-[language_guidance]
-ages_0_6 = ""
-ages_7_9 = ""
-ages_10_12 = ""
-ages_13_plus = ""
-
-[intent]
-{INTENT_KEYS}
-
-[engagement]
-frustrated = ""
-disengaging = ""
-
-[sections]
-knowledge_intro = ""
-summary_intro = ""
-retrieved_intro = ""
-vocab_review_intro = ""
-break_suggestion_intro = ""
-
-[labels]
-child = "Child"
-primer = "Primer"
-
-[question_detection]
-factual_prefixes = {factual_prefixes_array}
-
-[voice_state]
-listen_label = "x"
-listen_hint = "x"
-thinking_label = "x"
-thinking_hint = "x"
-speak_label = "x"
-speak_hint = "x"
-"#,
-            INTENT_KEYS = all_intents_zeroed_toml(),
+        synthetic_pack_body_with_status(
+            meta_language,
+            meta_language_name,
+            meta_bcp47,
+            factual_prefixes_array,
+            None,
         )
+    }
+
+    #[test]
+    fn pack_status_defaults_to_stable_when_field_absent_for_english() {
+        let pack = english_pack();
+        assert_eq!(pack.status(), PackStatus::Stable);
+    }
+
+    #[test]
+    fn pack_status_defaults_to_stable_when_field_absent_for_german() {
+        let pack = german_pack();
+        assert_eq!(pack.status(), PackStatus::Stable);
+    }
+
+    #[test]
+    fn pack_status_explicit_stable_loads_as_stable() {
+        let body = synthetic_pack_body_with_status("en", "English", "en-US", "[]", Some("stable"));
+        let pack = TomlPromptPack::from_toml_str(Locale::English, &body)
+            .expect("explicit status=stable should load");
+        assert_eq!(pack.status(), PackStatus::Stable);
+    }
+
+    #[test]
+    fn pack_status_explicit_preview_loads_as_preview() {
+        let body = synthetic_pack_body_with_status("en", "English", "en-US", "[]", Some("preview"));
+        let pack = TomlPromptPack::from_toml_str(Locale::English, &body)
+            .expect("explicit status=preview should load");
+        assert_eq!(pack.status(), PackStatus::Preview);
+    }
+
+    #[test]
+    fn pack_status_rejects_unknown_value() {
+        let body = synthetic_pack_body_with_status("en", "English", "en-US", "[]", Some("wip"));
+        let err = TomlPromptPack::from_toml_str(Locale::English, &body)
+            .err()
+            .expect("expected unknown-status error");
+        let s = format!("{err}");
+        assert!(s.contains("status"), "got: {s}");
+        assert!(s.contains("wip"), "got: {s}");
+        assert!(
+            s.contains("allowed"),
+            "error should name the allow-list: {s}"
+        );
+        assert!(s.contains("stable"), "error should name valid values: {s}");
+        assert!(s.contains("preview"), "error should name valid values: {s}");
+    }
+
+    #[test]
+    fn preview_warning_emits_once_per_locale_on_load_cached() {
+        // Use a captured-tracing subscriber to count events. Reset the
+        // per-locale warn-once gate via the test-only helper so this test
+        // is order-independent.
+        use std::sync::{Arc, Mutex};
+        use tracing::{Level, subscriber::with_default};
+
+        struct Counter(Arc<Mutex<usize>>);
+
+        impl<S> tracing_subscriber::Layer<S> for Counter
+        where
+            S: tracing::Subscriber,
+        {
+            fn on_event(
+                &self,
+                event: &tracing::Event<'_>,
+                _ctx: tracing_subscriber::layer::Context<'_, S>,
+            ) {
+                let m = event.metadata();
+                if m.level() == &Level::WARN && m.target() == "primer::prompt_pack" {
+                    *self.0.lock().unwrap() += 1;
+                }
+            }
+        }
+
+        // Skip the strict assertion under PRIMER_PROMPTS_DIR — load_cached
+        // bypasses the cache there, so the warn-once gate has nothing to
+        // gate.
+        if std::env::var_os("PRIMER_PROMPTS_DIR").is_some() {
+            return;
+        }
+
+        // Reset the warn-once gate for the test locale so we measure
+        // *this* test's emissions, not a previous test's residue.
+        reset_preview_warn_once_for_test(Locale::English);
+
+        let count = Arc::new(Mutex::new(0usize));
+        let layer = Counter(Arc::clone(&count));
+        use tracing_subscriber::prelude::*;
+        let subscriber = tracing_subscriber::registry().with(layer);
+
+        with_default(subscriber, || {
+            // We need a Preview English pack to exercise the warn path,
+            // but the embedded EN pack is Stable. Easiest path: bypass
+            // the cache via from_toml_str on a synthetic preview body
+            // and emit the warning manually — the test is a child module
+            // so it can call the module-private function directly.
+            // -- This test asserts the function's idempotence.
+            emit_preview_warning_if_first(Locale::English);
+            emit_preview_warning_if_first(Locale::English);
+            emit_preview_warning_if_first(Locale::English);
+        });
+
+        assert_eq!(
+            *count.lock().unwrap(),
+            1,
+            "expected exactly one warn event for repeated preview emits"
+        );
     }
 
     /// The English pack's `[meta]` block must agree with `Locale::English`
@@ -1309,5 +1482,193 @@ speak_hint = "x"
         let pack = load(Locale::English).unwrap();
         let rendered = pack.break_suggestion_intro(0);
         assert!(rendered.contains('0'), "{rendered:?}");
+    }
+
+    fn hindi_pack() -> Arc<dyn PromptPack> {
+        load(Locale::Hindi).expect("hindi pack loads")
+    }
+
+    #[test]
+    fn hindi_pack_loads_in_preview_status() {
+        let pack = hindi_pack();
+        assert_eq!(pack.locale(), Locale::Hindi);
+        assert_eq!(pack.status(), PackStatus::Preview);
+    }
+
+    #[test]
+    fn hindi_pack_intent_lookups_all_populated() {
+        let pack = hindi_pack();
+        for &intent in ALL_INTENTS {
+            let s = pack.intent_instruction(intent);
+            assert!(!s.is_empty(), "missing instruction for {intent:?}");
+            assert!(
+                s.chars().any(|c| ('\u{0900}'..='\u{097F}').contains(&c)),
+                "no Devanagari in intent {intent:?}: {s}"
+            );
+        }
+    }
+
+    #[test]
+    fn hindi_pack_voice_state_section_complete() {
+        let pack = hindi_pack();
+        let labels = pack.voice_state_labels();
+        for (name, value) in [
+            ("listen_label", &labels.listen_label),
+            ("listen_hint", &labels.listen_hint),
+            ("thinking_label", &labels.thinking_label),
+            ("thinking_hint", &labels.thinking_hint),
+            ("speak_label", &labels.speak_label),
+            ("speak_hint", &labels.speak_hint),
+        ] {
+            assert!(!value.is_empty(), "voice_state.{name} is empty");
+            assert!(
+                value
+                    .chars()
+                    .any(|c| ('\u{0900}'..='\u{097F}').contains(&c)),
+                "no Devanagari in voice_state.{name}: {value}"
+            );
+        }
+    }
+
+    #[test]
+    fn hindi_pack_renders_base_with_name_and_age() {
+        let pack = hindi_pack();
+        let s = pack.render_base("Aarav", 8);
+        assert!(s.contains("Aarav"), "got: {s}");
+        assert!(s.contains("8"), "got: {s}");
+        assert!(
+            !s.contains("{name}") && !s.contains("{age}") && !s.contains("{language_guidance}"),
+            "all placeholders substituted: {s}"
+        );
+    }
+
+    #[test]
+    fn hindi_pack_knowledge_intro_substitutes_age() {
+        let pack = hindi_pack();
+        let s = pack.knowledge_intro(8);
+        assert!(s.contains("8"), "got: {s}");
+        assert!(!s.contains("{age}"));
+    }
+
+    #[test]
+    fn hindi_pack_break_suggestion_intro_substitutes_minutes() {
+        let pack = hindi_pack();
+        let s = pack.break_suggestion_intro(30);
+        assert!(s.contains("30"), "got: {s}");
+        assert!(!s.contains("{minutes}"));
+    }
+
+    /// Calling load_cached(Hindi) twice in the same process must emit
+    /// exactly one warn event (target = "primer::prompt_pack"). The Hindi
+    /// pack is the only Preview locale at the time of this test, so any
+    /// warn at that target during repeated loads is the gated event.
+    #[test]
+    fn hindi_load_cached_warns_exactly_once_per_locale() {
+        use std::sync::{Arc, Mutex};
+        use tracing::{Level, subscriber::with_default};
+
+        struct Counter(Arc<Mutex<usize>>);
+
+        impl<S> tracing_subscriber::Layer<S> for Counter
+        where
+            S: tracing::Subscriber,
+        {
+            fn on_event(
+                &self,
+                event: &tracing::Event<'_>,
+                _ctx: tracing_subscriber::layer::Context<'_, S>,
+            ) {
+                let m = event.metadata();
+                if m.level() == &Level::WARN && m.target() == "primer::prompt_pack" {
+                    *self.0.lock().unwrap() += 1;
+                }
+            }
+        }
+
+        if std::env::var_os("PRIMER_PROMPTS_DIR").is_some() {
+            return;
+        }
+
+        reset_preview_warn_once_for_test(Locale::Hindi);
+
+        let count = Arc::new(Mutex::new(0usize));
+        let layer = Counter(Arc::clone(&count));
+        use tracing_subscriber::prelude::*;
+        let subscriber = tracing_subscriber::registry().with(layer);
+
+        with_default(subscriber, || {
+            let _ = load_cached(Locale::Hindi).expect("first load_cached");
+            let _ = load_cached(Locale::Hindi).expect("second load_cached");
+            let _ = load_cached(Locale::Hindi).expect("third load_cached");
+        });
+
+        assert_eq!(
+            *count.lock().unwrap(),
+            1,
+            "expected exactly one warn for repeated load_cached(Hindi)"
+        );
+    }
+
+    /// Variant of `synthetic_pack_body` that lets callers inject a
+    /// `[meta] status = "..."` line. `None` omits the line entirely
+    /// (verifies the "absent => Stable" default).
+    fn synthetic_pack_body_with_status(
+        meta_language: &str,
+        meta_language_name: &str,
+        meta_bcp47: &str,
+        factual_prefixes_array: &str,
+        status: Option<&str>,
+    ) -> String {
+        let status_line = match status {
+            Some(s) => format!("status = \"{s}\"\n"),
+            None => String::new(),
+        };
+        format!(
+            r#"
+[meta]
+language = "{meta_language}"
+language_name = "{meta_language_name}"
+bcp47 = "{meta_bcp47}"
+{status_line}
+[system_prompt]
+base = "x"
+
+[language_guidance]
+ages_0_6 = ""
+ages_7_9 = ""
+ages_10_12 = ""
+ages_13_plus = ""
+
+[intent]
+{INTENT_KEYS}
+
+[engagement]
+frustrated = ""
+disengaging = ""
+
+[sections]
+knowledge_intro = ""
+summary_intro = ""
+retrieved_intro = ""
+vocab_review_intro = ""
+break_suggestion_intro = ""
+
+[labels]
+child = "Child"
+primer = "Primer"
+
+[question_detection]
+factual_prefixes = {factual_prefixes_array}
+
+[voice_state]
+listen_label = "x"
+listen_hint = "x"
+thinking_label = "x"
+thinking_hint = "x"
+speak_label = "x"
+speak_hint = "x"
+"#,
+            INTENT_KEYS = all_intents_zeroed_toml(),
+        )
     }
 }

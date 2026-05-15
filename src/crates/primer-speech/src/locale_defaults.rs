@@ -59,6 +59,17 @@ pub const LOCALE_DEFAULTS: &[(&str, LocaleDefault)] = &[
             approx_total_mb: 540,
         },
     ),
+    (
+        "hi",
+        LocaleDefault {
+            piper_voice_id: "hi_IN-rohan-medium",
+            piper_onnx_url: "https://huggingface.co/rhasspy/piper-voices/resolve/main/hi/hi_IN/rohan/medium/hi_IN-rohan-medium.onnx",
+            piper_config_url: "https://huggingface.co/rhasspy/piper-voices/resolve/main/hi/hi_IN/rohan/medium/hi_IN-rohan-medium.onnx.json",
+            whisper_model_id: "ggml-small.bin",
+            whisper_url: "https://huggingface.co/ggerganov/whisper.cpp/resolve/main/ggml-small.bin",
+            approx_total_mb: 540,
+        },
+    ),
 ];
 
 /// Look up the default voice/STT bundle for `locale`, if one is pinned.
@@ -88,6 +99,15 @@ mod tests {
         let d = voice_default_for(&Locale::German).expect("de is pinned");
         assert_eq!(d.piper_voice_id, "de_DE-thorsten-medium");
         // Multilingual Whisper, not the .en-only variant — German is
+        // not in small.en's training set.
+        assert_eq!(d.whisper_model_id, "ggml-small.bin");
+    }
+
+    #[test]
+    fn hindi_default_is_rohan_plus_small_multilingual() {
+        let d = voice_default_for(&Locale::Hindi).expect("hi is pinned");
+        assert_eq!(d.piper_voice_id, "hi_IN-rohan-medium");
+        // Multilingual Whisper, not the .en-only variant — Hindi is
         // not in small.en's training set.
         assert_eq!(d.whisper_model_id, "ggml-small.bin");
     }

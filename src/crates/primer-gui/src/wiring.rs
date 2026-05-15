@@ -78,6 +78,12 @@ pub async fn build_active_session(
     let params = BackendParams {
         api_key,
         ollama_url: backend_config.ollama_url.clone(),
+        // The GUI config does not yet expose openai-compat settings; use
+        // the same defaults the CLI does. A future GUI settings screen can
+        // plumb these through `BackendConfig` when it adds openai-compat
+        // support.
+        openai_compat_url: "http://localhost:8000".to_string(),
+        openai_compat_api_key: None,
         classifier_backend: subsystem_kind(&config.classifier),
         classifier_model: config.classifier.model.clone(),
         extractor_backend: subsystem_kind(&config.extractor),

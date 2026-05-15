@@ -13,7 +13,6 @@
 //! and `docs/superpowers/specs/2026-05-13-gui-voice-mode-design.md` for
 //! the full design.
 
-pub mod locale_defaults;
 pub mod observer;
 pub mod state_machine;
 
@@ -25,7 +24,6 @@ pub mod state_machine;
 ))]
 pub mod backends;
 
-pub use locale_defaults::{LOCALE_DEFAULTS, LocaleDefault, voice_default_for};
 pub use observer::{ExitReason, LoopObserver, TurnCompletePayload, VoiceState};
 pub use state_machine::{
     DrainHook, LoopBackends, LoopConfig, LoopHandle, Responder, VAD_EVENT_CHANNEL_CAPACITY,

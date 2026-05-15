@@ -27,9 +27,9 @@ use primer_core::knowledge::KnowledgeBase;
 use primer_core::storage::{LearnerStore, SessionStore};
 use primer_engine::{
     BackendParams, IN_MEMORY, build_backend, build_classifier, build_comprehension,
-    build_extractor, build_fastembed_embedder, build_ollama_embedder, create_learner_with_id,
-    reconcile_persisted_learner, resolve_session_db_path, should_show_first_run_banner,
-    verify_resume_locale_match,
+    build_extractor, build_fastembed_embedder, build_ollama_embedder, build_openai_compat_embedder,
+    create_learner_with_id, reconcile_persisted_learner, resolve_session_db_path,
+    should_show_first_run_banner, verify_resume_locale_match,
 };
 use primer_extractor::{ConceptExtractor, ExtractorSettings};
 use primer_knowledge::SqliteKnowledgeBase;
@@ -51,6 +51,21 @@ struct Cli {
     /// Ollama server URL (used when --backend ollama).
     #[arg(long, default_value = "http://localhost:11434")]
     ollama_url: String,
+
+    /// OpenAI-compatible server URL (used when --backend openai-compat).
+    /// Works with oMLX, LM Studio, vLLM, llama.cpp --server, etc.
+    #[arg(
+        long,
+        default_value = "http://localhost:8000",
+        env = "OPENAI_COMPAT_URL"
+    )]
+    openai_compat_url: String,
+
+    /// API key for OpenAI-compatible servers that require auth
+    /// (Together, Groq, OpenRouter). Local servers like oMLX/LM Studio
+    /// typically don't need one.
+    #[arg(long, env = "OPENAI_COMPAT_API_KEY")]
+    openai_compat_api_key: Option<String>,
 
     /// Child's name (for the learner profile).
     #[arg(long, default_value = primer_core::consts::learner::DEFAULT_NAME)]
@@ -198,6 +213,16 @@ struct Cli {
     /// `stub`/`fastembed` backends.
     #[arg(long, value_name = "URL")]
     embedder_ollama_url: Option<String>,
+
+    /// Override the URL for `--embedder-backend openai-compat`.
+    /// Defaults to `--openai-compat-url` if set, otherwise
+    /// `http://localhost:8000`.
+    #[arg(long, value_name = "URL")]
+    embedder_openai_compat_url: Option<String>,
+
+    /// Model name for `--embedder-backend openai-compat` (required).
+    #[arg(long, value_name = "NAME")]
+    embedder_openai_compat_model: Option<String>,
 
     /// Print pedagogical decisions (intent chosen, classifier output,
     /// extractor output, comprehension output) alongside the conversation,
@@ -405,6 +430,10 @@ async fn async_main() -> anyhow::Result<()> {
             eprintln!("Error: --model required for ollama backend (e.g., --model llama3.2).");
             std::process::exit(1);
         }),
+        "openai-compat" => cli.model.clone().unwrap_or_else(|| {
+            eprintln!("Error: --model required for openai-compat backend.");
+            std::process::exit(1);
+        }),
         // stub (and anything else — will error in build_backend below)
         _ => cli.model.clone().unwrap_or_else(|| "stub".to_string()),
     };
@@ -414,6 +443,8 @@ async fn async_main() -> anyhow::Result<()> {
     let backend_params = BackendParams {
         api_key: cli.api_key.clone(),
         ollama_url: cli.ollama_url.clone(),
+        openai_compat_url: cli.openai_compat_url.clone(),
+        openai_compat_api_key: cli.openai_compat_api_key.clone(),
         classifier_backend: cli.classifier_backend.clone(),
         classifier_model: cli.classifier_model.clone(),
         extractor_backend: cli.extractor_backend.clone(),
@@ -438,8 +469,14 @@ async fn async_main() -> anyhow::Result<()> {
             "Using ollama backend at {} with model {main_model}.",
             cli.ollama_url
         ),
+        "openai-compat" => eprintln!(
+            "Using openai-compat backend at {} with model {main_model}.",
+            cli.openai_compat_url
+        ),
         other => {
-            eprintln!("Unknown backend: {other}. Use 'stub', 'cloud', or 'ollama'.");
+            eprintln!(
+                "Unknown backend: {other}. Use 'stub', 'cloud', 'ollama', or 'openai-compat'."
+            );
             std::process::exit(1);
         }
     }
@@ -726,9 +763,30 @@ async fn async_main() -> anyhow::Result<()> {
                 std::process::exit(1);
             }
         },
+        "openai-compat" => {
+            let url = cli
+                .embedder_openai_compat_url
+                .as_deref()
+                .or(Some(cli.openai_compat_url.as_str()));
+            match build_openai_compat_embedder(
+                url,
+                cli.embedder_openai_compat_model
+                    .as_deref()
+                    .or(cli.embedder_model.as_deref()),
+                cli.openai_compat_api_key.clone(),
+            )
+            .await
+            {
+                Ok(opt) => opt,
+                Err(e) => {
+                    eprintln!("Error: {e}");
+                    std::process::exit(1);
+                }
+            }
+        }
         other => {
             eprintln!(
-                "Error: unknown --embedder-backend {other:?}; expected one of none, stub, fastembed, ollama"
+                "Error: unknown --embedder-backend {other:?}; expected one of none, stub, fastembed, ollama, openai-compat"
             );
             std::process::exit(1);
         }

@@ -332,7 +332,7 @@ impl Default for SpeechSettings {
 
 /// Per-locale path/voice override for `SpeechSettings`. `None` on any
 /// field means "fall through to the locale default" (see
-/// `primer_speech::voice_loop::locale_defaults::voice_default_for`).
+/// `primer_speech::locale_defaults::voice_default_for`).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
 #[serde(default)]
 pub struct SpeechLocaleOverride {

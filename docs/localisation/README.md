@@ -41,6 +41,7 @@ Each language directory holds at minimum a `README.md` status page. Longer notes
 |---|---|---|---|---|---|
 | `en` | English | ✅ | ✅ 56 hand-drafted + 35 Simple-English-Wiki | ✅ `en_GB-alba-medium` + Whisper `small.en` | Reference locale — [details](en/README.md) |
 | `de` | German | ✅ | ✅ 66 Klexikon articles | ✅ `de_DE-thorsten-medium` + Whisper `small` | Working — [details](de/README.md) |
+| `hi` | Hindi (हिन्दी) | 🟡 preview (machine-translated) | ❌ | ✅ `hi_IN-rohan-medium` + Whisper `small` | Preview — excluded from `Locale::ALL` — [details](hi/README.md) |
 
 Add your locale to this table when you open the PR.
 
