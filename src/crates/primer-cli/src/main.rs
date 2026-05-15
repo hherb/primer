@@ -52,6 +52,17 @@ struct Cli {
     #[arg(long, default_value = "http://localhost:11434")]
     ollama_url: String,
 
+    /// OpenAI-compatible server URL (used when --backend openai-compat).
+    /// Works with oMLX, LM Studio, vLLM, llama.cpp --server, etc.
+    #[arg(long, default_value = "http://localhost:8000", env = "OPENAI_COMPAT_URL")]
+    openai_compat_url: String,
+
+    /// API key for OpenAI-compatible servers that require auth
+    /// (Together, Groq, OpenRouter). Local servers like oMLX/LM Studio
+    /// typically don't need one.
+    #[arg(long, env = "OPENAI_COMPAT_API_KEY")]
+    openai_compat_api_key: Option<String>,
+
     /// Child's name (for the learner profile).
     #[arg(long, default_value = primer_core::consts::learner::DEFAULT_NAME)]
     name: String,
@@ -405,6 +416,10 @@ async fn async_main() -> anyhow::Result<()> {
             eprintln!("Error: --model required for ollama backend (e.g., --model llama3.2).");
             std::process::exit(1);
         }),
+        "openai-compat" => cli.model.clone().unwrap_or_else(|| {
+            eprintln!("Error: --model required for openai-compat backend.");
+            std::process::exit(1);
+        }),
         // stub (and anything else — will error in build_backend below)
         _ => cli.model.clone().unwrap_or_else(|| "stub".to_string()),
     };
@@ -414,6 +429,8 @@ async fn async_main() -> anyhow::Result<()> {
     let backend_params = BackendParams {
         api_key: cli.api_key.clone(),
         ollama_url: cli.ollama_url.clone(),
+        openai_compat_url: cli.openai_compat_url.clone(),
+        openai_compat_api_key: cli.openai_compat_api_key.clone(),
         classifier_backend: cli.classifier_backend.clone(),
         classifier_model: cli.classifier_model.clone(),
         extractor_backend: cli.extractor_backend.clone(),
@@ -438,8 +455,14 @@ async fn async_main() -> anyhow::Result<()> {
             "Using ollama backend at {} with model {main_model}.",
             cli.ollama_url
         ),
+        "openai-compat" => eprintln!(
+            "Using openai-compat backend at {} with model {main_model}.",
+            cli.openai_compat_url
+        ),
         other => {
-            eprintln!("Unknown backend: {other}. Use 'stub', 'cloud', or 'ollama'.");
+            eprintln!(
+                "Unknown backend: {other}. Use 'stub', 'cloud', 'ollama', or 'openai-compat'."
+            );
             std::process::exit(1);
         }
     }
