@@ -22,3 +22,4 @@ thiserror.workspace = true
 
 [dev-dependencies]
 primer-storage.workspace = true
+tracing-subscriber = { version = "0.3", features = ["registry"] }
