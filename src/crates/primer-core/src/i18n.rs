@@ -236,7 +236,11 @@ mod tests {
     }
 
     #[test]
-    fn locale_all_lists_every_variant() {
+    fn locale_all_contains_only_production_ready_locales() {
+        // Hindi is in the enum (preview), but deliberately excluded from
+        // `Locale::ALL` so CLI/GUI pickers don't surface it. Flipping this
+        // assertion is part of the native-speaker-review PR that promotes
+        // Hindi from preview to stable.
         assert_eq!(Locale::ALL.len(), 2);
         assert!(Locale::ALL.contains(&Locale::English));
         assert!(Locale::ALL.contains(&Locale::German));
