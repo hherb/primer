@@ -44,7 +44,12 @@ use serde::Deserialize;
 /// the enum and the validator's `from_toml_str` arm.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum PackStatus {
+    /// Default. All user-visible strings have been reviewed by a native speaker.
+    /// Absent `[meta] status` in a pack TOML maps to `Stable`.
     Stable,
+    /// Machine-translated draft awaiting native-speaker review. `load_cached`
+    /// emits a one-time `tracing::warn!` per `(process, locale)` pair when a
+    /// `Preview` pack loads, so logs make the unreviewed status obvious.
     Preview,
 }
 
@@ -1145,6 +1150,9 @@ speak_hint = "x"
         let s = format!("{err}");
         assert!(s.contains("status"), "got: {s}");
         assert!(s.contains("wip"), "got: {s}");
+        assert!(s.contains("allowed"), "error should name the allow-list: {s}");
+        assert!(s.contains("stable"), "error should name valid values: {s}");
+        assert!(s.contains("preview"), "error should name valid values: {s}");
     }
 
     /// The English pack's `[meta]` block must agree with `Locale::English`

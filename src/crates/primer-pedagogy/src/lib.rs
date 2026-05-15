@@ -21,5 +21,5 @@ pub mod prompt_pack;
 pub mod vocab;
 
 pub use dialogue_manager::{DialogueManager, DialogueManagerStores, DialogueManagerSubsystems};
-pub use prompt_pack::{PromptPack, TomlPromptPack};
+pub use prompt_pack::{PackStatus, PromptPack, TomlPromptPack};
 pub use vocab::VocabSettings;
