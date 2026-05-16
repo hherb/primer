@@ -92,6 +92,18 @@ impl Locale {
         }
     }
 
+    /// The locale's name written in its own language (an "endonym" or
+    /// "autonym"). Used as the user-facing label in a locale picker so a
+    /// German child sees "Deutsch", not "German". Distinct from
+    /// [`Self::name`], which is the English exonym (stable machine id).
+    pub fn endonym(self) -> &'static str {
+        match self {
+            Self::English => "English",
+            Self::German => "Deutsch",
+            Self::Hindi => "हिन्दी",
+        }
+    }
+
     /// Parse a short pack id back to a `Locale`. Returns `None` for
     /// unknown ids (caller decides whether that's a hard error or a
     /// fall-back to `Locale::default()`).
@@ -319,6 +331,17 @@ mod tests {
         assert_eq!(Locale::Hindi.bcp47(), "hi-IN");
         assert_eq!(Locale::Hindi.name(), "Hindi");
         assert_eq!(Locale::from_pack_id("hi"), Some(Locale::Hindi));
+    }
+
+    /// `endonym()` returns each locale's name in its own language —
+    /// the label shown in a locale-picker UI so a German child sees
+    /// "Deutsch" rather than "German". Pinned for every variant so a
+    /// future locale addition can't silently fall through to a default.
+    #[test]
+    fn locale_endonym_matches_locale_native_spelling() {
+        assert_eq!(Locale::English.endonym(), "English");
+        assert_eq!(Locale::German.endonym(), "Deutsch");
+        assert_eq!(Locale::Hindi.endonym(), "हिन्दी");
     }
 
     /// Hindi is gated as a preview locale: present in the enum, available
