@@ -20,6 +20,7 @@ pub fn register(builder: tauri::Builder<Wry>) -> tauri::Builder<Wry> {
     builder.invoke_handler(tauri::generate_handler![
         settings::get_settings,
         settings::update_settings,
+        settings::list_locales,
         session::start_session,
         session::close_session,
         session::resume_session,

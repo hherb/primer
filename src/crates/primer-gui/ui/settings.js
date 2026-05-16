@@ -18,13 +18,11 @@
 (() => {
 const { invoke } = window.__TAURI__.core;
 
-// Locale list must stay in sync with `primer_core::i18n::Locale::ALL`.
-// The validation step (`validate_locale`) is the authoritative check;
-// this list is just for the dropdown UI.
-const LOCALE_CHOICES = [
-  { id: "en", label: "English" },
-  { id: "de", label: "Deutsch" },
-];
+// Locale choices come from the `list_locales` Tauri command, which
+// reads `primer_core::i18n::Locale::ALL`. Sourcing the list from Rust
+// means a new locale pack is a Rust-only edit — preview locales are
+// excluded automatically. `state.localeChoices` is populated by the
+// first `open()` call.
 
 const SUBSYSTEMS = ["classifier", "extractor", "comprehension"];
 
@@ -95,11 +93,19 @@ const state = {
   /// button in PR 3+), so we round-trip it verbatim — never reset it
   /// to false when the user saves the speech settings form.
   lastVoiceModeEnabled: false,
+  /// `[{id, label}]` returned by the `list_locales` Tauri command. Cached
+  /// across `open()` calls so we don't re-invoke on every modal open.
+  /// `null` until the first successful fetch; the fetch shares the same
+  /// `Promise.all` as `get_settings`, so an IPC failure aborts the whole
+  /// modal load and surfaces an error banner — there is no
+  /// partially-populated state to worry about downstream.
+  localeChoices: null,
 };
 
 // Initial DOM wiring — runs at script-load time. The modal stays
-// hidden via the `hidden` attribute until `open()` is called.
-populateLocaleChoices();
+// hidden via the `hidden` attribute until `open()` is called. The
+// locale dropdown is populated lazily inside `open()` once the
+// `list_locales` IPC returns.
 wireDismiss();
 wireBackendKindReveal();
 wireEmbedderKindReveal();
@@ -116,10 +122,19 @@ async function open({ onSessionRestarted } = {}) {
   state.onSessionRestarted = onSessionRestarted ?? null;
   hideBanner();
   try {
-    const [view, sessionInfo] = await Promise.all([
+    // `list_locales` is cached after the first successful fetch; on a
+    // re-open we skip the IPC and reuse the stored choices.
+    const localesPromise =
+      state.localeChoices === null
+        ? invoke("list_locales")
+        : Promise.resolve(state.localeChoices);
+    const [view, sessionInfo, locales] = await Promise.all([
       invoke("get_settings"),
       invoke("current_session_info").catch(() => null),
+      localesPromise,
     ]);
+    state.localeChoices = locales;
+    populateLocaleChoices();
     populate(view);
     dom.activeHint.hidden = sessionInfo === null;
     dom.backdrop.hidden = false;
@@ -159,10 +174,13 @@ function wireDismiss() {
   });
 }
 
+// Reads `state.localeChoices`, which is guaranteed non-null here because
+// `open()` only calls this after the `list_locales` IPC resolves
+// successfully (a rejected IPC short-circuits into the catch branch).
 function populateLocaleChoices() {
   const sel = dom.fields.learnerLocale;
   sel.replaceChildren();
-  for (const { id, label } of LOCALE_CHOICES) {
+  for (const { id, label } of state.localeChoices) {
     const opt = document.createElement("option");
     opt.value = id;
     opt.textContent = `${label} (${id})`;
@@ -176,9 +194,10 @@ function populate(view) {
   // Learner
   f.learnerName.value = view.learner.name;
   f.learnerAge.value = view.learner.age;
-  // If the persisted locale isn't in LOCALE_CHOICES (e.g. a future
-  // pack), still show it so the user isn't silently switched.
-  if (!LOCALE_CHOICES.some((l) => l.id === view.learner.locale)) {
+  // If the persisted locale isn't in the choices returned by Rust (e.g.
+  // a preview pack reached the user via --language, or a pack id was
+  // retired), still show it so the user isn't silently switched.
+  if (!state.localeChoices.some((l) => l.id === view.learner.locale)) {
     const opt = document.createElement("option");
     opt.value = view.learner.locale;
     opt.textContent = `${view.learner.locale} (unknown pack)`;
@@ -255,7 +274,12 @@ function populate(view) {
 function populateSpeechOverrides(overrides) {
   const container = dom.fields.speechOverrides;
   container.replaceChildren();
-  for (const { id: locale } of LOCALE_CHOICES) {
+  // Speech-override cards mirror the locale dropdown — same source of
+  // truth (`list_locales`) so a preview locale doesn't accidentally
+  // show up here while excluded from the picker. `populate()` only
+  // runs after `state.localeChoices` has been resolved, so it's
+  // guaranteed non-null here.
+  for (const { id: locale } of state.localeChoices) {
     const ov = overrides[locale] ?? {};
     const card = document.createElement("div");
     card.className = "settings-grid";
