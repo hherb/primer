@@ -1,0 +1,50 @@
+#!/usr/bin/env bash
+# Primer pre-commit hook — rejects commits with cargo fmt drift in src/.
+#
+# Install once (from repo root):
+#     git config core.hooksPath .githooks
+#
+# Disable temporarily with `git commit --no-verify` or by unsetting the
+# config (`git config --unset core.hooksPath`).
+#
+# Behaviour:
+#   - Fast-skips when no staged file is a .rs path. Docs-only / config-only
+#     commits never pay the cost.
+#   - Runs `cargo fmt --all -- --check` from the workspace root (src/) —
+#     identical to the CI step. The CI step in .github/workflows/ci.yml is
+#     the source of truth; this hook is an early-warning copy.
+#   - On drift, prints the exact remediation command and exits 1.
+#   - On missing cargo, warns and exits 0 so non-Rust contributors can still
+#     commit docs. CI catches the drift in either case.
+set -euo pipefail
+
+STAGED_RS=$(git diff --cached --name-only --diff-filter=ACMR -- '*.rs' 2>/dev/null || true)
+if [ -z "$STAGED_RS" ]; then
+  exit 0
+fi
+
+# Resolve cargo: prefer $CARGO, then rustup's default install path, then PATH.
+# The triple lookup matches CLAUDE.md's "Homebrew rust shadows PATH" guidance —
+# rustup's $HOME/.cargo/bin must win over a Homebrew shim.
+CARGO_BIN="${CARGO:-$HOME/.cargo/bin/cargo}"
+if [ ! -x "$CARGO_BIN" ]; then
+  if command -v cargo >/dev/null 2>&1; then
+    CARGO_BIN=$(command -v cargo)
+  else
+    echo "[pre-commit] cargo not found (looked at \$CARGO=$CARGO_BIN and PATH); skipping fmt check." >&2
+    echo "[pre-commit] CI will still enforce; install rustup if you commit Rust often." >&2
+    exit 0
+  fi
+fi
+
+REPO_ROOT=$(git rev-parse --show-toplevel)
+WORKSPACE="$REPO_ROOT/src"
+
+if ! (cd "$WORKSPACE" && "$CARGO_BIN" fmt --all -- --check >/dev/null 2>&1); then
+  echo "[pre-commit] cargo fmt drift detected in src/. Fix with:" >&2
+  echo "    (cd src && '$CARGO_BIN' fmt --all)" >&2
+  echo "Then re-stage and re-commit. Use --no-verify to bypass (CI will still enforce)." >&2
+  exit 1
+fi
+
+exit 0
