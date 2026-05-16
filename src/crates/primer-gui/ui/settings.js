@@ -95,9 +95,10 @@ const state = {
   lastVoiceModeEnabled: false,
   /// `[{id, label}]` returned by the `list_locales` Tauri command. Cached
   /// across `open()` calls so we don't re-invoke on every modal open.
-  /// `null` until the first successful fetch; a load failure leaves it
-  /// null and the modal degrades gracefully (only the persisted locale
-  /// shows in the dropdown).
+  /// `null` until the first successful fetch; the fetch shares the same
+  /// `Promise.all` as `get_settings`, so an IPC failure aborts the whole
+  /// modal load and surfaces an error banner — there is no
+  /// partially-populated state to worry about downstream.
   localeChoices: null,
 };
 
@@ -173,10 +174,13 @@ function wireDismiss() {
   });
 }
 
+// Reads `state.localeChoices`, which is guaranteed non-null here because
+// `open()` only calls this after the `list_locales` IPC resolves
+// successfully (a rejected IPC short-circuits into the catch branch).
 function populateLocaleChoices() {
   const sel = dom.fields.learnerLocale;
   sel.replaceChildren();
-  for (const { id, label } of state.localeChoices ?? []) {
+  for (const { id, label } of state.localeChoices) {
     const opt = document.createElement("option");
     opt.value = id;
     opt.textContent = `${label} (${id})`;
@@ -193,8 +197,7 @@ function populate(view) {
   // If the persisted locale isn't in the choices returned by Rust (e.g.
   // a preview pack reached the user via --language, or a pack id was
   // retired), still show it so the user isn't silently switched.
-  const choices = state.localeChoices ?? [];
-  if (!choices.some((l) => l.id === view.learner.locale)) {
+  if (!state.localeChoices.some((l) => l.id === view.learner.locale)) {
     const opt = document.createElement("option");
     opt.value = view.learner.locale;
     opt.textContent = `${view.learner.locale} (unknown pack)`;
@@ -273,9 +276,10 @@ function populateSpeechOverrides(overrides) {
   container.replaceChildren();
   // Speech-override cards mirror the locale dropdown — same source of
   // truth (`list_locales`) so a preview locale doesn't accidentally
-  // show up here while excluded from the picker. `populate()` always
-  // runs after `state.localeChoices` has been resolved, so this is safe.
-  for (const { id: locale } of state.localeChoices ?? []) {
+  // show up here while excluded from the picker. `populate()` only
+  // runs after `state.localeChoices` has been resolved, so it's
+  // guaranteed non-null here.
+  for (const { id: locale } of state.localeChoices) {
     const ov = overrides[locale] ?? {};
     const card = document.createElement("div");
     card.className = "settings-grid";

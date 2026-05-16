@@ -317,8 +317,9 @@
               <label class="field">
                 <span>Locale</span>
                 <select id="f-learner-locale">
-                  <!-- Options injected from JS so adding a locale pack
-                       only requires updating LOCALE_CHOICES in settings.js. -->
+                  <!-- Options injected from JS via the `list_locales` Tauri
+                       command, so adding a locale pack is a Rust-only edit
+                       (extend `Locale::ALL` in primer-core). -->
                 </select>
               </label>
             </div>
@@ -592,8 +593,9 @@
 
               <h3 class="settings-subhead">Per-locale overrides</h3>
               <div id="f-speech-overrides">
-                <!-- One sub-card per locale; rendered from JS so adding a locale
-                     pack only requires updating LOCALE_CHOICES in settings.js. -->
+                <!-- One sub-card per locale; rendered from JS using the
+                     `list_locales` Tauri command, so adding a locale pack
+                     is a Rust-only edit (extend `Locale::ALL` in primer-core). -->
               </div>
             </div>
           </details>
