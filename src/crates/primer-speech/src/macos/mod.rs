@@ -16,8 +16,7 @@ pub mod voice;
 
 // TODO Task 5: uncomment when MacosSpeechToText is defined in stt.rs.
 // pub use stt::MacosSpeechToText;
-// TODO Task 7: uncomment when MacosTextToSpeech is defined in tts.rs.
-// pub use tts::MacosTextToSpeech;
+pub use tts::MacosTextToSpeech;
 
 /// Backend family identifier surfaced by `Named::name()` and used in logs.
 pub const FEATURE_NAME: &str = "macos-native";
