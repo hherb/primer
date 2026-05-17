@@ -35,6 +35,18 @@ CLI flags exposed by `primer-cli`: `--backend stub|cloud|ollama|openai-compat`, 
 
 Env files are auto-loaded at startup. Two locations checked, in order: (1) project-local `.env` (dotenvy searches cwd and ancestors), then (2) user-global `~/.primer_env`. Earlier sources win, so a per-repo `.env` overrides the home file. Copy `.env.example` → `.env` for a per-repo config, or drop `ANTHROPIC_API_KEY=...` into `~/.primer_env` to share across projects. Both `.env` and `*.local` variants are gitignored.
 
+## Local pre-commit hook (optional, recommended)
+
+A version-controlled pre-commit hook lives at [.githooks/pre-commit](.githooks/pre-commit). It runs `cargo fmt --all -- --check` from `src/` on commits that touch `.rs` files (and fast-skips otherwise). Opt in once per clone:
+
+```bash
+git config core.hooksPath .githooks
+```
+
+Bypass a single commit with `git commit --no-verify`. Disable permanently with `git config --unset core.hooksPath`. The CI step in [.github/workflows/ci.yml](.github/workflows/ci.yml) is the source of truth; the hook is an early-warning copy so drift fails locally instead of after a CI round-trip. The hook skips (with a one-line warning) when `cargo` isn't on `PATH` and `$CARGO` is unset, so docs-only contributors aren't forced to install rustup.
+
+**Branch protection is the structural fix** for `main`. The recommended setup, configurable from GitHub repo settings, is to require the `cargo test (default features)` status check before merging to `main`. The local hook complements but does not replace this — the local hook closes the loop for direct `git commit` use; branch protection closes it at the merge boundary regardless of contributor discipline. Closes issue #96.
+
 ## Architecture: trait-based hardware abstraction
 
 The central design principle is that **the pedagogical engine is decoupled from any specific inference backend, speech engine, or knowledge store via traits in `primer-core`**. Backend selection is a runtime config choice, not a code change. This is what allows Phase 0 (cloud) to share code with Phase 1 (llama.cpp / QNN NPU / RKNN NPU) and Phase 2 (Whisper + Piper).
