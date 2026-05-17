@@ -43,6 +43,17 @@ cpal = { workspace = true, optional = true }
 ringbuf = { workspace = true, optional = true }
 rubato = { workspace = true, optional = true }
 
+# Apple Speech.framework + AVFoundation bindings — opt-in via the
+# `macos-native` feature (and the throwaway `_macos_smoke_check`
+# precursor that only enables the chunk-size smoke example).
+# All four are `optional = true` and the workspace decl uses
+# `default-features = false`, so non-macOS builds compile nothing.
+objc2 = { workspace = true, optional = true }
+objc2-foundation = { workspace = true, optional = true }
+objc2-avf-audio = { workspace = true, optional = true }
+objc2-speech = { workspace = true, optional = true }
+block2 = { workspace = true, optional = true }
+
 [dev-dependencies]
 # WAV writer for the tts_hello example. Dev-only — not part of the
 # default build dep tree.
@@ -63,7 +74,16 @@ cpal = ["dep:cpal", "dep:ringbuf", "dep:rubato"]
 # compilation in consumers. Consumed by primer-cli (--speech mode) and
 # primer-gui (Voice mode toggle).
 voice-loop = ["silero", "whisper", "piper", "cpal"]
+# Ephemeral feature scoped to the AVSpeechSynthesizer PCM-callback
+# chunk-size smoke example. Will be folded into a real `macos-native`
+# feature once the chunk-size verdict is in. See
+# docs/superpowers/plans/2026-05-17-macos-native-speech.md Task 0.
+_macos_smoke_check = ["dep:objc2", "dep:objc2-foundation", "dep:objc2-avf-audio", "dep:block2"]
 
 [[example]]
 name = "tts_hello"
 required-features = ["piper"]
+
+[[example]]
+name = "tts_macos_pcm_smoke"
+required-features = ["_macos_smoke_check"]

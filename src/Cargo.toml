@@ -64,6 +64,16 @@ cpal = "0.17"
 ringbuf = "0.4"
 rubato = "0.16"
 
+# Apple framework bindings — only consumed by primer-speech's
+# `macos-native` feature (and its `_macos_smoke_check` precursor).
+# Pulls nothing on non-macOS builds because every primer-speech feature
+# that depends on them is opt-in.
+objc2 = "0.6"
+objc2-foundation = { version = "0.3", default-features = false, features = ["NSString", "NSLocale", "NSRunLoop", "NSDate"] }
+objc2-avf-audio = { version = "0.3", default-features = false, features = ["AVSpeechSynthesis", "AVAudioBuffer", "AVAudioFormat", "AVAudioTypes", "block2"] }
+objc2-speech = "0.3"
+block2 = "0.6"
+
 # CLI
 clap = { version = "4", features = ["derive", "env"] }
 
