@@ -341,6 +341,18 @@ cargo run --bin primer -- --resume <uuid>
 
 When the resumed session has more than `context_window_turns` (default 20) turns, the Primer maintains long-term memory in two complementary ways: a rolling LLM-generated summary (refreshed on resume only when the loaded one is stale, then every 20 further pre-window turns during active conversation) and FTS5-based retrieval of relevant older turns based on the current child input. Both are injected into the system prompt — the chat-message timeline the model sees stays equal to the last 20 turns, so context budget is bounded even across hours of conversation.
 
+### macOS evaluation build
+
+For evaluators on macOS 13+ who want zero external dependencies and the
+fastest install path:
+
+```bash
+cd src
+~/.cargo/bin/cargo tauri build --features "primer-gui/speech primer-gui/macos-native"
+```
+
+See [docs/macos_native_speech.md](docs/macos_native_speech.md) for details.
+
 ## Building the macOS DMG
 
 Produces a signed and notarized `.dmg` for the desktop GUI, ready to hand to evaluators with no Gatekeeper friction. Apple Silicon only.
