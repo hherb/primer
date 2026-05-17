@@ -39,9 +39,10 @@ use std::time::{Duration, Instant};
 use async_trait::async_trait;
 use objc2::rc::Retained;
 use objc2_avf_audio::{
-    AVAudioBuffer, AVAudioPCMBuffer, AVSpeechSynthesisVoice, AVSpeechSynthesizer, AVSpeechUtterance,
+    AVAudioBuffer, AVAudioPCMBuffer, AVSampleRateKey, AVSpeechSynthesisVoice, AVSpeechSynthesizer,
+    AVSpeechUtterance,
 };
-use objc2_foundation::{NSDate, NSRunLoop, NSString};
+use objc2_foundation::{NSDate, NSNumber, NSRunLoop, NSString};
 
 use primer_core::error::{PrimerError, Result};
 use primer_core::i18n::Locale;
@@ -149,6 +150,62 @@ impl Drop for DispatchSemaphore {
     }
 }
 
+/// Query the native PCM sample rate that `AVSpeechSynthesizer` will use for
+/// `voice`. The rate is encoded in the dictionary returned by
+/// `AVSpeechSynthesisVoice.audioFileSettings` under the key `AVSampleRateKey`.
+///
+/// Compact (Default) voices deliver 22 050 Hz; Enhanced / Premium neural
+/// voices deliver 24 000 Hz on macOS 13+. The value is available at
+/// construction time, before any synthesis call, so we read it once here
+/// rather than trusting either a hardcoded constant or the first PCM callback.
+///
+/// Falls back to 22 050 Hz if the key is missing or the value cannot be
+/// interpreted — wrong rate here is an 8.8% pitch/speed error; wrong rate in
+/// the PCM callback's `sample_rate` field (always correct, from the
+/// `AVAudioFormat` the synthesiser delivers) would be far worse, so we keep
+/// the fallback path and emit a warning.
+fn voice_native_sample_rate(voice: &AVSpeechSynthesisVoice) -> u32 {
+    // SAFETY: `audioFileSettings` is documented as "not atomic" (same caveat
+    // as `language()`/`identifier()` in voice.rs) — we call it from a single
+    // thread with no concurrent mutation of the voice object.
+    let settings = unsafe { voice.audioFileSettings() };
+
+    // SAFETY: the static `AVSampleRateKey` is initialised by the AVFoundation
+    // framework before any user code runs; `Option::unwrap` is safe here.
+    let key: &NSString = unsafe { AVSampleRateKey }.expect("AVSampleRateKey must not be nil");
+
+    // NSDictionary<NSString, AnyObject>::objectForKey returns
+    // Option<Retained<AnyObject>>. We downcast to NSNumber to read the float.
+    let Some(obj) = settings.objectForKey(key) else {
+        tracing::warn!(
+            target: "primer::speech::macos",
+            "AVSpeechSynthesisVoice.audioFileSettings missing AVSampleRateKey; \
+             falling back to 22050 Hz (Enhanced voices deliver 24000 Hz — the \
+             resampler will be constructed at 22050 Hz and audio may be slightly \
+             slow/low-pitched)"
+        );
+        return 22_050;
+    };
+
+    let Some(number) = obj.downcast_ref::<NSNumber>() else {
+        tracing::warn!(
+            target: "primer::speech::macos",
+            "AVSampleRateKey value is not NSNumber; falling back to 22050 Hz"
+        );
+        return 22_050;
+    };
+
+    let rate = number.as_f64() as u32;
+    if rate == 0 {
+        tracing::warn!(
+            target: "primer::speech::macos",
+            "AVSampleRateKey returned 0; falling back to 22050 Hz"
+        );
+        return 22_050;
+    }
+    rate
+}
+
 /// macOS-native TTS backend using `AVSpeechSynthesizer`.
 ///
 /// Each instance is bound to a single locale and holds the best available
@@ -157,6 +214,13 @@ impl Drop for DispatchSemaphore {
 pub struct MacosTextToSpeech {
     locale: Locale,
     voice: Retained<AVSpeechSynthesisVoice>,
+    /// The native PCM sample rate for the selected voice, queried from
+    /// `AVSpeechSynthesisVoice.audioFileSettings` at construction time.
+    /// Compact (Default) voices deliver 22 050 Hz; Enhanced/Premium neural
+    /// voices deliver 24 000 Hz. Used by `StreamingTextToSpeech::sample_rate()`
+    /// so the output resampler in `build_local_backends_macos_native` is
+    /// constructed at the correct rate.
+    native_sample_rate: u32,
 }
 
 impl MacosTextToSpeech {
@@ -179,9 +243,18 @@ impl MacosTextToSpeech {
             PrimerError::Speech(format!("no system voice available for locale {bcp47}"))
         })?;
 
+        let native_sample_rate = voice_native_sample_rate(&selection.voice);
+        tracing::debug!(
+            target: "primer::speech::macos",
+            bcp47,
+            native_sample_rate,
+            "MacosTextToSpeech: resolved voice native sample rate"
+        );
+
         Ok(Self {
             locale,
             voice: selection.voice,
+            native_sample_rate,
         })
     }
 
@@ -279,12 +352,19 @@ fn chunks_to_audio_buffer(chunks: Vec<AudioChunk>) -> AudioBuffer {
 // ═══════════════════════════════════════════════════════════════════════════
 
 impl StreamingTextToSpeech for MacosTextToSpeech {
-    /// AVSpeechSynthesizer emits audio at the voice's native sample rate.
-    /// Apple voices emit 22 050 Hz (compact) or 24 000 Hz (enhanced/premium)
-    /// on macOS 13–26. Each `AudioChunk` also carries its own `sample_rate`
-    /// field, so this value is a hint for pre-allocation — not a contract.
+    /// Returns the voice's actual native PCM sample rate, queried from
+    /// `AVSpeechSynthesisVoice.audioFileSettings` at construction time.
+    /// Compact (Default) voices deliver 22 050 Hz; Enhanced/Premium neural
+    /// voices deliver 24 000 Hz on macOS 13+.
+    ///
+    /// Each `AudioChunk` also carries its own `sample_rate` field (always
+    /// correct, from the `AVAudioFormat` in the PCM callback), but this
+    /// trait method is the value that `build_local_backends_macos_native`
+    /// reads at builder time to construct the output resampler. Returning
+    /// the wrong rate here caused audio to play ~8.8% too slowly and one
+    /// semitone too low when an Enhanced voice was active.
     fn sample_rate(&self) -> u32 {
-        22_050
+        self.native_sample_rate
     }
 
     fn open_session(&self, _voice: &VoiceProfile) -> Result<Box<dyn SynthesisSession>> {

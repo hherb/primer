@@ -38,7 +38,14 @@ pub fn run() -> Result<(), Box<dyn std::error::Error>> {
     // it, phoneme lookup fails at synthesis time (the `espeak-rs-sys`
     // bundled subset ships without `phontab` and other core files).
     // Mirrors the CLI's `probe_espeak_ng_data` at primer-cli/src/main.rs.
-    #[cfg(feature = "speech")]
+    //
+    // Skipped when `macos-native` is active: the macOS-native path uses
+    // AVSpeechSynthesizer (not Piper), so espeak-ng is structurally unused
+    // and the warning would be unactionable noise for evaluators.
+    #[cfg(all(
+        feature = "speech",
+        not(all(target_os = "macos", feature = "macos-native"))
+    ))]
     probe_espeak_ng_data();
 
     let home = resolve_home();
@@ -81,7 +88,14 @@ fn init_tracing() {
 /// Mirrors `primer-cli/src/main.rs::probe_espeak_ng_data` byte-for-byte
 /// except for the verbose flag — the GUI logs hits via `tracing::info!`
 /// instead of stderr.
-#[cfg(feature = "speech")]
+///
+/// Not compiled when `macos-native` is active — espeak-ng is unused on that
+/// path (AVSpeechSynthesizer does its own phonemisation) and the warning
+/// would be unactionable noise for evaluators.
+#[cfg(all(
+    feature = "speech",
+    not(all(target_os = "macos", feature = "macos-native"))
+))]
 fn probe_espeak_ng_data() {
     if std::env::var_os("PIPER_ESPEAKNG_DATA_DIRECTORY").is_some() {
         return;
