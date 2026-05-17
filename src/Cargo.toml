@@ -69,7 +69,7 @@ rubato = "0.16"
 # Pulls nothing on non-macOS builds because every primer-speech feature
 # that depends on them is opt-in.
 objc2 = "0.6"
-objc2-foundation = { version = "0.3", default-features = false, features = ["NSString", "NSLocale", "NSRunLoop", "NSDate"] }
+objc2-foundation = { version = "0.3", default-features = false, features = ["NSString", "NSLocale", "NSRunLoop", "NSDate", "NSArray"] }
 objc2-avf-audio = { version = "0.3", default-features = false, features = ["AVSpeechSynthesis", "AVAudioBuffer", "AVAudioFormat", "AVAudioTypes", "block2"] }
 objc2-speech = "0.3"
 block2 = "0.6"
