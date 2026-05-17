@@ -25,11 +25,12 @@
 //!    and starts a `recognitionTaskWithRequest_resultHandler` task.
 //! 2. `push_audio` builds an `AVAudioPCMBuffer`, calls `appendAudioPCMBuffer`,
 //!    and drains the partial-transcript channel.
-//! 3. `finalize` calls `endAudio`, polls briefly for the final segment, and
-//!    returns all segments received during the session.
+//! 3. `finalize` calls `endAudio`, then uses `recv_timeout` (not a spin loop)
+//!    to wait for the final segment, exiting early when `is_final_seen` is set.
 
 use std::sync::Mutex;
-use std::sync::mpsc;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, mpsc};
 use std::time::{Duration, Instant};
 
 use objc2::AnyThread;
@@ -40,7 +41,6 @@ use objc2_speech::{
     SFSpeechAudioBufferRecognitionRequest, SFSpeechRecognitionResult, SFSpeechRecognizer,
 };
 use primer_core::error::{PrimerError, Result};
-use primer_core::i18n::Locale;
 use primer_core::speech::{Named, StreamingSpeechToText, TranscriptSegment, TranscriptionSession};
 
 /// Backend identifier returned by `Named::name()` and used in logs.
@@ -51,11 +51,11 @@ pub const BACKEND_NAME: &str = "macos-native-stt";
 /// on-device recognition; using 16 kHz avoids unnecessary resampling.
 const STT_SAMPLE_RATE: u32 = 16_000;
 
-/// How long `finalize` polls the result channel for the final segment.
-const FINALIZE_POLL_TIMEOUT: Duration = Duration::from_millis(300);
-
-/// Spin interval inside the `finalize` poll loop.
-const FINALIZE_POLL_INTERVAL: Duration = Duration::from_millis(10);
+/// How long `finalize` waits for the final recognition result.
+/// On-device STT can take >300 ms for longer utterances; 2 s gives
+/// enough headroom without blocking the voice loop for an unreasonable
+/// time when the recognizer is unresponsive.
+const FINALIZE_POLL_TIMEOUT: Duration = Duration::from_millis(2_000);
 
 // ═══════════════════════════════════════════════════════════════════════════
 // MacosSpeechToText — the backend object
@@ -99,15 +99,14 @@ impl MacosSpeechToText {
         // `SFSpeechRecognizer` accepts many more locales than we map here;
         // unsupported ones return an `Other` error rather than silently
         // constructing a backend for an unhandled locale.
-        let _locale: Locale = match bcp47 {
-            "en-US" => Locale::English,
-            "de-DE" => Locale::German,
+        match bcp47 {
+            "en-US" | "de-DE" => {} // accepted locales
             other => {
                 return Err(PrimerError::Speech(format!(
                     "unsupported BCP-47 locale for macOS STT: {other}"
                 )));
             }
-        };
+        }
 
         let ns_id = NSString::from_str(bcp47);
         let ns_locale = NSLocale::localeWithLocaleIdentifier(&ns_id);
@@ -193,14 +192,39 @@ impl StreamingSpeechToText for MacosSpeechToText {
         // SAFETY: simple property setter.
         unsafe { request.setShouldReportPartialResults(true) };
 
-        // ── 2. Create the mpsc channel ───────────────────────────────────
+        // ── 2. Build the cached AVAudioFormat (16 kHz mono) ─────────────
+        // Built once here at open_session and stored on the session, so
+        // push_audio doesn't re-allocate an identical ObjC object on every
+        // call (saves alloc churn on the audio thread for every push).
+        //
+        // SAFETY: factory initialiser taking no mutable state.
+        let format: Retained<AVAudioFormat> = unsafe {
+            AVAudioFormat::initStandardFormatWithSampleRate_channels(
+                AVAudioFormat::alloc(),
+                STT_SAMPLE_RATE as f64,
+                1, // mono
+            )
+        }
+        .ok_or_else(|| {
+            PrimerError::Speech("AVAudioFormat init failed for 16 kHz mono STT format".into())
+        })?;
+
+        // ── 3. Create the mpsc channel ───────────────────────────────────
         // The channel is bounded at 64 segments — each partial result from
         // the recognizer is one send; 64 is more than any single utterance
         // will produce before `push_audio` drains them.
         let (seg_tx, seg_rx) = mpsc::sync_channel::<TranscriptSegment>(64);
 
-        // ── 3. Build the result-handler closure ──────────────────────────
-        // The closure captures `seg_tx` (a `SyncSender` — `Send + Clone`).
+        // ── 4. Arc<AtomicBool> to signal is_final without touching the channel ──
+        // The result handler sets this to `true` (Release) when `isFinal()` is
+        // true. `finalize` checks it (Acquire) after each recv to exit early —
+        // zero busy-wait, exits within microseconds of the final result arriving.
+        let is_final_seen = Arc::new(AtomicBool::new(false));
+        let is_final_seen_handler = Arc::clone(&is_final_seen);
+
+        // ── 5. Build the result-handler closure ──────────────────────────
+        // The closure captures `seg_tx` (a `SyncSender` — `Send + Clone`)
+        // and `is_final_seen_handler` (an `Arc<AtomicBool>` — `Send + Sync`).
         // It fires on the background `NSOperationQueue` we set during
         // construction, so no main-thread run-loop dependency here.
         //
@@ -227,13 +251,18 @@ impl StreamingSpeechToText for MacosSpeechToText {
                 let formatted = unsafe { transcription.formattedString() };
                 let text = formatted.to_string();
 
-                if text.is_empty() {
-                    return;
-                }
-
                 // `is_final` — if true this is the last segment.
                 // SAFETY: immutable property getter.
                 let is_final = unsafe { result.isFinal() };
+
+                if text.is_empty() {
+                    // Even on empty text: if this is final, set the flag so
+                    // finalize() doesn't wait out the full timeout.
+                    if is_final {
+                        is_final_seen_handler.store(true, Ordering::Release);
+                    }
+                    return;
+                }
 
                 let segment = TranscriptSegment {
                     text,
@@ -245,20 +274,39 @@ impl StreamingSpeechToText for MacosSpeechToText {
                     end_ms: 0,
                 };
 
-                // Send — silently drop on a disconnected receiver (session
-                // was dropped before finalize was called, which is a legal
-                // usage if the voice loop cancels mid-utterance).
-                let _ = handler_tx.try_send(segment);
+                // Send — distinguish between expected shutdown (Disconnected)
+                // and a full buffer (worth a warning, suggests push_audio isn't
+                // draining frequently enough or the channel bound needs raising).
+                match handler_tx.try_send(segment) {
+                    Ok(()) => {}
+                    Err(mpsc::TrySendError::Disconnected(_)) => {
+                        // Receiver dropped — session closed before recognition
+                        // finished. Silent: this is the expected shutdown path
+                        // when the voice loop cancels mid-utterance.
+                    }
+                    Err(mpsc::TrySendError::Full(_)) => {
+                        tracing::warn!(
+                            target: "primer::speech::macos",
+                            "STT segment channel full; dropping a partial transcript segment. \
+                             Increase the channel bound or call push_audio more frequently."
+                        );
+                    }
+                }
 
-                // Log final recognition for debugging; tracing is behind
-                // a runtime filter so it's zero-cost when disabled.
+                // Signal finalize() to stop waiting as soon as the final
+                // result has been pushed — set AFTER the send so the receiver
+                // sees the segment before exiting.
                 if is_final {
-                    tracing::debug!(target: "primer::speech::macos_stt", "SFSpeechRecognizer: final result received");
+                    is_final_seen_handler.store(true, Ordering::Release);
+                    tracing::debug!(
+                        target: "primer::speech::macos_stt",
+                        "SFSpeechRecognizer: final result received"
+                    );
                 }
             },
         );
 
-        // ── 4. Start the recognition task ────────────────────────────────
+        // ── 6. Start the recognition task ────────────────────────────────
         // Lock the recognizer to call `recognitionTaskWithRequest_resultHandler`.
         // The task runs asynchronously; this call returns immediately.
         //
@@ -290,7 +338,8 @@ impl StreamingSpeechToText for MacosSpeechToText {
             request,
             _task: task,
             seg_rx,
-            elapsed_ms: 0,
+            is_final_seen,
+            format,
         }))
     }
 }
@@ -313,10 +362,14 @@ struct MacosSttSession {
     _task: Retained<objc2_speech::SFSpeechRecognitionTask>,
     /// Partial/final transcript segments delivered by the result handler.
     seg_rx: mpsc::Receiver<TranscriptSegment>,
-    /// Cumulative audio pushed, in milliseconds (used for `start_ms` /
-    /// `end_ms` approximation — currently always 0, reserved for future
-    /// per-segment timing).
-    elapsed_ms: u64,
+    /// Set to `true` (Release) by the result handler when `isFinal()` fires.
+    /// `finalize` reads this (Acquire) after each `recv_timeout` to exit
+    /// early — no busy-wait, no arbitrary 300 ms ceiling for slow devices.
+    is_final_seen: Arc<AtomicBool>,
+    /// Cached 16 kHz mono `AVAudioFormat`, built once at `open_session` and
+    /// reused across all `push_audio` calls to avoid per-call ObjC allocation
+    /// churn on the audio thread.
+    format: Retained<AVAudioFormat>,
 }
 
 // SAFETY: `MacosSttSession` owns its fields exclusively after construction:
@@ -325,6 +378,8 @@ struct MacosSttSession {
 //   the `Mutex` in the parent `MacosSpeechToText` is no longer involved —
 //   we hold our own `Retained` copies.
 // - `mpsc::Receiver<TranscriptSegment>` is `Send`.
+// - `Arc<AtomicBool>` is `Send + Sync`.
+// - `Retained<AVAudioFormat>` is an immutable-after-construction ObjC object.
 // `Send` is required by the `TranscriptionSession` supertrait.
 unsafe impl Send for MacosSttSession {}
 
@@ -337,27 +392,15 @@ impl TranscriptionSession for MacosSttSession {
         // ── 1. Build an AVAudioPCMBuffer containing `samples` ────────────
         let frame_count = samples.len() as u32;
 
-        // Create 16 kHz mono standard (= non-interleaved f32) format.
-        // `initStandardFormatWithSampleRate:channels:` is gated on
-        // `AVAudioTypes` feature (already enabled in the workspace dep).
-        // SAFETY: factory initialiser taking no mutable state.
-        let format: Retained<AVAudioFormat> = unsafe {
-            AVAudioFormat::initStandardFormatWithSampleRate_channels(
-                AVAudioFormat::alloc(),
-                STT_SAMPLE_RATE as f64,
-                1, // mono
-            )
-        }
-        .ok_or_else(|| {
-            PrimerError::Speech("AVAudioFormat init failed for 16 kHz mono STT format".into())
-        })?;
-
+        // Use the cached AVAudioFormat built once in open_session — no per-call
+        // ObjC allocation needed.
+        //
         // SAFETY: `initWithPCMFormat:frameCapacity:` requires a valid format
         // and a non-zero capacity. Both conditions are met.
         let pcm: Retained<AVAudioPCMBuffer> = unsafe {
             AVAudioPCMBuffer::initWithPCMFormat_frameCapacity(
                 AVAudioPCMBuffer::alloc(),
-                &format,
+                &self.format,
                 frame_count,
             )
         }
@@ -402,10 +445,6 @@ impl TranscriptionSession for MacosSttSession {
         // the OS will resample internally.
         unsafe { self.request.appendAudioPCMBuffer(&pcm) };
 
-        // Update elapsed time (approximate — no per-segment timestamps yet).
-        let duration_ms = (samples.len() as u64 * 1_000) / u64::from(STT_SAMPLE_RATE);
-        self.elapsed_ms = self.elapsed_ms.saturating_add(duration_ms);
-
         // ── 3. Drain the segment channel ─────────────────────────────────
         let mut segments = Vec::new();
         while let Ok(seg) = self.seg_rx.try_recv() {
@@ -419,32 +458,47 @@ impl TranscriptionSession for MacosSttSession {
         // result to the handler block, then mark the task as finished.
         // SAFETY: `endAudio` is safe to call at any point after the request
         // was started; it is idempotent.
-        unsafe { self.request.endAudio() };
+        {
+            // SAFETY: endAudio is a thread-safe Apple API on the request object.
+            unsafe { self.request.endAudio() };
+        }
 
-        // Poll for the final segment. The result handler fires asynchronously
-        // on the background NSOperationQueue; we give it up to FINALIZE_POLL_TIMEOUT
-        // to deliver the last partial/final segment.
+        let mut out = Vec::new();
         let deadline = Instant::now() + FINALIZE_POLL_TIMEOUT;
-        let mut segments = Vec::new();
 
         loop {
-            match self.seg_rx.try_recv() {
-                Ok(seg) => {
-                    segments.push(seg);
+            // Drain any segments that have already arrived.
+            while let Ok(seg) = self.seg_rx.try_recv() {
+                out.push(seg);
+            }
+
+            // Exit early as soon as the handler has flagged is_final — the
+            // final segment is already in `out` (we set the flag after the
+            // send, so the segment landed before the flag was visible here).
+            if self.is_final_seen.load(Ordering::Acquire) {
+                // One more drain to catch anything that arrived between the
+                // last try_recv pass and reading the flag.
+                while let Ok(seg) = self.seg_rx.try_recv() {
+                    out.push(seg);
                 }
-                Err(mpsc::TryRecvError::Empty) => {
-                    if Instant::now() >= deadline {
-                        break;
-                    }
-                    std::thread::sleep(FINALIZE_POLL_INTERVAL);
-                }
-                Err(mpsc::TryRecvError::Disconnected) => {
-                    // Sender was dropped (task completed or error); drain done.
-                    break;
-                }
+                break;
+            }
+
+            // Compute remaining budget; exit if we've hit the deadline.
+            let remaining = match deadline.checked_duration_since(Instant::now()) {
+                Some(d) if !d.is_zero() => d,
+                _ => break, // timeout hit
+            };
+
+            // Block until the next segment arrives or the budget expires.
+            // This is zero CPU while waiting — no busy-wait spin.
+            match self.seg_rx.recv_timeout(remaining) {
+                Ok(seg) => out.push(seg),
+                Err(mpsc::RecvTimeoutError::Timeout) => break,
+                Err(mpsc::RecvTimeoutError::Disconnected) => break,
             }
         }
 
-        Ok(segments)
+        Ok(out)
     }
 }
