@@ -4,26 +4,31 @@ use primer_speech::macos::permissions::{
     SpeechAuthStatus, current_speech_authorization_status, request_speech_authorization,
 };
 
-/// Verify the `SpeechAuthStatus` type and its `From` conversion are exported
-/// and cover all variants.
+/// Verify that the `From<SFSpeechRecognizerAuthorizationStatus>` conversion
+/// maps every known Apple variant to the correct `SpeechAuthStatus`.
+///
+/// This exercises the actual conversion logic in `permissions.rs`, unlike a
+/// pure enum-construction test which the compiler already enforces.
 #[test]
-fn speech_auth_status_variants_are_exhaustive() {
-    // All four variants must be constructible and comparable.
-    let variants = [
-        SpeechAuthStatus::NotDetermined,
-        SpeechAuthStatus::Restricted,
-        SpeechAuthStatus::Denied,
-        SpeechAuthStatus::Authorized,
-    ];
-    for v in variants {
-        assert!(matches!(
-            v,
-            SpeechAuthStatus::Authorized
-                | SpeechAuthStatus::Denied
-                | SpeechAuthStatus::Restricted
-                | SpeechAuthStatus::NotDetermined
-        ));
-    }
+fn from_impl_maps_all_four_known_apple_variants() {
+    use objc2_speech::SFSpeechRecognizerAuthorizationStatus;
+
+    assert_eq!(
+        SpeechAuthStatus::from(SFSpeechRecognizerAuthorizationStatus::NotDetermined),
+        SpeechAuthStatus::NotDetermined
+    );
+    assert_eq!(
+        SpeechAuthStatus::from(SFSpeechRecognizerAuthorizationStatus::Denied),
+        SpeechAuthStatus::Denied
+    );
+    assert_eq!(
+        SpeechAuthStatus::from(SFSpeechRecognizerAuthorizationStatus::Restricted),
+        SpeechAuthStatus::Restricted
+    );
+    assert_eq!(
+        SpeechAuthStatus::from(SFSpeechRecognizerAuthorizationStatus::Authorized),
+        SpeechAuthStatus::Authorized
+    );
 }
 
 /// Verify that reading the *current* authorization status (which does NOT

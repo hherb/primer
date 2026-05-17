@@ -33,7 +33,13 @@ impl From<SFSpeechRecognizerAuthorizationStatus> for SpeechAuthStatus {
             SFSpeechRecognizerAuthorizationStatus::Denied => SpeechAuthStatus::Denied,
             SFSpeechRecognizerAuthorizationStatus::Restricted => SpeechAuthStatus::Restricted,
             SFSpeechRecognizerAuthorizationStatus::Authorized => SpeechAuthStatus::Authorized,
-            _ => SpeechAuthStatus::Denied,
+            _ => {
+                tracing::warn!(
+                    raw = ?raw,
+                    "Unknown SFSpeechRecognizerAuthorizationStatus; treating as Denied — Apple may have added a new variant in a recent SDK"
+                );
+                SpeechAuthStatus::Denied
+            }
         }
     }
 }
@@ -64,6 +70,7 @@ pub async fn request_speech_authorization() -> SpeechAuthStatus {
     let tx_cell = std::sync::Mutex::new(Some(tx));
 
     let cb = block2::RcBlock::new(move |status: SFSpeechRecognizerAuthorizationStatus| {
+        // Cannot poison: the lock body is infallible Option::take().
         if let Some(tx) = tx_cell.lock().unwrap().take() {
             let _ = tx.send(SpeechAuthStatus::from(status));
         }
