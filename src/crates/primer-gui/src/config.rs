@@ -289,6 +289,17 @@ impl Default for UiConfig {
     }
 }
 
+/// Which speech backend stack to use. `WhisperPiper` is the default and
+/// works on every supported OS. `MacosNative` is macOS-only and requires
+/// building with `--features primer-gui/macos-native`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "kebab-case")]
+pub enum SpeechBackend {
+    #[default]
+    WhisperPiper,
+    MacosNative,
+}
+
 /// Voice-mode settings.
 ///
 /// `voice_mode_enabled` is the sticky toggle (per device, not per
@@ -300,6 +311,12 @@ impl Default for UiConfig {
 pub struct SpeechSettings {
     pub voice_mode_enabled: bool,
     pub disable_auto_download: bool,
+    /// Which backend stack to use for voice mode. Defaults to
+    /// `whisper-piper`. Set to `macos-native` (requires building with
+    /// `--features primer-gui/macos-native`) to use
+    /// SFSpeechRecognizer + AVSpeechSynthesizer instead.
+    #[serde(default)]
+    pub backend: SpeechBackend,
     /// Milliseconds of post-end-of-speech silence the VAD waits before
     /// firing SpeechEnd. Default reads from
     /// `primer_core::consts::speech::DEFAULT_MIC_SILENCE_MS`.
@@ -323,6 +340,7 @@ impl Default for SpeechSettings {
         Self {
             voice_mode_enabled: false,
             disable_auto_download: false,
+            backend: SpeechBackend::default(),
             mic_silence_ms: primer_core::consts::speech::DEFAULT_MIC_SILENCE_MS,
             download_timeout_secs: default_download_timeout_secs(),
             overrides: std::collections::BTreeMap::new(),

@@ -6,6 +6,7 @@
 //! lifted module path directly — easier to swap or wrap later if the
 //! GUI ever needs to inject its own audio strategy.
 
+use crate::config::SpeechBackend;
 use crate::voice::assets::ResolvedAssets;
 
 /// Build every local voice-loop backend (cpal mic + speaker, silero VAD,
@@ -13,11 +14,43 @@ use crate::voice::assets::ResolvedAssets;
 /// drain hook). The caller drains the returned `LocalBackends` into
 /// `run_loop` and stashes the post-loop handle so `shutdown()` can run
 /// when voice mode ends.
+///
+/// When `backend` is [`SpeechBackend::MacosNative`] **and** this binary
+/// was compiled with `--features primer-gui/macos-native` on macOS, the
+/// Apple-native SFSpeechRecognizer + AVSpeechSynthesizer stack is used
+/// instead of whisper/piper. On all other combinations the function falls
+/// through to the whisper/piper path unconditionally.
 pub async fn build_loop_backends(
     assets: &ResolvedAssets,
     locale: primer_core::i18n::Locale,
     mic_silence_ms: u32,
+    backend: SpeechBackend,
 ) -> Result<primer_speech::voice_loop::LocalBackends, String> {
+    // ── macOS-native branch ──────────────────────────────────────────
+    // Both the compile-time cfg AND the runtime config must select it.
+    // This lets an evaluator flip A/B via gui-config.json without
+    // rebuilding, while non-macOS / non-feature builds get the
+    // whisper-piper path at zero cost.
+    #[cfg(all(target_os = "macos", feature = "macos-native"))]
+    {
+        if matches!(backend, SpeechBackend::MacosNative) {
+            return primer_speech::voice_loop::backends::build_local_backends_macos_native(
+                locale,
+                mic_silence_ms,
+                // The GUI logs via tracing, never stderr.
+                false,
+            )
+            .await
+            .map_err(|e| e.to_string());
+        }
+    }
+
+    // ── Whisper/Piper fallthrough ────────────────────────────────────
+    // Reached for:
+    //   - non-macOS builds,
+    //   - macOS builds without `macos-native` feature, OR
+    //   - macOS+macos-native builds where config selects whisper-piper.
+    let _ = backend; // suppress unused-variable warning on non-macOS builds
     primer_speech::voice_loop::build_local_backends(
         &assets.piper_onnx,
         &assets.piper_config,
