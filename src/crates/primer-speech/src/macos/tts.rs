@@ -71,6 +71,12 @@ const RUN_LOOP_SLICE: Duration = Duration::from_millis(10);
 /// re-exported by `libSystem.B.dylib`, which every macOS binary links.
 /// `dispatch_get_main_queue()` is an inline C function that returns a
 /// pointer to `_dispatch_main_q`; we bind the underlying symbol directly.
+///
+// TODO: Replace raw GCD bindings (extern "C" + raw pointer types)
+// with the `dispatch2` crate when it stabilises. The crate provides
+// safe typed wrappers for dispatch_queue_t / dispatch_semaphore_t /
+// dispatch_async_f and would eliminate the _dispatch_main_q
+// private-symbol binding. See plan task 5 review notes (commit 37c3f79).
 mod dispatch {
     #[allow(non_camel_case_types)]
     pub type dispatch_object_t = *mut std::ffi::c_void;
@@ -108,6 +114,34 @@ mod dispatch {
     /// Maximum wait expressed as a `dispatch_time_t` value.
     /// 30 seconds × 10^9 ns/s.
     pub const TIMEOUT_NS: i64 = 30 * 1_000_000_000;
+}
+
+/// RAII wrapper for a GCD `dispatch_semaphore_t`. Calls `dispatch_release`
+/// on `Drop`. Cloneable via `Arc` so both the background thread and the
+/// trampoline can hold a strong reference; the last drop releases the
+/// underlying semaphore — preventing the use-after-free that would occur
+/// if the background thread released on timeout while the trampoline was
+/// still queued on the main thread.
+struct DispatchSemaphore(dispatch::dispatch_semaphore_t);
+
+// SAFETY: `dispatch_semaphore_t` is thread-safe per Apple docs;
+// `dispatch_semaphore_signal` / `dispatch_release` are also thread-safe.
+unsafe impl Send for DispatchSemaphore {}
+unsafe impl Sync for DispatchSemaphore {}
+
+impl DispatchSemaphore {
+    /// Return the raw handle for use with the `dispatch_semaphore_*` FFI.
+    fn as_raw(&self) -> dispatch::dispatch_semaphore_t {
+        self.0
+    }
+}
+
+impl Drop for DispatchSemaphore {
+    fn drop(&mut self) {
+        // SAFETY: We hold exclusive ownership through `self.0`; `Drop` runs
+        // exactly once per instance, never on a null/dangling pointer.
+        unsafe { dispatch::dispatch_release(self.0) };
+    }
 }
 
 /// macOS-native TTS backend using `AVSpeechSynthesizer`.
@@ -253,6 +287,12 @@ fn synthesize_main_thread_path(text: &str, voice: &AVSpeechSynthesisVoice) -> Re
         run_loop.runUntilDate(&date);
     }
 
+    // `cb` (RcBlock) goes out of scope here, but synthesis callbacks
+    // may still fire afterward. This is safe ONLY because
+    // AVSpeechSynthesizer issues its own Block_retain when assigning
+    // the callback — Rust's Drop of RcBlock decrements the refcount
+    // by 1, leaving the ObjC retain in place. Do not "fix" this by
+    // keeping `cb` alive longer; that would double-retain and leak.
     drop(cb);
     let (samples, sample_rate) = accumulator.lock().unwrap().clone();
     Ok(AudioBuffer {
@@ -268,7 +308,9 @@ fn synthesize_main_thread_path(text: &str, voice: &AVSpeechSynthesisVoice) -> Re
 /// Context bundle passed through `dispatch_async_f`.
 struct SynthCtx {
     utterance: Retained<AVSpeechUtterance>,
-    sema: dispatch::dispatch_semaphore_t,
+    /// Shared semaphore — both the trampoline and the waiting background
+    /// thread hold an `Arc` clone. The last drop calls `dispatch_release`.
+    sema: Arc<DispatchSemaphore>,
     accum: Accumulator,
     eos: Arc<AtomicBool>,
 }
@@ -289,12 +331,17 @@ fn synthesize_background_path(
 ) -> Result<AudioBuffer> {
     // ── 1. Create the EOS semaphore ──────────────────────────────────────
     // SAFETY: `dispatch_semaphore_create(0)` returns a valid semaphore.
-    let sema = unsafe { dispatch::dispatch_semaphore_create(0) };
-    if sema.is_null() {
+    let raw_sema = unsafe { dispatch::dispatch_semaphore_create(0) };
+    if raw_sema.is_null() {
         return Err(PrimerError::Speech(
             "dispatch_semaphore_create returned null".into(),
         ));
     }
+    // Wrap in Arc so both this thread and the trampoline share ownership.
+    // The last Arc to drop calls `dispatch_release` via the RAII wrapper,
+    // eliminating the use-after-free that occurred when this thread released
+    // on timeout while the trampoline was still queued on the main thread.
+    let sema = Arc::new(DispatchSemaphore(raw_sema));
 
     // ── 2. Build utterance on the calling thread ─────────────────────────
     let ns_text = NSString::from_str(text);
@@ -309,6 +356,10 @@ fn synthesize_background_path(
     // ── 3. Build and submit the synthesis trampoline ─────────────────────
     extern "C" fn trampoline(ctx_raw: *mut std::ffi::c_void) {
         // SAFETY: ctx_raw was Box::into_raw'd below; we take ownership here.
+        // When `ctx` drops at end of scope, the `Arc<DispatchSemaphore>`
+        // inside is decremented. If this is the last Arc (i.e. the background
+        // thread already timed out and dropped its Arc), `dispatch_release`
+        // runs here — never on an already-freed semaphore.
         let ctx = unsafe { Box::from_raw(ctx_raw as *mut SynthCtx) };
 
         // SAFETY: AVSpeechSynthesizer::new on the main thread.
@@ -316,7 +367,10 @@ fn synthesize_background_path(
 
         let accum_cb = Arc::clone(&ctx.accum);
         let eos_cb = Arc::clone(&ctx.eos);
-        let sema_ptr = ctx.sema;
+        // Clone the Arc so the closure captures its own strong reference.
+        // The closure may outlive `ctx`'s drop (ObjC retains the block),
+        // but the Arc ensures the semaphore stays alive until the closure drops.
+        let sema_cb = Arc::clone(&ctx.sema);
 
         type CbBlock = block2::Block<dyn Fn(NonNull<AVAudioBuffer>)>;
         let cb = block2::RcBlock::new(move |buf_ptr: NonNull<AVAudioBuffer>| {
@@ -334,8 +388,9 @@ fn synthesize_background_path(
             pcm_callback(buf_ptr, &accum_cb, &eos_cb);
 
             if is_eos {
-                // SAFETY: sema_ptr is alive until the waiting thread wakes.
-                unsafe { dispatch::dispatch_semaphore_signal(sema_ptr) };
+                // SAFETY: `sema_cb` (Arc) keeps the semaphore alive for at
+                // least as long as this closure lives — safe to signal.
+                unsafe { dispatch::dispatch_semaphore_signal(sema_cb.as_raw()) };
             }
         });
 
@@ -343,13 +398,18 @@ fn synthesize_background_path(
         let block_ref: &CbBlock = &cb;
         let block_ptr: *mut CbBlock = (block_ref as *const CbBlock).cast_mut();
         unsafe { synth.writeUtterance_toBufferCallback(&ctx.utterance, block_ptr) };
-        // `cb` is dropped here; synthesis callbacks may still fire afterward,
-        // but the EOS one has already signalled the semaphore.
+
+        // `cb` (RcBlock) goes out of scope here, but synthesis callbacks
+        // may still fire afterward. This is safe ONLY because
+        // AVSpeechSynthesizer issues its own Block_retain when assigning
+        // the callback — Rust's Drop of RcBlock decrements the refcount
+        // by 1, leaving the ObjC retain in place. Do not "fix" this by
+        // keeping `cb` alive longer; that would double-retain and leak.
     }
 
     let ctx = Box::new(SynthCtx {
         utterance,
-        sema,
+        sema: Arc::clone(&sema),
         accum: Arc::clone(&accumulator),
         eos: Arc::clone(&eos),
     });
@@ -363,12 +423,16 @@ fn synthesize_background_path(
     unsafe { dispatch::dispatch_async_f(main_queue, ctx_ptr, trampoline) };
 
     // ── 4. Wait for EOS semaphore ────────────────────────────────────────
-    // SAFETY: `sema` is valid; `dispatch_time` computes an absolute deadline.
+    // SAFETY: `sema` Arc keeps the semaphore valid throughout the wait.
+    // `dispatch_time` computes an absolute deadline.
     let deadline =
         unsafe { dispatch::dispatch_time(dispatch::DISPATCH_TIME_NOW, dispatch::TIMEOUT_NS) };
-    let wait_result = unsafe { dispatch::dispatch_semaphore_wait(sema, deadline) };
-    // SAFETY: release our reference to the semaphore.
-    unsafe { dispatch::dispatch_release(sema) };
+    let wait_result = unsafe { dispatch::dispatch_semaphore_wait(sema.as_raw(), deadline) };
+    // Drop our Arc. If the trampoline has already run and dropped its Arc,
+    // this is the last reference and `dispatch_release` runs here.
+    // If the trampoline is still queued, its Arc keeps the semaphore alive
+    // until the trampoline runs — no UAF.
+    drop(sema);
 
     if wait_result != 0 {
         return Err(PrimerError::Speech(
@@ -408,6 +472,13 @@ fn pcm_callback(buf_ptr: NonNull<AVAudioBuffer>, accum: &Accumulator, eos: &Arc<
 
     // SAFETY: immutable property getters.
     let format = unsafe { pcm.format() };
+    let channel_count = unsafe { format.channelCount() };
+    if channel_count != 1 {
+        tracing::warn!(
+            channel_count,
+            "AVSpeechSynthesizer emitted multi-channel PCM; only channel 0 will be captured"
+        );
+    }
     let sample_rate = unsafe { format.sampleRate() } as u32;
 
     // SAFETY: `floatChannelData()[0]` is the mono channel of `frame_length`
