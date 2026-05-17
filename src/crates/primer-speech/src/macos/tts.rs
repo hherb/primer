@@ -240,25 +240,26 @@ fn synthesize_to_chunks(voice: &AVSpeechSynthesisVoice, text: &str) -> Result<Ve
 #[async_trait]
 impl TextToSpeech for MacosTextToSpeech {
     async fn synthesize(&self, text: &str, _voice: &VoiceProfile) -> Result<AudioBuffer> {
-        let on_main = objc2_foundation::NSThread::isMainThread_class();
-
-        if on_main {
-            // Synchronous call — no non-Send ObjC types cross any `.await`
-            // boundary in the outer async fn. The main-thread path drives the
-            // NSRunLoop in a tight loop; on a `current_thread` runtime (the test
-            // harness) this is the only task, so brief blocking is harmless.
-            let chunks = synthesize_to_chunks_main_thread(text, &self.voice)?;
-            Ok(chunks_to_audio_buffer(chunks))
-        } else {
-            let text_owned = text.to_owned();
-            let voice_retained = self.voice.clone();
-            tokio::task::spawn_blocking(move || {
-                let chunks = synthesize_to_chunks_background(&text_owned, &voice_retained)?;
-                Ok(chunks_to_audio_buffer(chunks))
-            })
-            .await
-            .map_err(|e| PrimerError::Speech(format!("spawn_blocking panicked: {e}")))?
+        // Main-thread fast path: skip spawn_blocking (it would force a worker
+        // hop and lose the optimisation where main-thread callers can synthesise
+        // synchronously without GCD bouncing). synthesize_to_chunks detects
+        // main-thread and takes the main-thread path.
+        if objc2_foundation::NSThread::isMainThread_class() {
+            let chunks = synthesize_to_chunks(&self.voice, text)?;
+            return Ok(chunks_to_audio_buffer(chunks));
         }
+        // Off main thread (typical for tokio worker callers): spawn_blocking so
+        // the synchronous synthesize_to_chunks doesn't stall the runtime. Inside
+        // the blocking task, synthesize_to_chunks will detect not-main-thread and
+        // take the GCD-bounce path.
+        let text_owned = text.to_owned();
+        let voice_retained = self.voice.clone();
+        tokio::task::spawn_blocking(move || {
+            let chunks = synthesize_to_chunks(&voice_retained, &text_owned)?;
+            Ok::<_, PrimerError>(chunks_to_audio_buffer(chunks))
+        })
+        .await
+        .map_err(|e| PrimerError::Speech(format!("spawn_blocking panicked: {e}")))?
     }
 }
 
@@ -292,19 +293,13 @@ impl StreamingTextToSpeech for MacosTextToSpeech {
         let session = MacosTtsSession {
             voice,
             splitter: PhraseSplitter::new(),
-            #[cfg(not(test))]
-            pre_warm: true,
-            #[cfg(test)]
-            pre_warm: false,
         };
 
         // Pre-warm: synthesize a silent space to absorb the ~380-640 ms
         // per-voice cold-start cost so the first real `push_text` call
-        // returns audio promptly. Skipped in test builds to avoid the
-        // latency cost during unit tests.
-        if session.pre_warm {
-            let _ = synthesize_to_chunks(&session.voice, " ");
-        }
+        // returns audio promptly. Failure is silently ignored — a broken
+        // voice must not prevent session creation.
+        let _ = synthesize_to_chunks(&session.voice, " ");
 
         Ok(Box::new(session))
     }
@@ -316,10 +311,6 @@ impl StreamingTextToSpeech for MacosTextToSpeech {
 struct MacosTtsSession {
     voice: Retained<AVSpeechSynthesisVoice>,
     splitter: PhraseSplitter,
-    /// Whether to synthesize a silent pre-warm utterance in `open_session`.
-    /// Always `false` in `#[cfg(test)]` so unit tests aren't penalised by the
-    /// ~380-640 ms cold-start cost.
-    pre_warm: bool,
 }
 
 // SAFETY: `MacosTtsSession` owns `voice` exclusively after construction

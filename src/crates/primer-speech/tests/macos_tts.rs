@@ -230,8 +230,8 @@ fn streaming_session_yields_chunks_for_multiple_phrases() {
 
     let total_chunks: usize = mid.len() + tail.len();
     assert!(
-        total_chunks >= 1,
-        "session must emit at least one chunk total for two phrases (got {total_chunks})"
+        total_chunks >= 2,
+        "two-phrase push must produce at least two AudioChunks; got {total_chunks}"
     );
     let total_samples: usize = mid.iter().chain(tail.iter()).map(|c| c.samples.len()).sum();
     assert!(
