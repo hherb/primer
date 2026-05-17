@@ -1,12 +1,22 @@
 # Silero VAD (Rust)
 
+<!-- VENDOR PATCH STATUS: Last checked 2026-05-17 on rustc 1.94.1.
+     unsigned_is_multiple_of stabilised in Rust 1.87 (rust-lang/rust#128101) —
+     the is_multiple_of workaround in model.rs and utils_vad.rs is now OBSOLETE.
+     HOWEVER: upstream silero-vad-rust 6.2.1 still declares
+       ort = { features = ["load-dynamic", "ndarray"] }
+     which re-enables dynamic linking and causes runtime libonnxruntime not-found
+     errors. The vendor MUST stay until upstream drops "load-dynamic" from its
+     ort dep OR another static-link enforcement path is found.
+     Re-check when upstream silero-vad-rust > 6.2.1 is released. -->
+
 Rust port of the [Silero Voice Activity Detector](https://github.com/snakers4/silero-vad) that runs the pre-trained ONNX models through the safe `ort` bindings. The crate bundles the original ONNX weights and exposes idiomatic Rust helpers for loading audio, running the network, and post-processing speech segments.
 
 ## Features
 
 - 🌍 **Universal** — Silero VAD was trained on massive corpora covering 6,000+ languages, so it performs well across domains and under noisy conditions.
 - 🧠 **Pre-trained accuracy** — ships with Silero ONNX models (`opset 15` & `16`) inside `src/silero_vad/data`, so no extra downloads are required.
-- 🖥️ **CPU friendly** — defaults to ONNX Runtime’s CPU execution provider for predictable server and edge runs, while keeping other providers available if you reconfigure `LoadOptions`.
+- 🖥️ **CPU friendly** — defaults to ONNX Runtime's CPU execution provider for predictable server and edge runs, while keeping other providers available if you reconfigure `LoadOptions`.
 - 🔄 **Streaming ready** — `forward_chunk` keeps internal state for long-running streams, while `audio_forward` processes entire buffers offline.
 - 🎚️ **Configurable thresholds** — `VadParameters` lets you tune thresholds, speech/silence windows, and return units (samples or seconds) for rapid adaptation to new setups.
 - 🔧 **Helper APIs** — ships with `read_audio`, `save_audio`, `get_speech_timestamps`, `collect_chunks`, `drop_chunks`, and `VadIterator` for quick end-to-end adoption.
