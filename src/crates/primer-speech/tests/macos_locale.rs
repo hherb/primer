@@ -24,3 +24,13 @@ fn en_us_is_available_on_device() {
 fn de_de_is_available_on_device() {
     assert!(is_on_device_available(&Locale::German));
 }
+
+/// CI coverage for the `false` arm. Hindi is the project's preview
+/// locale and is not on Apple's on-device list on macOS 13–15 (only
+/// added at the SpeechAnalyzer layer on macOS 26+). On a developer
+/// machine that has somehow grown Hindi on-device support, this test
+/// will fail loudly and tell the maintainer to revisit the contract.
+#[test]
+fn hindi_is_not_available_on_device() {
+    assert!(!is_on_device_available(&Locale::Hindi));
+}
