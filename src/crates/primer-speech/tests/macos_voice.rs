@@ -16,5 +16,9 @@ fn en_us_resolves_to_a_voice() {
 #[test]
 fn de_de_resolves_to_a_voice() {
     let selection = select_voice(&Locale::German).expect("de-DE must have at least one voice");
-    assert!(selection.identifier.contains("de") || selection.identifier.contains("Anna"));
+    assert!(
+        selection.language.starts_with("de"),
+        "language must be a de-* tag, got {}",
+        selection.language
+    );
 }

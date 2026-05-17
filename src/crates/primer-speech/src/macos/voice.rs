@@ -7,11 +7,17 @@ use primer_core::i18n::Locale;
 
 /// Voice-quality tier, mirroring `AVSpeechSynthesisVoiceQuality` so
 /// callers don't import the objc2 type.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+///
+/// Variant declaration order encodes the ranking: `Default` < `Premium` <
+/// `Enhanced`. `Premium` ranks below `Enhanced` because Premium voices are
+/// optional ~500 MB downloads that most users will not have installed. We
+/// prefer the reliably-available Enhanced (~100 MB) neural voice over an
+/// absent Premium, and any neural voice over the always-bundled Default.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 pub enum VoiceQuality {
-    Default,
-    Enhanced,
-    Premium,
+    Default,  // lowest — robotic, always-bundled
+    Premium,  // middle — neural, ~500 MB optional download, fewer voices available
+    Enhanced, // highest — neural, ~100 MB optional download, broader coverage; preferred default
 }
 
 impl VoiceQuality {
@@ -22,20 +28,6 @@ impl VoiceQuality {
             _ => VoiceQuality::Default,
         }
     }
-
-    /// Higher is better. Used to pick the best voice for a locale.
-    ///
-    /// `Premium` ranks below `Enhanced` because Premium voices are optional
-    /// ~500 MB downloads that most users will not have installed. We prefer
-    /// the reliably-available Enhanced (~100 MB) neural voice over an absent
-    /// Premium, and any neural voice over the always-bundled Default.
-    fn rank(self) -> u8 {
-        match self {
-            VoiceQuality::Default => 0,
-            VoiceQuality::Premium => 1,
-            VoiceQuality::Enhanced => 2,
-        }
-    }
 }
 
 /// A selected voice ready to assign to an `AVSpeechUtterance`.
@@ -44,7 +36,16 @@ pub struct VoiceSelection {
     pub language: String,
     pub quality: VoiceQuality,
     /// Retained pointer — keep alive for the lifetime of the utterance.
-    pub voice: Retained<AVSpeechSynthesisVoice>,
+    pub(crate) voice: Retained<AVSpeechSynthesisVoice>,
+}
+
+impl VoiceSelection {
+    /// Borrow the underlying AVFoundation voice for use with an
+    /// `AVSpeechUtterance::setVoice`. Crate-internal callers can also
+    /// `clone()` the field directly via `pub(crate)`.
+    pub fn voice(&self) -> &AVSpeechSynthesisVoice {
+        &self.voice
+    }
 }
 
 /// Pick the best available voice for `locale`. Preference is `Enhanced`
@@ -91,7 +92,7 @@ pub fn select_voice(locale: &Locale) -> Option<VoiceSelection> {
 
         let take = match &best {
             None => true,
-            Some((current_q, _, _, _)) => quality.rank() > current_q.rank(),
+            Some((current_q, _, _, _)) => quality > *current_q,
         };
         if take {
             // `voice` is a `&Retained<AVSpeechSynthesisVoice>` from the vec;
