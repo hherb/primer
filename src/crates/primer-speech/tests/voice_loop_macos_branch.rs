@@ -12,8 +12,10 @@ async fn macos_native_builder_returns_local_backends() {
     // be cleanly droppable.
     match result {
         Ok(mut backends) => backends.shutdown(),
-        Err(_) => {
-            // Acceptable in CI without mic permission — just don't panic.
+        Err(e) => {
+            eprintln!(
+                "macos-native builder returned Err (acceptable in CI without mic/STT permission): {e}"
+            );
         }
     }
 }

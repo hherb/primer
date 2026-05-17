@@ -437,6 +437,14 @@ fn run_audio_thread_stt(
                     }
                 }
                 VadEvent::SpeechEnd => {
+                    // TODO(macos-native): MacosSttSession::finalize() blocks the audio
+                    // capture thread for up to 2 s waiting for SFSpeechRecognizer's final
+                    // segment (FINALIZE_POLL_TIMEOUT in stt.rs). During this window the
+                    // mic ringbuf keeps filling (5 s of headroom) but new VAD events are
+                    // not processed. For fast back-and-forth speech this is a latency
+                    // cliff. The fix is to move finalize() to a short-lived helper thread
+                    // and signal completion via a channel, letting the audio loop keep
+                    // pumping. Deferred to a follow-up PR — see plan task 8 review.
                     let segments = match active_session.take() {
                         Some(s) => match s.finalize() {
                             Ok(segs) => segs,
