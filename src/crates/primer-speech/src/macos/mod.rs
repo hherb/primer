@@ -14,8 +14,7 @@ pub mod stt;
 pub mod tts;
 pub mod voice;
 
-// TODO Task 5: uncomment when MacosSpeechToText is defined in stt.rs.
-// pub use stt::MacosSpeechToText;
+pub use stt::MacosSpeechToText;
 pub use tts::MacosTextToSpeech;
 
 /// Backend family identifier surfaced by `Named::name()` and used in logs.
