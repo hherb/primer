@@ -43,13 +43,23 @@ pub struct SpeechLoopConfig<'a> {
 /// CLI entry point for `--speech` mode.
 ///
 /// Builds the local speech backends via the shared
-/// `primer_speech::voice_loop::build_local_backends` helper,
-/// instantiates a [`StdoutObserver`], and calls
-/// [`primer_speech::voice_loop::run_loop_borrowed`] (the
+/// `primer_speech::voice_loop::build_local_backends` helper (or the
+/// macOS-native variant when `--features primer-cli/macos-native` is
+/// set at compile time on macOS), instantiates a [`StdoutObserver`],
+/// and calls [`primer_speech::voice_loop::run_loop_borrowed`] (the
 /// borrowed-`&mut DialogueManager` variant; the CLI owns the DM
 /// directly so no Arc<Mutex<>> is needed here).
 #[cfg(feature = "speech")]
 pub async fn run(cfg: SpeechLoopConfig<'_>, dialogue: &mut DialogueManager) -> Result<()> {
+    #[cfg(all(target_os = "macos", feature = "macos-native"))]
+    let mut local = primer_speech::voice_loop::build_local_backends_macos_native(
+        cfg.locale,
+        cfg.mic_silence_ms,
+        cfg.verbose,
+    )
+    .await?;
+
+    #[cfg(not(all(target_os = "macos", feature = "macos-native")))]
     let mut local = primer_speech::voice_loop::build_local_backends(
         cfg.voice_onnx,
         cfg.voice_config,
