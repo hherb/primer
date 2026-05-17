@@ -37,3 +37,13 @@ pub use state_machine::{
     feature = "cpal"
 ))]
 pub use backends::{ChannelStt, LocalBackends, build_local_backends};
+
+#[cfg(all(
+    target_os = "macos",
+    feature = "macos-native",
+    feature = "silero",
+    feature = "whisper",
+    feature = "piper",
+    feature = "cpal"
+))]
+pub use backends::build_local_backends_macos_native;
