@@ -44,10 +44,9 @@ ringbuf = { workspace = true, optional = true }
 rubato = { workspace = true, optional = true }
 
 # Apple Speech.framework + AVFoundation bindings — opt-in via the
-# `macos-native` feature (and the throwaway `_macos_smoke_check`
-# precursor that only enables the chunk-size smoke example).
-# All four are `optional = true` and the workspace decl uses
-# `default-features = false`, so non-macOS builds compile nothing.
+# `macos-native` feature. All five are `optional = true` and the
+# workspace decl uses `default-features = false`, so non-macOS builds
+# compile nothing.
 objc2 = { workspace = true, optional = true }
 objc2-foundation = { workspace = true, optional = true }
 objc2-avf-audio = { workspace = true, optional = true }
@@ -74,11 +73,11 @@ cpal = ["dep:cpal", "dep:ringbuf", "dep:rubato"]
 # compilation in consumers. Consumed by primer-cli (--speech mode) and
 # primer-gui (Voice mode toggle).
 voice-loop = ["silero", "whisper", "piper", "cpal"]
-# Ephemeral feature scoped to the AVSpeechSynthesizer PCM-callback
-# chunk-size smoke example. Will be folded into a real `macos-native`
-# feature once the chunk-size verdict is in. See
-# docs/superpowers/plans/2026-05-17-macos-native-speech.md Task 0.
-_macos_smoke_check = ["dep:objc2", "dep:objc2-foundation", "dep:objc2-avf-audio", "dep:block2"]
+# Apple Speech.framework + AVFoundation backends. macOS-only.
+# Enables Speech-to-Text (SFSpeechRecognizer) and Text-to-Speech
+# (AVSpeechSynthesizer) without any external system deps, model
+# downloads, or ort runtime download. See docs/macos_native_speech.md.
+macos-native = ["dep:objc2", "dep:objc2-foundation", "dep:objc2-avf-audio", "dep:objc2-speech", "dep:block2"]
 
 [[example]]
 name = "tts_hello"
@@ -86,4 +85,4 @@ required-features = ["piper"]
 
 [[example]]
 name = "tts_macos_pcm_smoke"
-required-features = ["_macos_smoke_check"]
+required-features = ["macos-native"]
