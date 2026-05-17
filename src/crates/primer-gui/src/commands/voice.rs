@@ -103,8 +103,10 @@ pub async fn start_voice_mode(
         .await
         .map_err(StartVoiceModeError::from)?;
 
-    // 2. Close any already-active voice loop.
-    stop_voice_mode_inner(&state).await.ok();
+    // 2. Close any already-active voice loop. The toggle flip-down
+    //    inside stop_voice_mode_inner is harmless here because step 8
+    //    below flips it back to `true` after the new loop is up.
+    stop_voice_mode_inner(&state, false).await.ok();
 
     let cfg = state.config.lock().await.clone();
 
@@ -250,7 +252,7 @@ pub async fn start_voice_mode(
 #[cfg(feature = "speech")]
 #[tauri::command]
 pub async fn stop_voice_mode(state: tauri::State<'_, AppState>) -> Result<(), String> {
-    stop_voice_mode_inner(&state).await
+    stop_voice_mode_inner(&state, false).await
 }
 
 /// Stub for builds without the speech feature.
@@ -263,15 +265,25 @@ pub async fn stop_voice_mode(_state: tauri::State<'_, AppState>) -> Result<(), S
 /// Internal helper so `start_voice_mode` can close any active loop
 /// before spawning a new one.
 ///
-/// Flips `speech.voice_mode_enabled = false` on the way out, AFTER the
-/// loop has actually been joined (or timed out). That keeps the sticky
-/// toggle aligned with what the user just did: pressing Stop persists
-/// the off-state durably, while a start-failure leaves the prior value
-/// untouched so the consent-dialog reach-back from `start_voice_mode`'s
-/// `AssetMissing` path continues to render the toggle in its original
-/// position.
+/// When `preserve_toggle == false`, flips `speech.voice_mode_enabled = false`
+/// on the way out, AFTER the loop has actually been joined (or timed out).
+/// That keeps the sticky toggle aligned with what the user just did:
+/// pressing Stop persists the off-state durably, while a start-failure
+/// leaves the prior value untouched so the consent-dialog reach-back
+/// from `start_voice_mode`'s `AssetMissing` path continues to render the
+/// toggle in its original position.
+///
+/// When `preserve_toggle == true`, the sticky-toggle flip is skipped.
+/// Used by `session::prepare_for_session_change` so a transient
+/// teardown across a session switch doesn't surface as the user having
+/// pressed the off button — the frontend reads the still-`true` flag
+/// and auto-restarts voice mode under the new locale (closes #102
+/// polished follow-up).
 #[cfg(feature = "speech")]
-pub(crate) async fn stop_voice_mode_inner(state: &AppState) -> Result<(), String> {
+pub(crate) async fn stop_voice_mode_inner(
+    state: &AppState,
+    preserve_toggle: bool,
+) -> Result<(), String> {
     let Some(active) = state.voice.lock().await.take() else {
         return Ok(());
     };
@@ -284,7 +296,8 @@ pub(crate) async fn stop_voice_mode_inner(state: &AppState) -> Result<(), String
     // Flip the sticky toggle off — voice mode just stopped. Persist
     // failure is logged but doesn't propagate; the in-memory state is
     // already correct and the next save_settings will pick it up.
-    {
+    // Skipped on a transient teardown (`preserve_toggle == true`).
+    if !preserve_toggle {
         let mut c = state.config.lock().await;
         c.speech.voice_mode_enabled = false;
         if let Err(e) = crate::config::save(&state.home, &c) {
@@ -538,5 +551,98 @@ mod tests {
         let json = serde_json::to_value(&err).unwrap();
         assert_eq!(json["kind"], "other");
         assert_eq!(json["message"], "test message");
+    }
+
+    // ─── Issue #102 polished follow-up: preserve sticky toggle ──────
+
+    /// Synthesize an `ActiveVoiceLoop` whose task completes the moment
+    /// `stop_tx` is signaled — mirrors the production join contract
+    /// without spinning up cpal/whisper/piper. Returned ready to stash
+    /// into `state.voice`.
+    #[cfg(feature = "speech")]
+    fn fake_voice_loop(info: crate::types::SessionInfo) -> crate::state::ActiveVoiceLoop {
+        use primer_speech::voice_loop::VoiceLoopError;
+        let (stop_tx, stop_rx) = tokio::sync::oneshot::channel::<()>();
+        let (cancel_tx, _cancel_rx) = tokio::sync::mpsc::channel::<()>(8);
+        let join: tokio::task::JoinHandle<Result<(), VoiceLoopError>> = tokio::spawn(async move {
+            let _ = stop_rx.await;
+            Ok(())
+        });
+        crate::state::ActiveVoiceLoop {
+            join,
+            stop_tx,
+            cancel_response_tx: cancel_tx,
+            info,
+        }
+    }
+
+    #[cfg(feature = "speech")]
+    fn make_synthetic_session_info() -> crate::types::SessionInfo {
+        use crate::types::LearnerSummary;
+        crate::types::SessionInfo {
+            session_id: None,
+            learner: LearnerSummary {
+                id: uuid::Uuid::nil(),
+                name: "test".into(),
+                age: 8,
+                concept_count: 0,
+            },
+            backend_kind: "stub".into(),
+            main_model: "stub".into(),
+            locale: "en".into(),
+            voice_mode_available: true,
+        }
+    }
+
+    /// User pressed Stop (or a start-error teardown happened) →
+    /// `preserve_toggle = false` → the sticky toggle is durably
+    /// flipped off so the next launch doesn't auto-resume voice mode.
+    #[cfg(feature = "speech")]
+    #[tokio::test]
+    async fn stop_voice_mode_inner_flips_toggle_off_by_default() {
+        use crate::config::GuiConfig;
+        use crate::state::AppState;
+        use tempfile::TempDir;
+
+        let home = TempDir::new().unwrap();
+        let mut cfg = GuiConfig::default();
+        cfg.speech.voice_mode_enabled = true;
+        let state = AppState::new(home.path().to_path_buf(), cfg);
+        *state.voice.lock().await = Some(fake_voice_loop(make_synthetic_session_info()));
+
+        stop_voice_mode_inner(&state, false).await.unwrap();
+
+        assert!(state.voice.lock().await.is_none(), "loop must be cleared");
+        assert!(
+            !state.config.lock().await.speech.voice_mode_enabled,
+            "preserve_toggle=false must flip the sticky toggle off"
+        );
+    }
+
+    /// Session switch → `preserve_toggle = true` → the sticky toggle
+    /// stays at its current value so the frontend can auto-restart
+    /// voice mode under the new locale (closes #102 polished
+    /// follow-up).
+    #[cfg(feature = "speech")]
+    #[tokio::test]
+    async fn stop_voice_mode_inner_preserves_toggle_when_requested() {
+        use crate::config::GuiConfig;
+        use crate::state::AppState;
+        use tempfile::TempDir;
+
+        let home = TempDir::new().unwrap();
+        let mut cfg = GuiConfig::default();
+        cfg.speech.voice_mode_enabled = true;
+        let state = AppState::new(home.path().to_path_buf(), cfg);
+        *state.voice.lock().await = Some(fake_voice_loop(make_synthetic_session_info()));
+
+        stop_voice_mode_inner(&state, true).await.unwrap();
+
+        assert!(state.voice.lock().await.is_none(), "loop must be cleared");
+        assert!(
+            state.config.lock().await.speech.voice_mode_enabled,
+            "preserve_toggle=true must leave the sticky toggle untouched so the frontend's \
+             post-`start_session` `primerRestoreVoiceMode` sees true and auto-restarts"
+        );
     }
 }

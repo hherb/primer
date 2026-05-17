@@ -19,6 +19,15 @@
     active: false,
     available: false,
     currentVoiceState: null,    // "listen" | "latent_think" | "speak" | null
+    // Guard against concurrent auto-start attempts (e.g. rapid back-to-back
+    // session switches firing `primerRestoreVoiceMode` before the first
+    // call's `start_voice_mode` has resolved and set `state.active = true`).
+    // Without this, a second call would race past the `state.active` check
+    // and invoke `start_voice_mode` a second time, whose step-2 teardown
+    // briefly flips the sticky toggle to `false` on disk before step-8
+    // restores it — a tiny window where a crash leaves the persisted
+    // toggle stale.
+    starting: false,
   };
 
   // Per-state label/hint copy. Populated from get_voice_state_copy on init;
@@ -268,7 +277,39 @@
     STATE_COPY.speak        = { label: c.speak_label,     hint: c.speak_hint };
   }
 
-  // === Sticky-toggle restoration on launch ===
+  // === Sticky-toggle restoration ===
+
+  /// Auto-start voice mode if the sticky toggle is on.
+  ///
+  /// Shared by `restoreOnLaunch` (initial GUI start) and
+  /// `restoreAfterSessionChange` (post-`start_session` /
+  /// `resume_session` re-entry — backend preserves the sticky toggle
+  /// through the teardown so voice mode flows seamlessly into the new
+  /// session under its new locale; closes #102 polished follow-up).
+  ///
+  /// Caller controls the error-message prefix via `contextLabel` so
+  /// the user can tell launch-time auto-resume apart from
+  /// session-switch auto-resume in the error banner.
+  async function tryAutoStartVoiceMode(contextLabel) {
+    if (!state.available || state.active || state.starting) return;
+    const cfg = await invoke("get_settings").catch(() => null);
+    if (!cfg || !cfg.speech || cfg.speech.voice_mode_enabled !== true) return;
+    state.starting = true;
+    try {
+      await invoke("start_voice_mode");
+      setActive(true);
+    } catch (err) {
+      if (err && err.kind === "asset_missing") {
+        await showConsentModal(err.entries);
+      } else if (err && err.kind === "not_built") {
+        // Silent — toggle is already disabled.
+      } else {
+        showError(`${contextLabel}: ${(err && (err.message || JSON.stringify(err))) || String(err)}`);
+      }
+    } finally {
+      state.starting = false;
+    }
+  }
 
   async function restoreOnLaunch() {
     // Read the speech-feature flag from the dedicated capability command,
@@ -286,23 +327,25 @@
       toggle.title = "Voice mode is not built into this binary";
       return;
     }
-    // Read persisted speech.voice_mode_enabled via get_settings.
-    const cfg = await invoke("get_settings").catch(() => null);
-    if (cfg && cfg.speech && cfg.speech.voice_mode_enabled === true) {
-      try {
-        await invoke("start_voice_mode");
-        setActive(true);
-      } catch (err) {
-        if (err && err.kind === "asset_missing") {
-          await showConsentModal(err.entries);
-        } else if (err && err.kind === "not_built") {
-          // Silent — toggle is already disabled.
-        } else {
-          showError(`auto-resume voice mode: ${(err && (err.message || JSON.stringify(err))) || String(err)}`);
-        }
-      }
-    }
+    await tryAutoStartVoiceMode("auto-resume voice mode");
   }
+
+  /// Re-enter voice mode after a session switch when the user had it
+  /// active before the switch. Mirrors `restoreOnLaunch`'s auto-start
+  /// branch — the backend's `prepare_for_session_change` preserves
+  /// `speech.voice_mode_enabled` across the transient teardown so this
+  /// helper sees the still-`true` flag and rebuilds voice mode against
+  /// the new locale's Whisper + Piper backends.
+  async function restoreAfterSessionChange() {
+    if (!state.available) return;
+    await tryAutoStartVoiceMode("restart voice mode after session switch");
+  }
+
+  // Exposed so `app.js` / `picker.js` / `settings.js` can call it after
+  // a successful `start_session` / `resume_session`. Idempotent: a
+  // sticky toggle of `false` (user explicitly stopped voice mode
+  // earlier) makes this a no-op.
+  window.primerRestoreVoiceMode = restoreAfterSessionChange;
 
   // === DOM wiring ===
 

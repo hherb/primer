@@ -46,7 +46,7 @@ const TURN_TEXT_PREVIEW_CHARS: usize = 80;
 /// internal drain.
 #[tauri::command]
 pub async fn start_session(state: tauri::State<'_, AppState>) -> Result<SessionInfo, String> {
-    close_session_inner(&state).await?;
+    prepare_for_session_change(&state).await?;
 
     let cfg = state.config.lock().await.clone();
     let active = wiring::build_active_session(&state.home, &cfg).await?;
@@ -102,7 +102,7 @@ pub async fn resume_session(
     let uuid = Uuid::parse_str(&session_id)
         .map_err(|e| format!("invalid session id {session_id:?}: {e}"))?;
 
-    close_session_inner(&state).await?;
+    prepare_for_session_change(&state).await?;
 
     let mut cfg = state.config.lock().await.clone();
 
@@ -546,13 +546,51 @@ pub(crate) fn read_signals(dm: &DialogueManager) -> TurnSignals {
 ///
 /// Also called by `commands::voice::start_voice_mode` so that switching
 /// to voice mode cleanly drains any active text session first.
-pub(crate) async fn close_session_inner(state: &tauri::State<'_, AppState>) -> Result<(), String> {
+///
+/// Takes `&AppState` rather than `&tauri::State<…>` so the unit tests
+/// for `prepare_for_session_change` can drive it without a Tauri runtime.
+/// Deref coercion lets `tauri::State<'_, AppState>` callers continue to
+/// pass `&state`.
+pub(crate) async fn close_session_inner(state: &AppState) -> Result<(), String> {
     let active = state.session.lock().await.take();
     if let Some(active) = active {
         let mut dm = active.dialogue_manager.lock().await;
         dm.close_session().await;
     }
     Ok(())
+}
+
+/// Tear down both the active voice loop (if any) and the active text
+/// session (if any) before switching to a new session. On non-speech
+/// builds the voice teardown is a compile-time no-op (the
+/// `#[cfg(feature = "speech")]`-guarded call below disappears entirely),
+/// so this collapses to just `close_session_inner` and remains correct.
+///
+/// Order matters: `voice::stop_voice_mode_inner` ALSO drops
+/// `state.session` (because the voice loop's responder owns the same
+/// DM Arc the GUI session held). Calling it first means
+/// `close_session_inner` becomes a no-op when voice mode was active,
+/// and the reverse when only a text session was open. This restores
+/// the invariant that `start_session` / `resume_session` always
+/// rebuild backends — including the locale-bound voice ones — from
+/// the new config (closes #102).
+///
+/// Without this teardown, a session switch from `de` → `en` would
+/// leave the voice loop running with its original German-locale
+/// Whisper + Piper backends until the GUI was fully restarted.
+///
+/// **Sticky-toggle preservation.** Passes `preserve_toggle = true` so
+/// `speech.voice_mode_enabled` stays at its current value across the
+/// teardown. The frontend reads the still-`true` flag after
+/// `start_session` / `resume_session` returns and auto-invokes
+/// `start_voice_mode` against the new locale — the user sees voice
+/// mode flow seamlessly into the new session instead of needing to
+/// re-toggle it. (Without this, every session switch silently flipped
+/// voice mode off and required a manual re-enable.)
+async fn prepare_for_session_change(state: &AppState) -> Result<(), String> {
+    #[cfg(feature = "speech")]
+    super::voice::stop_voice_mode_inner(state, true).await.ok();
+    close_session_inner(state).await
 }
 
 /// Read the persisted learner's locale from disk without constructing
@@ -1595,5 +1633,161 @@ mod tests {
         let info = info_from(&active).await;
         // The flag matches whatever feature the test binary was built with.
         assert_eq!(info.voice_mode_available, cfg!(feature = "speech"));
+    }
+
+    // ─── Issue #102: session switch tears down voice mode ────────────
+
+    /// `prepare_for_session_change` clears `state.session` even on
+    /// non-speech builds — the pre-existing `close_session_inner`
+    /// behaviour must survive the refactor through the new helper.
+    /// Compiled in every build so the no-speech path stays covered.
+    #[tokio::test]
+    async fn prepare_for_session_change_clears_text_session() {
+        let home = TempDir::new().unwrap();
+        let cfg = stub_config_with_persistence(home.path());
+        let active = build_active_session(home.path(), &cfg).await.unwrap();
+
+        let state = AppState::new(home.path().to_path_buf(), cfg);
+        *state.session.lock().await = Some(active);
+
+        prepare_for_session_change(&state).await.unwrap();
+
+        assert!(
+            state.session.lock().await.is_none(),
+            "text session must be torn down so the next start_session rebuilds it"
+        );
+    }
+
+    /// Voice-build only: `prepare_for_session_change` tears down a
+    /// running voice loop AND preserves `speech.voice_mode_enabled`
+    /// so the frontend can auto-restart voice mode under the new
+    /// locale (closes #102 polished follow-up). Without this, every
+    /// session switch silently flipped voice mode off and required a
+    /// manual re-enable.
+    #[cfg(feature = "speech")]
+    #[tokio::test]
+    async fn prepare_for_session_change_stops_voice_loop() {
+        use primer_speech::voice_loop::VoiceLoopError;
+
+        let home = TempDir::new().unwrap();
+        let cfg = stub_config_with_persistence(home.path());
+
+        // Synthesize a voice-loop handle whose task exits cleanly the
+        // moment stop_tx is signaled — mirrors the production
+        // contract without spinning up cpal/whisper/piper.
+        let (stop_tx, stop_rx) = tokio::sync::oneshot::channel::<()>();
+        let (cancel_tx, _cancel_rx) = tokio::sync::mpsc::channel::<()>(8);
+        let join: tokio::task::JoinHandle<Result<(), VoiceLoopError>> = tokio::spawn(async move {
+            let _ = stop_rx.await;
+            Ok(())
+        });
+
+        let active = build_active_session(home.path(), &cfg).await.unwrap();
+        let info = info_from(&active).await;
+
+        // Sticky toggle is on — mirrors the user having voice mode
+        // active at the moment of the session switch.
+        let mut cfg_with_voice_on = cfg.clone();
+        cfg_with_voice_on.speech.voice_mode_enabled = true;
+        let state = AppState::new(home.path().to_path_buf(), cfg_with_voice_on);
+        *state.session.lock().await = Some(active);
+        *state.voice.lock().await = Some(crate::state::ActiveVoiceLoop {
+            join,
+            stop_tx,
+            cancel_response_tx: cancel_tx,
+            info,
+        });
+
+        prepare_for_session_change(&state).await.unwrap();
+
+        assert!(
+            state.voice.lock().await.is_none(),
+            "voice loop must be cleared so the next start_voice_mode rebuilds backends \
+             under the new locale (issue #102)"
+        );
+        assert!(
+            state.session.lock().await.is_none(),
+            "active session must also be cleared — stop_voice_mode_inner drops it as part \
+             of its teardown"
+        );
+        assert!(
+            state.config.lock().await.speech.voice_mode_enabled,
+            "sticky toggle must survive the session-change teardown — the frontend reads \
+             this flag after start_session/resume_session returns and auto-invokes \
+             start_voice_mode against the new locale (#102 polished follow-up)"
+        );
+    }
+
+    /// Voice-build only: after a session switch from `de` → `en` via
+    /// `prepare_for_session_change` + rebuild, the new active session
+    /// is configured under the new locale. This is the
+    /// construction-time witness of the fix — the broken behaviour
+    /// from #102 was that the running voice loop kept its German
+    /// Whisper + Piper backends because `state.voice` was untouched.
+    /// With the loop now cleared, a subsequent `start_voice_mode`
+    /// (production path) rebuilds backends from the new cfg.
+    #[cfg(feature = "speech")]
+    #[tokio::test]
+    async fn session_switch_rebuilds_under_new_locale() {
+        use primer_speech::voice_loop::VoiceLoopError;
+
+        let home = TempDir::new().unwrap();
+
+        // Step 1: start under German. Uses `no_persist` so neither
+        // learner row touches disk — otherwise the locale-mismatch
+        // hard-fail from PR #101 would fire on the en-side build (it
+        // protects against silent retagging of an existing learner,
+        // a separate bug class from the voice-loop teardown gap).
+        let mut cfg_de = GuiConfig::default();
+        cfg_de.persistence.no_persist = true;
+        cfg_de.learner.locale = "de".to_string();
+        cfg_de.learner.name = "Hans".to_string();
+        let active_de = build_active_session(home.path(), &cfg_de).await.unwrap();
+        let info_de = info_from(&active_de).await;
+        assert_eq!(active_de.locale.pack_id(), "de");
+
+        let (stop_tx, stop_rx) = tokio::sync::oneshot::channel::<()>();
+        let (cancel_tx, _cancel_rx) = tokio::sync::mpsc::channel::<()>(8);
+        let join: tokio::task::JoinHandle<Result<(), VoiceLoopError>> = tokio::spawn(async move {
+            let _ = stop_rx.await;
+            Ok(())
+        });
+
+        let state = AppState::new(home.path().to_path_buf(), cfg_de);
+        *state.session.lock().await = Some(active_de);
+        *state.voice.lock().await = Some(crate::state::ActiveVoiceLoop {
+            join,
+            stop_tx,
+            cancel_response_tx: cancel_tx,
+            info: info_de,
+        });
+
+        // Step 2: user switches to English. Mirrors what start_session
+        // does after the fix: tear down, then rebuild from current cfg.
+        {
+            let mut c = state.config.lock().await;
+            c.learner.locale = "en".to_string();
+            c.learner.name = "Alice".to_string();
+        }
+        prepare_for_session_change(&state).await.unwrap();
+
+        // Voice loop is gone — this is the *necessary condition* for
+        // the production `start_voice_mode` path to rebuild backends
+        // (LoopBackends is built once from `cfg.learner.locale` at
+        // voice.rs:118-131; pulling the loop out of `state.voice` is
+        // what frees the next `start_voice_mode` to construct new
+        // ones). This test pins that necessary condition; the actual
+        // rebuild is exercised by `start_voice_mode`'s own happy-path
+        // tests (cf. #102).
+        assert!(state.voice.lock().await.is_none());
+
+        let cfg_en = state.config.lock().await.clone();
+        let active_en = build_active_session(&state.home, &cfg_en).await.unwrap();
+        assert_eq!(
+            active_en.locale.pack_id(),
+            "en",
+            "freshly-built session uses the new cfg's locale — the production \
+             `start_voice_mode` would build LoopBackends against this same cfg"
+        );
     }
 }

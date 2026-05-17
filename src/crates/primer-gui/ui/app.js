@@ -207,6 +207,19 @@ async function handleSessionReady({ info, shouldReplay }) {
 
   setComposerState("idle");
   refreshSidebar();
+
+  // If voice mode was active before this session switch, re-enter it
+  // under the new locale. The backend's `prepare_for_session_change`
+  // preserves `speech.voice_mode_enabled` across the teardown so the
+  // sticky toggle reads `true` here and voice.js auto-restarts voice
+  // mode against the new session's Whisper + Piper backends. A
+  // sticky toggle of `false` (user explicitly stopped voice mode)
+  // makes this a no-op. (Closes #102 polished follow-up.)
+  if (window.primerRestoreVoiceMode) {
+    window.primerRestoreVoiceMode().catch((err) =>
+      console.warn("primerRestoreVoiceMode failed:", err),
+    );
+  }
 }
 
 /// Wipe the chat surface back to its empty-state shell — used before
