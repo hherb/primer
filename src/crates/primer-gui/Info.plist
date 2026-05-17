@@ -1,0 +1,10 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>NSMicrophoneUsageDescription</key>
+    <string>The Primer listens to your voice so you and the Primer can have a conversation.</string>
+    <key>NSSpeechRecognitionUsageDescription</key>
+    <string>The Primer turns your voice into words on this device. Nothing leaves your computer.</string>
+</dict>
+</plist>
