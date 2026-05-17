@@ -87,16 +87,17 @@ required-features = ["piper"]
 name = "tts_macos_pcm_smoke"
 required-features = ["macos-native"]
 
-# Custom-harness integration test for MacosTextToSpeech one-shot synthesis.
-# harness = false so that the test file owns its own main() and therefore
-# runs on the actual OS main thread — AVSpeechSynthesizer.writeUtterance:
-# toBufferCallback: delivers PCM callbacks on the main thread, which requires
-# the main thread to be running its NSRunLoop / GCD main queue. The standard
-# cargo test harness spawns test functions on worker threads where the main
-# queue is never drained, causing a 30-second timeout. This test file's
-# main() drives a tokio current_thread runtime on the OS main thread so the
-# synthesis callbacks can be delivered and collected.
+# Custom-harness integration tests for MacosTextToSpeech one-shot and
+# streaming synthesis. harness = false so that the test file owns its own
+# main() and therefore runs on the actual OS main thread —
+# AVSpeechSynthesizer.writeUtterance:toBufferCallback: delivers PCM callbacks
+# on the main thread, which requires the main thread to be running its
+# NSRunLoop / GCD main queue. The standard cargo test harness spawns test
+# functions on worker threads where the main queue is never drained, causing
+# a 30-second timeout. This test file's main() drives a tokio
+# current_thread runtime on the OS main thread so the synthesis callbacks
+# can be delivered and collected.
 [[test]]
-name = "macos_tts_oneshot"
+name = "macos_tts"
 harness = false
 required-features = ["macos-native"]

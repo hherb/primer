@@ -1,4 +1,4 @@
-//! AVSpeechSynthesizer one-shot TTS backend.
+//! AVSpeechSynthesizer one-shot and streaming TTS backend.
 //!
 //! # Delivery contract
 //!
@@ -45,7 +45,12 @@ use objc2_foundation::{NSDate, NSRunLoop, NSString};
 
 use primer_core::error::{PrimerError, Result};
 use primer_core::i18n::Locale;
-use primer_core::speech::{AudioBuffer, Named, TextToSpeech, VoiceProfile};
+use primer_core::speech::{
+    AudioBuffer, AudioChunk, Named, StreamingTextToSpeech, SynthesisSession, TextToSpeech,
+    VoiceProfile,
+};
+
+use crate::PhraseSplitter;
 
 use super::voice::select_voice;
 
@@ -57,7 +62,7 @@ const BACKEND_NAME: &str = "macos-native-tts";
 const EOS_FRAME_LENGTH: usize = 0;
 
 /// Synthesis timeout. If no EOS sentinel arrives within this window,
-/// `synthesize` returns an error.
+/// `synthesize_to_chunks` returns an error.
 const DRAIN_TIMEOUT: Duration = Duration::from_secs(30);
 
 /// NSRunLoop slice for the main-thread poll path. Each `runUntilDate` call
@@ -200,26 +205,56 @@ unsafe impl Send for MacosTextToSpeech {}
 unsafe impl Sync for MacosTextToSpeech {}
 
 /// Shared accumulator type used in both synthesis paths.
-type Accumulator = Arc<Mutex<(Vec<f32>, u32)>>;
+type Accumulator = Arc<Mutex<Vec<AudioChunk>>>;
+
+// ═══════════════════════════════════════════════════════════════════════════
+// Core synthesis helper — shared by one-shot and streaming paths
+// ═══════════════════════════════════════════════════════════════════════════
+
+/// Synthesize `text` using `voice` and return the individual PCM chunks
+/// exactly as AVSpeechSynthesizer delivered them (one chunk per callback
+/// invocation, excluding the zero-frame EOS sentinel).
+///
+/// Dispatches to the main-thread path when called on the OS main thread,
+/// or the background-thread GCD-bounce path otherwise.
+///
+/// The one-shot `synthesize` method concatenates the chunks into an
+/// `AudioBuffer`; the streaming `push_text` / `finalize` methods return
+/// the chunks directly.
+fn synthesize_to_chunks(voice: &AVSpeechSynthesisVoice, text: &str) -> Result<Vec<AudioChunk>> {
+    // `+[NSThread isMainThread]` is a thread-safe class method — safe from
+    // any thread.
+    let on_main = objc2_foundation::NSThread::isMainThread_class();
+
+    if on_main {
+        synthesize_to_chunks_main_thread(text, voice)
+    } else {
+        synthesize_to_chunks_background(text, voice)
+    }
+}
+
+// ═══════════════════════════════════════════════════════════════════════════
+// One-shot TextToSpeech impl
+// ═══════════════════════════════════════════════════════════════════════════
 
 #[async_trait]
 impl TextToSpeech for MacosTextToSpeech {
     async fn synthesize(&self, text: &str, _voice: &VoiceProfile) -> Result<AudioBuffer> {
-        // `+[NSThread isMainThread]` is a thread-safe class method — safe from
-        // any thread.
         let on_main = objc2_foundation::NSThread::isMainThread_class();
 
         if on_main {
             // Synchronous call — no non-Send ObjC types cross any `.await`
-            // boundary in the outer async fn.  The main-thread path drives the
+            // boundary in the outer async fn. The main-thread path drives the
             // NSRunLoop in a tight loop; on a `current_thread` runtime (the test
             // harness) this is the only task, so brief blocking is harmless.
-            synthesize_main_thread_path(text, &self.voice)
+            let chunks = synthesize_to_chunks_main_thread(text, &self.voice)?;
+            Ok(chunks_to_audio_buffer(chunks))
         } else {
             let text_owned = text.to_owned();
             let voice_retained = self.voice.clone();
             tokio::task::spawn_blocking(move || {
-                synthesize_background_path(&text_owned, voice_retained)
+                let chunks = synthesize_to_chunks_background(&text_owned, &voice_retained)?;
+                Ok(chunks_to_audio_buffer(chunks))
             })
             .await
             .map_err(|e| PrimerError::Speech(format!("spawn_blocking panicked: {e}")))?
@@ -227,11 +262,98 @@ impl TextToSpeech for MacosTextToSpeech {
     }
 }
 
+/// Concatenate a `Vec<AudioChunk>` into a single `AudioBuffer`.
+/// Returns an empty buffer (sample_rate = 0) if `chunks` is empty.
+fn chunks_to_audio_buffer(chunks: Vec<AudioChunk>) -> AudioBuffer {
+    let sample_rate = chunks.first().map(|c| c.sample_rate).unwrap_or(0);
+    let samples: Vec<f32> = chunks.into_iter().flat_map(|c| c.samples).collect();
+    AudioBuffer {
+        samples,
+        sample_rate,
+    }
+}
+
+// ═══════════════════════════════════════════════════════════════════════════
+// Streaming TextToSpeech impl
+// ═══════════════════════════════════════════════════════════════════════════
+
+impl StreamingTextToSpeech for MacosTextToSpeech {
+    /// AVSpeechSynthesizer emits audio at the voice's native sample rate.
+    /// Apple voices emit 22 050 Hz (compact) or 24 000 Hz (enhanced/premium)
+    /// on macOS 13–26. Each `AudioChunk` also carries its own `sample_rate`
+    /// field, so this value is a hint for pre-allocation — not a contract.
+    fn sample_rate(&self) -> u32 {
+        22_050
+    }
+
+    fn open_session(&self, _voice: &VoiceProfile) -> Result<Box<dyn SynthesisSession>> {
+        let voice = self.voice.clone();
+
+        let session = MacosTtsSession {
+            voice,
+            splitter: PhraseSplitter::new(),
+            #[cfg(not(test))]
+            pre_warm: true,
+            #[cfg(test)]
+            pre_warm: false,
+        };
+
+        // Pre-warm: synthesize a silent space to absorb the ~380-640 ms
+        // per-voice cold-start cost so the first real `push_text` call
+        // returns audio promptly. Skipped in test builds to avoid the
+        // latency cost during unit tests.
+        if session.pre_warm {
+            let _ = synthesize_to_chunks(&session.voice, " ");
+        }
+
+        Ok(Box::new(session))
+    }
+}
+
+/// Per-turn synthesis session. `!Sync` by construction (owns its own
+/// `AVSpeechSynthesisVoice` retained pointer and `PhraseSplitter` state).
+/// Each session drives the NSRunLoop / GCD semaphore machinery independently.
+struct MacosTtsSession {
+    voice: Retained<AVSpeechSynthesisVoice>,
+    splitter: PhraseSplitter,
+    /// Whether to synthesize a silent pre-warm utterance in `open_session`.
+    /// Always `false` in `#[cfg(test)]` so unit tests aren't penalised by the
+    /// ~380-640 ms cold-start cost.
+    pre_warm: bool,
+}
+
+// SAFETY: `MacosTtsSession` owns `voice` exclusively after construction
+// (no shared references from `MacosTextToSpeech`). All synthesis runs on
+// the thread that owns the session. `Send` is required by `SynthesisSession`.
+unsafe impl Send for MacosTtsSession {}
+
+impl SynthesisSession for MacosTtsSession {
+    fn push_text(&mut self, text: &str) -> Result<Vec<AudioChunk>> {
+        let phrases = self.splitter.push(text);
+        let mut chunks = Vec::new();
+        for phrase in phrases {
+            let phrase_chunks = synthesize_to_chunks(&self.voice, &phrase)?;
+            chunks.extend(phrase_chunks);
+        }
+        Ok(chunks)
+    }
+
+    fn finalize(mut self: Box<Self>) -> Result<Vec<AudioChunk>> {
+        let mut chunks = Vec::new();
+        if let Some(tail) = self.splitter.flush() {
+            let tail_chunks = synthesize_to_chunks(&self.voice, &tail)?;
+            chunks.extend(tail_chunks);
+        }
+        Ok(chunks)
+    }
+}
+
 // ═══════════════════════════════════════════════════════════════════════════
 // Main-thread path
 // ═══════════════════════════════════════════════════════════════════════════
 
-/// Synthesis from the OS main thread (synchronous).
+/// Synthesis from the OS main thread (synchronous). Returns one
+/// `AudioChunk` per PCM callback that AVSpeechSynthesizer delivered.
 ///
 /// Calls `writeUtterance:toBufferCallback:` on the current (main) thread,
 /// then drives the main NSRunLoop in 10 ms slices — each slice delivers any
@@ -240,8 +362,11 @@ impl TextToSpeech for MacosTextToSpeech {
 ///
 /// This is intentionally synchronous so that non-Send ObjC types never cross
 /// an `.await` boundary in the calling `async fn synthesize`.
-fn synthesize_main_thread_path(text: &str, voice: &AVSpeechSynthesisVoice) -> Result<AudioBuffer> {
-    let accumulator: Accumulator = Arc::new(Mutex::new((Vec::new(), 0u32)));
+fn synthesize_to_chunks_main_thread(
+    text: &str,
+    voice: &AVSpeechSynthesisVoice,
+) -> Result<Vec<AudioChunk>> {
+    let accumulator: Accumulator = Arc::new(Mutex::new(Vec::new()));
     let eos = Arc::new(AtomicBool::new(false));
 
     // ── 1. Build synthesizer + utterance ────────────────────────────────
@@ -294,11 +419,8 @@ fn synthesize_main_thread_path(text: &str, voice: &AVSpeechSynthesisVoice) -> Re
     // by 1, leaving the ObjC retain in place. Do not "fix" this by
     // keeping `cb` alive longer; that would double-retain and leak.
     drop(cb);
-    let (samples, sample_rate) = accumulator.lock().unwrap().clone();
-    Ok(AudioBuffer {
-        samples,
-        sample_rate,
-    })
+    let chunks = accumulator.lock().unwrap().clone();
+    Ok(chunks)
 }
 
 // ═══════════════════════════════════════════════════════════════════════════
@@ -320,15 +442,17 @@ struct SynthCtx {
 unsafe impl Send for SynthCtx {}
 
 /// Synthesis from a background thread (pool thread, GUI async task).
+/// Returns one `AudioChunk` per PCM callback that AVSpeechSynthesizer
+/// delivered.
 ///
 /// Submits `writeUtterance:toBufferCallback:` to the GCD main queue via
 /// `dispatch_async_f`. The main queue runs on the main thread, whose
 /// CFRunLoop is already spinning (CLI tool, GUI app). A `dispatch_semaphore`
 /// blocks the calling pool thread until the EOS callback fires.
-fn synthesize_background_path(
+fn synthesize_to_chunks_background(
     text: &str,
-    voice: Retained<AVSpeechSynthesisVoice>,
-) -> Result<AudioBuffer> {
+    voice: &AVSpeechSynthesisVoice,
+) -> Result<Vec<AudioChunk>> {
     // ── 1. Create the EOS semaphore ──────────────────────────────────────
     // SAFETY: `dispatch_semaphore_create(0)` returns a valid semaphore.
     let raw_sema = unsafe { dispatch::dispatch_semaphore_create(0) };
@@ -348,9 +472,9 @@ fn synthesize_background_path(
     // SAFETY: factory method.
     let utterance = unsafe { AVSpeechUtterance::speechUtteranceWithString(&ns_text) };
     // SAFETY: setVoice:.
-    unsafe { utterance.setVoice(Some(&voice)) };
+    unsafe { utterance.setVoice(Some(voice)) };
 
-    let accumulator: Accumulator = Arc::new(Mutex::new((Vec::new(), 0u32)));
+    let accumulator: Accumulator = Arc::new(Mutex::new(Vec::new()));
     let eos = Arc::new(AtomicBool::new(false));
 
     // ── 3. Build and submit the synthesis trampoline ─────────────────────
@@ -440,19 +564,17 @@ fn synthesize_background_path(
         ));
     }
 
-    let (samples, sample_rate) = accumulator.lock().unwrap().clone();
-    Ok(AudioBuffer {
-        samples,
-        sample_rate,
-    })
+    let chunks = accumulator.lock().unwrap().clone();
+    Ok(chunks)
 }
 
 // ═══════════════════════════════════════════════════════════════════════════
 // Shared PCM callback
 // ═══════════════════════════════════════════════════════════════════════════
 
-/// Collect one PCM buffer from `AVSpeechSynthesizer` into `accum`.
-/// Sets `eos` when a zero-frame buffer arrives (the EOS sentinel).
+/// Collect one PCM buffer from `AVSpeechSynthesizer` into `accum` as a
+/// new `AudioChunk`. Sets `eos` when a zero-frame buffer arrives (the EOS
+/// sentinel).
 fn pcm_callback(buf_ptr: NonNull<AVAudioBuffer>, accum: &Accumulator, eos: &Arc<AtomicBool>) {
     // SAFETY: buf_ptr is non-null and valid for the callback's lifetime.
     let buf: &AVAudioBuffer = unsafe { buf_ptr.as_ref() };
@@ -493,8 +615,8 @@ fn pcm_callback(buf_ptr: NonNull<AVAudioBuffer>, accum: &Accumulator, eos: &Arc<
     let slice: &[f32] = unsafe { std::slice::from_raw_parts(chan0_ptr, frame_length) };
 
     let mut guard = accum.lock().unwrap();
-    guard.0.extend_from_slice(slice);
-    if guard.1 == 0 {
-        guard.1 = sample_rate;
-    }
+    guard.push(AudioChunk {
+        samples: slice.to_vec(),
+        sample_rate,
+    });
 }
