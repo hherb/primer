@@ -249,7 +249,7 @@ pub struct LoopConfig {
 
 use std::sync::Arc;
 
-use primer_core::speech::{StreamingSpeechToText, StreamingTextToSpeech};
+use primer_core::speech::{StreamingSpeechToText, StreamingTextToSpeech, SynthesisEvent};
 
 /// Bound on the VAD event channel. At ~32 events/s (silero on 512-sample
 /// chunks at 16 kHz), 256 holds ~8 seconds of accumulated events. The
@@ -833,23 +833,22 @@ async fn run_loop_inner<'r, O: LoopObserver>(
                 })?;
             let mut session = active_tts.open_session(active_voice)?;
             let tts_rate = active_tts.sample_rate();
-            // ~200 ms of silence inserted between AudioChunks (each
-            // chunk is one phrase). Gives the listener a perceptible
-            // pause at sentence boundaries without adding much to
+            // ~200 ms of silence inserted between AudioChunks (each `PhraseEnd`
+            // event marks the boundary of one phrase). Gives the listener a
+            // perceptible pause at sentence boundaries without adding much to
             // total response time.
             const INTER_PHRASE_SILENCE_MS: u32 = 200;
             let inter_phrase_silence_samples = (tts_rate * INTER_PHRASE_SILENCE_MS / 1000) as usize;
-            for chunk in session.push_text(&tts_text)? {
-                on_committed_audio(chunk.samples);
-                on_committed_audio(vec![0.0_f32; inter_phrase_silence_samples]);
-            }
-            for chunk in session.finalize()? {
-                on_committed_audio(chunk.samples);
-                on_committed_audio(vec![0.0_f32; inter_phrase_silence_samples]);
-            }
+            let mut on_event = |event: SynthesisEvent| match event {
+                SynthesisEvent::Audio(chunk) => on_committed_audio(chunk.samples),
+                SynthesisEvent::PhraseEnd => {
+                    on_committed_audio(vec![0.0_f32; inter_phrase_silence_samples])
+                }
+            };
+            session.push_text(&tts_text, &mut on_event)?;
+            session.finalize(&mut on_event)?;
             // Flush sentinel: empty Vec signals on_audio to drain any
-            // resampler-leftover tail. Mock callbacks no-op on empty
-            // input.
+            // resampler-leftover tail. Mock callbacks no-op on empty input.
             on_committed_audio(Vec::new());
             // Wait for cpal to actually empty the speaker ringbuf
             // before clearing the mic gate. Going through `spawn_blocking`
@@ -908,8 +907,8 @@ mod mocks {
 
     use primer_core::error::Result;
     use primer_core::speech::{
-        AudioChunk, Named, StreamingSpeechToText, StreamingTextToSpeech, SynthesisSession,
-        TranscriptSegment, TranscriptionSession, VoiceProfile,
+        AudioChunk, Named, StreamingSpeechToText, StreamingTextToSpeech, SynthesisEvent,
+        SynthesisSession, TranscriptSegment, TranscriptionSession, VoiceProfile,
     };
 
     /// Mock streaming STT: emits a fixed transcript on `finalize`.
@@ -1030,17 +1029,24 @@ mod mocks {
     }
 
     impl SynthesisSession for MockTtsSession {
-        fn push_text(&mut self, text: &str) -> Result<Vec<AudioChunk>> {
+        fn push_text(
+            &mut self,
+            text: &str,
+            on_event: &mut dyn FnMut(SynthesisEvent),
+        ) -> Result<()> {
             if text.is_empty() {
-                return Ok(vec![]);
+                return Ok(());
             }
-            Ok(vec![AudioChunk {
+            on_event(SynthesisEvent::Audio(AudioChunk {
                 samples: vec![0.5; self.chunk_samples],
                 sample_rate: 22_050,
-            }])
+            }));
+            on_event(SynthesisEvent::PhraseEnd);
+            Ok(())
         }
-        fn finalize(self: Box<Self>) -> Result<Vec<AudioChunk>> {
-            Ok(vec![])
+
+        fn finalize(self: Box<Self>, _on_event: &mut dyn FnMut(SynthesisEvent)) -> Result<()> {
+            Ok(())
         }
     }
 
@@ -1131,8 +1137,20 @@ mod mocks {
         let tts = MockStreamingTts::new(100);
         let voice = VoiceProfile::default();
         let mut session = tts.open_session(&voice).unwrap();
-        assert_eq!(session.push_text("hi.").unwrap().len(), 1);
-        assert_eq!(session.push_text("").unwrap().len(), 0);
+
+        let mut count_non_empty: u32 = 0;
+        session
+            .push_text("hi.", &mut |e| {
+                if let SynthesisEvent::Audio(_) = e {
+                    count_non_empty += 1;
+                }
+            })
+            .unwrap();
+        assert_eq!(count_non_empty, 1);
+
+        let mut count_empty: u32 = 0;
+        session.push_text("", &mut |_| count_empty += 1).unwrap();
+        assert_eq!(count_empty, 0);
     }
 
     #[test]
@@ -1916,7 +1934,8 @@ mod mocks {
         use std::sync::Mutex;
 
         use primer_core::speech::{
-            AudioChunk, Named, StreamingTextToSpeech, SynthesisSession, VadEvent, VoiceProfile,
+            AudioChunk, Named, StreamingTextToSpeech, SynthesisEvent, SynthesisSession, VadEvent,
+            VoiceProfile,
         };
 
         // TTS that records every text fed to its session.
@@ -1945,18 +1964,28 @@ mod mocks {
             captured: Arc<Mutex<Vec<String>>>,
         }
         impl SynthesisSession for CapturingSession {
-            fn push_text(&mut self, text: &str) -> primer_core::error::Result<Vec<AudioChunk>> {
+            fn push_text(
+                &mut self,
+                text: &str,
+                on_event: &mut dyn FnMut(SynthesisEvent),
+            ) -> primer_core::error::Result<()> {
                 if text.is_empty() {
-                    return Ok(vec![]);
+                    return Ok(());
                 }
                 self.captured.lock().unwrap().push(text.to_string());
-                Ok(vec![AudioChunk {
+                on_event(SynthesisEvent::Audio(AudioChunk {
                     samples: vec![0.5; 64],
                     sample_rate: 22_050,
-                }])
+                }));
+                on_event(SynthesisEvent::PhraseEnd);
+                Ok(())
             }
-            fn finalize(self: Box<Self>) -> primer_core::error::Result<Vec<AudioChunk>> {
-                Ok(vec![])
+
+            fn finalize(
+                self: Box<Self>,
+                _on_event: &mut dyn FnMut(SynthesisEvent),
+            ) -> primer_core::error::Result<()> {
+                Ok(())
             }
         }
 

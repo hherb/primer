@@ -47,8 +47,8 @@ use objc2_foundation::{NSDate, NSNumber, NSRunLoop, NSString};
 use primer_core::error::{PrimerError, Result};
 use primer_core::i18n::Locale;
 use primer_core::speech::{
-    AudioBuffer, AudioChunk, Named, StreamingTextToSpeech, SynthesisSession, TextToSpeech,
-    VoiceProfile,
+    AudioBuffer, AudioChunk, Named, StreamingTextToSpeech, SynthesisEvent, SynthesisSession,
+    TextToSpeech, VoiceProfile,
 };
 
 use crate::PhraseSplitter;
@@ -408,32 +408,29 @@ struct MacosTtsSession {
 unsafe impl Send for MacosTtsSession {}
 
 impl SynthesisSession for MacosTtsSession {
-    /// **Contract:** returns ONE `AudioChunk` per phrase, matching the
-    /// piper-rs backend. AVSpeechSynthesizer fires its PCM callback
-    /// multiple times per utterance, so we coalesce the per-callback
-    /// chunks here. The state machine in `voice_loop::state_machine`
-    /// inserts ~200 ms of inter-phrase silence between returned chunks;
-    /// returning one chunk per PCM callback (the pre-fix shape) caused
-    /// that silence to land between every ~100 ms of audio, shredding
-    /// each sentence into stuttered syllables.
-    fn push_text(&mut self, text: &str) -> Result<Vec<AudioChunk>> {
-        let phrases = self.splitter.push(text);
-        let mut chunks = Vec::with_capacity(phrases.len());
-        for phrase in phrases {
-            if let Some(c) = coalesce_phrase(synthesize_to_chunks(&self.voice, &phrase)?) {
-                chunks.push(c);
+    /// **Stage-A wrapper:** synthesises the full phrase via the existing
+    /// [`synthesize_to_chunks`] path, coalesces into one chunk, then
+    /// fires `Audio(chunk)` + `PhraseEnd`. Same observable timing as the
+    /// pre-trait-reshape behaviour. Stage B replaces this with a true
+    /// channel-streaming path. Tracking: #114.
+    fn push_text(&mut self, text: &str, on_event: &mut dyn FnMut(SynthesisEvent)) -> Result<()> {
+        for phrase in self.splitter.push(text) {
+            if let Some(chunk) = coalesce_phrase(synthesize_to_chunks(&self.voice, &phrase)?) {
+                on_event(SynthesisEvent::Audio(chunk));
+                on_event(SynthesisEvent::PhraseEnd);
             }
         }
-        Ok(chunks)
+        Ok(())
     }
 
-    fn finalize(mut self: Box<Self>) -> Result<Vec<AudioChunk>> {
-        match self.splitter.flush() {
-            Some(tail) => Ok(coalesce_phrase(synthesize_to_chunks(&self.voice, &tail)?)
-                .map(|c| vec![c])
-                .unwrap_or_default()),
-            None => Ok(vec![]),
+    fn finalize(mut self: Box<Self>, on_event: &mut dyn FnMut(SynthesisEvent)) -> Result<()> {
+        if let Some(tail) = self.splitter.flush() {
+            if let Some(chunk) = coalesce_phrase(synthesize_to_chunks(&self.voice, &tail)?) {
+                on_event(SynthesisEvent::Audio(chunk));
+                on_event(SynthesisEvent::PhraseEnd);
+            }
         }
+        Ok(())
     }
 }
 
