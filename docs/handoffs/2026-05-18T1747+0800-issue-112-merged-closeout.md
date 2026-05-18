@@ -1,60 +1,46 @@
 # Primer — Next Session Brief
 
 **Audience:** future Claude Code session continuing work on this repo.
-**Last updated:** 2026-05-18T1802+0800 (PR #119 in flight — tighten the GUI's CSP by dropping the two `'unsafe-inline'` allowances from `script-src` and `style-src`. Closes issue #71. PR #118 closing #112 merged earlier the same day as commit `1d8a1d7`.)
+**Last updated:** 2026-05-18T1747+0800 (PR #118 — drop dummy whisper/piper flag requirements on the macOS-native build — **merged** to `main` as commit `1d8a1d7`, closing issue #112. No PR currently in flight.)
 
 ## First moves when you start
 
 1. Read [CLAUDE.md](CLAUDE.md) — repo conventions, gotchas, build commands. **Workspace root is `src/`, not the repo root.** Every cargo command runs from `src/`. Always invoke as `~/.cargo/bin/cargo` (Homebrew rust shadows PATH and silently downgrades to 1.86, breaking silero).
-2. From `src/`: `~/.cargo/bin/cargo build && ~/.cargo/bin/cargo test --workspace`. Should be green: **842 Rust tests** under default features (was 839 — three new tests in `primer-gui::csp::tests` pinning the tightened CSP contract). 3 ignored. With `--features primer-gui/speech`: **132 primer-gui tests** (was 129; +3 CSP tests). With `--features primer-cli/speech`: primer-cli still has **12 tests**; same count under `--features primer-cli/speech,primer-cli/macos-native` (PR #118's gating still in force). Plus 135 Python tests in `data/ingest/` (unchanged this session).
-3. **Check PR #119's CI status.** If green and unmerged, merge it. If red, the diff is tiny (3 files; +94 / −1 lines; one config-string edit + one new test module + one `pub mod csp;` declaration). The failure mode is most likely the manual GUI smoke (CSP-blocked WebView resource) or a CI environment that doesn't carry the `'unsafe-inline'` regression test through cleanly.
+2. From `src/`: `~/.cargo/bin/cargo build && ~/.cargo/bin/cargo test --workspace`. Should be green: **839 Rust tests** under default features. 3 ignored. With `--features primer-gui/speech`: **129 primer-gui tests**. With `--features primer-cli/speech`: primer-cli has **12 tests**; same count under `--features primer-cli/speech,primer-cli/macos-native` (the `speech_alone_parses_on_macos_native_without_whisper_piper_flags` test replaces the off-native variant under that build). Plus 135 Python tests in `data/ingest/`.
+3. **Pick the next item from "What's next" below.** No PR is in flight today. The remaining open follow-ups are the eleven issues listed under "Smaller-scope follow-ups still open" plus the carried-forward larger items.
 4. **Don't assume nothing changed since this brief was written.** Read the current state of files you intend to touch first. Always verify open-issue claims and `git log origin/main` since this brief's "last updated" timestamp before starting.
 
 ## What we shipped this session
 
-### PR #119 (in flight, closes #71) — tighten CSP by dropping `'unsafe-inline'`
+This session opened with PR #118 already pushed to GitHub and pending CI green. The session's actual work was confined to closing it out:
 
-Until this PR, `tauri.conf.json` carried `'unsafe-inline'` in both `script-src` and `style-src`. The original Tauri scaffold (PR #70) needed it because the placeholder `ui/index.html` had an inline `<style>` block. That block has long since moved to `styles.css`, and a static-analysis sweep of the current UI confirmed no remaining inline content:
+- **CI verification.** PR #118 came back **green** on all four required checks (`cargo test (default features)`; CodeQL × 3 for actions / javascript-typescript / python / rust; CodeQL summary). Merged to `main` as commit `1d8a1d7` (squash merge from branch `cli/macos-native-drop-whisper-piper-flags-issue-112`).
+- **Issue #112 closed.** GitHub auto-closed the issue at 2026-05-18T09:44:16Z when the merge landed. No follow-up issues were spawned by the PR.
+- **Local cleanup.** Switched local clone to `main`, fast-forwarded over `413a1df..1d8a1d7`, deleted the merged feature branch.
+- **Sanity verification on main.** `cargo build --workspace` clean; `cargo test --workspace` green at **839 passed / 0 failed / 3 ignored**; `cargo fmt --all -- --check` clean; `cargo clippy --workspace --all-targets -- -D warnings` clean.
+- **No code change this session.** All work was confined to this brief (and its handoff snapshot in `docs/handoffs/`). README.md and CLAUDE.md were updated as part of PR #118 itself, before merge.
 
-- no `<style>` blocks
-- no `style="..."` attributes (HTML or JS innerHTML templates)
-- no inline `<script>` blocks (all script tags reference external files)
-- no inline event handlers (`onclick=`, `onload=`, etc.)
-- no `setAttribute('style', ...)` calls
-- no `javascript:` URLs
-- no `eval()` / `new Function()`
+### PR #118 recap (merged as `1d8a1d7`, closes #112)
 
-The six JS-side `element.style.foo = bar` writes in `app.js` are intentional (live-resizing the composer textarea, animating the engagement-confidence fill, sizing depth-distribution segments) and continue to work — CSP's `style-src` directive only covers HTML-parsed `style="..."` attributes and `<style>` blocks, not the CSS-OM DOM API.
+Under `--features primer-cli/speech,primer-cli/macos-native` on macOS the SFSpeechRecognizer + AVSpeechSynthesizer path replaces whisper + piper, yet clap still forced users to pass dummy `--whisper-model /dev/null --voice-onnx /dev/null --voice-config /dev/null` because of `requires_all`, and `speech_loop::run` discarded every value at runtime (emitting a dead-code warning on the matching `SpeechLoopConfig` fields, called out as a separate review finding in PR #111).
 
-The PR ships:
+The fix cfg-gates the four CLI flags + their `SpeechLoopConfig` mirrors under `not(all(target_os = "macos", feature = "macos-native"))` so they disappear entirely on the macOS-native build:
 
-- **`src/crates/primer-gui/src/csp.rs`** — new 92-line module, entirely `#[cfg(test)]`, holds three regression tests:
-  - `csp_does_not_grant_unsafe_inline_or_eval` — the headline assertion; pins both `'unsafe-inline'` and (defensively) `'unsafe-eval'` as forbidden tokens.
-  - `csp_declares_required_directives` — guards against directives being accidentally dropped (default-src / script-src / style-src / img-src / connect-src must all stay declared).
-  - `csp_self_origin_is_the_default_source` — pins `default-src 'self'` so anything not explicitly allowlisted is rejected.
-- **`src/crates/primer-gui/src/lib.rs`** — `+ pub mod csp;`.
-- **`src/crates/primer-gui/tauri.conf.json`** — drops `'unsafe-inline'` from both `script-src` and `style-src`. Single-line edit.
+- `Cli::speech` uses `#[cfg_attr]` to switch the `requires_all` payload.
+- `Cli::{whisper_model, voice_onnx, voice_config, voice}` fields are declared only on the whisper+piper build.
+- `validate_speech_assets` moves under the same cfg.
+- `SpeechLoopConfig` drops its lifetime parameter; the four asset fields are now owned (`PathBuf` / `String`) so the macOS-native arm doesn't need a `PhantomData<&'a ()>` workaround.
+- `speech_loop::run` takes `SpeechLoopConfig` (no lifetime).
+- Speech branch in `main.rs` cfg-gates the validate-then-construct path on the non-native arm; the macOS-native arm constructs the three-field config directly.
 
-The test reads `tauri.conf.json` via `include_str!`, so the file baked into the binary is exactly the file the test inspects — no cwd-relative path resolution and no risk of drift between what was shipped and what was tested.
+Two new tests, each gated to a complementary cfg so both speech builds are pinned in CI:
 
-**Branch:** `gui/tighten-csp-drop-unsafe-inline-issue-71`.
-**Tests:** `cargo test --workspace`: **842 / 0 / 3** (was 839 + 3 new). `cargo test -p primer-gui --features speech`: **132 / 0 / 0** (was 129 + 3 new). fmt + clippy `-D warnings` clean on default features and on `--features primer-gui/speech`. `cargo build -p primer-gui` builds cleanly under both default and speech features.
+- `speech_alone_parses_on_macos_native_without_whisper_piper_flags`
+- `speech_alone_still_rejected_off_macos_native`
 
-**Manual GUI smoke not run** — left to the merger. The static analysis above is exhaustive but a visual verification (open the app, open the settings modal, open the voice-consent modal) is cheap and would catch any blind spot.
-
-**Out of scope (explicit "consider" in the issue body, not a must):** switching `tauri.conf.json` to the CSP object form (`"csp": { "default-src": ["'self'"], ... }`). The string form is still concise enough that the multi-line diff cost is negligible. If a future CSP edit makes the string version awkward to diff, that's the right time to flip.
-
-### Earlier in this session day (already merged before this PR opened)
-
-- **PR #118** (commit `1d8a1d7`, closes #112): drop dummy whisper/piper flag requirements on the macOS-native build. Cfg-gates the four CLI flags + their `SpeechLoopConfig` mirrors + `validate_speech_assets` under `not(all(target_os = "macos", feature = "macos-native"))`. Two new tests, each gated to a complementary cfg, pin both speech builds in CI.
+`cargo test -p primer-cli --features speech`: 12 / 0 / 0 (was 11). `cargo test -p primer-cli --features speech,macos-native`: 12 / 0 / 0 (was 11; the pre-existing dead-code warning is also gone). Workspace default features: 839 / 0 / 3 (unchanged). fmt + clippy `-D warnings` clean on every relevant feature combination.
 
 ## What's next
-
-### CSP follow-ups (open after PR #119 lands)
-
-- **CSP object form** — explicit non-goal of #71 ("consider", not "must"). Only worth doing when a future edit makes the string form awkward to diff. Not opening a follow-up issue today.
-- **CSP nonce or hash for any future inline content** — when a feature genuinely needs inline JS/CSS (e.g. a Markdown-rendered chat bubble that injects rich content), the right pattern is a per-page nonce, not re-enabling `'unsafe-inline'`. Worth keeping in mind; no open issue today.
-- **Manual GUI smoke after merge** — open the app, navigate every modal (settings, voice-consent), confirm the WebView console shows no CSP-blocked-resource warnings. Cheap to run; should be a one-time exercise.
 
 ### macOS-native speech follow-ups (open after #112 landed)
 
@@ -98,12 +84,13 @@ Acceptance criteria for #114 (sketch — refine before implementing):
 
 ### Smaller-scope follow-ups still open
 
-Verified against `gh issue list` 2026-05-18T1802+0800 (no new issues opened since the prior brief; #71 will close on PR #119 merge; #112 closed by PR #118):
+Verified against `gh issue list` 2026-05-18T1747+0800 (no new issues opened since the prior brief; #112 closed by PR #118):
 
 - **#114** — voice(macos-native): stream PCM chunks to speaker as AVSpeechSynthesizer emits them.
 - **#103** — voice: cancel-and-retry path drops the first half of the transcript (bug, voice-loop hardening territory).
 - **#98** — refactor(tests): split `tests/common/sweep.rs` into `bm25`/`hybrid` submodules (enhancement). **Defer until Hindi or another third locale lands** — issue body explicitly recommends this.
 - **#81** — GUI: settings modal needs a focus trap (enhancement).
+- **#71** — GUI: tighten CSP before ship (remove `'unsafe-inline'`).
 - **#46** — Hybrid sweep: explore post-RRF `min_score` as a fifth grid axis.
 - **#41** — data/ingest: consider scoping disambiguation regex to lead-sentence patterns.
 - **#40** — data/ingest: aggregate per-source attribution for the Wikipedia layer.
@@ -134,12 +121,6 @@ Carried-forward open items (still relevant from prior sessions):
 - Background-task spawn order is load-bearing on serialized backends.
 - "I just don't want to see this word" escape valve for vocab not yet implemented.
 
-Newly carried into this brief from PR #119:
-
-- **CSP regression test reads `tauri.conf.json` via `include_str!`** — that's the right mechanism (compile-time embed of the file shipped) but the file location is hard-coded to `../tauri.conf.json` relative to `src/csp.rs`. A future restructure that moves `tauri.conf.json` would break compilation loudly (which is fine), but a structural reorganisation of the crate would need to update the relative path.
-- **The `' * '` wildcard check was considered but dropped from `FORBIDDEN_CSP_KEYWORDS`** because the surrounding-space-required pattern is brittle (matches `host * ` but not `host *;`). If a future regression introduces wildcard sources, it won't be caught by today's three tests. The narrower assertion bar (only `'unsafe-inline'` and `'unsafe-eval'`) is intentional — `*` in a CSP source is a host-allowlist concern that the directive-presence check partially covers anyway.
-- **No object-form CSP migration** — the string form remains short enough that the cost-benefit hasn't tipped. Flip the moment a multi-source directive makes the string awkward.
-
 Carried over from PR #118's brief, still pending:
 
 - **`SpeechLoopConfig` shape now differs between speech builds.** On macOS-native it has three fields; on every other speech build it has seven. Any future code that introspects this struct (serialization, debug-formatting, builder pattern, etc.) needs matching cfg gates. Today the only consumer is `speech_loop::run` in the same crate, so the blast radius is contained.
@@ -161,8 +142,6 @@ Carried over from PR #117's brief, still pending:
 
 (All inherited from prior sessions and confirmed standing.)
 
-- **Pin a static config-file contract via `include_str!` + a `#[cfg(test)]` parser test, not a runtime check** (issue #71). When the contract lives in a non-Rust file the binary depends on (`tauri.conf.json`, `Cargo.toml`, etc.), embedding the file with `include_str!` guarantees the bytes the test inspects are the bytes baked into the binary. The test is free at runtime (compile-time only), reads byte-for-byte what was shipped, and protects against the failure mode "the contract drifted because someone edited the config without realising it was load-bearing." The same pattern would work for prompt-pack-status invariants, manifest-format invariants, or any other compile-time-embedded asset.
-- **Static-analysis sweep before tightening a security policy.** Before dropping `'unsafe-inline'` from CSP, grep for every plausible source of inline content (`<style>`, `style="..."`, `<script>` blocks, inline event handlers, `setAttribute('style', ...)`, `javascript:` URLs, `eval`, `new Function`, and `innerHTML` templates containing `style="..."`). One-liner greps cover most of these and produce a strong audit trail in the PR description. The CSP doesn't cover the CSS-OM DOM API (`element.style.foo = bar`) — note that explicitly so a reviewer doesn't second-guess the `app.js` style writes.
 - **Cfg-gate CLI fields + the matching struct fields together, never just one side** (issue #112). When a CLI flag is meaningless on a build configuration and a downstream config struct mirrors that flag, gating only one side leaves a dead-code warning (consumer struct field never read) or a forced-dummy UX (CLI requires a value that gets discarded). Gate them in lockstep — flag declaration, `requires_all` list, asset-validation function, the consumer struct field, and the call-site construction — all under the same `cfg(...)` predicate. The two-test pattern (one test under each side of the cfg) keeps both behaviours pinned in CI without needing a feature-matrix workflow.
 - **Drop lifetimes from cfg-gated structs by owning their references.** When all the borrowed fields in a struct are cfg-gated out on one build, the lifetime parameter becomes unused on that build. The two clean fixes: (a) `PhantomData<&'a ()>` under the inverse cfg, or (b) switch `&'a Path` → `PathBuf` and `&'a str` → `String` so the struct doesn't need the lifetime at all. (b) trades one clone for cleaner shape and tends to win when the struct is small and constructed once.
 - **`#[cfg_attr]` to switch a single attribute payload, not just enable/disable an attribute.** When a clap `#[arg(...)]` attribute carries a `requires_all` whose contents depend on cfg, two `#[cfg_attr(cond, arg(long, ...))]` lines with mutually exclusive conditions is cleaner than splitting the field into two cfg-gated declarations. The field name appears once; the attribute payload switches.
@@ -214,13 +193,10 @@ Carried over from PR #117's brief, still pending:
 
 ```bash
 cd /Users/hherb/src/primer
-git status                       # confirm clean state
+git status                       # confirm clean on main
 git checkout main
 git pull
-git log --oneline -10            # 1d8a1d7 (PR #118) at top; PR #119 not yet merged
-
-# Check this session's PR.
-gh pr view 119
+git log --oneline -10            # 1d8a1d7 (PR #118, closes #112) at top
 
 # Check for any new PRs or issues opened since this brief.
 gh pr list --state open
@@ -231,7 +207,7 @@ git config core.hooksPath .githooks
 
 cd src
 ~/.cargo/bin/cargo build --workspace && ~/.cargo/bin/cargo test --workspace
-# Expected post-#119: 842 passed, 0 failed, 3 ignored (default features).
+# Expected: 839 passed, 0 failed, 3 ignored (default features).
 
 ~/.cargo/bin/cargo test -p primer-cli --features speech
 # Expected: 12 passed, 0 failed, 0 ignored.
@@ -241,7 +217,7 @@ cd src
 # Expected: 12 passed, 0 failed, 0 ignored.
 
 ~/.cargo/bin/cargo test -p primer-gui --features speech
-# Expected post-#119: 132 passed, 0 failed, 0 ignored.
+# Expected: 129 passed, 0 failed, 0 ignored.
 
 ~/.cargo/bin/cargo fmt --all -- --check
 # Expected: clean.
@@ -250,27 +226,13 @@ cd src
 # Expected: clean exit 0.
 
 RUSTFLAGS="-D warnings" ~/.cargo/bin/cargo test --workspace --no-fail-fast
-# Expected post-#119: 842 passed.
+# Expected: 839 passed.
 
 RUSTFLAGS="-D warnings" ~/.cargo/bin/cargo clippy --workspace --all-targets --features primer-gui/speech
 # Expected: clean exit 0 (the speech-features build is not yet on CI; verify locally).
 ```
 
-To do a manual GUI smoke verifying the tightened CSP (recommended before merging #119):
-
-```bash
-cd /Users/hherb/src/primer/src
-~/.cargo/bin/cargo run -p primer-gui --features speech
-# Then in the running app:
-#   1. Open Settings (settings modal must render correctly — no CSP-blocked styles).
-#   2. Open one of the per-locale Speech override cards.
-#   3. Trigger a voice-consent flow if speech assets aren't cached: voice-mode toggle
-#      → consent modal renders.
-# Open WebView devtools (right-click → Inspect). The Console tab must show NO
-# "Refused to apply inline style" or "Refused to execute inline script" warnings.
-```
-
-To exercise the macOS-native build manually (verifies #112's fix is still in force):
+To exercise the macOS-native build manually (verifies #112's fix landed):
 
 ```bash
 cd /Users/hherb/src/primer/src
@@ -279,6 +241,9 @@ cd /Users/hherb/src/primer/src
 # Expected: no clap MissingRequiredArgument error — the four whisper/piper
 # flags are no longer required (or even declared). SFSpeechRecognizer +
 # AVSpeechSynthesizer carry STT and TTS; Silero stays as the VAD.
+# Note: this still requires the macOS Speech framework to be available;
+# the loop will error if SFSpeechRecognizer's on-device English assets
+# are missing (System Settings → Keyboard → Dictation).
 ```
 
 To exercise the Hindi preview locale manually:
@@ -288,7 +253,20 @@ cd /Users/hherb/src/primer/src
 RUST_LOG=primer::prompt_pack=warn,info ~/.cargo/bin/cargo run --bin primer -- \
     --backend stub --name Aarav --age 8 --language hi --no-persist
 # Expected: one WARN line "prompt pack is in preview status — machine-translated content
-# awaiting native-speaker review ... locale=hi" before the first turn.
+# awaiting native-speaker review ... locale=hi" before the first turn. Session runs;
+# type "bye" to end. Stub backend gives an English canned response (it doesn't read the
+# system prompt) — this is correct; the Hindi pack-loading path is what we're verifying.
+```
+
+For a manual GUI smoke (locale picker):
+
+```bash
+cd /Users/hherb/src/primer/src
+~/.cargo/bin/cargo run -p primer-gui --features speech
+# Open Settings; confirm:
+#   - Locale dropdown lists "English (en)" and "Deutsch (de)" (in that order)
+#   - Speech section lists override cards for both EN and DE
+#   - Hindi is absent from both
 ```
 
 For a real-LLM Hindi smoke (recommended before flipping to stable):
@@ -323,12 +301,37 @@ cd /Users/hherb/src/primer/src
 ~/.cargo/bin/cargo test -p primer-kb-load --features fastembed --test retrieval_quality_hybrid_de
 ```
 
+To re-run the sweep diagnostics:
+
+```bash
+cd /Users/hherb/src/primer/src
+
+# BM25-only (always built; ~250ms wallclock):
+~/.cargo/bin/cargo test -p primer-kb-load --test retrieval_sweep_de \
+    -- --ignored sweep_retrieval_params_de --nocapture
+
+# Hybrid (downloads ~570 MB BGE-M3 on first run; ~78s wallclock when cached):
+~/.cargo/bin/cargo test -p primer-kb-load --features fastembed \
+    --test retrieval_sweep_hybrid_de \
+    -- --ignored sweep_retrieval_params_hybrid_de --nocapture
+```
+
 For the Python ingestion pipeline tests (uv-only — never invoke pip directly):
 
 ```bash
 cd /Users/hherb/src/primer/data/ingest
 .venv/bin/pytest tests/
 # Expected: 135 passed.
+```
+
+For the speech build path: `~/.cargo/bin/cargo build --workspace --features primer-cli/speech`.
+
+For the embedding feature build path:
+
+```bash
+~/.cargo/bin/cargo build --workspace --features primer-cli/embedding
+~/.cargo/bin/cargo run --bin primer -- --embedder-backend fastembed ...
+# First run downloads BGE-M3 (~570 MB) into the fastembed cache.
 ```
 
 ## Reporting back
