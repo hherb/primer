@@ -244,11 +244,20 @@ impl MacosTextToSpeech {
         })?;
 
         let native_sample_rate = voice_native_sample_rate(&selection.voice);
-        tracing::debug!(
+        // INFO-level on purpose: voice quality (Default / Premium / Enhanced)
+        // is the single biggest lever for the macOS-native TTS user experience.
+        // Default = robotic Compact voice; Enhanced/Premium = neural. Surfacing
+        // the selected voice's identifier + quality at startup makes it obvious
+        // when the user is hearing a Compact voice and should install a neural
+        // one via System Settings → Accessibility → Spoken Content → System
+        // Voice → Manage Voices.
+        tracing::info!(
             target: "primer::speech::macos",
             bcp47,
+            voice = %selection.identifier,
+            quality = ?selection.quality,
             native_sample_rate,
-            "MacosTextToSpeech: resolved voice native sample rate"
+            "MacosTextToSpeech: selected system voice"
         );
 
         Ok(Self {
@@ -399,24 +408,52 @@ struct MacosTtsSession {
 unsafe impl Send for MacosTtsSession {}
 
 impl SynthesisSession for MacosTtsSession {
+    /// **Contract:** returns ONE `AudioChunk` per phrase, matching the
+    /// piper-rs backend. AVSpeechSynthesizer fires its PCM callback
+    /// multiple times per utterance, so we coalesce the per-callback
+    /// chunks here. The state machine in `voice_loop::state_machine`
+    /// inserts ~200 ms of inter-phrase silence between returned chunks;
+    /// returning one chunk per PCM callback (the pre-fix shape) caused
+    /// that silence to land between every ~100 ms of audio, shredding
+    /// each sentence into stuttered syllables.
     fn push_text(&mut self, text: &str) -> Result<Vec<AudioChunk>> {
         let phrases = self.splitter.push(text);
-        let mut chunks = Vec::new();
+        let mut chunks = Vec::with_capacity(phrases.len());
         for phrase in phrases {
-            let phrase_chunks = synthesize_to_chunks(&self.voice, &phrase)?;
-            chunks.extend(phrase_chunks);
+            if let Some(c) = coalesce_phrase(synthesize_to_chunks(&self.voice, &phrase)?) {
+                chunks.push(c);
+            }
         }
         Ok(chunks)
     }
 
     fn finalize(mut self: Box<Self>) -> Result<Vec<AudioChunk>> {
-        let mut chunks = Vec::new();
-        if let Some(tail) = self.splitter.flush() {
-            let tail_chunks = synthesize_to_chunks(&self.voice, &tail)?;
-            chunks.extend(tail_chunks);
+        match self.splitter.flush() {
+            Some(tail) => Ok(coalesce_phrase(synthesize_to_chunks(&self.voice, &tail)?)
+                .map(|c| vec![c])
+                .unwrap_or_default()),
+            None => Ok(vec![]),
         }
-        Ok(chunks)
     }
+}
+
+/// Concatenate the PCM-callback chunks of one phrase into a single
+/// `AudioChunk`. Returns `None` for empty input or zero-frame phrases
+/// (the splitter can hand us whitespace-only tails).
+///
+/// Every PCM callback within one synthesis call uses the same
+/// `AVAudioFormat`, so the sample rate of the first chunk is the
+/// correct rate for the concatenation.
+fn coalesce_phrase(chunks: Vec<AudioChunk>) -> Option<AudioChunk> {
+    let sample_rate = chunks.first()?.sample_rate;
+    let samples: Vec<f32> = chunks.into_iter().flat_map(|c| c.samples).collect();
+    if samples.is_empty() {
+        return None;
+    }
+    Some(AudioChunk {
+        samples,
+        sample_rate,
+    })
 }
 
 // ═══════════════════════════════════════════════════════════════════════════

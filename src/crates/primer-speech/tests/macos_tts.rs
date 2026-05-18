@@ -223,15 +223,18 @@ fn streaming_session_yields_chunks_for_multiple_phrases() {
         pitch: 0.0,
     };
     let mut session = tts.open_session(&voice).expect("session opens");
-    // Two complete phrases separated by whitespace — push_text should emit
-    // chunks for both before finalize is called.
+    // Two complete phrases separated by whitespace — push_text must emit
+    // EXACTLY one AudioChunk per phrase to match the piper-rs contract
+    // the state machine assumes (see `voice_loop::state_machine` —
+    // inter-phrase silence is inserted between returned chunks; if a
+    // phrase emits multiple chunks, silence lands mid-phrase).
     let mid = session.push_text("Hello. World. ").expect("push ok");
     let tail = session.finalize().expect("finalize ok");
 
     let total_chunks: usize = mid.len() + tail.len();
-    assert!(
-        total_chunks >= 2,
-        "two-phrase push must produce at least two AudioChunks; got {total_chunks}"
+    assert_eq!(
+        total_chunks, 2,
+        "two-phrase push must produce exactly two AudioChunks (one per phrase); got {total_chunks}"
     );
     let total_samples: usize = mid.iter().chain(tail.iter()).map(|c| c.samples.len()).sum();
     assert!(
