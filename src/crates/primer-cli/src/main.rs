@@ -1097,7 +1097,7 @@ mod tests {
     // still applies, because `build_local_backends` needs all three
     // model paths to open whisper + piper.
 
-    #[cfg(all(feature = "speech", target_os = "macos", feature = "macos-native"))]
+    #[cfg(all(feature = "speech", all(target_os = "macos", feature = "macos-native")))]
     #[test]
     fn speech_alone_parses_on_macos_native_without_whisper_piper_flags() {
         let result = Cli::try_parse_from(["primer", "--speech"]);
