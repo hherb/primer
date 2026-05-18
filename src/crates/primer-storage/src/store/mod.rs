@@ -20,7 +20,7 @@ use std::path::Path;
 use std::sync::Mutex;
 
 use primer_core::error::{PrimerError, Result};
-use rusqlite::Connection;
+use rusqlite::{Connection, OpenFlags};
 
 thread_local! {
     /// Per-OS-thread counter incremented by every
@@ -52,6 +52,33 @@ thread_local! {
 #[doc(hidden)]
 pub fn __session_store_open_count_for_tests() -> usize {
     SESSION_STORE_OPEN_COUNT.with(|c| c.get())
+}
+
+/// Read a concept's `concept_language_tag` from a session DB by name.
+///
+/// **Test-only API.** Used by the GUI's cross-crate end-to-end test
+/// for issue #87 (resume_inherits_persisted_locale_end_to_end) to
+/// inspect the on-disk artefact without pulling rusqlite into the
+/// `primer-gui` crate's dev-deps. Opens a transient read-only
+/// connection on the file at `path`, queries the `concepts` table by
+/// `name`, and returns the tag — or `None` if no such row exists.
+///
+/// Production code must not call this. The `__` prefix and
+/// `#[doc(hidden)]` attribute mark it as not part of the public
+/// surface.
+#[doc(hidden)]
+pub fn __concept_language_tag_for_tests(path: &Path, name: &str) -> Option<String> {
+    let conn = Connection::open_with_flags(
+        path,
+        OpenFlags::SQLITE_OPEN_READ_ONLY | OpenFlags::SQLITE_OPEN_NO_MUTEX,
+    )
+    .ok()?;
+    conn.query_row(
+        "SELECT concept_language_tag FROM concepts WHERE name = ?1",
+        rusqlite::params![name],
+        |r| r.get::<_, String>(0),
+    )
+    .ok()
 }
 
 /// SQLite-backed session store.

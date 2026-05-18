@@ -1057,6 +1057,113 @@ mod tests {
         );
     }
 
+    /// Regression guard for issue #87. The
+    /// `resume_helper_inherits_persisted_locale_on_mismatch` test pins
+    /// the `ActiveSession.locale` field; this one extends coverage to
+    /// the two downstream consequences the issue calls out:
+    ///   - the resumed `DialogueManager`'s `learner.profile.locale` is
+    ///     the persisted English value (not cfg's German request); and
+    ///   - a concept inserted *after* resume lands tagged with that
+    ///     persisted locale in the session DB.
+    ///
+    /// The stub extractor doesn't actually emit concepts in the
+    /// default test wiring, so this drives `update_turn_concepts`
+    /// directly on the resumed `session_store` — the same surface the
+    /// real spawned extractor task writes through.
+    #[tokio::test]
+    async fn resume_inherits_persisted_locale_end_to_end() {
+        let home = TempDir::new().unwrap();
+
+        // Step 1: build under English, run a turn so a session row
+        // lands on disk, then close.
+        let cfg_en = stub_config_with_persistence(home.path());
+        let active_en = build_active_session(home.path(), &cfg_en).await.unwrap();
+        let dm_en = Arc::clone(&active_en.dialogue_manager);
+        let payload_en = run_turn(&dm_en, "hello", |_, _| {}).await.unwrap();
+        let original_id = payload_en.session_id;
+        dm_en.lock().await.close_session().await;
+        drop(active_en);
+
+        // Step 2: build_active_session_for_resume with cfg.locale = de.
+        // The helper inherits English from the persisted learner row.
+        let mut cfg_de = stub_config_with_persistence(home.path());
+        cfg_de.learner.locale = "de".to_string();
+        let active_resumed = crate::wiring::build_active_session_for_resume(home.path(), &cfg_de)
+            .await
+            .unwrap();
+        assert_eq!(
+            active_resumed.locale,
+            primer_core::i18n::Locale::English,
+            "active session inherits English locale"
+        );
+
+        // Step 3: actually load + resume the persisted session into
+        // the new DM. The resumed DM must report English in its
+        // learner.profile.locale, not the cfg's German.
+        let loaded = active_resumed
+            .session_store
+            .load_session(original_id)
+            .await
+            .unwrap()
+            .expect("the just-persisted session must be loadable");
+        active_resumed
+            .dialogue_manager
+            .lock()
+            .await
+            .resume_session(loaded)
+            .await
+            .unwrap();
+        assert_eq!(
+            active_resumed
+                .dialogue_manager
+                .lock()
+                .await
+                .learner
+                .profile
+                .locale,
+            primer_core::i18n::Locale::English,
+            "resumed DM's learner carries English, not cfg's German"
+        );
+
+        // Step 4: insert a concept against the resumed store. This
+        // exercises the SAME `update_turn_concepts` path the spawned
+        // extractor task uses post-turn, against the SAME store the
+        // GUI handed back. If the in-place locale re-tag from issue
+        // #86 silently broke, the row would land tagged 'de'.
+        active_resumed
+            .session_store
+            .update_turn_concepts(original_id, 0, &["post_resume_concept".into()])
+            .await
+            .unwrap();
+
+        // Deterministically drain any in-flight extractor / comprehension
+        // tasks before reading the on-disk artefact from a second
+        // connection. `close_session` calls `await_pending_background`
+        // internally — this is a real join on the spawned tasks, not a
+        // sleep, so the read below sees a settled file. Dropping the
+        // active session afterwards releases the SQLite connection so
+        // the read-only test seam can re-open.
+        active_resumed
+            .dialogue_manager
+            .lock()
+            .await
+            .close_session()
+            .await;
+        drop(active_resumed);
+
+        // Step 5: read the tag back through the primer-storage
+        // cross-crate test seam. Verifies the on-disk artefact without
+        // pulling rusqlite into primer-gui's dev-deps.
+        let session_db = home.path().join("test_session.db");
+        let tag =
+            primer_storage::__concept_language_tag_for_tests(&session_db, "post_resume_concept")
+                .expect("the post-resume concept must exist with a tag");
+        assert_eq!(
+            tag, "en",
+            "concept inserted after resume carries the persisted locale, not cfg's request"
+        );
+    }
+
     #[tokio::test]
     async fn turn_persists_to_session_store() {
         let home = TempDir::new().unwrap();

@@ -2246,6 +2246,61 @@ async fn save_comprehensions_tags_concepts_with_store_locale() {
     }
 }
 
+/// Regression guard for issue #116. PR #115's `set_locale` exists so the
+/// GUI resume path can re-tag the store in place when the persisted
+/// learner's locale differs from `cfg.learner.locale`. The contract this
+/// pins is the *longitudinal* effect: concepts inserted before
+/// `set_locale` keep their original tag, concepts inserted after pick up
+/// the new one. The PR-#115 tests verify the inputs to that invariant
+/// (store.locale() returns the new value; the file isn't re-opened); this
+/// test asserts the on-disk consequence.
+#[tokio::test]
+async fn set_locale_changes_subsequent_concept_tags() {
+    let mut store = open_memory_for_locale(primer_core::i18n::Locale::English);
+    let session = make_two_turn_session();
+    store.save_session(&session).await.unwrap();
+
+    // Insert under English.
+    store
+        .update_turn_concepts(session.id, 0, &["en_concept".into()])
+        .await
+        .unwrap();
+
+    // Re-tag in place — no re-open.
+    let before = __session_store_open_count_for_tests();
+    store.set_locale(primer_core::i18n::Locale::German);
+    assert_eq!(
+        __session_store_open_count_for_tests() - before,
+        0,
+        "set_locale must not re-open the SQLite file"
+    );
+
+    // Insert under German (different concept name so INSERT OR IGNORE
+    // doesn't silently keep the English row).
+    store
+        .update_turn_concepts(session.id, 1, &["de_concept".into()])
+        .await
+        .unwrap();
+
+    let conn = store.conn.lock().unwrap();
+    let mut stmt = conn
+        .prepare("SELECT name, concept_language_tag FROM concepts ORDER BY id")
+        .unwrap();
+    let rows: Vec<(String, String)> = stmt
+        .query_map([], |r| Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?)))
+        .unwrap()
+        .map(|r| r.unwrap())
+        .collect();
+    assert_eq!(
+        rows,
+        vec![
+            ("en_concept".to_string(), "en".to_string()),
+            ("de_concept".to_string(), "de".to_string()),
+        ],
+        "pre-set_locale concept stays tagged 'en'; post-set_locale concept tagged 'de'"
+    );
+}
+
 // ─── embedding storage + hybrid retrieval (schema v8) ────────────
 
 #[tokio::test]

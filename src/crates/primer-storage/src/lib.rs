@@ -23,7 +23,9 @@ mod store;
 
 pub use store::SqliteSessionStore;
 
-// `#[doc(hidden)]` test-only re-export. See the function's own doc for
-// the contract — production code must not call this.
+// `#[doc(hidden)]` test-only re-exports. See each function's own doc
+// for the contract — production code must not call these.
+#[doc(hidden)]
+pub use store::__concept_language_tag_for_tests;
 #[doc(hidden)]
 pub use store::__session_store_open_count_for_tests;
