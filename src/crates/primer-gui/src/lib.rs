@@ -7,6 +7,7 @@
 pub mod commands;
 pub mod config;
 pub mod csp;
+pub mod modal_dialog_contract;
 pub mod paths;
 pub mod state;
 pub mod types;

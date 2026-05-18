@@ -90,8 +90,8 @@
   }
 
   async function showConsentModal(entries) {
-    const backdrop = $("voice-consent-backdrop");
-    if (!backdrop) return;
+    const dialog = $("voice-consent-modal");
+    if (!dialog) return;
     const tbody = $("voice-consent-assets");
     if (tbody) tbody.innerHTML = "";
     let totalMb = 0;
@@ -109,8 +109,7 @@
     }
     const totalEl = $("voice-consent-total-size");
     if (totalEl) totalEl.textContent = totalMb ? `~${totalMb} MB` : "(unknown)";
-    backdrop.hidden = false;
-    backdrop.setAttribute("aria-hidden", "false");
+    if (!dialog.open) dialog.showModal();
 
     // Subscribe to download_progress events for the progress bar.
     let unlistenProgress = null;
@@ -132,15 +131,29 @@
     }
 
     return new Promise((resolve) => {
+      // Listener handle for the dialog's `cancel` event (fired on
+      // Escape). Tracked here so cleanup() can remove it — without
+      // removal the listener leaks across re-opens and the
+      // stop_voice_mode call would fire twice on the second close.
+      let cancelListener = null;
+
       const cleanup = () => {
         if (unlistenProgress) { unlistenProgress(); unlistenProgress = null; }
         if ($("voice-consent-cancel")) $("voice-consent-cancel").onclick = null;
         if ($("voice-consent-close"))  $("voice-consent-close").onclick  = null;
         if ($("voice-consent-download")) $("voice-consent-download").onclick = null;
+        if (cancelListener) {
+          dialog.removeEventListener("cancel", cancelListener);
+          cancelListener = null;
+        }
+      };
+
+      const closeDialog = () => {
+        if (dialog.open) dialog.close();
       };
 
       const onCancel = async () => {
-        backdrop.hidden = true;
+        closeDialog();
         cleanup();
         // Persist voice_mode_enabled=false so the next GUI launch doesn't
         // re-prompt the consent dialog. stop_voice_mode is idempotent and
@@ -173,7 +186,7 @@
           await invoke("download_voice_assets", {
             kinds: entries.map((e) => e.kind),
           });
-          backdrop.hidden = true;
+          closeDialog();
           cleanup();
           // Retry start_voice_mode now that assets are local.
           try {
@@ -210,6 +223,19 @@
       if ($("voice-consent-cancel")) $("voice-consent-cancel").onclick = onCancel;
       if ($("voice-consent-close"))  $("voice-consent-close").onclick  = onCancel;
       if ($("voice-consent-download")) $("voice-consent-download").onclick = onDownload;
+
+      // Native <dialog>.showModal() fires a `cancel` event on Escape
+      // before auto-closing. Block the auto-close and route through
+      // onCancel so stop_voice_mode is called and the promise resolves —
+      // the same path the explicit Cancel button takes. Without this,
+      // Escape would close the dialog without persisting
+      // voice_mode_enabled=false and the modal would re-appear on the
+      // next launch with no way to dismiss it durably.
+      cancelListener = (e) => {
+        e.preventDefault();
+        onCancel();
+      };
+      dialog.addEventListener("cancel", cancelListener);
     });
   }
 
