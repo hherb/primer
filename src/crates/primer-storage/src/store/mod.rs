@@ -15,11 +15,33 @@ mod session_load;
 mod session_save;
 mod session_search;
 
+use std::cell::Cell;
 use std::path::Path;
 use std::sync::Mutex;
 
 use primer_core::error::{PrimerError, Result};
 use rusqlite::Connection;
+
+thread_local! {
+    /// Per-OS-thread counter incremented by every
+    /// `SqliteSessionStore::open_for_locale` call.
+    ///
+    /// Visible via [`session_store_open_count`]; used by the GUI's
+    /// `resume_session` test to pin the one-open invariant (issue #86).
+    /// Thread-local — not a process-wide atomic — because `cargo test`
+    /// runs tests in parallel across OS threads and a global counter
+    /// would race. Each `#[tokio::test]` runs on its own OS thread with
+    /// a default `current_thread` runtime, so all opens within one
+    /// test are observed on the same thread.
+    static SESSION_STORE_OPEN_COUNT: Cell<usize> = const { Cell::new(0) };
+}
+
+/// Read the calling thread's session-store open counter. Tests
+/// snapshot this before a flow, then assert the delta after; production
+/// code does not consult it.
+pub fn session_store_open_count() -> usize {
+    SESSION_STORE_OPEN_COUNT.with(|c| c.get())
+}
 
 /// SQLite-backed session store.
 ///
@@ -57,6 +79,7 @@ impl SqliteSessionStore {
     /// newer than this build understands is a hard error rather than a
     /// silent downgrade.
     pub fn open_for_locale(path: &Path, locale: primer_core::i18n::Locale) -> Result<Self> {
+        SESSION_STORE_OPEN_COUNT.with(|c| c.set(c.get() + 1));
         let conn = Connection::open(path)
             .map_err(|e| PrimerError::Storage(format!("open failed: {e}")))?;
 
@@ -147,10 +170,67 @@ impl SqliteSessionStore {
     pub fn locale(&self) -> primer_core::i18n::Locale {
         self.locale
     }
+
+    /// Re-tag the store's locale without re-opening the SQLite file.
+    ///
+    /// Used by the GUI's resume path (issue #86): the store is first
+    /// opened under cfg's locale, the persisted learner row is read to
+    /// determine the effective locale, and — if they differ — this
+    /// updates the locale field so subsequent writes (notably
+    /// `concept_language_tag` inserts) use the persisted value. The
+    /// SQLite-file schema is locale-neutral on this side (one
+    /// `concepts` table across all locales, tagged via a column), so
+    /// the connection itself doesn't need to be re-opened.
+    ///
+    /// Distinct from the KB side, where each locale gets its own
+    /// `passages_<pack>` tables and re-opening is mandatory.
+    pub fn set_locale(&mut self, locale: primer_core::i18n::Locale) {
+        self.locale = locale;
+    }
 }
 
 #[cfg(test)]
 mod tests {
     mod learner_tests;
     mod session_tests;
+
+    use super::*;
+    use primer_core::i18n::Locale;
+    use tempfile::tempdir;
+
+    #[test]
+    fn open_for_locale_increments_counter() {
+        let dir = tempdir().unwrap();
+        let before = session_store_open_count();
+        let _store =
+            SqliteSessionStore::open_for_locale(&dir.path().join("a.db"), Locale::English).unwrap();
+        assert_eq!(
+            session_store_open_count() - before,
+            1,
+            "one increment per open"
+        );
+        let _store2 =
+            SqliteSessionStore::open_for_locale(&dir.path().join("b.db"), Locale::German).unwrap();
+        assert_eq!(
+            session_store_open_count() - before,
+            2,
+            "two opens visible in counter"
+        );
+    }
+
+    #[test]
+    fn set_locale_swaps_in_place_without_reopening() {
+        let dir = tempdir().unwrap();
+        let mut store =
+            SqliteSessionStore::open_for_locale(&dir.path().join("a.db"), Locale::English).unwrap();
+        assert_eq!(store.locale(), Locale::English);
+        let before = session_store_open_count();
+        store.set_locale(Locale::German);
+        assert_eq!(store.locale(), Locale::German);
+        assert_eq!(
+            session_store_open_count() - before,
+            0,
+            "set_locale must not re-open"
+        );
+    }
 }

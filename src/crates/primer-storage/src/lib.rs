@@ -21,4 +21,4 @@ mod catalog;
 mod schema;
 mod store;
 
-pub use store::SqliteSessionStore;
+pub use store::{SqliteSessionStore, session_store_open_count};

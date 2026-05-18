@@ -104,26 +104,16 @@ pub async fn resume_session(
 
     prepare_for_session_change(&state).await?;
 
-    let mut cfg = state.config.lock().await.clone();
+    let cfg = state.config.lock().await.clone();
 
-    // Probe the session DB to read the learner row's persisted locale
-    // BEFORE building the full active session. If it differs from cfg's,
-    // override cfg.learner.locale for THIS resume so the KB + session
-    // store + prompt pack all line up with the saved data. The user's
-    // persisted gui-config.json is untouched.
-    if let Some(session_locale) = probe_learner_locale(&state.home, &cfg).await? {
-        if session_locale.pack_id() != cfg.learner.locale {
-            tracing::info!(
-                target: "primer_gui::resume",
-                cfg_locale = %cfg.learner.locale,
-                session_locale = session_locale.pack_id(),
-                "resume: inheriting session's saved locale (differs from cfg)"
-            );
-            cfg.learner.locale = session_locale.pack_id().to_string();
-        }
-    }
-
-    let active = wiring::build_active_session(&state.home, &cfg).await?;
+    // Issue #86: `build_active_session_for_resume` opens the session DB
+    // exactly once, reads the persisted learner inline, and silently
+    // inherits the persisted locale on mismatch (the cfg value reflects
+    // what the picker would pass for a NEW session, not what this
+    // resumed session was originally tagged under). The pre-#86 path
+    // opened the DB twice — once for a `probe_learner_locale` helper
+    // and again for `build_active_session`.
+    let active = wiring::build_active_session_for_resume(&state.home, &cfg).await?;
 
     let loaded = active
         .session_store
@@ -593,53 +583,6 @@ async fn prepare_for_session_change(state: &AppState) -> Result<(), String> {
     close_session_inner(state).await
 }
 
-/// Read the persisted learner's locale from disk without constructing
-/// a full active session. Returns `Ok(None)` when there's no on-disk
-/// session DB to probe (fresh install, or `no_persist` is on) — both
-/// cases mean cfg's locale wins by default. Errors bubble up as
-/// user-facing strings so they can land in the resume failure banner.
-///
-/// The store is opened with `Locale::default()` because the probe is a
-/// pure read: `LearnerStore::load_learner` doesn't touch the locale
-/// field at all (it returns whatever's stored in `learners.locale`).
-/// Using a deterministic locale here also keeps `--reembed`-style
-/// concept-tag writes that *do* depend on the store's locale out of
-/// this read-only code path.
-async fn probe_learner_locale(
-    home: &std::path::Path,
-    cfg: &crate::config::GuiConfig,
-) -> Result<Option<primer_core::i18n::Locale>, String> {
-    use primer_core::storage::LearnerStore;
-
-    if cfg.persistence.no_persist {
-        return Ok(None);
-    }
-    let session_path = primer_engine::resolve_session_db_path(
-        cfg.persistence.session_db.clone(),
-        home,
-        &cfg.learner.name,
-        false,
-    );
-    if !session_path.exists() {
-        return Ok(None);
-    }
-    let store = primer_storage::SqliteSessionStore::open_for_locale(
-        &session_path,
-        primer_core::i18n::Locale::default(),
-    )
-    .map_err(|e| {
-        format!(
-            "probe: opening session-db {} for locale read: {e}",
-            session_path.display()
-        )
-    })?;
-    let learner = store
-        .load_learner()
-        .await
-        .map_err(|e| format!("probe: load_learner: {e}"))?;
-    Ok(learner.map(|l| l.profile.locale))
-}
-
 /// Drive one streaming dialogue turn end-to-end.
 ///
 /// Flow:
@@ -1067,16 +1010,12 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn probe_learner_locale_reads_stored_locale() {
-        // Resume-on-mismatch behaviour: instead of erroring like the CLI,
-        // the GUI probes the persisted learner's locale on disk and uses
-        // THAT for the resume regardless of cfg.learner.locale. This test
-        // exercises the probe helper directly — same pattern the Tauri
-        // command's resume path uses. The companion concept_language_tag
-        // invariant is preserved because the rebuilt ActiveSession opens
-        // the store under the probed (saved) locale, so any newly
-        // extracted concepts in the resumed session land with the
-        // matching tag.
+    async fn resume_helper_inherits_persisted_locale_on_mismatch() {
+        // Resume-on-mismatch behaviour: instead of erroring like the
+        // start_session path, the GUI's resume path silently inherits
+        // the persisted learner's locale (issue #86 collapsed this from
+        // a probe + build_active_session sequence into a single
+        // build_active_session_for_resume call that opens the DB once).
         let home = TempDir::new().unwrap();
 
         // Step 1: build + save under English so the learner row lands
@@ -1088,31 +1027,33 @@ mod tests {
         dm_en.lock().await.close_session().await;
         drop(active_en);
 
-        // Step 2: probe with a cfg that asks for German. The probe
-        // should return English (the stored locale), not German (cfg's
-        // request).
+        // Step 2: resume with a cfg that asks for German. The helper
+        // must inherit English (the stored locale), not German (cfg's
+        // request) — without opening the DB twice.
         let mut cfg_de = stub_config_with_persistence(home.path());
         cfg_de.learner.locale = "de".to_string();
-        let probed = super::probe_learner_locale(home.path(), &cfg_de)
+        let active_resumed = crate::wiring::build_active_session_for_resume(home.path(), &cfg_de)
             .await
             .unwrap();
         assert_eq!(
-            probed,
-            Some(primer_core::i18n::Locale::English),
-            "probe returns the persisted locale, not cfg's"
+            active_resumed.locale,
+            primer_core::i18n::Locale::English,
+            "resume inherits persisted locale, not cfg's"
         );
 
-        // Step 3: a probe on a fresh home with a fresh cfg (no session
-        // DB yet) returns None so the resume path falls through to
-        // cfg's locale.
+        // Step 3: a resume on a fresh home with a fresh cfg (no session
+        // DB yet) falls through to cfg's locale because there's no
+        // inheritance source.
         let fresh = TempDir::new().unwrap();
-        let cfg_fresh = stub_config_with_persistence(fresh.path());
-        let probed_fresh = super::probe_learner_locale(fresh.path(), &cfg_fresh)
+        let mut cfg_fresh = stub_config_with_persistence(fresh.path());
+        cfg_fresh.learner.locale = "de".to_string();
+        let active_fresh = crate::wiring::build_active_session_for_resume(fresh.path(), &cfg_fresh)
             .await
             .unwrap();
-        assert!(
-            probed_fresh.is_none(),
-            "no session DB → probe returns None: got {probed_fresh:?}"
+        assert_eq!(
+            active_fresh.locale,
+            primer_core::i18n::Locale::German,
+            "no persisted learner → cfg's locale wins"
         );
     }
 
