@@ -572,7 +572,15 @@ async fn run_loop_inner<'r, O: LoopObserver>(
         // the same whisper session and re-attempt the LLM call once the
         // child finishes their continuation.
         observer.on_state_change(VoiceState::LatentThink, None);
-        let mut transcript_so_far: String;
+        // Accumulates STT output across the iterations of this inner
+        // loop. On a SpeechStart-cancel + retry, each iteration's
+        // `finalize()` only returns audio captured since the previous
+        // `open_session()` — so reassignment (the pre-#103 behaviour)
+        // dropped the first half of the child's utterance whenever the
+        // VAD tripped a mid-sentence cancel. The fix is to append each
+        // iteration's new tokens with a single separating space, after
+        // both halves have already been `.trim()`'d.
+        let mut transcript_so_far = String::new();
         let mut accumulated = String::new();
         // Per-turn chunk accumulator. Captured by the on_chunk closure
         // passed to the responder; replayed onto the observer after the
@@ -588,7 +596,7 @@ async fn run_loop_inner<'r, O: LoopObserver>(
             // mock-friendliness — production whisper supports peeking via
             // process_step but the trait surface is finalize-only today.
             let segments = stt_session.finalize()?;
-            transcript_so_far = segments
+            let new_text = segments
                 .iter()
                 .map(|s| s.text.as_str())
                 .collect::<Vec<_>>()
@@ -596,6 +604,12 @@ async fn run_loop_inner<'r, O: LoopObserver>(
                 .trim()
                 .to_string();
             stt_session = backends.stt.open_session()?;
+            if !new_text.is_empty() {
+                if !transcript_so_far.is_empty() {
+                    transcript_so_far.push(' ');
+                }
+                transcript_so_far.push_str(&new_text);
+            }
 
             if transcript_so_far.is_empty() {
                 if verbose {
@@ -945,6 +959,44 @@ mod mocks {
         }
     }
 
+    /// Scriptable streaming STT: yields a different `finalize` text on
+    /// each successive `open_session()` call, draining a FIFO queue. Once
+    /// the queue is exhausted any further session finalizes to the empty
+    /// string. Required to exercise the cancel-and-retry path where the
+    /// first and second STT sessions return different partial transcripts
+    /// — see issue #103 / `cancel_and_retry_stitches_full_transcript`.
+    pub struct ScriptedStreamingStt {
+        pending: Arc<Mutex<std::collections::VecDeque<String>>>,
+    }
+
+    impl ScriptedStreamingStt {
+        pub fn new<I, S>(texts: I) -> Self
+        where
+            I: IntoIterator<Item = S>,
+            S: Into<String>,
+        {
+            Self {
+                pending: Arc::new(Mutex::new(texts.into_iter().map(Into::into).collect())),
+            }
+        }
+    }
+
+    impl Named for ScriptedStreamingStt {
+        fn name(&self) -> &str {
+            "scripted-stt"
+        }
+    }
+
+    impl StreamingSpeechToText for ScriptedStreamingStt {
+        fn sample_rate(&self) -> u32 {
+            16_000
+        }
+        fn open_session(&self) -> Result<Box<dyn TranscriptionSession>> {
+            let next = self.pending.lock().unwrap().pop_front().unwrap_or_default();
+            Ok(Box::new(MockSttSession { final_text: next }))
+        }
+    }
+
     /// Mock streaming TTS: emits one fixed AudioChunk per `push_text` call.
     pub struct MockStreamingTts {
         chunk_samples: usize,
@@ -1081,6 +1133,19 @@ mod mocks {
         let mut session = tts.open_session(&voice).unwrap();
         assert_eq!(session.push_text("hi.").unwrap().len(), 1);
         assert_eq!(session.push_text("").unwrap().len(), 0);
+    }
+
+    #[test]
+    fn scripted_stt_drains_queue_then_returns_empty() {
+        let stt = ScriptedStreamingStt::new(vec!["first", "second"]);
+        let s1 = stt.open_session().unwrap().finalize().unwrap();
+        assert_eq!(s1[0].text, "first");
+        let s2 = stt.open_session().unwrap().finalize().unwrap();
+        assert_eq!(s2[0].text, "second");
+        // Queue exhausted: subsequent sessions finalize to the empty
+        // string (the run-loop's empty-check handles this gracefully).
+        let s3 = stt.open_session().unwrap().finalize().unwrap();
+        assert_eq!(s3[0].text, "");
     }
 
     /// Test 1 — happy path: scripted SpeechEnd → LLM called with expected
@@ -1425,6 +1490,151 @@ mod mocks {
                 } if h == "child_resumed"
             )),
             "observer saw Listen state with child_resumed hint: {events:?}"
+        );
+    }
+
+    /// Regression test for issue #103 — cancel-and-retry must stitch the
+    /// transcript across the two STT sessions rather than discarding the
+    /// pre-cancel half. Drives the same SpeechEnd → SpeechStart-cancel →
+    /// SpeechEnd flow as the test above but with a scripted STT whose
+    /// successive sessions return *different* partial transcripts. The
+    /// final transcript surfaced to the observer (and to the LLM on
+    /// retry) must be the concatenation of both halves.
+    #[tokio::test]
+    async fn cancel_and_retry_stitches_full_transcript() {
+        use primer_core::speech::VadEvent;
+
+        // Session #0 (opened during LISTEN) finalizes to "why does".
+        // Session #1 (opened at the end of the latent-think iter 0)
+        // finalizes to "the sky look blue". Session #2 (opened at the
+        // end of iter 1) is unused; the queue is sized exactly so an
+        // accidental third finalize would surface as an empty string.
+        let backends = super::LoopBackends::single_locale(
+            Arc::new(ScriptedStreamingStt::new(vec![
+                "why does",
+                "the sky look blue",
+            ])),
+            Arc::new(MockStreamingTts::new(64)),
+            primer_core::speech::VoiceProfile::default(),
+            primer_core::i18n::Locale::English,
+        );
+
+        let (event_tx, event_rx) = tokio::sync::mpsc::channel(64);
+        // First SpeechStart → SpeechEnd: triggers LATENT_THINK (finalize
+        // session #0 → "why does").
+        event_tx.try_send(VadEvent::SpeechStart).unwrap();
+        event_tx.try_send(VadEvent::SpeechEnd).unwrap();
+        // SpeechStart mid-LATENT_THINK: cancels the LLM.
+        event_tx.try_send(VadEvent::SpeechStart).unwrap();
+        // Then SpeechEnd: retries LATENT_THINK (finalize session #1 →
+        // "the sky look blue"). The accumulated transcript at this point
+        // must be "why does the sky look blue".
+        event_tx.try_send(VadEvent::SpeechEnd).unwrap();
+        drop(event_tx);
+
+        // Capture the transcript the responder sees on each call so the
+        // assertions can pin "second call saw the full stitched text"
+        // rather than guessing from the final result alone.
+        let captured: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(Vec::new()));
+        let captured_clone = Arc::clone(&captured);
+        struct CapturingResponder {
+            captured: Arc<Mutex<Vec<String>>>,
+            count: Arc<std::sync::atomic::AtomicUsize>,
+        }
+        impl super::Responder for CapturingResponder {
+            fn respond<'a>(
+                &'a mut self,
+                transcript: &'a str,
+                mut on_chunk: Box<dyn FnMut(&str) + Send + 'a>,
+            ) -> std::pin::Pin<
+                Box<
+                    dyn std::future::Future<Output = primer_core::error::Result<String>>
+                        + Send
+                        + 'a,
+                >,
+            > {
+                self.captured.lock().unwrap().push(transcript.to_string());
+                let n = self.count.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                Box::pin(async move {
+                    if n == 0 {
+                        // First call: park forever so the cancel arm wins.
+                        std::future::pending::<()>().await;
+                        unreachable!()
+                    }
+                    on_chunk("Because of Rayleigh scattering.");
+                    Ok("Because of Rayleigh scattering.".to_string())
+                })
+            }
+        }
+        let count = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let responder = Box::new(CapturingResponder {
+            captured: captured_clone,
+            count: Arc::clone(&count),
+        });
+
+        let committed: Arc<Mutex<Vec<f32>>> = Arc::new(Mutex::new(Vec::new()));
+        let committed_clone = Arc::clone(&committed);
+        let on_audio: Box<dyn FnMut(Vec<f32>) + Send> = Box::new(move |samples| {
+            committed_clone.lock().unwrap().extend(samples);
+        });
+
+        let observer = MockObserver::new();
+        let result = tokio::time::timeout(
+            std::time::Duration::from_secs(2),
+            super::run_loop_borrowed(
+                backends,
+                event_rx,
+                responder,
+                on_audio,
+                None,
+                false,
+                None,
+                observer.clone(),
+            ),
+        )
+        .await
+        .expect("did not deadlock")
+        .expect("loop ok");
+
+        // Exactly one turn (cancel-and-retry stays inside a single outer
+        // iteration) and the surfaced transcript is the full stitched
+        // utterance — the headline assertion of issue #103.
+        assert_eq!(
+            result,
+            vec!["why does the sky look blue".to_string()],
+            "transcript stitched across both STT sessions"
+        );
+
+        // Responder was called twice; the second call saw the full
+        // stitched text. Before the fix, the second call received only
+        // "the sky look blue" and the test would fail here.
+        let calls = captured.lock().unwrap().clone();
+        assert_eq!(
+            calls.len(),
+            2,
+            "responder called once before cancel, once on retry"
+        );
+        assert_eq!(
+            calls[1], "why does the sky look blue",
+            "retry LLM call received the full stitched transcript, not the tail"
+        );
+
+        // Observer saw the full stitched transcript via
+        // `on_transcript_finalized` — the bubble-emission path that the
+        // issue called out as user-visibly broken before the fix.
+        let events = observer.events();
+        assert!(
+            events.iter().any(|e| matches!(
+                e,
+                MockEvent::Transcript(t) if t == "why does the sky look blue"
+            )),
+            "observer received the full stitched transcript: {events:?}"
+        );
+
+        // Sanity: audio reaches the speaker on the second attempt.
+        assert!(
+            !committed.lock().unwrap().is_empty(),
+            "audio committed on retry"
         );
     }
 
