@@ -26,20 +26,31 @@ thread_local! {
     /// Per-OS-thread counter incremented by every
     /// `SqliteSessionStore::open_for_locale` call.
     ///
-    /// Visible via [`session_store_open_count`]; used by the GUI's
-    /// `resume_session` test to pin the one-open invariant (issue #86).
-    /// Thread-local — not a process-wide atomic — because `cargo test`
-    /// runs tests in parallel across OS threads and a global counter
-    /// would race. Each `#[tokio::test]` runs on its own OS thread with
-    /// a default `current_thread` runtime, so all opens within one
-    /// test are observed on the same thread.
+    /// Visible only via [`__session_store_open_count_for_tests`]; used
+    /// by the GUI's `resume_session` test to pin the one-open invariant
+    /// (issue #86). Thread-local — not a process-wide atomic — because
+    /// `cargo test` runs tests in parallel across OS threads and a
+    /// global counter would race. Each `#[tokio::test]` runs on its own
+    /// OS thread with a default `current_thread` runtime, so all opens
+    /// within one test are observed on the same thread.
     static SESSION_STORE_OPEN_COUNT: Cell<usize> = const { Cell::new(0) };
 }
 
-/// Read the calling thread's session-store open counter. Tests
-/// snapshot this before a flow, then assert the delta after; production
-/// code does not consult it.
-pub fn session_store_open_count() -> usize {
+/// Read the calling thread's session-store open counter.
+///
+/// **Test-only API.** Tests snapshot this before a flow and assert the
+/// delta after; production code must not consult it. The `__` prefix
+/// and `#[doc(hidden)]` attribute mark this as not part of the public
+/// surface — it's `pub` only because the GUI's regression test for
+/// issue #86 lives in a different crate.
+///
+/// The counter is thread-local, so it only behaves predictably inside
+/// `#[tokio::test]` (the default `current_thread` runtime keeps every
+/// `await` on one OS thread). Calling this from a `multi_thread`
+/// runtime or from arbitrary async code will read whatever the
+/// *current* thread happens to have observed, not a process-wide total.
+#[doc(hidden)]
+pub fn __session_store_open_count_for_tests() -> usize {
     SESSION_STORE_OPEN_COUNT.with(|c| c.get())
 }
 
@@ -201,18 +212,18 @@ mod tests {
     #[test]
     fn open_for_locale_increments_counter() {
         let dir = tempdir().unwrap();
-        let before = session_store_open_count();
+        let before = __session_store_open_count_for_tests();
         let _store =
             SqliteSessionStore::open_for_locale(&dir.path().join("a.db"), Locale::English).unwrap();
         assert_eq!(
-            session_store_open_count() - before,
+            __session_store_open_count_for_tests() - before,
             1,
             "one increment per open"
         );
         let _store2 =
             SqliteSessionStore::open_for_locale(&dir.path().join("b.db"), Locale::German).unwrap();
         assert_eq!(
-            session_store_open_count() - before,
+            __session_store_open_count_for_tests() - before,
             2,
             "two opens visible in counter"
         );
@@ -224,11 +235,11 @@ mod tests {
         let mut store =
             SqliteSessionStore::open_for_locale(&dir.path().join("a.db"), Locale::English).unwrap();
         assert_eq!(store.locale(), Locale::English);
-        let before = session_store_open_count();
+        let before = __session_store_open_count_for_tests();
         store.set_locale(Locale::German);
         assert_eq!(store.locale(), Locale::German);
         assert_eq!(
-            session_store_open_count() - before,
+            __session_store_open_count_for_tests() - before,
             0,
             "set_locale must not re-open"
         );

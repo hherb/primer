@@ -658,6 +658,17 @@ mod tests {
         // helper with a German cfg — the helper must inherit English
         // from the persisted learner without a second `open_for_locale`
         // call.
+        //
+        // IMPORTANT: this assertion uses a thread-local counter exposed
+        // by `primer_storage::__session_store_open_count_for_tests`. `#[tokio::test]`
+        // defaults to a `current_thread` runtime, so every `await` in
+        // this test resumes on the same OS thread as the `before`/
+        // `after` snapshots — counter deltas are exact. Do NOT switch to
+        // `#[tokio::test(flavor = "multi_thread")]` here: tokio workers
+        // would observe the `open_for_locale` increment on a different
+        // OS thread and this test would silently always read `0`. See
+        // the `__session_store_open_count_for_tests` doc for the full
+        // rationale.
         let home = TempDir::new().unwrap();
         let session_db = home.path().join("resume_open_count.db");
 
@@ -675,11 +686,11 @@ mod tests {
         // English silently and open only once.
         let mut cfg_de = cfg_en.clone();
         cfg_de.learner.locale = "de".to_string();
-        let before = primer_storage::session_store_open_count();
+        let before = primer_storage::__session_store_open_count_for_tests();
         let active = build_active_session_for_resume(home.path(), &cfg_de)
             .await
             .expect("resume build succeeds despite cfg/persisted locale mismatch");
-        let after = primer_storage::session_store_open_count();
+        let after = primer_storage::__session_store_open_count_for_tests();
 
         assert_eq!(
             after - before,
