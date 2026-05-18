@@ -129,10 +129,14 @@ pub async fn start_voice_mode(
     // 5. Build the local backends (cpal mic + speaker, VAD, STT, TTS,
     //    audio thread, on_audio, drain hook). Lives in primer-speech;
     //    GUI wraps via voice::backends::build_loop_backends.
-    let mut local =
-        crate::voice::backends::build_loop_backends(&assets, locale, cfg.speech.mic_silence_ms)
-            .await
-            .map_err(|e| StartVoiceModeError::from(format!("backend init: {e}")))?;
+    let mut local = crate::voice::backends::build_loop_backends(
+        &assets,
+        locale,
+        cfg.speech.mic_silence_ms,
+        cfg.speech.backend,
+    )
+    .await
+    .map_err(|e| StartVoiceModeError::from(format!("backend init: {e}")))?;
 
     let backends = local
         .backends

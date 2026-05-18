@@ -37,3 +37,19 @@ pub use state_machine::{
     feature = "cpal"
 ))]
 pub use backends::{ChannelStt, LocalBackends, build_local_backends};
+
+// The re-export gate matches `backends`'s module-level cfg (silero +
+// whisper + piper + cpal) because that's where the function lives;
+// the function itself only requires silero + cpal + macos-native.
+// Once a follow-up PR extracts the macos-native builder into its own
+// module gated on the narrower set, this re-export can drop the
+// whisper/piper requirements. Tracking: plan task 8 review.
+#[cfg(all(
+    target_os = "macos",
+    feature = "macos-native",
+    feature = "silero",
+    feature = "whisper",
+    feature = "piper",
+    feature = "cpal"
+))]
+pub use backends::build_local_backends_macos_native;

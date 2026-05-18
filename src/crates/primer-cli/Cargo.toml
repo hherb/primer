@@ -71,3 +71,8 @@ speech = [
     "primer-speech/cpal",
     "primer-speech/voice-loop",
 ]
+
+# macOS-native speech backends (SFSpeechRecognizer + AVSpeechSynthesizer).
+# Combine with `speech` for an Apple-native voice loop. No effect on
+# non-macOS builds (the underlying primer-speech feature is a no-op there).
+macos-native = ["primer-speech/macos-native"]

@@ -386,8 +386,45 @@ fn main() -> anyhow::Result<()> {
         probe_espeak_ng_data(verbose);
     }
 
-    // Build the tokio runtime explicitly (instead of `#[tokio::main]`)
-    // so the env probe above runs single-threaded.
+    run_tokio_on_main()
+}
+
+/// Build the tokio runtime that drives `async_main()`.
+///
+/// **Non-macos-native (default):** multi-thread runtime on the OS main
+/// thread — historical behaviour. tokio's worker pool handles
+/// `tokio::spawn` background tasks (classifier, extractor,
+/// comprehension, embedding) in parallel with the dialogue's main turn.
+///
+/// **macos-native:** current-thread runtime on the OS main thread. The
+/// voice loop's `MacosTtsSession::push_text` is a synchronous fn that
+/// dispatches AVSpeechSynthesizer synthesis on whatever thread it's
+/// called from. With current-thread tokio on main, all awaits stay on
+/// main, so `push_text` runs on main and takes the main-thread
+/// synthesis path ([`primer_speech::macos::tts::synthesize_to_chunks_main_thread`]) —
+/// the path that drives `NSRunLoop::runUntilDate` from inside the call
+/// and drains the GCD main queue (AVFoundation primes the
+/// queue→runloop integration on its first AVSpeechSynthesizer
+/// instantiation; nobody else needs to).
+///
+/// The background-thread synthesis path (worker → `dispatch_async_f`
+/// to the main queue → wait on `dispatch_semaphore`) is **not used**
+/// on macos-native CLI: it would only work if AppKit's
+/// `NSApplicationMain` (or an explicit `dispatch_main()`) had wired
+/// the main queue to the main run loop, and we can't pull AppKit
+/// into a text-mode CLI.
+///
+/// Cost: background tokio tasks (classifier, extractor, etc.) are
+/// blocked while `push_text` runs (typically 1–2 s per phrase). They
+/// catch up at the start of the next turn via
+/// `await_pending_post_response`, so the user-visible behaviour is
+/// unchanged.
+fn run_tokio_on_main() -> anyhow::Result<()> {
+    #[cfg(all(target_os = "macos", feature = "macos-native"))]
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()?;
+    #[cfg(not(all(target_os = "macos", feature = "macos-native")))]
     let runtime = tokio::runtime::Builder::new_multi_thread()
         .enable_all()
         .build()?;

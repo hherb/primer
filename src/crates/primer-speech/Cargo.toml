@@ -43,6 +43,16 @@ cpal = { workspace = true, optional = true }
 ringbuf = { workspace = true, optional = true }
 rubato = { workspace = true, optional = true }
 
+# Apple Speech.framework + AVFoundation bindings — opt-in via the
+# `macos-native` feature. All five are `optional = true` and the
+# workspace decl uses `default-features = false`, so non-macOS builds
+# compile nothing.
+objc2 = { workspace = true, optional = true }
+objc2-foundation = { workspace = true, optional = true }
+objc2-avf-audio = { workspace = true, optional = true }
+objc2-speech = { workspace = true, optional = true }
+block2 = { workspace = true, optional = true }
+
 [dev-dependencies]
 # WAV writer for the tts_hello example. Dev-only — not part of the
 # default build dep tree.
@@ -63,7 +73,31 @@ cpal = ["dep:cpal", "dep:ringbuf", "dep:rubato"]
 # compilation in consumers. Consumed by primer-cli (--speech mode) and
 # primer-gui (Voice mode toggle).
 voice-loop = ["silero", "whisper", "piper", "cpal"]
+# Apple Speech.framework + AVFoundation backends. macOS-only.
+# Enables Speech-to-Text (SFSpeechRecognizer) and Text-to-Speech
+# (AVSpeechSynthesizer) without any external system deps, model
+# downloads, or ort runtime download. See docs/macos_native_speech.md.
+macos-native = ["dep:objc2", "dep:objc2-foundation", "dep:objc2-avf-audio", "dep:objc2-speech", "dep:block2"]
 
 [[example]]
 name = "tts_hello"
 required-features = ["piper"]
+
+[[example]]
+name = "tts_macos_pcm_smoke"
+required-features = ["macos-native"]
+
+# Custom-harness integration tests for MacosTextToSpeech one-shot and
+# streaming synthesis. harness = false so that the test file owns its own
+# main() and therefore runs on the actual OS main thread —
+# AVSpeechSynthesizer.writeUtterance:toBufferCallback: delivers PCM callbacks
+# on the main thread, which requires the main thread to be running its
+# NSRunLoop / GCD main queue. The standard cargo test harness spawns test
+# functions on worker threads where the main queue is never drained, causing
+# a 30-second timeout. This test file's main() drives a tokio
+# current_thread runtime on the OS main thread so the synthesis callbacks
+# can be delivered and collected.
+[[test]]
+name = "macos_tts"
+harness = false
+required-features = ["macos-native"]
