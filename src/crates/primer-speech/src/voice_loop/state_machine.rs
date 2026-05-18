@@ -1638,6 +1638,126 @@ mod mocks {
         );
     }
 
+    /// Defends the `!new_text.is_empty()` gate inside the LATENT_THINK
+    /// accumulator. If a future refactor removed the gate, an iteration
+    /// that finalizes to empty would append a phantom trailing space to
+    /// the running transcript, and a subsequent non-empty finalize would
+    /// surface as `"first  second"` (double space) rather than the
+    /// correct `"first second"`. Drives three STT sessions —
+    /// `["first", "", "second"]` — across two cancel-and-retry cycles
+    /// and asserts the final stitched transcript has the right shape.
+    #[tokio::test]
+    async fn cancel_and_retry_skips_empty_finalize_no_phantom_space() {
+        use primer_core::speech::VadEvent;
+
+        let backends = super::LoopBackends::single_locale(
+            Arc::new(ScriptedStreamingStt::new(vec!["first", "", "second"])),
+            Arc::new(MockStreamingTts::new(64)),
+            primer_core::speech::VoiceProfile::default(),
+            primer_core::i18n::Locale::English,
+        );
+
+        let (event_tx, event_rx) = tokio::sync::mpsc::channel(64);
+        // Iter 0: SpeechStart → SpeechEnd → finalize "first" → LLM call 0.
+        event_tx.try_send(VadEvent::SpeechStart).unwrap();
+        event_tx.try_send(VadEvent::SpeechEnd).unwrap();
+        // Cancel call 0; iter 1: SpeechEnd → finalize "" → LLM call 1
+        // (with the carried-over "first").
+        event_tx.try_send(VadEvent::SpeechStart).unwrap();
+        event_tx.try_send(VadEvent::SpeechEnd).unwrap();
+        // Cancel call 1; iter 2: SpeechEnd → finalize "second" → LLM
+        // call 2 (with the stitched "first second", a single space).
+        event_tx.try_send(VadEvent::SpeechStart).unwrap();
+        event_tx.try_send(VadEvent::SpeechEnd).unwrap();
+        drop(event_tx);
+
+        let captured: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(Vec::new()));
+        let captured_clone = Arc::clone(&captured);
+        struct CapturingResponder {
+            captured: Arc<Mutex<Vec<String>>>,
+            count: Arc<std::sync::atomic::AtomicUsize>,
+        }
+        impl super::Responder for CapturingResponder {
+            fn respond<'a>(
+                &'a mut self,
+                transcript: &'a str,
+                mut on_chunk: Box<dyn FnMut(&str) + Send + 'a>,
+            ) -> std::pin::Pin<
+                Box<
+                    dyn std::future::Future<Output = primer_core::error::Result<String>>
+                        + Send
+                        + 'a,
+                >,
+            > {
+                self.captured.lock().unwrap().push(transcript.to_string());
+                let n = self.count.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                Box::pin(async move {
+                    if n < 2 {
+                        // First two calls park so the cancel arms win.
+                        std::future::pending::<()>().await;
+                        unreachable!()
+                    }
+                    on_chunk("ok.");
+                    Ok("ok.".to_string())
+                })
+            }
+        }
+        let count = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let responder = Box::new(CapturingResponder {
+            captured: captured_clone,
+            count: Arc::clone(&count),
+        });
+
+        let committed: Arc<Mutex<Vec<f32>>> = Arc::new(Mutex::new(Vec::new()));
+        let committed_clone = Arc::clone(&committed);
+        let on_audio: Box<dyn FnMut(Vec<f32>) + Send> = Box::new(move |samples| {
+            committed_clone.lock().unwrap().extend(samples);
+        });
+
+        let observer = MockObserver::new();
+        let result = tokio::time::timeout(
+            std::time::Duration::from_secs(2),
+            super::run_loop_borrowed(
+                backends,
+                event_rx,
+                responder,
+                on_audio,
+                None,
+                false,
+                None,
+                observer.clone(),
+            ),
+        )
+        .await
+        .expect("did not deadlock")
+        .expect("loop ok");
+
+        // The final transcript is "first second" with a single separating
+        // space. With the empty-gate removed, this would be "first  second"
+        // (double space) because the empty middle finalize would append a
+        // phantom trailing space onto "first" before "second" is appended.
+        assert_eq!(
+            result,
+            vec!["first second".to_string()],
+            "empty middle finalize must not introduce a phantom space"
+        );
+
+        // The responder saw three calls; the third saw the stitched text
+        // with a single space. The second call saw the carried-over
+        // "first" alone (no trailing space) — the strongest direct check
+        // on the empty-text gate.
+        let calls = captured.lock().unwrap().clone();
+        assert_eq!(calls.len(), 3, "three LLM attempts (two cancelled, one ok)");
+        assert_eq!(
+            calls[1], "first",
+            "empty iteration must not add a trailing space to the carried transcript"
+        );
+        assert_eq!(
+            calls[2], "first second",
+            "third call sees the stitched transcript with a single space"
+        );
+    }
+
     /// Test 3 — commit on first audio: synthesis fires before any
     /// resumed speech. Audio reaches the speaker callback; subsequent
     /// VAD events arriving after commit do not affect the in-flight
