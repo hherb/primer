@@ -6,6 +6,7 @@
 
 pub mod commands;
 pub mod config;
+pub mod csp;
 pub mod paths;
 pub mod state;
 pub mod types;
