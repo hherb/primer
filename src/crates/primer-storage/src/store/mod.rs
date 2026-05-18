@@ -20,7 +20,7 @@ use std::path::Path;
 use std::sync::Mutex;
 
 use primer_core::error::{PrimerError, Result};
-use rusqlite::Connection;
+use rusqlite::{Connection, OpenFlags};
 
 thread_local! {
     /// Per-OS-thread counter incremented by every
@@ -68,7 +68,11 @@ pub fn __session_store_open_count_for_tests() -> usize {
 /// surface.
 #[doc(hidden)]
 pub fn __concept_language_tag_for_tests(path: &Path, name: &str) -> Option<String> {
-    let conn = Connection::open(path).ok()?;
+    let conn = Connection::open_with_flags(
+        path,
+        OpenFlags::SQLITE_OPEN_READ_ONLY | OpenFlags::SQLITE_OPEN_NO_MUTEX,
+    )
+    .ok()?;
     conn.query_row(
         "SELECT concept_language_tag FROM concepts WHERE name = ?1",
         rusqlite::params![name],

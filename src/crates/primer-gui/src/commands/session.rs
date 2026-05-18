@@ -1136,8 +1136,13 @@ mod tests {
             .await
             .unwrap();
 
-        // Drain background tasks so any concurrent extractor writes
-        // are flushed before we re-open from a second connection.
+        // Deterministically drain any in-flight extractor / comprehension
+        // tasks before reading the on-disk artefact from a second
+        // connection. `close_session` calls `await_pending_background`
+        // internally — this is a real join on the spawned tasks, not a
+        // sleep, so the read below sees a settled file. Dropping the
+        // active session afterwards releases the SQLite connection so
+        // the read-only test seam can re-open.
         active_resumed
             .dialogue_manager
             .lock()
