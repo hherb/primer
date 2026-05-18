@@ -428,25 +428,23 @@ fn run_tokio_on_main() -> anyhow::Result<()> {
 #[cfg(all(target_os = "macos", feature = "macos-native"))]
 fn run_with_main_thread_runloop() -> anyhow::Result<()> {
     use std::sync::Arc;
-    use std::sync::atomic::{AtomicBool, Ordering};
+    use std::sync::atomic::AtomicBool;
     use std::sync::mpsc;
 
-    struct StopGuard(Arc<AtomicBool>);
-    impl Drop for StopGuard {
-        fn drop(&mut self) {
-            self.0.store(true, Ordering::Release);
-        }
-    }
+    use primer_speech::macos::StopGuard;
 
     let stop_flag = Arc::new(AtomicBool::new(false));
     let stop_for_worker = Arc::clone(&stop_flag);
-    let (result_tx, result_rx) = mpsc::channel::<anyhow::Result<()>>();
+    // One-shot channel for the worker's anyhow::Result. `sync_channel(1)`
+    // captures the single-message intent explicitly; the worker sends
+    // exactly once on every non-panic exit path.
+    let (result_tx, result_rx) = mpsc::sync_channel::<anyhow::Result<()>>(1);
 
     let worker = std::thread::Builder::new()
         .name("primer-async-main".into())
         .spawn(move || {
             // Set the stop flag on every exit path (success, error, panic).
-            let _stop_guard = StopGuard(stop_for_worker);
+            let _stop_guard = StopGuard::new(stop_for_worker);
             let outcome: anyhow::Result<()> = match tokio::runtime::Builder::new_multi_thread()
                 .enable_all()
                 .build()
