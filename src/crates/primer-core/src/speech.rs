@@ -249,11 +249,7 @@ pub trait SynthesisSession: Send {
     /// `on_event` may be invoked zero or more times during one call.
     /// May block the calling thread for the duration of synthesis —
     /// see the trait-level `# Blocking` note.
-    fn push_text(
-        &mut self,
-        text: &str,
-        on_event: &mut dyn FnMut(SynthesisEvent),
-    ) -> Result<()>;
+    fn push_text(&mut self, text: &str, on_event: &mut dyn FnMut(SynthesisEvent)) -> Result<()>;
 
     /// Drain remaining buffered text and finalize. Consumes the
     /// session. Fires the same events as [`Self::push_text`] for any
@@ -261,10 +257,7 @@ pub trait SynthesisSession: Send {
     ///
     /// May block for one final synthesis call — see the trait-level
     /// `# Blocking` note.
-    fn finalize(
-        self: Box<Self>,
-        on_event: &mut dyn FnMut(SynthesisEvent),
-    ) -> Result<()>;
+    fn finalize(self: Box<Self>, on_event: &mut dyn FnMut(SynthesisEvent)) -> Result<()>;
 }
 
 /// Streaming text-to-speech backend.
@@ -481,8 +474,8 @@ mod tests {
 
     /// Canary that the `Named` super-trait is the single source of `name()`
     /// across every speech trait — `VoiceActivityDetector`, `SpeechToText`,
-    /// `StreamingSpeechToText`, `TextToSpeech`. Adding a fifth leaf trait
-    /// should add a fifth assertion here.
+    /// `StreamingSpeechToText`, `TextToSpeech`, `StreamingTextToSpeech`.
+    /// Adding a sixth leaf trait should add a sixth assertion here.
     #[test]
     fn named_super_trait_resolves_via_each_speech_trait() {
         let vad: Box<dyn VoiceActivityDetector> = Box::new(CannedVad::new(vec![]));
@@ -496,6 +489,9 @@ mod tests {
 
         let tts: Box<dyn TextToSpeech> = Box::new(CannedTts);
         assert_eq!(Named::name(&*tts), "canned-tts");
+
+        let streaming_tts: Box<dyn StreamingTextToSpeech> = Box::new(CannedStreamingTts);
+        assert_eq!(Named::name(&*streaming_tts), "canned-stream-tts");
     }
 
     /// Mock streaming-TTS that emits one canned `AudioChunk` per push.
@@ -528,10 +524,7 @@ mod tests {
             Ok(())
         }
 
-        fn finalize(
-            self: Box<Self>,
-            _on_event: &mut dyn FnMut(SynthesisEvent),
-        ) -> Result<()> {
+        fn finalize(self: Box<Self>, _on_event: &mut dyn FnMut(SynthesisEvent)) -> Result<()> {
             Ok(())
         }
     }
@@ -564,7 +557,9 @@ mod tests {
 
         // Push 1: script has "alpha" — expect Audio + PhraseEnd.
         let mut events: Vec<SynthesisEvent> = Vec::new();
-        session.push_text("hello.", &mut |e| events.push(e)).unwrap();
+        session
+            .push_text("hello.", &mut |e| events.push(e))
+            .unwrap();
         assert_eq!(events.len(), 2, "one Audio + one PhraseEnd per push");
         assert!(matches!(events[0], SynthesisEvent::Audio(_)));
         assert!(matches!(events[1], SynthesisEvent::PhraseEnd));
@@ -575,13 +570,18 @@ mod tests {
 
         // Push 2: script has "beta" — expect Audio + PhraseEnd.
         let mut events2: Vec<SynthesisEvent> = Vec::new();
-        session.push_text(" world.", &mut |e| events2.push(e)).unwrap();
+        session
+            .push_text(" world.", &mut |e| events2.push(e))
+            .unwrap();
         assert_eq!(events2.len(), 2);
 
         // Push 3: script exhausted — expect no events.
         let mut events3: Vec<SynthesisEvent> = Vec::new();
         session.push_text("", &mut |e| events3.push(e)).unwrap();
-        assert!(events3.is_empty(), "empty push (script exhausted) emits no events");
+        assert!(
+            events3.is_empty(),
+            "empty push (script exhausted) emits no events"
+        );
 
         // finalize: scripted iterator already exhausted; no trailing events expected.
         let mut events4: Vec<SynthesisEvent> = Vec::new();
@@ -606,5 +606,17 @@ mod tests {
         };
         session.push_text("ping.", &mut sink).unwrap();
         assert_eq!(order, vec!["audio", "phrase_end"]);
+    }
+
+    /// Compile-time canary: `SynthesisSession` must remain object-safe so
+    /// `Box<dyn SynthesisSession>` (the return type of
+    /// `StreamingTextToSpeech::open_session`) keeps working. The
+    /// `&mut dyn FnMut(SynthesisEvent)` callback is the load-bearing
+    /// constraint — any future trait method that takes `impl FnMut`,
+    /// returns `impl Trait`, or otherwise loses object safety will fail
+    /// to compile here.
+    #[test]
+    fn synthesis_session_is_object_safe() {
+        fn _accepts_boxed(_s: Box<dyn SynthesisSession>) {}
     }
 }
