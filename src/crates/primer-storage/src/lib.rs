@@ -22,3 +22,8 @@ mod schema;
 mod store;
 
 pub use store::SqliteSessionStore;
+
+// `#[doc(hidden)]` test-only re-export. See the function's own doc for
+// the contract — production code must not call this.
+#[doc(hidden)]
+pub use store::__session_store_open_count_for_tests;

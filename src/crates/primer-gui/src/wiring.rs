@@ -34,6 +34,21 @@ use uuid::Uuid;
 use crate::config::{ApiKeySource, GuiConfig};
 use crate::state::{ActiveSession, SessionSnapshot};
 
+/// How `build_active_session*` should treat a locale mismatch between
+/// `cfg.learner.locale` and a learner already persisted on disk.
+///
+/// `start_session` uses [`LocaleStrategy::UseCfg`] (hard-fail on mismatch
+/// — the persisted longitudinal record must not silently accept a new
+/// locale tag). `resume_session` uses
+/// [`LocaleStrategy::InheritFromPersistedLearner`] (silently inherit
+/// the persisted locale; the cfg value is only relevant for new
+/// sessions, never for continuing an existing one).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum LocaleStrategy {
+    UseCfg,
+    InheritFromPersistedLearner,
+}
+
 /// Construct everything `DialogueManager::new` would need from a single
 /// `GuiConfig`.
 ///
@@ -51,11 +66,45 @@ pub async fn build_active_session(
     home: &Path,
     config: &GuiConfig,
 ) -> Result<ActiveSession, String> {
+    build_with_strategy(home, config, LocaleStrategy::UseCfg).await
+}
+
+/// Variant of [`build_active_session`] that silently inherits the
+/// persisted learner's locale on mismatch instead of erroring.
+///
+/// Used by the GUI's `resume_session` Tauri command: the user has chosen
+/// a saved session whose locale was set when it was originally created;
+/// the `cfg.learner.locale` value reflects what the picker would use for
+/// a NEW session, not what this resumed session was tagged under. Issue
+/// #86: the previous code path called a separate `probe_learner_locale`
+/// helper that opened the session DB just to read the learner row, then
+/// `build_active_session` opened it again. This helper folds both into
+/// a single open by reading the learner immediately after the first
+/// open and (when needed) re-tagging the store's locale field in place
+/// — the SQLite-file schema is locale-neutral on the session side, so
+/// no re-open is required (see `SqliteSessionStore::set_locale` for the
+/// rationale).
+pub async fn build_active_session_for_resume(
+    home: &Path,
+    config: &GuiConfig,
+) -> Result<ActiveSession, String> {
+    build_with_strategy(home, config, LocaleStrategy::InheritFromPersistedLearner).await
+}
+
+/// Shared body of `build_active_session` and
+/// `build_active_session_for_resume`. The two callers differ only in
+/// how they treat a locale mismatch between `cfg.learner.locale` and
+/// the persisted learner row (see [`LocaleStrategy`]).
+async fn build_with_strategy(
+    home: &Path,
+    config: &GuiConfig,
+    strategy: LocaleStrategy,
+) -> Result<ActiveSession, String> {
     let learner_config = &config.learner;
     let backend_config = &config.backend;
 
-    // ─── Locale ──────────────────────────────────────────────────────
-    let locale = Locale::from_pack_id(&learner_config.locale).ok_or_else(|| {
+    // ─── Locale (from cfg; may be overridden by inherit-on-mismatch) ─
+    let cfg_locale = Locale::from_pack_id(&learner_config.locale).ok_or_else(|| {
         let known: Vec<&str> = Locale::ALL.iter().map(|l| l.pack_id()).collect();
         format!(
             "language {:?} is not a supported locale pack. Known: {:?}",
@@ -92,34 +141,15 @@ pub async fn build_active_session(
         comprehension_model: config.comprehension.model.clone(),
     };
 
-    // ─── Main backend ────────────────────────────────────────────────
+    // ─── Main backend (locale-independent) ───────────────────────────
     let backend = build_backend(&backend_config.kind, main_model.clone(), &params)
         .await
         .map_err(|e| format!("constructing inference backend: {e}"))?;
 
-    // ─── Knowledge base + auto-seed ──────────────────────────────────
-    let knowledge_path = config
-        .persistence
-        .knowledge_db
-        .clone()
-        .unwrap_or_else(|| PathBuf::from(IN_MEMORY));
-    let knowledge = SqliteKnowledgeBase::open_for_locale(&knowledge_path, locale)
-        .map_err(|e| format!("opening knowledge base {}: {e}", knowledge_path.display()))?;
-    if let Some(stats) = primer_kb_load::auto_seed_if_empty(&knowledge, locale)
-        .await
-        .map_err(|e| format!("auto-seeding knowledge base: {e}"))?
-    {
-        tracing::info!(
-            target = "primer-gui::startup",
-            inserted = stats.inserted,
-            sources = stats.sources_seen,
-            "auto-seeded knowledge base for locale {}",
-            locale.pack_id()
-        );
-    }
-    let knowledge = Arc::new(knowledge);
-
-    // ─── Session store ───────────────────────────────────────────────
+    // ─── Session store (open BEFORE KB so we can probe the learner's
+    //     locale and avoid a second open). Opens under cfg_locale; the
+    //     in-place set_locale call below switches the tag field if the
+    //     persisted learner has a different locale.  ──────────────────
     let session_path = resolve_session_db_path(
         config.persistence.session_db.clone(),
         home,
@@ -135,14 +165,17 @@ pub async fn build_active_session(
             }
         }
     }
-    let session_store = Arc::new(
-        SqliteSessionStore::open_for_locale(&session_path, locale)
-            .map_err(|e| format!("opening session-db {}: {e}", session_path.display()))?,
-    );
+    let mut session_store_inner = SqliteSessionStore::open_for_locale(&session_path, cfg_locale)
+        .map_err(|e| format!("opening session-db {}: {e}", session_path.display()))?;
 
-    // ─── Learner model ───────────────────────────────────────────────
-    let learner = match session_store.load_learner().await {
-        Ok(Some(existing)) => {
+    // ─── Learner model + effective locale resolution ─────────────────
+    let persisted = session_store_inner
+        .load_learner()
+        .await
+        .map_err(|e| format!("load_learner failed: {e}"))?;
+
+    let (effective_locale, learner) = match (persisted, strategy) {
+        (Some(existing), LocaleStrategy::UseCfg) => {
             // Hard-fail on locale mismatch. The persisted learner already
             // carries `concept_language_tag` rows under its stored locale;
             // silently adopting a new locale would tag every new concept
@@ -152,32 +185,56 @@ pub async fn build_active_session(
             // discipline, but adapted for the GUI's start-new-session path
             // where the user-actionable resolutions are "revert Settings"
             // or "remove the persisted learner DB file".
-            if existing.profile.locale != locale {
+            if existing.profile.locale != cfg_locale {
                 return Err(format!(
                     "Settings → Locale is {:?} but the persisted learner at {} \
                      was created under locale {:?}. Either revert Settings → Locale \
                      to {:?}, or remove that DB file to start a fresh learner under \
                      {:?}. Silent re-tagging is refused because it would corrupt the \
                      longitudinal concept-language record.",
-                    locale.pack_id(),
+                    cfg_locale.pack_id(),
                     session_path.display(),
                     existing.profile.locale.pack_id(),
                     existing.profile.locale.pack_id(),
-                    locale.pack_id(),
+                    cfg_locale.pack_id(),
                 ));
             }
             let reconciled =
                 reconcile_persisted_learner(existing, &learner_config.name, learner_config.age);
-            if let Err(e) = session_store.save_learner(&reconciled).await {
+            if let Err(e) = session_store_inner.save_learner(&reconciled).await {
                 tracing::warn!("save_learner on session-start failed: {e}");
             }
-            reconciled
+            (cfg_locale, reconciled)
         }
-        Ok(None) => {
+        (Some(existing), LocaleStrategy::InheritFromPersistedLearner) => {
+            // Resume path: silently inherit the persisted locale. The
+            // store was opened under cfg_locale; if they differ, re-tag
+            // the store in place so any newly written concepts in the
+            // resumed session land with the correct
+            // `concept_language_tag`. No second `open_for_locale` call.
+            let persisted_locale = existing.profile.locale;
+            if persisted_locale != cfg_locale {
+                tracing::info!(
+                    target: "primer_gui::resume",
+                    cfg_locale = %cfg_locale.pack_id(),
+                    session_locale = %persisted_locale.pack_id(),
+                    "resume: inheriting persisted learner's locale (cfg differed)"
+                );
+                session_store_inner.set_locale(persisted_locale);
+            }
+            let reconciled =
+                reconcile_persisted_learner(existing, &learner_config.name, learner_config.age);
+            if let Err(e) = session_store_inner.save_learner(&reconciled).await {
+                tracing::warn!("save_learner on session-start failed: {e}");
+            }
+            (persisted_locale, reconciled)
+        }
+        (None, _) => {
             // Truly fresh DB OR v3 DB with sessions but no learners row.
             // Adopt the most-recent session's learner_id so existing
-            // sessions are not orphaned.
-            let id = match session_store.most_recent_session_learner_id().await {
+            // sessions are not orphaned. No inheritance possible — cfg
+            // wins regardless of strategy.
+            let id = match session_store_inner.most_recent_session_learner_id().await {
                 Ok(Some(uuid)) => {
                     tracing::info!("adopted learner_id {uuid} from existing sessions");
                     uuid
@@ -191,14 +248,37 @@ pub async fn build_active_session(
                 }
             };
             let fresh =
-                create_learner_with_id(id, &learner_config.name, learner_config.age, locale);
-            if let Err(e) = session_store.save_learner(&fresh).await {
+                create_learner_with_id(id, &learner_config.name, learner_config.age, cfg_locale);
+            if let Err(e) = session_store_inner.save_learner(&fresh).await {
                 tracing::warn!("save_learner on session-start failed: {e}");
             }
-            fresh
+            (cfg_locale, fresh)
         }
-        Err(e) => return Err(format!("load_learner failed: {e}")),
     };
+
+    let session_store = Arc::new(session_store_inner);
+
+    // ─── Knowledge base + auto-seed (under effective_locale) ─────────
+    let knowledge_path = config
+        .persistence
+        .knowledge_db
+        .clone()
+        .unwrap_or_else(|| PathBuf::from(IN_MEMORY));
+    let knowledge = SqliteKnowledgeBase::open_for_locale(&knowledge_path, effective_locale)
+        .map_err(|e| format!("opening knowledge base {}: {e}", knowledge_path.display()))?;
+    if let Some(stats) = primer_kb_load::auto_seed_if_empty(&knowledge, effective_locale)
+        .await
+        .map_err(|e| format!("auto-seeding knowledge base: {e}"))?
+    {
+        tracing::info!(
+            target = "primer-gui::startup",
+            inserted = stats.inserted,
+            sources = stats.sources_seen,
+            "auto-seeded knowledge base for locale {}",
+            effective_locale.pack_id()
+        );
+    }
+    let knowledge = Arc::new(knowledge);
 
     // ─── Subsystems ──────────────────────────────────────────────────
     let classifier_settings = ClassifierSettings {
@@ -307,7 +387,7 @@ pub async fn build_active_session(
     Ok(ActiveSession {
         dialogue_manager: Arc::new(Mutex::new(dm)),
         snapshot: Arc::new(Mutex::new(initial_snapshot)),
-        locale,
+        locale: effective_locale,
         backend_name: backend_config.kind.clone(),
         main_model,
         session_store: Arc::clone(&session_store) as _,
@@ -568,6 +648,102 @@ mod tests {
             .expect("second open with same locale succeeds");
         let dm = s2.dialogue_manager.lock().await;
         assert_eq!(dm.learner.profile.locale.pack_id(), "de");
+    }
+
+    #[tokio::test]
+    async fn build_active_session_for_resume_opens_session_db_once() {
+        // Acceptance criterion for issue #86: the resume path must open
+        // the session DB exactly once, not twice (probe + build). Sets
+        // up a learner persisted under English, then drives the resume
+        // helper with a German cfg — the helper must inherit English
+        // from the persisted learner without a second `open_for_locale`
+        // call.
+        //
+        // IMPORTANT: this assertion uses a thread-local counter exposed
+        // by `primer_storage::__session_store_open_count_for_tests`. `#[tokio::test]`
+        // defaults to a `current_thread` runtime, so every `await` in
+        // this test resumes on the same OS thread as the `before`/
+        // `after` snapshots — counter deltas are exact. Do NOT switch to
+        // `#[tokio::test(flavor = "multi_thread")]` here: tokio workers
+        // would observe the `open_for_locale` increment on a different
+        // OS thread and this test would silently always read `0`. See
+        // the `__session_store_open_count_for_tests` doc for the full
+        // rationale.
+        let home = TempDir::new().unwrap();
+        let session_db = home.path().join("resume_open_count.db");
+
+        let mut cfg_en = GuiConfig::default();
+        cfg_en.learner.name = "Binti".to_string();
+        cfg_en.learner.locale = "en".to_string();
+        cfg_en.persistence.session_db = Some(session_db.clone());
+
+        // First build under English persists the learner row.
+        let _ = build_active_session(home.path(), &cfg_en)
+            .await
+            .expect("seed open succeeds");
+
+        // Resume request asks for German; the helper must inherit
+        // English silently and open only once.
+        let mut cfg_de = cfg_en.clone();
+        cfg_de.learner.locale = "de".to_string();
+        let before = primer_storage::__session_store_open_count_for_tests();
+        let active = build_active_session_for_resume(home.path(), &cfg_de)
+            .await
+            .expect("resume build succeeds despite cfg/persisted locale mismatch");
+        let after = primer_storage::__session_store_open_count_for_tests();
+
+        assert_eq!(
+            after - before,
+            1,
+            "resume must open the session DB exactly once (was 2 with probe_learner_locale)"
+        );
+        assert_eq!(
+            active.locale.pack_id(),
+            "en",
+            "inherited locale wins for the resumed ActiveSession"
+        );
+        let dm = active.dialogue_manager.lock().await;
+        assert_eq!(
+            dm.learner.profile.locale.pack_id(),
+            "en",
+            "learner profile carries the inherited locale"
+        );
+    }
+
+    #[tokio::test]
+    async fn build_active_session_for_resume_uses_cfg_locale_when_no_persisted_learner() {
+        // Fresh DB, no learner row yet: the resume helper must fall
+        // through to cfg's locale (no inheritance source available).
+        let home = TempDir::new().unwrap();
+        let mut cfg = GuiConfig::default();
+        cfg.learner.name = "Fresh".to_string();
+        cfg.learner.locale = "de".to_string();
+        cfg.persistence.session_db = Some(home.path().join("fresh.db"));
+
+        let active = build_active_session_for_resume(home.path(), &cfg)
+            .await
+            .expect("resume build succeeds on a fresh DB");
+        assert_eq!(active.locale.pack_id(), "de", "cfg's locale wins");
+    }
+
+    #[tokio::test]
+    async fn build_active_session_for_resume_matches_cfg_when_locales_agree() {
+        // No mismatch, no inheritance to do — should behave identically
+        // to start_session and not log an inheritance warning.
+        let home = TempDir::new().unwrap();
+        let session_db = home.path().join("agree.db");
+        let mut cfg = GuiConfig::default();
+        cfg.learner.name = "Agree".to_string();
+        cfg.learner.locale = "de".to_string();
+        cfg.persistence.session_db = Some(session_db);
+
+        let _ = build_active_session(home.path(), &cfg)
+            .await
+            .expect("seed open under de succeeds");
+        let active = build_active_session_for_resume(home.path(), &cfg)
+            .await
+            .expect("resume under matching de succeeds");
+        assert_eq!(active.locale.pack_id(), "de");
     }
 
     #[tokio::test]
