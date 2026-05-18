@@ -316,18 +316,27 @@ Project-local `.env` wins over the home file. Both are gitignored. See `.env.exa
 Voice-mode flags (only when built with `--features primer-cli/speech`):
 
 ```
---speech                        Run the voice REPL instead of the text REPL. Requires
-                                --whisper-model, --voice-onnx, --voice-config.
+--speech                        Run the voice REPL instead of the text REPL. On the
+                                whisper+piper build (the default speech path) requires
+                                --whisper-model, --voice-onnx, --voice-config. On the
+                                macOS-native build (--features speech,macos-native on
+                                macOS) those three flags are not declared at all —
+                                SFSpeechRecognizer + AVSpeechSynthesizer replace them.
 --whisper-model <path>          Path to the whisper.cpp GGML/GGUF model file
-                                (e.g. ~/models/ggml-small.en.bin).
+                                (e.g. ~/models/ggml-small.en.bin). Not present on
+                                the macOS-native build.
 --voice-onnx <path>             Path to the Piper voice ONNX file
-                                (e.g. ~/models/voices/en_GB-alba-medium.onnx).
+                                (e.g. ~/models/voices/en_GB-alba-medium.onnx). Not
+                                present on the macOS-native build.
 --voice-config <path>           Path to the matching Piper voice JSON sidecar
                                 (e.g. ~/models/voices/en_GB-alba-medium.onnx.json).
+                                Not present on the macOS-native build.
 --voice <id>                    VoiceProfile.model_id; must match the file stem of
-                                --voice-onnx (default: en_GB-alba-medium).
+                                --voice-onnx (default: en_GB-alba-medium). Not
+                                present on the macOS-native build.
 --mic-silence-ms <ms>           Override Silero's min_silence_ms (default: 600,
-                                bounded to [50, 5000]).
+                                bounded to [50, 5000]). Used on both speech builds —
+                                Silero remains the VAD on macOS-native too.
 ```
 
 ### Resuming a past session

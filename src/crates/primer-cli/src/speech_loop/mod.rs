@@ -15,7 +15,8 @@
 mod dialogue_responder;
 pub mod stdout_observer;
 
-use std::path::Path;
+#[cfg(not(all(target_os = "macos", feature = "macos-native")))]
+use std::path::PathBuf;
 use std::sync::Arc;
 
 use primer_core::error::Result;
@@ -24,14 +25,22 @@ use primer_speech::voice_loop::run_loop_borrowed;
 
 pub use stdout_observer::StdoutObserver;
 
-/// Configuration passed into [`run`] from `main`. Same shape as the
-/// pre-refactor `SpeechLoopConfig` so the call site in main.rs needs
-/// no changes beyond the import path.
-pub struct SpeechLoopConfig<'a> {
-    pub whisper_model: &'a Path,
-    pub voice_onnx: &'a Path,
-    pub voice_config: &'a Path,
-    pub voice_id: &'a str,
+/// Configuration passed into [`run`] from `main`. The whisper/piper
+/// asset fields are cfg-gated out on the macOS-native build (#112) —
+/// SFSpeechRecognizer + AVSpeechSynthesizer carry STT and TTS and the
+/// corresponding CLI flags are not declared either. Owned `PathBuf` /
+/// `String` (rather than the pre-refactor `&'a Path` / `&'a str`)
+/// avoids a `PhantomData<&'a ()>` workaround when the cfg-gated branch
+/// would otherwise leave `'a` unused.
+pub struct SpeechLoopConfig {
+    #[cfg(not(all(target_os = "macos", feature = "macos-native")))]
+    pub whisper_model: PathBuf,
+    #[cfg(not(all(target_os = "macos", feature = "macos-native")))]
+    pub voice_onnx: PathBuf,
+    #[cfg(not(all(target_os = "macos", feature = "macos-native")))]
+    pub voice_config: PathBuf,
+    #[cfg(not(all(target_os = "macos", feature = "macos-native")))]
+    pub voice_id: String,
     pub mic_silence_ms: u32,
     pub verbose: bool,
     /// Active locale for TTS dispatch. Today's CLI binds this to the
@@ -50,7 +59,7 @@ pub struct SpeechLoopConfig<'a> {
 /// borrowed-`&mut DialogueManager` variant; the CLI owns the DM
 /// directly so no Arc<Mutex<>> is needed here).
 #[cfg(feature = "speech")]
-pub async fn run(cfg: SpeechLoopConfig<'_>, dialogue: &mut DialogueManager) -> Result<()> {
+pub async fn run(cfg: SpeechLoopConfig, dialogue: &mut DialogueManager) -> Result<()> {
     #[cfg(all(target_os = "macos", feature = "macos-native"))]
     let mut local = primer_speech::voice_loop::build_local_backends_macos_native(
         cfg.locale,
@@ -61,10 +70,10 @@ pub async fn run(cfg: SpeechLoopConfig<'_>, dialogue: &mut DialogueManager) -> R
 
     #[cfg(not(all(target_os = "macos", feature = "macos-native")))]
     let mut local = primer_speech::voice_loop::build_local_backends(
-        cfg.voice_onnx,
-        cfg.voice_config,
-        cfg.whisper_model,
-        cfg.voice_id,
+        cfg.voice_onnx.as_path(),
+        cfg.voice_config.as_path(),
+        cfg.whisper_model.as_path(),
+        cfg.voice_id.as_str(),
         cfg.locale,
         cfg.mic_silence_ms,
         cfg.verbose,
