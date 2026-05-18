@@ -27,7 +27,6 @@ const { invoke } = window.__TAURI__.core;
 const SUBSYSTEMS = ["classifier", "extractor", "comprehension"];
 
 const dom = {
-  backdrop: document.getElementById("settings-backdrop"),
   modal: document.getElementById("settings-modal"),
   close: document.getElementById("settings-close"),
   cancel: document.getElementById("settings-cancel"),
@@ -137,40 +136,62 @@ async function open({ onSessionRestarted } = {}) {
     populateLocaleChoices();
     populate(view);
     dom.activeHint.hidden = sessionInfo === null;
-    dom.backdrop.hidden = false;
-    dom.backdrop.setAttribute("aria-hidden", "false");
-    document.addEventListener("keydown", onEscape);
-    // Focus the first input so keyboard users can start editing.
+    showModal();
+    // Focus the first input so keyboard users can start editing. The
+    // browser's focus-trap on the dialog ensures Tab cycles between
+    // focusable descendants rather than escaping onto the chat shell.
     dom.fields.learnerName.focus();
   } catch (err) {
     showBanner(`Couldn't load settings: ${formatErr(err)}`);
-    dom.backdrop.hidden = false;
-    dom.backdrop.setAttribute("aria-hidden", "false");
+    showModal();
   } finally {
     state.isOpening = false;
   }
 }
 
-function closeModal() {
-  dom.backdrop.hidden = true;
-  dom.backdrop.setAttribute("aria-hidden", "true");
-  document.removeEventListener("keydown", onEscape);
+/// Open the native <dialog>. Guarded against double-showModal() which
+/// the spec defines as a no-op only when called with the same args, but
+/// some platforms (Tauri webview WebKitGTK 2.40) have reported throws.
+function showModal() {
+  if (!dom.modal.open) dom.modal.showModal();
+}
+
+/// Teardown shared by every dismissal path (explicit button click,
+/// backdrop click, Escape via the `cancel` event). Anything that has to
+/// run on close-by-any-means lives here so the cancel listener and
+/// closeModal() can never drift apart.
+function clearTransientState() {
   state.onSessionRestarted = null;
 }
 
-function onEscape(e) {
-  if (e.key === "Escape" && !state.isSaving) {
-    e.preventDefault();
-    closeModal();
-  }
+function closeModal() {
+  if (dom.modal.open) dom.modal.close();
+  clearTransientState();
 }
 
 function wireDismiss() {
   dom.close.addEventListener("click", closeModal);
   dom.cancel.addEventListener("click", closeModal);
-  // Click on backdrop (but not on the modal card) closes.
-  dom.backdrop.addEventListener("click", (e) => {
-    if (e.target === dom.backdrop && !state.isSaving) closeModal();
+  // Backdrop click closes. Native <dialog> doesn't natively dismiss on
+  // backdrop click, but the click bubbles up with event.target equal to
+  // the dialog element itself (rather than any descendant) when the
+  // user clicks the ::backdrop area. Gating on `!state.isSaving` mirrors
+  // the cancel-button behaviour: in-flight saves shouldn't drop the
+  // modal mid-operation.
+  dom.modal.addEventListener("click", (e) => {
+    if (e.target === dom.modal && !state.isSaving) closeModal();
+  });
+  // The browser fires a `cancel` event on Escape. Prevent it while a
+  // save is in flight so the user can't drop the modal mid-operation
+  // (which previously would have stranded the in-flight invoke).
+  // Otherwise the UA auto-closes the dialog; we mirror the explicit-
+  // button path by running the same teardown helper.
+  dom.modal.addEventListener("cancel", (e) => {
+    if (state.isSaving) {
+      e.preventDefault();
+      return;
+    }
+    clearTransientState();
   });
 }
 

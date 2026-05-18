@@ -67,8 +67,9 @@
 /* Defensive: ensure the HTML `hidden` attribute actually hides an
    element even when a class rule sets `display: flex` or similar.
    At equal specificity the author rule overrides the UA `[hidden]`
-   rule, which would otherwise leave .modal-backdrop / .picker-screen
-   permanently visible. */
+   rule, which would otherwise leave .picker-screen permanently visible.
+   (The settings + voice-consent modals are <dialog> elements opened via
+   showModal() — see issue #81 — so they're not affected by this rule.) */
 [hidden] {
   display: none !important;
 }
@@ -959,31 +960,38 @@ body.sidebar-collapsed .sidebar {
   background: color-mix(in oklab, var(--accent) 8%, var(--bg));
 }
 
-/* ─── Settings modal ────────────────────────────────────────────── */
+/* ─── Settings + voice-consent modals ──────────────────────────────
+   Both surfaces are native <dialog> elements opened via showModal()
+   (see issue #81). The browser supplies the focus trap and Escape-
+   dismiss; we only need to style the dialog itself and its backdrop
+   pseudo-element. */
 
-.modal-backdrop {
-  position: fixed;
-  inset: 0;
-  z-index: 100;
-  background: color-mix(in oklab, #000 45%, transparent);
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  padding: 2vh 2vw;
+dialog.modal {
+  /* Reset the UA dialog defaults that fight our flex layout. */
+  padding: 0;
+  margin: auto; /* keeps the dialog centered when shown */
+  border: 1px solid var(--border);
+  border-radius: 0.75rem;
+  background: var(--surface);
+  color: var(--fg);
+  box-shadow: 0 24px 60px rgba(0, 0, 0, 0.35);
+  width: min(720px, calc(100vw - 4vw));
+  max-height: 96vh;
+  overflow: hidden;
   -webkit-app-region: no-drag;
 }
 
-.modal {
+/* `display` only applies while the dialog is open — the UA stylesheet
+   sets `display: none` on `dialog:not([open])` and we shouldn't fight
+   that. Switching to flex only when [open] keeps the closed state
+   hidden without `!important`. */
+dialog.modal[open] {
   display: flex;
   flex-direction: column;
-  width: min(720px, 100%);
-  max-height: 96vh;
-  background: var(--surface);
-  color: var(--fg);
-  border: 1px solid var(--border);
-  border-radius: 0.75rem;
-  box-shadow: 0 24px 60px rgba(0, 0, 0, 0.35);
-  overflow: hidden;
+}
+
+dialog.modal::backdrop {
+  background: color-mix(in oklab, #000 45%, transparent);
 }
 
 .modal-header {
