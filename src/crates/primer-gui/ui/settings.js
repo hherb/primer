@@ -156,9 +156,17 @@ function showModal() {
   if (!dom.modal.open) dom.modal.showModal();
 }
 
+/// Teardown shared by every dismissal path (explicit button click,
+/// backdrop click, Escape via the `cancel` event). Anything that has to
+/// run on close-by-any-means lives here so the cancel listener and
+/// closeModal() can never drift apart.
+function clearTransientState() {
+  state.onSessionRestarted = null;
+}
+
 function closeModal() {
   if (dom.modal.open) dom.modal.close();
-  state.onSessionRestarted = null;
+  clearTransientState();
 }
 
 function wireDismiss() {
@@ -176,14 +184,14 @@ function wireDismiss() {
   // The browser fires a `cancel` event on Escape. Prevent it while a
   // save is in flight so the user can't drop the modal mid-operation
   // (which previously would have stranded the in-flight invoke).
+  // Otherwise the UA auto-closes the dialog; we mirror the explicit-
+  // button path by running the same teardown helper.
   dom.modal.addEventListener("cancel", (e) => {
     if (state.isSaving) {
       e.preventDefault();
       return;
     }
-    // The dialog will close itself on cancel — clear our callback state
-    // so the close path stays consistent with the explicit-button paths.
-    state.onSessionRestarted = null;
+    clearTransientState();
   });
 }
 

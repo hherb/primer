@@ -111,6 +111,14 @@
     if (totalEl) totalEl.textContent = totalMb ? `~${totalMb} MB` : "(unknown)";
     if (!dialog.open) dialog.showModal();
 
+    // No backdrop-click dismissal is wired here — deliberate asymmetry
+    // vs the settings modal. The consent decision has side effects
+    // (start a ~530 MB download OR persist voice_mode_enabled=false via
+    // stop_voice_mode), so we require an explicit Cancel/Download click
+    // rather than letting a stray off-target click drop the modal.
+    // Escape still routes through the `cancel` event handler below so
+    // keyboard dismissal stays available.
+
     // Subscribe to download_progress events for the progress bar.
     let unlistenProgress = null;
     const progressBar   = $("voice-consent-progress-bar");
