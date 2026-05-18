@@ -10,10 +10,12 @@
 
 pub mod locale;
 pub mod permissions;
+pub mod runloop;
 pub mod stt;
 pub mod tts;
 pub mod voice;
 
+pub use runloop::run_main_loop_until;
 pub use stt::MacosSpeechToText;
 pub use tts::MacosTextToSpeech;
 

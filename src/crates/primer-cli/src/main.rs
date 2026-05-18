@@ -386,12 +386,89 @@ fn main() -> anyhow::Result<()> {
         probe_espeak_ng_data(verbose);
     }
 
-    // Build the tokio runtime explicitly (instead of `#[tokio::main]`)
-    // so the env probe above runs single-threaded.
+    // Threading mode depends on the macos-native speech backend.
+    //
+    // Default (any platform, or macOS without macos-native): tokio runtime
+    // on the OS main thread — historical behaviour.
+    //
+    // macOS + macos-native: invert. AVSpeechSynthesizer dispatches PCM
+    // callbacks to the GCD main queue, and tokio's mio/kqueue reactor does
+    // not drain that queue. Without the inversion, every TTS call from a
+    // tokio worker deadlocks for 30 s on its dispatch_semaphore wait. See
+    // primer_speech::macos::runloop for the long-form rationale.
+    #[cfg(all(target_os = "macos", feature = "macos-native"))]
+    {
+        run_with_main_thread_runloop()
+    }
+    #[cfg(not(all(target_os = "macos", feature = "macos-native")))]
+    {
+        run_tokio_on_main()
+    }
+}
+
+/// Default threading: tokio runtime on the OS main thread, async_main
+/// driven via `block_on`. Used on every non-macOS build, and on macOS
+/// when the macos-native feature is off.
+#[cfg(not(all(target_os = "macos", feature = "macos-native")))]
+fn run_tokio_on_main() -> anyhow::Result<()> {
     let runtime = tokio::runtime::Builder::new_multi_thread()
         .enable_all()
         .build()?;
     runtime.block_on(async_main())
+}
+
+/// Inverted threading for the macos-native speech backend: tokio
+/// runtime on a worker thread, CFRunLoop on the OS main thread. The
+/// worker signals exit via a shared atomic; `run_main_loop_until`
+/// returns within one run-loop slice (~10 ms) of the flag flipping.
+///
+/// `StopGuard`'s `Drop` impl guarantees the stop flag is set even if
+/// `async_main` panics, so a runtime crash can never leave the OS main
+/// thread spinning forever.
+#[cfg(all(target_os = "macos", feature = "macos-native"))]
+fn run_with_main_thread_runloop() -> anyhow::Result<()> {
+    use std::sync::Arc;
+    use std::sync::atomic::{AtomicBool, Ordering};
+    use std::sync::mpsc;
+
+    struct StopGuard(Arc<AtomicBool>);
+    impl Drop for StopGuard {
+        fn drop(&mut self) {
+            self.0.store(true, Ordering::Release);
+        }
+    }
+
+    let stop_flag = Arc::new(AtomicBool::new(false));
+    let stop_for_worker = Arc::clone(&stop_flag);
+    let (result_tx, result_rx) = mpsc::channel::<anyhow::Result<()>>();
+
+    let worker = std::thread::Builder::new()
+        .name("primer-async-main".into())
+        .spawn(move || {
+            // Set the stop flag on every exit path (success, error, panic).
+            let _stop_guard = StopGuard(stop_for_worker);
+            let outcome: anyhow::Result<()> = match tokio::runtime::Builder::new_multi_thread()
+                .enable_all()
+                .build()
+            {
+                Ok(rt) => rt.block_on(async_main()),
+                Err(e) => Err(e.into()),
+            };
+            let _ = result_tx.send(outcome);
+        })?;
+
+    primer_speech::macos::run_main_loop_until(stop_flag);
+
+    let join_result = worker.join();
+    match result_rx.try_recv() {
+        Ok(r) => r,
+        Err(_) => match join_result {
+            Err(_) => Err(anyhow::anyhow!("primer-async-main worker panicked")),
+            Ok(()) => Err(anyhow::anyhow!(
+                "primer-async-main worker exited without reporting a result"
+            )),
+        },
+    }
 }
 
 /// Default tracing filter when `RUST_LOG` is unset.

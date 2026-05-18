@@ -517,9 +517,13 @@ unsafe impl Send for SynthCtx {}
 /// delivered.
 ///
 /// Submits `writeUtterance:toBufferCallback:` to the GCD main queue via
-/// `dispatch_async_f`. The main queue runs on the main thread, whose
-/// CFRunLoop is already spinning (CLI tool, GUI app). A `dispatch_semaphore`
-/// blocks the calling pool thread until the EOS callback fires.
+/// `dispatch_async_f`. The main queue runs on the OS main thread, whose
+/// CFRunLoop must already be spinning — Tauri does this for the GUI; CLI
+/// binaries must invert their threading and call
+/// [`crate::macos::run_main_loop_until`] from `fn main()`. Without that,
+/// the trampoline below never runs and the wait below times out at 30 s.
+/// A `dispatch_semaphore` blocks the calling pool thread until the EOS
+/// callback fires.
 fn synthesize_to_chunks_background(
     text: &str,
     voice: &AVSpeechSynthesisVoice,
