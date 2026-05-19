@@ -16,7 +16,7 @@ members = [
     "crates/primer-engine",
     "crates/primer-gui",
 ]
-exclude = ["vendor/piper-rs", "vendor/silero-vad-rust"]
+exclude = ["vendor/piper-rs", "vendor/silero-vad-rust", "vendor/supertonic-rs"]
 
 [workspace.package]
 version = "0.1.0"

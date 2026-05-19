@@ -29,6 +29,14 @@ whisper-cpp-plus = { version = "0.1", default-features = false, optional = true 
 # transitively. Watch for ort rc disagreement with silero-vad-rust 6.2 when
 # both `silero` and `piper` features are enabled.
 piper-rs = { version = "0.1", default-features = false, optional = true }
+
+# Supertonic TTS — opt-in via the `supertonic` feature. Vendored fork at
+# `src/vendor/supertonic-rs/` (upstream commit 67175af; ort pinned to rc.10
+# to match the rest of the workspace; upstream uses rc.7). Single
+# multilingual model (en/de/hi + 28 more), no espeak-ng dep, ~400 MB asset
+# footprint on first run. Library-only consumer; no [patch.crates-io]
+# entry needed because supertonic-tts is not published.
+supertonic-tts = { path = "../../vendor/supertonic-rs", optional = true }
 # Used by the piper backend to read `audio.sample_rate` from the voice
 # config sidecar JSON. Optional so the default workspace build doesn't
 # pull serde_json into primer-speech.
@@ -66,6 +74,12 @@ default = []
 silero = ["dep:silero-vad-rust", "dep:ort"]
 whisper = ["dep:whisper-cpp-plus"]
 piper = ["dep:piper-rs", "dep:serde_json"]
+# Supertonic TTS smoke gate. No primer-speech glue code lands behind this
+# yet — Stage A of the evaluation just lifts the vendored library into
+# the workspace dep graph and a smoke example. A real `TextToSpeech` /
+# `StreamingTextToSpeech` impl arrives in a follow-up once the rc.10
+# migration is empirically validated locally and an asset-flow is wired.
+supertonic = ["dep:supertonic-tts"]
 cpal = ["dep:cpal", "dep:ringbuf", "dep:rubato"]
 # Shared voice loop state machine (LISTEN → LATENT_THINK → SPEAK → LISTEN).
 # Pulls every speech backend feature so the state machine can compose
@@ -82,6 +96,10 @@ macos-native = ["dep:objc2", "dep:objc2-foundation", "dep:objc2-avf-audio", "dep
 [[example]]
 name = "tts_hello"
 required-features = ["piper"]
+
+[[example]]
+name = "tts_supertonic_hello"
+required-features = ["supertonic"]
 
 [[example]]
 name = "tts_macos_pcm_smoke"
