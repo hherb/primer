@@ -1107,9 +1107,7 @@ mod mocks {
                     sample_rate: TIMED_MOCK_SAMPLE_RATE,
                 }));
                 if i < 2 {
-                    std::thread::sleep(std::time::Duration::from_millis(
-                        TIMED_MOCK_INTER_CHUNK_MS,
-                    ));
+                    std::thread::sleep(std::time::Duration::from_millis(TIMED_MOCK_INTER_CHUNK_MS));
                 }
             }
             on_event(SynthesisEvent::PhraseEnd);
