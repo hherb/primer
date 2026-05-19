@@ -1,0 +1,58 @@
+[package]
+name = "supertonic-tts"
+version = "0.1.0"
+edition = "2021"
+# Vendored fork of https://github.com/supertone-inc/supertonic
+# Upstream commit: 67175af735efeefda3d33751634ef997e272413d
+# Local patches:
+#   - ort = "=2.0.0-rc.10" (upstream pins rc.7 — primer workspace ort pin)
+#   - helper.rs exposed as `helper` module from lib.rs so primer-speech can
+#     depend on supertonic-tts as a library, not only via the CLI bin.
+# Upstream license: MIT (see LICENSE in this directory). The primer workspace
+# is AGPL-3.0-or-later; MIT is compatible.
+license = "MIT"
+
+[lib]
+name = "supertonic_tts"
+path = "src/lib.rs"
+
+[dependencies]
+# ONNX Runtime — pinned to rc.10 to match the rest of the primer workspace
+# (silero/whisper/piper/fastembed all pin rc.10). Upstream supertonic uses
+# rc.7. The migration touchpoints are documented inline in helper.rs.
+ort = { version = "=2.0.0-rc.10", default-features = false, features = ["download-binaries", "copy-dylibs"] }
+
+# Array processing (like NumPy)
+ndarray = { version = "0.17", features = ["rayon"] }
+rand = "0.8"
+rand_distr = "0.4"
+
+# Parallel processing
+rayon = "1.10"
+
+# Audio processing
+hound = "3.5"
+rustfft = "6.2"
+
+# JSON serialization
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+
+# CLI argument parsing — only needed by the example_onnx bin.
+clap = { version = "4.5", features = ["derive"] }
+
+# Error handling
+anyhow = "1.0"
+
+# Unicode normalization
+unicode-normalization = "0.1"
+
+# Regular expressions
+regex = "1.10"
+
+# System calls
+libc = "0.2"
+
+[[bin]]
+name = "example_onnx"
+path = "src/example_onnx.rs"
