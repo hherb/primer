@@ -1073,6 +1073,18 @@ mod mocks {
     /// values 0.1, 0.2, 0.3 as identity markers), then `PhraseEnd`.
     /// Total per-push wallclock ≈ 2 × interval = 100 ms. Empty input
     /// emits no events (same shape as the production sessions).
+    ///
+    /// **Why `std::thread::sleep` inside an `async`-ish call path is OK
+    /// here:** `SynthesisSession::push_text` is a synchronous trait
+    /// method by design (production backends do CPU-heavy ONNX
+    /// inference inline; see the trait's `# Blocking` note). The TTFA
+    /// test needs a *real* wallclock gap between Audio events so the
+    /// consumer's per-event `Instant::now()` records can show
+    /// separation — `tokio::time::sleep().await` would be inappropriate
+    /// because the trait isn't async, and `std::thread::yield_now()`
+    /// gives no measurable gap. Total wallclock cost per push is
+    /// ~100 ms, briefly blocking one tokio worker; tolerable in a unit
+    /// test mock.
     pub struct TimedMockTts;
 
     impl Named for TimedMockTts {

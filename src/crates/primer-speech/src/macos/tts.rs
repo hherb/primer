@@ -85,11 +85,11 @@ const RUN_LOOP_SLICE: Duration = Duration::from_millis(10);
 /// `dispatch_semaphore`. The `dispatch_semaphore_*` family was removed
 /// together with the `DispatchSemaphore` RAII wrapper and `SynthCtx`.
 ///
-// TODO: Replace raw GCD bindings (extern "C" + raw pointer types)
-// with the `dispatch2` crate when it stabilises. The crate provides
-// safe typed wrappers for dispatch_queue_t / dispatch_async_f and would
-// eliminate the _dispatch_main_q private-symbol binding. See plan task
-// 5 review notes (commit 37c3f79).
+// TODO(#125): Replace raw GCD bindings (extern "C" + raw pointer types)
+// with the `dispatch2` crate. The crate ships safe typed wrappers for
+// dispatch_queue_t / dispatch_async_f and would eliminate the
+// _dispatch_main_q private-symbol binding. Tracked alongside the
+// shared drain-loop helper in #124.
 mod dispatch {
     #[allow(non_camel_case_types)]
     pub type dispatch_object_t = *mut std::ffi::c_void;
@@ -404,12 +404,28 @@ fn synthesize_streaming_background(
         let block_ptr: *mut CbBlock = (block_ref as *const CbBlock).cast_mut();
         unsafe { synth.writeUtterance_toBufferCallback(&ctx.utterance, block_ptr) };
 
+        // ── Drop order at end of scope ──────────────────────────────────
         // `cb` drops here; AVSpeechSynthesizer's Block_retain keeps it
         // alive for any further callbacks. The closure's clone of `tx`
         // stays alive through Block_retain too; when the closure drops
         // after EOS, the sender drops and any later `recv` would return
         // `Disconnected` (which the caller below ignores after seeing
         // PhraseEnd).
+        //
+        // `synth` (Retained<AVSpeechSynthesizer>) and `ctx.utterance`
+        // both drop here too, even though PCM callbacks may still fire
+        // asynchronously on the main queue afterward. This is
+        // load-bearing on AVSpeechSynthesizer self-retaining internally
+        // while utterances are in flight — Apple's headers don't make
+        // this explicit, but the Stage-A code shipped with the same
+        // shape (synth scoped to the trampoline body) and observed no
+        // crashes during voice-loop testing. If a future macOS release
+        // changes this and we see crashes after the trampoline returns,
+        // the fix is to move `synth` ownership into a struct retained
+        // by the closure (alongside `tx_cb`) so it stays alive until
+        // AVSpeechSynthesizer releases the block. Do NOT try to extend
+        // `synth`'s lifetime by holding an Arc here; the trampoline is
+        // a one-shot dispatched work item with no place to park it.
     }
 
     let ctx = Box::new(StreamCtx { utterance, tx });
@@ -480,20 +496,24 @@ impl TextToSpeech for MacosTextToSpeech {
 /// the concatenated audio as a single [`AudioBuffer`]. Replaces the
 /// Stage-A `synthesize_to_chunks` + `chunks_to_audio_buffer` pair so
 /// the one-shot path and streaming path share one synthesis code path.
+///
+/// `sample_rate` is captured from the first `Audio` event and reused
+/// for the returned buffer. If no `Audio` event arrives (empty input,
+/// silent-only synthesis), the buffer's sample_rate stays at 0 —
+/// matching the empty-buffer convention of the deleted
+/// `chunks_to_audio_buffer`.
 fn synthesize_to_buffer(voice: &AVSpeechSynthesisVoice, text: &str) -> Result<AudioBuffer> {
     let mut samples: Vec<f32> = Vec::new();
-    let mut sample_rate: u32 = 0;
+    let mut sample_rate: Option<u32> = None;
     synthesize_streaming(voice, text, &mut |event| {
         if let SynthesisEvent::Audio(chunk) = event {
-            if sample_rate == 0 {
-                sample_rate = chunk.sample_rate;
-            }
+            sample_rate.get_or_insert(chunk.sample_rate);
             samples.extend(chunk.samples);
         }
     })?;
     Ok(AudioBuffer {
         samples,
-        sample_rate,
+        sample_rate: sample_rate.unwrap_or(0),
     })
 }
 
