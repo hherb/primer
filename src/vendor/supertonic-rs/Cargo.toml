@@ -20,10 +20,17 @@ path = "src/lib.rs"
 # ONNX Runtime — pinned to rc.10 to match the rest of the primer workspace
 # (silero/whisper/piper/fastembed all pin rc.10). Upstream supertonic uses
 # rc.7. The migration touchpoints are documented inline in helper.rs.
-ort = { version = "=2.0.0-rc.10", default-features = false, features = ["download-binaries", "copy-dylibs"] }
+# `default-features = false` drops ort's defaults, so `std`, `ndarray`, and
+# `tracing` are re-added explicitly: `std` is required by Session/Value/error
+# types, `ndarray` is required by every `Value::from_array` site in helper.rs,
+# `tracing` matches ort's default and keeps log forwarding working.
+ort = { version = "=2.0.0-rc.10", default-features = false, features = ["std", "ndarray", "tracing", "download-binaries", "copy-dylibs"] }
 
-# Array processing (like NumPy)
-ndarray = { version = "0.17", features = ["rayon"] }
+# Array processing (like NumPy). Pinned to 0.16 because `ort 2.0.0-rc.10` is
+# built against ndarray 0.16 — the `OwnedTensorArrayData` trait bound on
+# `Value::from_array` is keyed to ort's compiled-in ndarray version, so a
+# 0.17 here silently breaks every tensor construction site.
+ndarray = { version = "0.16", features = ["rayon"] }
 rand = "0.8"
 rand_distr = "0.4"
 
