@@ -1049,6 +1049,88 @@ mod mocks {
         }
     }
 
+    /// Sample count emitted per Audio event by [`TimedMockTts`]. Small
+    /// enough that on_committed_audio doesn't do meaningful work per
+    /// call; large enough that the consumer's audio plumbing accepts
+    /// each push without backpressure.
+    const TIMED_MOCK_SAMPLES_PER_CHUNK: usize = 64;
+    /// Sample rate of the timed-mock chunks. Matches [`MockStreamingTts`]
+    /// (Piper-class voice rate).
+    const TIMED_MOCK_SAMPLE_RATE: u32 = 22_050;
+    /// Wallclock delay between successive Audio events emitted by
+    /// [`TimedMockTts`]. The TTFA test relies on a real wallclock gap so
+    /// the consumer's per-event `Instant::now()` records show separation;
+    /// `std::thread::sleep` is correct here because `push_text` is
+    /// synchronous.
+    const TIMED_MOCK_INTER_CHUNK_MS: u64 = 50;
+
+    /// Streaming TTS mock that injects real wallclock delays between
+    /// Audio events, used to verify the consumer doesn't buffer chunks
+    /// before forwarding them to `on_committed_audio`.
+    ///
+    /// Each non-empty `push_text` emits three Audio events at
+    /// [`TIMED_MOCK_INTER_CHUNK_MS`]-millisecond intervals (with sample
+    /// values 0.1, 0.2, 0.3 as identity markers), then `PhraseEnd`.
+    /// Total per-push wallclock ≈ 2 × interval = 100 ms. Empty input
+    /// emits no events (same shape as the production sessions).
+    ///
+    /// **Why `std::thread::sleep` inside an `async`-ish call path is OK
+    /// here:** `SynthesisSession::push_text` is a synchronous trait
+    /// method by design (production backends do CPU-heavy ONNX
+    /// inference inline; see the trait's `# Blocking` note). The TTFA
+    /// test needs a *real* wallclock gap between Audio events so the
+    /// consumer's per-event `Instant::now()` records can show
+    /// separation — `tokio::time::sleep().await` would be inappropriate
+    /// because the trait isn't async, and `std::thread::yield_now()`
+    /// gives no measurable gap. Total wallclock cost per push is
+    /// ~100 ms, briefly blocking one tokio worker; tolerable in a unit
+    /// test mock.
+    pub struct TimedMockTts;
+
+    impl Named for TimedMockTts {
+        fn name(&self) -> &str {
+            "timed-mock-tts"
+        }
+    }
+
+    impl StreamingTextToSpeech for TimedMockTts {
+        fn sample_rate(&self) -> u32 {
+            TIMED_MOCK_SAMPLE_RATE
+        }
+        fn open_session(&self, _voice: &VoiceProfile) -> Result<Box<dyn SynthesisSession>> {
+            Ok(Box::new(TimedMockTtsSession))
+        }
+    }
+
+    struct TimedMockTtsSession;
+
+    impl SynthesisSession for TimedMockTtsSession {
+        fn push_text(
+            &mut self,
+            text: &str,
+            on_event: &mut dyn FnMut(SynthesisEvent),
+        ) -> Result<()> {
+            if text.is_empty() {
+                return Ok(());
+            }
+            for (i, marker) in [0.1_f32, 0.2, 0.3].iter().enumerate() {
+                on_event(SynthesisEvent::Audio(AudioChunk {
+                    samples: vec![*marker; TIMED_MOCK_SAMPLES_PER_CHUNK],
+                    sample_rate: TIMED_MOCK_SAMPLE_RATE,
+                }));
+                if i < 2 {
+                    std::thread::sleep(std::time::Duration::from_millis(TIMED_MOCK_INTER_CHUNK_MS));
+                }
+            }
+            on_event(SynthesisEvent::PhraseEnd);
+            Ok(())
+        }
+
+        fn finalize(self: Box<Self>, _on_event: &mut dyn FnMut(SynthesisEvent)) -> Result<()> {
+            Ok(())
+        }
+    }
+
     /// Observer-event record used by the unit tests. The original
     /// `speech_loop.rs` asserted side-effects via captured channels;
     /// after the observer refactor each test inspects the recorded
@@ -1150,6 +1232,119 @@ mod mocks {
         let mut count_empty: u32 = 0;
         session.push_text("", &mut |_| count_empty += 1).unwrap();
         assert_eq!(count_empty, 0);
+    }
+
+    /// Pin the state machine's consumer-side guarantee that PCM events
+    /// reach `on_committed_audio` AS THEY ARRIVE — not buffered until
+    /// after `push_text` returns.
+    ///
+    /// [`TimedMockTts`] emits three Audio events at 50 ms intervals
+    /// ([`TIMED_MOCK_INTER_CHUNK_MS`]). We record `Instant::now()` at
+    /// each `on_committed_audio` call and assert the FIRST 0.1-marker's
+    /// timestamp precedes the LAST 0.3-marker's timestamp by ≥80 ms (vs.
+    /// the 100 ms total inter-event budget — 20 ms slack absorbs CI
+    /// noise). A consumer that buffered all chunks before forwarding
+    /// would see all three timestamps clustered within microseconds and
+    /// fail this assertion.
+    #[tokio::test]
+    async fn streaming_chunks_reach_speaker_before_phrase_completes() {
+        use std::sync::Mutex;
+        use std::time::Instant;
+
+        use primer_core::speech::VadEvent;
+
+        /// Lower bound on the wallclock gap between the first and last
+        /// committed Audio sample. Allows ~20 ms of slack on top of the
+        /// nominal `2 × TIMED_MOCK_INTER_CHUNK_MS = 100 ms` budget.
+        const STREAMING_GAP_FLOOR_MS: u64 = 80;
+        /// Float-equality tolerance for matching the 0.1 / 0.3 identity
+        /// markers in the committed sample stream. The markers are
+        /// exact `f32` literals; the tolerance only guards against any
+        /// future resampler that might be inserted between mock and
+        /// consumer.
+        const MARKER_EPS: f32 = 0.01;
+
+        let backends = super::LoopBackends::single_locale(
+            Arc::new(MockStreamingStt::new("hello primer")),
+            Arc::new(TimedMockTts),
+            primer_core::speech::VoiceProfile::default(),
+            primer_core::i18n::Locale::English,
+        );
+
+        let (event_tx, event_rx) = tokio::sync::mpsc::channel(64);
+        event_tx.try_send(VadEvent::SpeechStart).unwrap();
+        event_tx.try_send(VadEvent::SpeechEnd).unwrap();
+        drop(event_tx);
+
+        /// `(wallclock, first-sample-value)` for each non-empty
+        /// on_audio call. The first sample uniquely identifies which
+        /// TimedMockTts marker (0.1 / 0.2 / 0.3) drove the commit.
+        type TimelineEntry = (Instant, Option<f32>);
+
+        // Record per non-empty on_audio call. Empty pushes (inter-phrase
+        // silence frames) are filtered out so the markers' positions are
+        // unambiguous.
+        let timeline: Arc<Mutex<Vec<TimelineEntry>>> = Arc::new(Mutex::new(Vec::new()));
+        let timeline_cb = Arc::clone(&timeline);
+        let on_audio: Box<dyn FnMut(Vec<f32>) + Send> = Box::new(move |samples| {
+            if !samples.is_empty() {
+                timeline_cb
+                    .lock()
+                    .unwrap()
+                    .push((Instant::now(), samples.first().copied()));
+            }
+        });
+
+        struct EchoResponder;
+        impl super::Responder for EchoResponder {
+            fn respond<'a>(
+                &'a mut self,
+                transcript: &'a str,
+                mut on_chunk: Box<dyn FnMut(&str) + Send + 'a>,
+            ) -> std::pin::Pin<
+                Box<
+                    dyn std::future::Future<Output = primer_core::error::Result<String>>
+                        + Send
+                        + 'a,
+                >,
+            > {
+                let owned = transcript.to_string();
+                Box::pin(async move {
+                    on_chunk(&owned);
+                    Ok(owned)
+                })
+            }
+        }
+
+        let observer = MockObserver::new();
+        super::run_loop_borrowed(
+            backends,
+            event_rx,
+            Box::new(EchoResponder),
+            on_audio,
+            None,
+            false,
+            None,
+            observer.clone(),
+        )
+        .await
+        .expect("loop runs to completion");
+
+        let recorded = timeline.lock().unwrap();
+        let first = recorded
+            .iter()
+            .find(|(_, v)| v.map(|x| (x - 0.1).abs() < MARKER_EPS).unwrap_or(false))
+            .expect("0.1 marker was committed");
+        let last = recorded
+            .iter()
+            .rfind(|(_, v)| v.map(|x| (x - 0.3).abs() < MARKER_EPS).unwrap_or(false))
+            .expect("0.3 marker was committed");
+        let gap = last.0.duration_since(first.0);
+        assert!(
+            gap >= std::time::Duration::from_millis(STREAMING_GAP_FLOOR_MS),
+            "expected ≥{STREAMING_GAP_FLOOR_MS}ms between first and last Audio commit \
+             (true streaming); got {gap:?}"
+        );
     }
 
     #[test]
