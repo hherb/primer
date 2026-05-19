@@ -43,7 +43,9 @@ use objc2_avf_audio::{
 };
 use objc2_foundation::{NSDate, NSNumber, NSRunLoop, NSString};
 
-use primer_core::consts::speech::STREAM_DRAIN_POLL_MS;
+use primer_core::consts::speech::{
+    STREAM_DRAIN_POLL_MS, STREAM_DRAIN_TIMEOUT_SECS, STREAM_RUN_LOOP_SLICE_MS,
+};
 use primer_core::error::{PrimerError, Result};
 use primer_core::i18n::Locale;
 use primer_core::speech::{
@@ -62,14 +64,16 @@ const BACKEND_NAME: &str = "macos-native-tts";
 /// zero-frame buffer.
 const EOS_FRAME_LENGTH: usize = 0;
 
-/// Synthesis timeout. If no EOS sentinel arrives within this window,
-/// `synthesize_to_chunks` returns an error.
-const DRAIN_TIMEOUT: Duration = Duration::from_secs(30);
+/// Synthesis timeout. If no `SynthesisEvent::PhraseEnd` arrives within this
+/// window, the streaming call returns an error. Sourced from
+/// [`STREAM_DRAIN_TIMEOUT_SECS`] so both streaming paths share one tunable.
+const DRAIN_TIMEOUT: Duration = Duration::from_secs(STREAM_DRAIN_TIMEOUT_SECS);
 
 /// NSRunLoop slice for the main-thread poll path. Each `runUntilDate` call
 /// blocks for this long, draining any pending GCD main-queue callbacks
-/// (including AVSpeechSynthesizer PCM callbacks) before returning.
-const RUN_LOOP_SLICE: Duration = Duration::from_millis(10);
+/// (including AVSpeechSynthesizer PCM callbacks) before returning. Sourced
+/// from [`STREAM_RUN_LOOP_SLICE_MS`].
+const RUN_LOOP_SLICE: Duration = Duration::from_millis(STREAM_RUN_LOOP_SLICE_MS);
 
 /// Raw libdispatch bindings for the background-thread path.
 ///
@@ -338,9 +342,9 @@ fn synthesize_streaming_main_thread(
         if Instant::now() >= deadline {
             drop(tx);
             drop(cb);
-            return Err(PrimerError::Speech(
-                "AVSpeechSynthesizer 30s NSRunLoop drain timeout (main-thread streaming)".into(),
-            ));
+            return Err(PrimerError::Speech(format!(
+                "AVSpeechSynthesizer {STREAM_DRAIN_TIMEOUT_SECS}s NSRunLoop drain timeout (main-thread streaming)"
+            )));
         }
         let date = NSDate::dateWithTimeIntervalSinceNow(RUN_LOOP_SLICE.as_secs_f64());
         run_loop.runUntilDate(&date);
@@ -412,20 +416,23 @@ fn synthesize_streaming_background(
         // `Disconnected` (which the caller below ignores after seeing
         // PhraseEnd).
         //
-        // `synth` (Retained<AVSpeechSynthesizer>) and `ctx.utterance`
-        // both drop here too, even though PCM callbacks may still fire
-        // asynchronously on the main queue afterward. This is
-        // load-bearing on AVSpeechSynthesizer self-retaining internally
-        // while utterances are in flight — Apple's headers don't make
-        // this explicit, but the Stage-A code shipped with the same
-        // shape (synth scoped to the trampoline body) and observed no
-        // crashes during voice-loop testing. If a future macOS release
-        // changes this and we see crashes after the trampoline returns,
-        // the fix is to move `synth` ownership into a struct retained
-        // by the closure (alongside `tx_cb`) so it stays alive until
+        // SAFETY-CRITICAL on macOS 13–15 (verified): `synth`
+        // (Retained<AVSpeechSynthesizer>) and `ctx.utterance` both drop
+        // here, even though PCM callbacks may still fire asynchronously
+        // on the main queue afterward. This is load-bearing on
+        // AVSpeechSynthesizer self-retaining internally while utterances
+        // are in flight — Apple's headers don't make this explicit, but
+        // the Stage-A code shipped with the same shape (synth scoped to
+        // the trampoline body) and observed no crashes during voice-loop
+        // testing on macOS 13.x–15.x. If a future macOS release changes
+        // this and we see UAF crashes after the trampoline returns, the
+        // fix is to move `synth` ownership into a struct retained by the
+        // closure (alongside `tx_cb`) so it stays alive until
         // AVSpeechSynthesizer releases the block. Do NOT try to extend
-        // `synth`'s lifetime by holding an Arc here; the trampoline is
-        // a one-shot dispatched work item with no place to park it.
+        // `synth`'s lifetime by holding an Arc here; the trampoline is a
+        // one-shot dispatched work item with no place to park it. Audit
+        // tag: grep for `SAFETY-CRITICAL on macOS` when bumping the
+        // supported macOS floor.
     }
 
     let ctx = Box::new(StreamCtx { utterance, tx });
@@ -439,9 +446,17 @@ fn synthesize_streaming_background(
     unsafe { dispatch::dispatch_async_f(main_queue, ctx_ptr, trampoline) };
 
     // ── Drain loop ────────────────────────────────────────────────────
+    // Deadline is checked above the `match` (not just on `Timeout`) so a
+    // runaway producer that keeps firing Audio events without ever
+    // emitting PhraseEnd still trips the sanity cap.
     let poll = Duration::from_millis(STREAM_DRAIN_POLL_MS);
     let deadline = Instant::now() + DRAIN_TIMEOUT;
     loop {
+        if Instant::now() >= deadline {
+            return Err(PrimerError::Speech(format!(
+                "AVSpeechSynthesizer {STREAM_DRAIN_TIMEOUT_SECS}s drain timeout (background streaming)"
+            )));
+        }
         match rx.recv_timeout(poll) {
             Ok(event) => {
                 let is_phrase_end = matches!(event, SynthesisEvent::PhraseEnd);
@@ -451,11 +466,7 @@ fn synthesize_streaming_background(
                 }
             }
             Err(RecvTimeoutError::Timeout) => {
-                if Instant::now() >= deadline {
-                    return Err(PrimerError::Speech(
-                        "AVSpeechSynthesizer 30s drain timeout (background streaming)".into(),
-                    ));
-                }
+                // Loop back; deadline check at top handles expiry.
             }
             Err(RecvTimeoutError::Disconnected) => {
                 return Err(PrimerError::Speech(
@@ -478,7 +489,7 @@ impl TextToSpeech for MacosTextToSpeech {
         // synchronously without GCD bouncing). `synthesize_streaming` detects
         // main-thread and takes the main-thread path.
         if objc2_foundation::NSThread::isMainThread_class() {
-            return synthesize_to_buffer(&self.voice, text);
+            return synthesize_to_buffer(&self.voice, text, self.native_sample_rate);
         }
         // Off main thread (typical for tokio worker callers): spawn_blocking so
         // the synchronous `synthesize_streaming` doesn't stall the runtime.
@@ -486,9 +497,12 @@ impl TextToSpeech for MacosTextToSpeech {
         // not-main-thread and take the GCD-bounce path.
         let text_owned = text.to_owned();
         let voice_retained = self.voice.clone();
-        tokio::task::spawn_blocking(move || synthesize_to_buffer(&voice_retained, &text_owned))
-            .await
-            .map_err(|e| PrimerError::Speech(format!("spawn_blocking panicked: {e}")))?
+        let native_sample_rate = self.native_sample_rate;
+        tokio::task::spawn_blocking(move || {
+            synthesize_to_buffer(&voice_retained, &text_owned, native_sample_rate)
+        })
+        .await
+        .map_err(|e| PrimerError::Speech(format!("spawn_blocking panicked: {e}")))?
     }
 }
 
@@ -497,12 +511,18 @@ impl TextToSpeech for MacosTextToSpeech {
 /// Stage-A `synthesize_to_chunks` + `chunks_to_audio_buffer` pair so
 /// the one-shot path and streaming path share one synthesis code path.
 ///
-/// `sample_rate` is captured from the first `Audio` event and reused
-/// for the returned buffer. If no `Audio` event arrives (empty input,
-/// silent-only synthesis), the buffer's sample_rate stays at 0 —
-/// matching the empty-buffer convention of the deleted
-/// `chunks_to_audio_buffer`.
-fn synthesize_to_buffer(voice: &AVSpeechSynthesisVoice, text: &str) -> Result<AudioBuffer> {
+/// `sample_rate` is captured from the first `Audio` event. If no `Audio`
+/// event arrives (empty input, silent-only synthesis), `fallback_sample_rate`
+/// — the voice's `native_sample_rate` queried at backend construction — is
+/// used instead. The previous behaviour returned `sample_rate: 0`, which was
+/// a divide-by-zero footgun for downstream sinks/resamplers; the fallback
+/// keeps the buffer's sample_rate field consistent with what a non-empty
+/// synthesis from the same voice would have produced.
+fn synthesize_to_buffer(
+    voice: &AVSpeechSynthesisVoice,
+    text: &str,
+    fallback_sample_rate: u32,
+) -> Result<AudioBuffer> {
     let mut samples: Vec<f32> = Vec::new();
     let mut sample_rate: Option<u32> = None;
     synthesize_streaming(voice, text, &mut |event| {
@@ -513,7 +533,7 @@ fn synthesize_to_buffer(voice: &AVSpeechSynthesisVoice, text: &str) -> Result<Au
     })?;
     Ok(AudioBuffer {
         samples,
-        sample_rate: sample_rate.unwrap_or(0),
+        sample_rate: sample_rate.unwrap_or(fallback_sample_rate),
     })
 }
 

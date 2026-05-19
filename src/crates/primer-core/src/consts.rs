@@ -189,10 +189,11 @@ pub mod speech {
 
     /// `recv_timeout` slice in milliseconds for the macOS-native TTS
     /// background-path streaming drain loop. Short enough that the
-    /// 30 s overall streaming-drain deadline fires promptly on a hung
-    /// synth; long enough to amortise wakeup cost. Not used by the
-    /// main-thread path (which drives the NSRunLoop in its own 10 ms
-    /// slices and uses `try_recv`).
+    /// [`STREAM_DRAIN_TIMEOUT_SECS`] overall streaming-drain deadline
+    /// fires promptly on a hung synth; long enough to amortise wakeup
+    /// cost. Not used by the main-thread path (which drives the
+    /// NSRunLoop in [`STREAM_RUN_LOOP_SLICE_MS`]-wide slices and uses
+    /// `try_recv`).
     ///
     /// The streaming channel itself is **unbounded** by design. The PCM
     /// callback fires synchronously on the GCD main queue; a bounded
@@ -203,6 +204,24 @@ pub mod speech {
     /// unbounded channel makes the GCD main queue's hard "never block"
     /// invariant a structural property rather than a tunable budget.
     pub const STREAM_DRAIN_POLL_MS: u64 = 10;
+
+    /// Overall sanity-cap deadline for the macOS-native TTS streaming
+    /// drain loops (both main-thread and background paths). If no
+    /// `SynthesisEvent::PhraseEnd` arrives within this window the synth
+    /// is considered hung and the call returns an error. AVSpeechSynthesizer
+    /// terminates well within this budget for any plausible utterance length
+    /// in practice; the cap is defensive insurance against driver-level
+    /// hangs, not a tuning parameter.
+    pub const STREAM_DRAIN_TIMEOUT_SECS: u64 = 30;
+
+    /// NSRunLoop slice (milliseconds) for the macOS-native TTS main-thread
+    /// drain path. Each `runUntilDate` call blocks for this long, draining
+    /// any pending GCD main-queue callbacks (including AVSpeechSynthesizer
+    /// PCM callbacks) before returning to the channel `try_recv` loop.
+    /// Short enough that interleaved channel drains stay responsive; long
+    /// enough that the per-slice wakeup cost is amortised against actual
+    /// callback delivery.
+    pub const STREAM_RUN_LOOP_SLICE_MS: u64 = 10;
 
     /// Approximate Whisper `small`/`small.en` model size in MiB. Used
     /// by the asset-consent modal as the "whisper portion" of a locale
