@@ -55,8 +55,8 @@ use piper_rs::synth::PiperSpeechSynthesizer;
 use piper_rs::{PiperModel, PiperSynthesisConfig};
 use primer_core::error::{PrimerError, Result};
 use primer_core::speech::{
-    AudioBuffer, AudioChunk, Named, StreamingTextToSpeech, SynthesisSession, TextToSpeech,
-    VoiceProfile,
+    AudioBuffer, AudioChunk, Named, StreamingTextToSpeech, SynthesisEvent, SynthesisSession,
+    TextToSpeech, VoiceProfile,
 };
 
 use crate::phrase_split::PhraseSplitter;
@@ -319,20 +319,22 @@ impl PiperSession {
 }
 
 impl SynthesisSession for PiperSession {
-    fn push_text(&mut self, text: &str) -> Result<Vec<AudioChunk>> {
-        let phrases = self.splitter.push(text);
-        let mut out = Vec::with_capacity(phrases.len());
-        for phrase in phrases {
-            out.push(self.synth_phrase(&phrase)?);
+    fn push_text(&mut self, text: &str, on_event: &mut dyn FnMut(SynthesisEvent)) -> Result<()> {
+        for phrase in self.splitter.push(text) {
+            let chunk = self.synth_phrase(&phrase)?;
+            on_event(SynthesisEvent::Audio(chunk));
+            on_event(SynthesisEvent::PhraseEnd);
         }
-        Ok(out)
+        Ok(())
     }
 
-    fn finalize(mut self: Box<Self>) -> Result<Vec<AudioChunk>> {
-        match self.splitter.flush() {
-            Some(trailing) => Ok(vec![self.synth_phrase(&trailing)?]),
-            None => Ok(vec![]),
+    fn finalize(mut self: Box<Self>, on_event: &mut dyn FnMut(SynthesisEvent)) -> Result<()> {
+        if let Some(trailing) = self.splitter.flush() {
+            let chunk = self.synth_phrase(&trailing)?;
+            on_event(SynthesisEvent::Audio(chunk));
+            on_event(SynthesisEvent::PhraseEnd);
         }
+        Ok(())
     }
 }
 

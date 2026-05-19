@@ -15,7 +15,7 @@ use std::time::Instant;
 
 use clap::Parser;
 use hound::{SampleFormat, WavSpec, WavWriter};
-use primer_core::speech::{StreamingTextToSpeech, VoiceProfile};
+use primer_core::speech::{StreamingTextToSpeech, SynthesisEvent, VoiceProfile};
 use primer_speech::PiperTts;
 
 /// Phrase the brief uses for the smoke test.
@@ -61,12 +61,13 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     let mut session = tts.open_session(&voice)?;
     let mut samples: Vec<f32> = Vec::new();
-    for chunk in session.push_text(SMOKE_PHRASE)? {
-        samples.extend(chunk.samples);
-    }
-    for chunk in session.finalize()? {
-        samples.extend(chunk.samples);
-    }
+    let mut collect = |e: SynthesisEvent| {
+        if let SynthesisEvent::Audio(chunk) = e {
+            samples.extend(chunk.samples);
+        }
+    };
+    session.push_text(SMOKE_PHRASE, &mut collect)?;
+    session.finalize(&mut collect)?;
 
     let spec = WavSpec {
         channels: WAV_CHANNELS,

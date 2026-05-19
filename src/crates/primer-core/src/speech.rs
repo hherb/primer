@@ -192,12 +192,10 @@ pub trait TextToSpeech: Named + Send + Sync {
 
 /// One PCM chunk emitted by a [`SynthesisSession`] during streaming.
 ///
-/// Emitted as soon as the underlying model has enough context to commit
-/// audio (typically once a phrase boundary is reached). Concatenate the
-/// `samples` of every chunk in order to reconstruct the full utterance.
-/// `sample_rate` is carried per-chunk even though every chunk in one
-/// session shares one — keeps this type usable by audio sinks that don't
-/// hold a reference to the originating backend.
+/// Concatenate the `samples` of every chunk in order to reconstruct the
+/// full utterance. `sample_rate` is carried per-chunk even though every
+/// chunk in one session shares one — keeps this type usable by audio
+/// sinks that don't hold a reference to the originating backend.
 #[derive(Debug, Clone)]
 pub struct AudioChunk {
     /// PCM samples, f32, mono.
@@ -206,36 +204,63 @@ pub struct AudioChunk {
     pub sample_rate: u32,
 }
 
+/// One event emitted by a streaming [`SynthesisSession`].
+///
+/// `Audio(chunk)` carries PCM data — consumers forward it to the
+/// speaker immediately. `PhraseEnd` is a boundary marker — consumers
+/// typically insert a brief inter-phrase pause (see
+/// [`crate::consts::speech::DEFAULT_INTER_PHRASE_SILENCE_MS`])
+/// before the next phrase's audio.
+///
+/// Separating audio from boundaries (rather than packing a
+/// `bool is_phrase_end` onto chunks) keeps phrase-detection knowledge
+/// where it belongs — in the producer's `PhraseSplitter` — and avoids
+/// per-chunk overhead in the steady state.
+#[derive(Debug, Clone)]
+pub enum SynthesisEvent {
+    /// PCM data became available.
+    Audio(AudioChunk),
+    /// End of one phrase. Consumer typically inserts a brief inter-phrase
+    /// pause — see
+    /// [`crate::consts::speech::DEFAULT_INTER_PHRASE_SILENCE_MS`].
+    PhraseEnd,
+}
+
 /// A single streaming-synthesis session.
 ///
-/// Created by [`StreamingTextToSpeech::open_session`]. Push partial text
-/// from the LLM via [`Self::push_text`]; each push may emit zero or more
-/// chunks as soon as the synthesiser has enough context. Call
-/// [`Self::finalize`] when the LLM stream has ended to drain the trailing
-/// buffer. `Send` but not `Sync`: each Primer turn owns its own session.
+/// Created by [`StreamingTextToSpeech::open_session`]. Push partial
+/// text from the LLM via [`Self::push_text`]; the session invokes
+/// `on_event` for each PCM chunk and phrase boundary as soon as it's
+/// available — without buffering an entire phrase. Call
+/// [`Self::finalize`] when the LLM stream has ended to drain the
+/// trailing buffer. `Send` but not `Sync`: each Primer turn owns its
+/// own session.
 ///
 /// # Blocking
 ///
-/// Both [`Self::push_text`] and [`Self::finalize`] are synchronous and may
-/// run CPU-heavy synthesis (e.g. ONNX inference) on the calling thread.
-/// Async callers MUST wrap session calls in `tokio::task::spawn_blocking`
-/// (or an equivalent) to keep the runtime free. The trait stays sync so
-/// pure backends (the stub, future fixed-buffer ones) don't pay an async
-/// surface tax.
+/// Both [`Self::push_text`] and [`Self::finalize`] are synchronous and
+/// may run CPU-heavy synthesis (e.g. ONNX inference) on the calling
+/// thread. Async callers MUST wrap session calls in
+/// `tokio::task::spawn_blocking` (or an equivalent) to keep the
+/// runtime free. The trait stays sync so pure backends don't pay an
+/// async surface tax.
 pub trait SynthesisSession: Send {
-    /// Push text; receive any audio chunks that became available as a
-    /// result. May return an empty Vec when the buffer doesn't yet
-    /// contain a complete phrase.
+    /// Push text. The synthesiser invokes `on_event` for each PCM
+    /// chunk and phrase boundary as soon as it's available — without
+    /// buffering an entire phrase.
     ///
-    /// May block the calling thread for the duration of synthesis — see
-    /// the [trait-level `# Blocking` note](Self).
-    fn push_text(&mut self, text: &str) -> Result<Vec<AudioChunk>>;
+    /// `on_event` may be invoked zero or more times during one call.
+    /// May block the calling thread for the duration of synthesis —
+    /// see the trait-level `# Blocking` note.
+    fn push_text(&mut self, text: &str, on_event: &mut dyn FnMut(SynthesisEvent)) -> Result<()>;
 
-    /// Drain remaining buffered text and finalize. Consumes the session.
+    /// Drain remaining buffered text and finalize. Consumes the
+    /// session. Fires the same events as [`Self::push_text`] for any
+    /// trailing partial phrase.
     ///
     /// May block for one final synthesis call — see the trait-level
     /// `# Blocking` note.
-    fn finalize(self: Box<Self>) -> Result<Vec<AudioChunk>>;
+    fn finalize(self: Box<Self>, on_event: &mut dyn FnMut(SynthesisEvent)) -> Result<()>;
 }
 
 /// Streaming text-to-speech backend.
@@ -452,8 +477,8 @@ mod tests {
 
     /// Canary that the `Named` super-trait is the single source of `name()`
     /// across every speech trait — `VoiceActivityDetector`, `SpeechToText`,
-    /// `StreamingSpeechToText`, `TextToSpeech`. Adding a fifth leaf trait
-    /// should add a fifth assertion here.
+    /// `StreamingSpeechToText`, `TextToSpeech`, `StreamingTextToSpeech`.
+    /// Adding a sixth leaf trait should add a sixth assertion here.
     #[test]
     fn named_super_trait_resolves_via_each_speech_trait() {
         let vad: Box<dyn VoiceActivityDetector> = Box::new(CannedVad::new(vec![]));
@@ -467,6 +492,9 @@ mod tests {
 
         let tts: Box<dyn TextToSpeech> = Box::new(CannedTts);
         assert_eq!(Named::name(&*tts), "canned-tts");
+
+        let streaming_tts: Box<dyn StreamingTextToSpeech> = Box::new(CannedStreamingTts);
+        assert_eq!(Named::name(&*streaming_tts), "canned-stream-tts");
     }
 
     /// Mock streaming-TTS that emits one canned `AudioChunk` per push.
@@ -484,17 +512,23 @@ mod tests {
     }
 
     impl SynthesisSession for CannedSynthesisSession {
-        fn push_text(&mut self, _text: &str) -> Result<Vec<AudioChunk>> {
-            match self.scripted.next() {
-                Some(_) => Ok(vec![AudioChunk {
+        fn push_text(
+            &mut self,
+            _text: &str,
+            on_event: &mut dyn FnMut(SynthesisEvent),
+        ) -> Result<()> {
+            if self.scripted.next().is_some() {
+                on_event(SynthesisEvent::Audio(AudioChunk {
                     samples: vec![0.0; CANNED_TTS_SAMPLES_PER_CHUNK],
                     sample_rate: self.sample_rate,
-                }]),
-                None => Ok(vec![]),
+                }));
+                on_event(SynthesisEvent::PhraseEnd);
             }
+            Ok(())
         }
-        fn finalize(self: Box<Self>) -> Result<Vec<AudioChunk>> {
-            Ok(vec![])
+
+        fn finalize(self: Box<Self>, _on_event: &mut dyn FnMut(SynthesisEvent)) -> Result<()> {
+            Ok(())
         }
     }
 
@@ -523,15 +557,69 @@ mod tests {
         assert_eq!(tts.sample_rate(), CANNED_TTS_SAMPLE_RATE);
         let voice = VoiceProfile::default();
         let mut session = tts.open_session(&voice).unwrap();
-        let c0 = session.push_text("hello.").unwrap();
-        let c1 = session.push_text(" world.").unwrap();
-        let c2 = session.push_text("").unwrap();
-        assert_eq!(c0.len(), 1);
-        assert_eq!(c0[0].samples.len(), CANNED_TTS_SAMPLES_PER_CHUNK);
-        assert_eq!(c0[0].sample_rate, CANNED_TTS_SAMPLE_RATE);
-        assert_eq!(c1.len(), 1);
-        assert!(c2.is_empty());
-        let trailing = session.finalize().unwrap();
-        assert!(trailing.is_empty());
+
+        // Push 1: script has "alpha" — expect Audio + PhraseEnd.
+        let mut events: Vec<SynthesisEvent> = Vec::new();
+        session
+            .push_text("hello.", &mut |e| events.push(e))
+            .unwrap();
+        assert_eq!(events.len(), 2, "one Audio + one PhraseEnd per push");
+        assert!(matches!(events[0], SynthesisEvent::Audio(_)));
+        assert!(matches!(events[1], SynthesisEvent::PhraseEnd));
+        if let SynthesisEvent::Audio(ref chunk) = events[0] {
+            assert_eq!(chunk.samples.len(), CANNED_TTS_SAMPLES_PER_CHUNK);
+            assert_eq!(chunk.sample_rate, CANNED_TTS_SAMPLE_RATE);
+        }
+
+        // Push 2: script has "beta" — expect Audio + PhraseEnd.
+        let mut events2: Vec<SynthesisEvent> = Vec::new();
+        session
+            .push_text(" world.", &mut |e| events2.push(e))
+            .unwrap();
+        assert_eq!(events2.len(), 2);
+
+        // Push 3: script exhausted — expect no events.
+        let mut events3: Vec<SynthesisEvent> = Vec::new();
+        session.push_text("", &mut |e| events3.push(e)).unwrap();
+        assert!(
+            events3.is_empty(),
+            "empty push (script exhausted) emits no events"
+        );
+
+        // finalize: scripted iterator already exhausted; no trailing events expected.
+        let mut events4: Vec<SynthesisEvent> = Vec::new();
+        session.finalize(&mut |e| events4.push(e)).unwrap();
+        assert!(events4.is_empty());
+    }
+
+    /// Pin the exact `[Audio, PhraseEnd]` event order for one push. The
+    /// existing test asserts shape; this one asserts ordering as a
+    /// separate signal so a future regression that reverses the order
+    /// (or drops `PhraseEnd`) fails with a clearly diagnostic message.
+    #[test]
+    fn synthesis_session_fires_audio_before_phrase_end() {
+        let tts: Box<dyn StreamingTextToSpeech> = Box::new(CannedStreamingTts);
+        let mut session = tts.open_session(&VoiceProfile::default()).unwrap();
+        let mut order: Vec<&'static str> = Vec::new();
+        let mut sink = |e: SynthesisEvent| {
+            order.push(match e {
+                SynthesisEvent::Audio(_) => "audio",
+                SynthesisEvent::PhraseEnd => "phrase_end",
+            });
+        };
+        session.push_text("ping.", &mut sink).unwrap();
+        assert_eq!(order, vec!["audio", "phrase_end"]);
+    }
+
+    /// Compile-time canary: `SynthesisSession` must remain object-safe so
+    /// `Box<dyn SynthesisSession>` (the return type of
+    /// `StreamingTextToSpeech::open_session`) keeps working. The
+    /// `&mut dyn FnMut(SynthesisEvent)` callback is the load-bearing
+    /// constraint — any future trait method that takes `impl FnMut`,
+    /// returns `impl Trait`, or otherwise loses object safety will fail
+    /// to compile here.
+    #[test]
+    fn synthesis_session_is_object_safe() {
+        fn _accepts_boxed(_s: Box<dyn SynthesisSession>) {}
     }
 }

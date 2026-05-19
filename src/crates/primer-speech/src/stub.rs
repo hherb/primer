@@ -3,8 +3,8 @@
 use async_trait::async_trait;
 use primer_core::error::Result;
 use primer_core::speech::{
-    AudioBuffer, AudioChunk, Named, SpeechToText, StreamingTextToSpeech, SynthesisSession,
-    TextToSpeech, Transcript, VoiceProfile,
+    AudioBuffer, AudioChunk, Named, SpeechToText, StreamingTextToSpeech, SynthesisEvent,
+    SynthesisSession, TextToSpeech, Transcript, VoiceProfile,
 };
 
 use crate::phrase_split::PhraseSplitter;
@@ -87,39 +87,56 @@ impl StubSynthesisSession {
 }
 
 impl SynthesisSession for StubSynthesisSession {
-    fn push_text(&mut self, text: &str) -> Result<Vec<AudioChunk>> {
-        let phrases = self.splitter.push(text);
-        Ok(phrases.iter().map(|_| Self::silent_chunk()).collect())
+    fn push_text(&mut self, text: &str, on_event: &mut dyn FnMut(SynthesisEvent)) -> Result<()> {
+        for _ in self.splitter.push(text) {
+            on_event(SynthesisEvent::Audio(Self::silent_chunk()));
+            on_event(SynthesisEvent::PhraseEnd);
+        }
+        Ok(())
     }
 
-    fn finalize(mut self: Box<Self>) -> Result<Vec<AudioChunk>> {
-        match self.splitter.flush() {
-            Some(_) => Ok(vec![Self::silent_chunk()]),
-            None => Ok(vec![]),
+    fn finalize(mut self: Box<Self>, on_event: &mut dyn FnMut(SynthesisEvent)) -> Result<()> {
+        if self.splitter.flush().is_some() {
+            on_event(SynthesisEvent::Audio(Self::silent_chunk()));
+            on_event(SynthesisEvent::PhraseEnd);
         }
+        Ok(())
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use primer_core::speech::{StreamingTextToSpeech, VoiceProfile};
-
-    /// `StubTts` claims this rate as a no-op default since it emits silence.
-    /// Mirrors the value used in stub.rs's existing one-shot synthesize body.
-    const STUB_TTS_SAMPLE_RATE: u32 = 16_000;
+    use primer_core::speech::{StreamingTextToSpeech, SynthesisEvent, VoiceProfile};
 
     #[tokio::test]
     async fn stub_tts_streaming_emits_chunk_per_phrase() {
         let tts: Box<dyn StreamingTextToSpeech> = Box::new(StubTts);
         assert_eq!(tts.sample_rate(), STUB_TTS_SAMPLE_RATE);
         let mut session = tts.open_session(&VoiceProfile::default()).unwrap();
-        let phrases = session.push_text("Hello. World. ").unwrap();
-        assert_eq!(phrases.len(), 2);
-        for chunk in &phrases {
-            assert_eq!(chunk.sample_rate, STUB_TTS_SAMPLE_RATE);
-            assert!(!chunk.samples.is_empty());
-            assert!(chunk.samples.iter().all(|&s| s == 0.0));
+
+        let mut events: Vec<SynthesisEvent> = Vec::new();
+        session
+            .push_text("Hello. World. ", &mut |e| events.push(e))
+            .unwrap();
+
+        // Two phrases ⇒ two Audio + two PhraseEnd events.
+        let audio_count = events
+            .iter()
+            .filter(|e| matches!(e, SynthesisEvent::Audio(_)))
+            .count();
+        let phrase_end_count = events
+            .iter()
+            .filter(|e| matches!(e, SynthesisEvent::PhraseEnd))
+            .count();
+        assert_eq!(audio_count, 2);
+        assert_eq!(phrase_end_count, 2);
+        for event in &events {
+            if let SynthesisEvent::Audio(chunk) = event {
+                assert_eq!(chunk.sample_rate, STUB_TTS_SAMPLE_RATE);
+                assert!(!chunk.samples.is_empty());
+                assert!(chunk.samples.iter().all(|&s| s == 0.0));
+            }
         }
     }
 
@@ -127,10 +144,24 @@ mod tests {
     async fn stub_tts_streaming_finalize_drains_trailing() {
         let tts: Box<dyn StreamingTextToSpeech> = Box::new(StubTts);
         let mut session = tts.open_session(&VoiceProfile::default()).unwrap();
-        let mid = session.push_text("Hello").unwrap();
-        assert!(mid.is_empty());
-        let trailing = session.finalize().unwrap();
-        assert_eq!(trailing.len(), 1);
-        assert_eq!(trailing[0].sample_rate, STUB_TTS_SAMPLE_RATE);
+
+        let mut mid_events: Vec<SynthesisEvent> = Vec::new();
+        session
+            .push_text("Hello", &mut |e| mid_events.push(e))
+            .unwrap();
+        assert!(
+            mid_events.is_empty(),
+            "no phrase boundary yet on partial text"
+        );
+
+        let mut trailing_events: Vec<SynthesisEvent> = Vec::new();
+        session.finalize(&mut |e| trailing_events.push(e)).unwrap();
+        assert_eq!(
+            trailing_events.len(),
+            2,
+            "one Audio + one PhraseEnd for the trailing phrase"
+        );
+        assert!(matches!(trailing_events[0], SynthesisEvent::Audio(_)));
+        assert!(matches!(trailing_events[1], SynthesisEvent::PhraseEnd));
     }
 }

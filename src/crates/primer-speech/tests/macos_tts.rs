@@ -188,6 +188,7 @@ fn streaming_sample_rate_is_positive() {
 }
 
 fn streaming_session_yields_chunks_for_one_phrase() {
+    use primer_core::speech::SynthesisEvent;
     let tts = MacosTextToSpeech::new("en-US").expect("en-US voice");
     let voice = VoiceProfile {
         model_id: "system".into(),
@@ -195,27 +196,39 @@ fn streaming_session_yields_chunks_for_one_phrase() {
         pitch: 0.0,
     };
     let mut session = tts.open_session(&voice).expect("session opens");
-    // "Hello." is a complete phrase (terminator + flush). The splitter
-    // emits it immediately from push_text since there's a trailing space,
-    // or from finalize since there's no following whitespace. Either path
-    // must yield at least one chunk with audio.
-    let mid = session.push_text("Hello.").expect("push ok");
-    let tail = session.finalize().expect("finalize ok");
+
+    let mut events: Vec<SynthesisEvent> = Vec::new();
+    session
+        .push_text("Hello.", &mut |e| events.push(e))
+        .expect("push ok");
+    session
+        .finalize(&mut |e| events.push(e))
+        .expect("finalize ok");
+
+    let audio_count = events
+        .iter()
+        .filter(|e| matches!(e, SynthesisEvent::Audio(_)))
+        .count();
+    let phrase_end_count = events
+        .iter()
+        .filter(|e| matches!(e, SynthesisEvent::PhraseEnd))
+        .count();
     assert!(
-        !mid.is_empty() || !tail.is_empty(),
-        "session must emit at least one chunk for one phrase"
+        audio_count >= 1,
+        "session must emit at least one Audio event"
     );
-    // Every emitted chunk must carry a positive sample_rate.
-    for chunk in mid.iter().chain(tail.iter()) {
-        assert!(
-            chunk.sample_rate > 0,
-            "each chunk must carry a positive sample_rate"
-        );
-        assert!(!chunk.samples.is_empty(), "each chunk must carry samples");
+    assert_eq!(phrase_end_count, 1, "exactly one PhraseEnd for one phrase");
+
+    for event in &events {
+        if let SynthesisEvent::Audio(chunk) = event {
+            assert!(chunk.sample_rate > 0, "Audio chunk sample_rate > 0");
+            assert!(!chunk.samples.is_empty(), "Audio chunk has samples");
+        }
     }
 }
 
 fn streaming_session_yields_chunks_for_multiple_phrases() {
+    use primer_core::speech::SynthesisEvent;
     let tts = MacosTextToSpeech::new("en-US").expect("en-US voice");
     let voice = VoiceProfile {
         model_id: "system".into(),
@@ -223,20 +236,39 @@ fn streaming_session_yields_chunks_for_multiple_phrases() {
         pitch: 0.0,
     };
     let mut session = tts.open_session(&voice).expect("session opens");
-    // Two complete phrases separated by whitespace — push_text must emit
-    // EXACTLY one AudioChunk per phrase to match the piper-rs contract
-    // the state machine assumes (see `voice_loop::state_machine` —
-    // inter-phrase silence is inserted between returned chunks; if a
-    // phrase emits multiple chunks, silence lands mid-phrase).
-    let mid = session.push_text("Hello. World. ").expect("push ok");
-    let tail = session.finalize().expect("finalize ok");
 
-    let total_chunks: usize = mid.len() + tail.len();
+    let mut events: Vec<SynthesisEvent> = Vec::new();
+    session
+        .push_text("Hello. World. ", &mut |e| events.push(e))
+        .expect("push ok");
+    session
+        .finalize(&mut |e| events.push(e))
+        .expect("finalize ok");
+
+    // Two phrases ⇒ exactly two PhraseEnd events (one per phrase).
+    // The Audio count is ≥2 with the Stage-A wrapper (one per phrase)
+    // and may grow with Stage B (multiple per phrase as PCM callbacks
+    // arrive). The state machine relies on PhraseEnd, not Audio count,
+    // for inter-phrase silence.
+    let phrase_end_count = events
+        .iter()
+        .filter(|e| matches!(e, SynthesisEvent::PhraseEnd))
+        .count();
     assert_eq!(
-        total_chunks, 2,
-        "two-phrase push must produce exactly two AudioChunks (one per phrase); got {total_chunks}"
+        phrase_end_count, 2,
+        "two-phrase push must produce exactly two PhraseEnd events; got {phrase_end_count}"
     );
-    let total_samples: usize = mid.iter().chain(tail.iter()).map(|c| c.samples.len()).sum();
+
+    let total_samples: usize = events
+        .iter()
+        .filter_map(|e| {
+            if let SynthesisEvent::Audio(c) = e {
+                Some(c.samples.len())
+            } else {
+                None
+            }
+        })
+        .sum();
     assert!(
         total_samples > 0,
         "session must produce non-empty audio for two phrases"
