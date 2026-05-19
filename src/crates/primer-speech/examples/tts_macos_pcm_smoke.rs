@@ -104,6 +104,15 @@ mod imp {
         /// WAV output path.
         #[arg(long, default_value = "/tmp/hello_macos.wav")]
         out: PathBuf,
+
+        /// Print an explicit time-to-first-audio summary block after the
+        /// per-callback rows: writeUtterance → first PCM, writeUtterance →
+        /// EOS, and the streaming "win" (= PhraseEnd − TTFA, the gap that
+        /// the coalesce path used to waste before issue #114). No
+        /// assertion; instrumentation only — re-runs after macOS major
+        /// releases get a directly comparable verdict line.
+        #[arg(long)]
+        measure_ttfa: bool,
     }
 
     /// One entry per PCM-callback invocation. Recorded on the callback
@@ -334,6 +343,36 @@ mod imp {
                 "FAIL — stop, write findings before Task 1"
             }
         );
+
+        // ── 5b. Optional TTFA summary (issue #114) ──────────────────────
+        if args.measure_ttfa {
+            let phrase_end_ms = records
+                .iter()
+                .find(|r| r.frames == 0)
+                .map(|r| r.t_from_start_ms);
+            match (first_chunk_latency_ms, phrase_end_ms) {
+                (Some(ttfa_ms), Some(eos_ms)) => {
+                    let streaming_win_ms = eos_ms.saturating_sub(ttfa_ms);
+                    println!(
+                        "[smoke] TTFA: {ttfa_ms} ms (writeUtterance → first PCM callback) for voice {:?}",
+                        args.voice
+                    );
+                    println!(
+                        "[smoke] PhraseEnd: {eos_ms} ms (writeUtterance → EOS) for voice {:?}",
+                        args.voice
+                    );
+                    println!(
+                        "[smoke] Streaming win: {eos_ms} - {ttfa_ms} = {streaming_win_ms} ms earlier than coalesce"
+                    );
+                }
+                _ => {
+                    println!(
+                        "[smoke] TTFA: unavailable (no audio chunks emitted; voice {:?} may be unsupported)",
+                        args.voice
+                    );
+                }
+            }
+        }
 
         // ── 6. Write WAV for ear-check ──────────────────────────────────
         if combined_samples.is_empty() {
