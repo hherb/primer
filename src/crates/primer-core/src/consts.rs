@@ -187,6 +187,23 @@ pub mod speech {
     /// `SynthesisEvent::PhraseEnd` doc comment.
     pub const DEFAULT_INTER_PHRASE_SILENCE_MS: u32 = 200;
 
+    /// `recv_timeout` slice in milliseconds for the macOS-native TTS
+    /// background-path streaming drain loop. Short enough that the
+    /// 30 s overall streaming-drain deadline fires promptly on a hung
+    /// synth; long enough to amortise wakeup cost. Not used by the
+    /// main-thread path (which drives the NSRunLoop in its own 10 ms
+    /// slices and uses `try_recv`).
+    ///
+    /// The streaming channel itself is **unbounded** by design. The PCM
+    /// callback fires synchronously on the GCD main queue; a bounded
+    /// channel that backed up while the producer was inside the runloop
+    /// would deadlock the main-thread path (consumer would be stuck
+    /// inside `runUntilDate` waiting for the callback to return, while
+    /// the callback was stuck waiting for the consumer to drain). An
+    /// unbounded channel makes the GCD main queue's hard "never block"
+    /// invariant a structural property rather than a tunable budget.
+    pub const STREAM_DRAIN_POLL_MS: u64 = 10;
+
     /// Approximate Whisper `small`/`small.en` model size in MiB. Used
     /// by the asset-consent modal as the "whisper portion" of a locale
     /// bundle's download budget so the piper-voice portion can be

@@ -44,6 +44,7 @@ use objc2_avf_audio::{
 };
 use objc2_foundation::{NSDate, NSNumber, NSRunLoop, NSString};
 
+use primer_core::consts::speech::STREAM_DRAIN_POLL_MS;
 use primer_core::error::{PrimerError, Result};
 use primer_core::i18n::Locale;
 use primer_core::speech::{
@@ -316,6 +317,213 @@ fn synthesize_to_chunks(voice: &AVSpeechSynthesisVoice, text: &str) -> Result<Ve
 }
 
 // ═══════════════════════════════════════════════════════════════════════════
+// Streaming synthesis helpers — Stage B (issue #114)
+// ═══════════════════════════════════════════════════════════════════════════
+
+/// Synthesise `text` using `voice` and stream events to `on_event` as
+/// PCM callbacks arrive (per-callback `Audio` events, then `PhraseEnd`
+/// on the EOS sentinel). Dispatches to the main-thread path when called
+/// on the OS main thread, or the background-thread GCD-bounce path
+/// otherwise.
+///
+/// Per-phrase time-to-first-audio drops from ~hundreds of ms (full
+/// phrase synthesis under [`synthesize_to_chunks`]) to ~50 ms (first
+/// PCM callback). Closes #114.
+fn synthesize_streaming(
+    voice: &AVSpeechSynthesisVoice,
+    text: &str,
+    on_event: &mut dyn FnMut(SynthesisEvent),
+) -> Result<()> {
+    let on_main = objc2_foundation::NSThread::isMainThread_class();
+    if on_main {
+        synthesize_streaming_main_thread(voice, text, on_event)
+    } else {
+        synthesize_streaming_background(voice, text, on_event)
+    }
+}
+
+/// Streaming variant of [`synthesize_to_chunks_main_thread`]: fires
+/// `on_event` for each PCM callback as it arrives, interleaved with
+/// [`RUN_LOOP_SLICE`]-wide `runUntilDate` slices. The zero-frame EOS
+/// sentinel converts to `SynthesisEvent::PhraseEnd` and terminates the
+/// loop.
+///
+/// The receiver lives on this thread; the PCM-callback closure (which
+/// runs on the GCD main queue, i.e. the same thread) sends events
+/// through an **unbounded** `mpsc::channel`. A bounded channel cannot
+/// work here: when full, `send` blocks the callback, which is itself
+/// being driven by `runUntilDate` on the same thread — the consumer
+/// can never re-enter the drain loop to make room. See
+/// [`STREAM_DRAIN_POLL_MS`] doc for the wider invariant.
+fn synthesize_streaming_main_thread(
+    voice: &AVSpeechSynthesisVoice,
+    text: &str,
+    on_event: &mut dyn FnMut(SynthesisEvent),
+) -> Result<()> {
+    use std::sync::mpsc::channel;
+
+    let (tx, rx) = channel::<SynthesisEvent>();
+
+    // ── 1. Build synthesizer + utterance ────────────────────────────────
+    // SAFETY: called on the main thread.
+    let synth: Retained<AVSpeechSynthesizer> = unsafe { AVSpeechSynthesizer::new() };
+    let ns_text = NSString::from_str(text);
+    // SAFETY: factory method; ns_text lives for the scope.
+    let utterance = unsafe { AVSpeechUtterance::speechUtteranceWithString(&ns_text) };
+    // SAFETY: setVoice: on the main thread.
+    unsafe { utterance.setVoice(Some(voice)) };
+
+    // ── 2. Register the PCM callback ─────────────────────────────────────
+    let tx_cb = tx.clone();
+
+    type CbBlock = block2::Block<dyn Fn(NonNull<AVAudioBuffer>)>;
+    let cb = block2::RcBlock::new(move |buf_ptr: NonNull<AVAudioBuffer>| {
+        stream_pcm_callback(buf_ptr, &tx_cb);
+    });
+
+    // ── 3. Start synthesis (returns immediately; callbacks queued async) ─
+    // SAFETY: called on the main thread; `cb` is retained by `RcBlock`
+    // and additionally by AVSpeechSynthesizer's Block_retain.
+    let block_ref: &CbBlock = &cb;
+    let block_ptr: *mut CbBlock = (block_ref as *const CbBlock).cast_mut();
+    unsafe { synth.writeUtterance_toBufferCallback(&utterance, block_ptr) };
+
+    // ── 4. Drain loop: interleave runloop slices with channel drains ────
+    let run_loop = NSRunLoop::mainRunLoop();
+    let deadline = Instant::now() + DRAIN_TIMEOUT;
+    loop {
+        // Drain whatever the channel has now. PhraseEnd terminates.
+        while let Ok(event) = rx.try_recv() {
+            let is_phrase_end = matches!(event, SynthesisEvent::PhraseEnd);
+            on_event(event);
+            if is_phrase_end {
+                // Drop the local sender so a stale Block_retain'd callback
+                // closure dropping later isn't the last sender alive.
+                // `cb` (RcBlock) goes out of scope here; ObjC's own
+                // Block_retain keeps it alive for any late callbacks.
+                drop(tx);
+                drop(cb);
+                return Ok(());
+            }
+        }
+        if Instant::now() >= deadline {
+            drop(tx);
+            drop(cb);
+            return Err(PrimerError::Speech(
+                "AVSpeechSynthesizer 30s NSRunLoop drain timeout (main-thread streaming)".into(),
+            ));
+        }
+        let date = NSDate::dateWithTimeIntervalSinceNow(RUN_LOOP_SLICE.as_secs_f64());
+        run_loop.runUntilDate(&date);
+    }
+}
+
+/// Streaming variant of [`synthesize_to_chunks_background`]: PCM
+/// callbacks (firing on the GCD main thread) send events through an
+/// unbounded `mpsc::channel`; this background thread drains the
+/// channel via `recv_timeout` ([`STREAM_DRAIN_POLL_MS`]), emits events
+/// through `on_event`, and exits on `PhraseEnd` or the 30 s overall
+/// deadline.
+///
+/// The `dispatch_semaphore` machinery used by `synthesize_to_chunks_
+/// background` is gone here — `SynthesisEvent::PhraseEnd` arriving on
+/// the channel IS the synchronisation primitive. The trampoline still
+/// owns the utterance and the channel sender so the closure stays alive
+/// for late callbacks (via Block_retain).
+///
+/// The channel is unbounded for the same reason as the main-thread
+/// path: PCM callbacks run on the GCD main queue, which must not block.
+/// See [`STREAM_DRAIN_POLL_MS`] for the wider invariant.
+fn synthesize_streaming_background(
+    voice: &AVSpeechSynthesisVoice,
+    text: &str,
+    on_event: &mut dyn FnMut(SynthesisEvent),
+) -> Result<()> {
+    use std::sync::mpsc::{RecvTimeoutError, channel};
+
+    let (tx, rx) = channel::<SynthesisEvent>();
+
+    // ── Build utterance on the calling thread ─────────────────────────
+    let ns_text = NSString::from_str(text);
+    // SAFETY: factory method.
+    let utterance = unsafe { AVSpeechUtterance::speechUtteranceWithString(&ns_text) };
+    // SAFETY: setVoice:.
+    unsafe { utterance.setVoice(Some(voice)) };
+
+    // ── Trampoline context: utterance + sender ────────────────────────
+    struct StreamCtx {
+        utterance: Retained<AVSpeechUtterance>,
+        tx: std::sync::mpsc::Sender<SynthesisEvent>,
+    }
+    // SAFETY: `StreamCtx` is moved into the main-queue trampoline; at that
+    // point no other thread holds a reference. The move is one-shot.
+    unsafe impl Send for StreamCtx {}
+
+    extern "C" fn trampoline(ctx_raw: *mut std::ffi::c_void) {
+        // SAFETY: ctx_raw was Box::into_raw'd below; we take ownership here.
+        let ctx = unsafe { Box::from_raw(ctx_raw as *mut StreamCtx) };
+
+        // SAFETY: AVSpeechSynthesizer::new on the main thread.
+        let synth: Retained<AVSpeechSynthesizer> = unsafe { AVSpeechSynthesizer::new() };
+
+        let tx_cb = ctx.tx.clone();
+        type CbBlock = block2::Block<dyn Fn(NonNull<AVAudioBuffer>)>;
+        let cb = block2::RcBlock::new(move |buf_ptr: NonNull<AVAudioBuffer>| {
+            stream_pcm_callback(buf_ptr, &tx_cb);
+        });
+
+        // SAFETY: called on the main thread.
+        let block_ref: &CbBlock = &cb;
+        let block_ptr: *mut CbBlock = (block_ref as *const CbBlock).cast_mut();
+        unsafe { synth.writeUtterance_toBufferCallback(&ctx.utterance, block_ptr) };
+
+        // `cb` drops here; AVSpeechSynthesizer's Block_retain keeps it
+        // alive for any further callbacks. The closure's clone of `tx`
+        // stays alive through Block_retain too; when the closure drops
+        // after EOS, the sender drops and any later `recv` would return
+        // `Disconnected` (which the caller below ignores after seeing
+        // PhraseEnd).
+    }
+
+    let ctx = Box::new(StreamCtx { utterance, tx });
+    let ctx_ptr = Box::into_raw(ctx) as *mut std::ffi::c_void;
+
+    // SAFETY: `_dispatch_main_q` is the GCD main queue object.
+    let main_queue: dispatch::dispatch_queue_t =
+        unsafe { &dispatch::_dispatch_main_q as *const _ as dispatch::dispatch_queue_t };
+
+    // SAFETY: `trampoline` takes ownership of `ctx_ptr` exactly once.
+    unsafe { dispatch::dispatch_async_f(main_queue, ctx_ptr, trampoline) };
+
+    // ── Drain loop ────────────────────────────────────────────────────
+    let poll = Duration::from_millis(STREAM_DRAIN_POLL_MS);
+    let deadline = Instant::now() + DRAIN_TIMEOUT;
+    loop {
+        match rx.recv_timeout(poll) {
+            Ok(event) => {
+                let is_phrase_end = matches!(event, SynthesisEvent::PhraseEnd);
+                on_event(event);
+                if is_phrase_end {
+                    return Ok(());
+                }
+            }
+            Err(RecvTimeoutError::Timeout) => {
+                if Instant::now() >= deadline {
+                    return Err(PrimerError::Speech(
+                        "AVSpeechSynthesizer 30s drain timeout (background streaming)".into(),
+                    ));
+                }
+            }
+            Err(RecvTimeoutError::Disconnected) => {
+                return Err(PrimerError::Speech(
+                    "synth channel disconnected before PhraseEnd".into(),
+                ));
+            }
+        }
+    }
+}
+
+// ═══════════════════════════════════════════════════════════════════════════
 // One-shot TextToSpeech impl
 // ═══════════════════════════════════════════════════════════════════════════
 
@@ -408,33 +616,22 @@ struct MacosTtsSession {
 unsafe impl Send for MacosTtsSession {}
 
 impl SynthesisSession for MacosTtsSession {
-    /// **Stage-A wrapper:** synthesises the full phrase via the existing
-    /// [`synthesize_to_chunks`] path, coalesces into one chunk, then
-    /// fires `Audio(chunk)` + `PhraseEnd`. Same observable timing as the
-    /// pre-trait-reshape behaviour. Stage B replaces this with a true
-    /// channel-streaming path. Tracking: #114.
-    // TODO(#114-stage-b): replace this wrapper with a true channel-streaming
-    // impl — PCM callback (running on the GCD main queue) sends
-    // `SynthesisEvent::Audio(chunk)` into a bounded `mpsc::sync_channel`,
-    // the caller thread drains the channel and fires `on_event` as each
-    // event arrives. Until that lands, the trait's callback shape buys no
-    // user-visible per-phrase TTFA benefit on macOS.
+    /// Stream PCM events for each phrase via [`synthesize_streaming`]:
+    /// each PCM callback from AVSpeechSynthesizer flows through a
+    /// bounded channel and fires `Audio(chunk)` on the consumer; the
+    /// zero-frame EOS sentinel fires `PhraseEnd`. Per-phrase TTFA is
+    /// ~50 ms (first PCM callback) instead of ~hundreds of ms (full
+    /// phrase coalesce). Closes #114.
     fn push_text(&mut self, text: &str, on_event: &mut dyn FnMut(SynthesisEvent)) -> Result<()> {
         for phrase in self.splitter.push(text) {
-            if let Some(chunk) = coalesce_phrase(synthesize_to_chunks(&self.voice, &phrase)?) {
-                on_event(SynthesisEvent::Audio(chunk));
-                on_event(SynthesisEvent::PhraseEnd);
-            }
+            synthesize_streaming(&self.voice, &phrase, on_event)?;
         }
         Ok(())
     }
 
     fn finalize(mut self: Box<Self>, on_event: &mut dyn FnMut(SynthesisEvent)) -> Result<()> {
         if let Some(tail) = self.splitter.flush() {
-            if let Some(chunk) = coalesce_phrase(synthesize_to_chunks(&self.voice, &tail)?) {
-                on_event(SynthesisEvent::Audio(chunk));
-                on_event(SynthesisEvent::PhraseEnd);
-            }
+            synthesize_streaming(&self.voice, &tail, on_event)?;
         }
         Ok(())
     }
@@ -447,6 +644,7 @@ impl SynthesisSession for MacosTtsSession {
 /// Every PCM callback within one synthesis call uses the same
 /// `AVAudioFormat`, so the sample rate of the first chunk is the
 /// correct rate for the concatenation.
+#[allow(dead_code)] // Stage-A wrapper helper; deleted in #114 Task 10 cleanup sweep.
 fn coalesce_phrase(chunks: Vec<AudioChunk>) -> Option<AudioChunk> {
     let sample_rate = chunks.first()?.sample_rate;
     let samples: Vec<f32> = chunks.into_iter().flat_map(|c| c.samples).collect();
@@ -686,6 +884,65 @@ fn synthesize_to_chunks_background(
 // ═══════════════════════════════════════════════════════════════════════════
 // Shared PCM callback
 // ═══════════════════════════════════════════════════════════════════════════
+
+/// Convert one PCM buffer from `AVSpeechSynthesizer` into a
+/// `SynthesisEvent` and send it through `tx`. Zero-frame buffers (the
+/// EOS sentinel) send `SynthesisEvent::PhraseEnd`. Used by both
+/// streaming paths (main-thread + background).
+///
+/// `send` is non-blocking on the unbounded `mpsc::channel` used by
+/// both streaming paths — required so the GCD main queue, which calls
+/// this function, never blocks. Errors from `send` (receiver dropped)
+/// are intentionally swallowed: the caller already exited (deadline /
+/// early PhraseEnd) and no consumer remains.
+fn stream_pcm_callback(
+    buf_ptr: NonNull<AVAudioBuffer>,
+    tx: &std::sync::mpsc::Sender<SynthesisEvent>,
+) {
+    // SAFETY: buf_ptr is non-null and valid for the callback's lifetime.
+    let buf: &AVAudioBuffer = unsafe { buf_ptr.as_ref() };
+
+    let pcm: &AVAudioPCMBuffer = match buf.downcast_ref::<AVAudioPCMBuffer>() {
+        Some(p) => p,
+        None => return,
+    };
+
+    // SAFETY: `frameLength` is an immutable property getter.
+    let frame_length = unsafe { pcm.frameLength() } as usize;
+
+    if frame_length == EOS_FRAME_LENGTH {
+        let _ = tx.send(SynthesisEvent::PhraseEnd);
+        return;
+    }
+
+    // SAFETY: immutable property getters.
+    let format = unsafe { pcm.format() };
+    let channel_count = unsafe { format.channelCount() };
+    if channel_count != 1 {
+        tracing::warn!(
+            channel_count,
+            "AVSpeechSynthesizer emitted multi-channel PCM; only channel 0 will be captured"
+        );
+    }
+    let sample_rate = unsafe { format.sampleRate() } as u32;
+
+    // SAFETY: `floatChannelData()[0]` is the mono channel of `frame_length`
+    // samples; valid for the callback's lifetime.
+    let data_ptr = unsafe { pcm.floatChannelData() };
+    if data_ptr.is_null() {
+        return;
+    }
+    let chan0_nn: NonNull<f32> = unsafe { *data_ptr };
+    let chan0_ptr: *mut f32 = chan0_nn.as_ptr();
+    // SAFETY: valid mono float slice for the callback's lifetime.
+    let slice: &[f32] = unsafe { std::slice::from_raw_parts(chan0_ptr, frame_length) };
+
+    let chunk = AudioChunk {
+        samples: slice.to_vec(),
+        sample_rate,
+    };
+    let _ = tx.send(SynthesisEvent::Audio(chunk));
+}
 
 /// Collect one PCM buffer from `AVSpeechSynthesizer` into `accum` as a
 /// new `AudioChunk`. Sets `eos` when a zero-frame buffer arrives (the EOS

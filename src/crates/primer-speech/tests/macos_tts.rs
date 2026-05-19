@@ -112,6 +112,20 @@ fn main() {
         },
     );
 
+    // ── Test 7: streaming emits multiple Audio events before PhraseEnd ──
+    run_sync_test(
+        "streaming_emits_multiple_audio_events_before_phrase_end",
+        &mut passed,
+        &mut failed,
+        || {
+            let rt = tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+                .expect("tokio runtime");
+            rt.block_on(async { streaming_emits_multiple_audio_events_before_phrase_end() })
+        },
+    );
+
     println!(
         "\ntest result: {}. {passed} passed; {failed} failed; {ignored} ignored;",
         if failed == 0 { "ok" } else { "FAILED" }
@@ -273,6 +287,61 @@ fn streaming_session_yields_chunks_for_multiple_phrases() {
         total_samples > 0,
         "session must produce non-empty audio for two phrases"
     );
+}
+
+/// Pins the macOS-native streaming contract: with a real (long) phrase
+/// the `synthesize_streaming` impl must emit **two or more** `Audio`
+/// events before the single `PhraseEnd`. A Stage-A wrapper that
+/// coalesces the whole phrase into one chunk before firing `Audio +
+/// PhraseEnd` fails this assertion. This is the regression guard for
+/// #114 — closing the per-phrase time-to-first-audio gap.
+fn streaming_emits_multiple_audio_events_before_phrase_end() {
+    use primer_core::speech::SynthesisEvent;
+    let tts = MacosTextToSpeech::new("en-US").expect("en-US voice");
+    let voice = VoiceProfile {
+        model_id: "system".into(),
+        rate: 1.0,
+        pitch: 0.0,
+    };
+    let mut session = tts.open_session(&voice).expect("session opens");
+
+    let mut events: Vec<SynthesisEvent> = Vec::new();
+    session
+        .push_text(
+            "This is a longer phrase that should yield multiple PCM callbacks.",
+            &mut |e| events.push(e),
+        )
+        .expect("push ok");
+    session
+        .finalize(&mut |e| events.push(e))
+        .expect("finalize ok");
+
+    // Count Audio events that arrived before the first PhraseEnd.
+    let audio_before_first_phrase_end = events
+        .iter()
+        .take_while(|e| !matches!(e, SynthesisEvent::PhraseEnd))
+        .filter(|e| matches!(e, SynthesisEvent::Audio(_)))
+        .count();
+
+    let event_summary: Vec<String> = events
+        .iter()
+        .map(|e| match e {
+            SynthesisEvent::Audio(c) => format!("Audio({})", c.samples.len()),
+            SynthesisEvent::PhraseEnd => "PhraseEnd".to_string(),
+        })
+        .collect();
+
+    assert!(
+        audio_before_first_phrase_end >= 2,
+        "expected ≥2 Audio events before PhraseEnd (true streaming shape); \
+         got {audio_before_first_phrase_end} (events: {event_summary:?})"
+    );
+
+    let phrase_end_count = events
+        .iter()
+        .filter(|e| matches!(e, SynthesisEvent::PhraseEnd))
+        .count();
+    assert_eq!(phrase_end_count, 1, "exactly one PhraseEnd per phrase");
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
