@@ -18,9 +18,11 @@
 //!
 //! **Background-thread path** (GUI background worker; CLI `spawn_blocking`):
 //!   `dispatch_async_f` to the main queue submits the synthesis call to run on
-//!   the main thread (which already has its CFRunLoop spinning), then a pool
-//!   thread waits on a `dispatch_semaphore`. When the synthesis completes, the
-//!   EOS callback signals the semaphore.
+//!   the main thread (which already has its CFRunLoop spinning), then the pool
+//!   thread drains an `mpsc::channel` via `recv_timeout`. PCM callbacks (which
+//!   run on the GCD main queue) feed `SynthesisEvent::Audio` and the zero-frame
+//!   EOS sentinel feeds `SynthesisEvent::PhraseEnd`, which terminates the
+//!   drain loop.
 //!
 //! # NSRunLoop vs GCD
 //!
@@ -31,9 +33,6 @@
 //! queue, and each `runUntilDate` slice delivers those queued callbacks.
 
 use std::ptr::NonNull;
-use std::sync::Arc;
-use std::sync::Mutex;
-use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant};
 
 use async_trait::async_trait;
@@ -79,22 +78,23 @@ const RUN_LOOP_SLICE: Duration = Duration::from_millis(10);
 /// `dispatch_get_main_queue()` is an inline C function that returns a
 /// pointer to `_dispatch_main_q`; we bind the underlying symbol directly.
 ///
+/// After the streaming refactor (issue #114) the only dispatch primitives
+/// we still need are `dispatch_async_f` and `_dispatch_main_q` — the
+/// background streaming path drains a `mpsc::channel`'s
+/// `SynthesisEvent::PhraseEnd` to signal completion instead of a
+/// `dispatch_semaphore`. The `dispatch_semaphore_*` family was removed
+/// together with the `DispatchSemaphore` RAII wrapper and `SynthCtx`.
+///
 // TODO: Replace raw GCD bindings (extern "C" + raw pointer types)
 // with the `dispatch2` crate when it stabilises. The crate provides
-// safe typed wrappers for dispatch_queue_t / dispatch_semaphore_t /
-// dispatch_async_f and would eliminate the _dispatch_main_q
-// private-symbol binding. See plan task 5 review notes (commit 37c3f79).
+// safe typed wrappers for dispatch_queue_t / dispatch_async_f and would
+// eliminate the _dispatch_main_q private-symbol binding. See plan task
+// 5 review notes (commit 37c3f79).
 mod dispatch {
     #[allow(non_camel_case_types)]
     pub type dispatch_object_t = *mut std::ffi::c_void;
     #[allow(non_camel_case_types)]
     pub type dispatch_queue_t = dispatch_object_t;
-    #[allow(non_camel_case_types)]
-    pub type dispatch_semaphore_t = dispatch_object_t;
-    #[allow(non_camel_case_types)]
-    pub type dispatch_time_t = u64;
-
-    pub const DISPATCH_TIME_NOW: dispatch_time_t = 0;
 
     #[link(name = "System")]
     unsafe extern "C" {
@@ -107,47 +107,6 @@ mod dispatch {
             context: *mut std::ffi::c_void,
             work: extern "C" fn(*mut std::ffi::c_void),
         );
-        pub fn dispatch_semaphore_create(value: std::ffi::c_long) -> dispatch_semaphore_t;
-        pub fn dispatch_semaphore_signal(dsema: dispatch_semaphore_t) -> std::ffi::c_long;
-        pub fn dispatch_semaphore_wait(
-            dsema: dispatch_semaphore_t,
-            timeout: dispatch_time_t,
-        ) -> std::ffi::c_long;
-        pub fn dispatch_release(obj: dispatch_object_t);
-        pub fn dispatch_time(when: dispatch_time_t, delta: std::ffi::c_longlong)
-        -> dispatch_time_t;
-    }
-
-    /// Maximum wait expressed as a `dispatch_time_t` value.
-    /// 30 seconds × 10^9 ns/s.
-    pub const TIMEOUT_NS: i64 = 30 * 1_000_000_000;
-}
-
-/// RAII wrapper for a GCD `dispatch_semaphore_t`. Calls `dispatch_release`
-/// on `Drop`. Cloneable via `Arc` so both the background thread and the
-/// trampoline can hold a strong reference; the last drop releases the
-/// underlying semaphore — preventing the use-after-free that would occur
-/// if the background thread released on timeout while the trampoline was
-/// still queued on the main thread.
-struct DispatchSemaphore(dispatch::dispatch_semaphore_t);
-
-// SAFETY: `dispatch_semaphore_t` is thread-safe per Apple docs;
-// `dispatch_semaphore_signal` / `dispatch_release` are also thread-safe.
-unsafe impl Send for DispatchSemaphore {}
-unsafe impl Sync for DispatchSemaphore {}
-
-impl DispatchSemaphore {
-    /// Return the raw handle for use with the `dispatch_semaphore_*` FFI.
-    fn as_raw(&self) -> dispatch::dispatch_semaphore_t {
-        self.0
-    }
-}
-
-impl Drop for DispatchSemaphore {
-    fn drop(&mut self) {
-        // SAFETY: We hold exclusive ownership through `self.0`; `Drop` runs
-        // exactly once per instance, never on a null/dangling pointer.
-        unsafe { dispatch::dispatch_release(self.0) };
     }
 }
 
@@ -287,35 +246,6 @@ impl Named for MacosTextToSpeech {
 unsafe impl Send for MacosTextToSpeech {}
 unsafe impl Sync for MacosTextToSpeech {}
 
-/// Shared accumulator type used in both synthesis paths.
-type Accumulator = Arc<Mutex<Vec<AudioChunk>>>;
-
-// ═══════════════════════════════════════════════════════════════════════════
-// Core synthesis helper — shared by one-shot and streaming paths
-// ═══════════════════════════════════════════════════════════════════════════
-
-/// Synthesize `text` using `voice` and return the individual PCM chunks
-/// exactly as AVSpeechSynthesizer delivered them (one chunk per callback
-/// invocation, excluding the zero-frame EOS sentinel).
-///
-/// Dispatches to the main-thread path when called on the OS main thread,
-/// or the background-thread GCD-bounce path otherwise.
-///
-/// The one-shot `synthesize` method concatenates the chunks into an
-/// `AudioBuffer`; the streaming `push_text` / `finalize` methods return
-/// the chunks directly.
-fn synthesize_to_chunks(voice: &AVSpeechSynthesisVoice, text: &str) -> Result<Vec<AudioChunk>> {
-    // `+[NSThread isMainThread]` is a thread-safe class method — safe from
-    // any thread.
-    let on_main = objc2_foundation::NSThread::isMainThread_class();
-
-    if on_main {
-        synthesize_to_chunks_main_thread(text, voice)
-    } else {
-        synthesize_to_chunks_background(text, voice)
-    }
-}
-
 // ═══════════════════════════════════════════════════════════════════════════
 // Streaming synthesis helpers — Stage B (issue #114)
 // ═══════════════════════════════════════════════════════════════════════════
@@ -326,9 +256,9 @@ fn synthesize_to_chunks(voice: &AVSpeechSynthesisVoice, text: &str) -> Result<Ve
 /// on the OS main thread, or the background-thread GCD-bounce path
 /// otherwise.
 ///
-/// Per-phrase time-to-first-audio drops from ~hundreds of ms (full
-/// phrase synthesis under [`synthesize_to_chunks`]) to ~50 ms (first
-/// PCM callback). Closes #114.
+/// Per-phrase time-to-first-audio is ~50 ms (first PCM callback),
+/// down from ~hundreds of ms under the pre-#114 full-phrase coalesce
+/// path. Closes #114.
 fn synthesize_streaming(
     voice: &AVSpeechSynthesisVoice,
     text: &str,
@@ -342,11 +272,10 @@ fn synthesize_streaming(
     }
 }
 
-/// Streaming variant of [`synthesize_to_chunks_main_thread`]: fires
-/// `on_event` for each PCM callback as it arrives, interleaved with
-/// [`RUN_LOOP_SLICE`]-wide `runUntilDate` slices. The zero-frame EOS
-/// sentinel converts to `SynthesisEvent::PhraseEnd` and terminates the
-/// loop.
+/// Main-thread streaming path: fires `on_event` for each PCM callback
+/// as it arrives, interleaved with [`RUN_LOOP_SLICE`]-wide
+/// `runUntilDate` slices. The zero-frame EOS sentinel converts to
+/// `SynthesisEvent::PhraseEnd` and terminates the loop.
 ///
 /// The receiver lives on this thread; the PCM-callback closure (which
 /// runs on the GCD main queue, i.e. the same thread) sends events
@@ -418,18 +347,16 @@ fn synthesize_streaming_main_thread(
     }
 }
 
-/// Streaming variant of [`synthesize_to_chunks_background`]: PCM
-/// callbacks (firing on the GCD main thread) send events through an
-/// unbounded `mpsc::channel`; this background thread drains the
-/// channel via `recv_timeout` ([`STREAM_DRAIN_POLL_MS`]), emits events
-/// through `on_event`, and exits on `PhraseEnd` or the 30 s overall
-/// deadline.
+/// Background-thread streaming path: PCM callbacks (firing on the GCD
+/// main queue) send events through an unbounded `mpsc::channel`; this
+/// background thread drains the channel via `recv_timeout`
+/// ([`STREAM_DRAIN_POLL_MS`]), emits events through `on_event`, and
+/// exits on `PhraseEnd` or the 30 s overall deadline.
 ///
-/// The `dispatch_semaphore` machinery used by `synthesize_to_chunks_
-/// background` is gone here — `SynthesisEvent::PhraseEnd` arriving on
-/// the channel IS the synchronisation primitive. The trampoline still
-/// owns the utterance and the channel sender so the closure stays alive
-/// for late callbacks (via Block_retain).
+/// `SynthesisEvent::PhraseEnd` arriving on the channel IS the
+/// synchronisation primitive (no separate `dispatch_semaphore`). The
+/// trampoline still owns the utterance and the channel sender so the
+/// closure stays alive for late callbacks (via Block_retain).
 ///
 /// The channel is unbounded for the same reason as the main-thread
 /// path: PCM callbacks run on the GCD main queue, which must not block.
@@ -532,36 +459,42 @@ impl TextToSpeech for MacosTextToSpeech {
     async fn synthesize(&self, text: &str, _voice: &VoiceProfile) -> Result<AudioBuffer> {
         // Main-thread fast path: skip spawn_blocking (it would force a worker
         // hop and lose the optimisation where main-thread callers can synthesise
-        // synchronously without GCD bouncing). synthesize_to_chunks detects
+        // synchronously without GCD bouncing). `synthesize_streaming` detects
         // main-thread and takes the main-thread path.
         if objc2_foundation::NSThread::isMainThread_class() {
-            let chunks = synthesize_to_chunks(&self.voice, text)?;
-            return Ok(chunks_to_audio_buffer(chunks));
+            return synthesize_to_buffer(&self.voice, text);
         }
         // Off main thread (typical for tokio worker callers): spawn_blocking so
-        // the synchronous synthesize_to_chunks doesn't stall the runtime. Inside
-        // the blocking task, synthesize_to_chunks will detect not-main-thread and
-        // take the GCD-bounce path.
+        // the synchronous `synthesize_streaming` doesn't stall the runtime.
+        // Inside the blocking task `synthesize_streaming` will detect
+        // not-main-thread and take the GCD-bounce path.
         let text_owned = text.to_owned();
         let voice_retained = self.voice.clone();
-        tokio::task::spawn_blocking(move || {
-            let chunks = synthesize_to_chunks(&voice_retained, &text_owned)?;
-            Ok::<_, PrimerError>(chunks_to_audio_buffer(chunks))
-        })
-        .await
-        .map_err(|e| PrimerError::Speech(format!("spawn_blocking panicked: {e}")))?
+        tokio::task::spawn_blocking(move || synthesize_to_buffer(&voice_retained, &text_owned))
+            .await
+            .map_err(|e| PrimerError::Speech(format!("spawn_blocking panicked: {e}")))?
     }
 }
 
-/// Concatenate a `Vec<AudioChunk>` into a single `AudioBuffer`.
-/// Returns an empty buffer (sample_rate = 0) if `chunks` is empty.
-fn chunks_to_audio_buffer(chunks: Vec<AudioChunk>) -> AudioBuffer {
-    let sample_rate = chunks.first().map(|c| c.sample_rate).unwrap_or(0);
-    let samples: Vec<f32> = chunks.into_iter().flat_map(|c| c.samples).collect();
-    AudioBuffer {
+/// Drive [`synthesize_streaming`] with a local accumulator and return
+/// the concatenated audio as a single [`AudioBuffer`]. Replaces the
+/// Stage-A `synthesize_to_chunks` + `chunks_to_audio_buffer` pair so
+/// the one-shot path and streaming path share one synthesis code path.
+fn synthesize_to_buffer(voice: &AVSpeechSynthesisVoice, text: &str) -> Result<AudioBuffer> {
+    let mut samples: Vec<f32> = Vec::new();
+    let mut sample_rate: u32 = 0;
+    synthesize_streaming(voice, text, &mut |event| {
+        if let SynthesisEvent::Audio(chunk) = event {
+            if sample_rate == 0 {
+                sample_rate = chunk.sample_rate;
+            }
+            samples.extend(chunk.samples);
+        }
+    })?;
+    Ok(AudioBuffer {
         samples,
         sample_rate,
-    }
+    })
 }
 
 // ═══════════════════════════════════════════════════════════════════════════
@@ -595,8 +528,10 @@ impl StreamingTextToSpeech for MacosTextToSpeech {
         // Pre-warm: synthesize a silent space to absorb the ~380-640 ms
         // per-voice cold-start cost so the first real `push_text` call
         // returns audio promptly. Failure is silently ignored — a broken
-        // voice must not prevent session creation.
-        let _ = synthesize_to_chunks(&session.voice, " ");
+        // voice must not prevent session creation. Events are
+        // discarded; we only need the AVSpeechSynthesizer initialisation
+        // side-effects.
+        let _ = synthesize_streaming(&session.voice, " ", &mut |_event| {});
 
         Ok(Box::new(session))
     }
@@ -604,7 +539,9 @@ impl StreamingTextToSpeech for MacosTextToSpeech {
 
 /// Per-turn synthesis session. `!Sync` by construction (owns its own
 /// `AVSpeechSynthesisVoice` retained pointer and `PhraseSplitter` state).
-/// Each session drives the NSRunLoop / GCD semaphore machinery independently.
+/// Each session drives one `synthesize_streaming` invocation per phrase
+/// (which dispatches to the main-thread or background-thread path
+/// based on the calling context).
 struct MacosTtsSession {
     voice: Retained<AVSpeechSynthesisVoice>,
     splitter: PhraseSplitter,
@@ -617,11 +554,11 @@ unsafe impl Send for MacosTtsSession {}
 
 impl SynthesisSession for MacosTtsSession {
     /// Stream PCM events for each phrase via [`synthesize_streaming`]:
-    /// each PCM callback from AVSpeechSynthesizer flows through a
-    /// bounded channel and fires `Audio(chunk)` on the consumer; the
-    /// zero-frame EOS sentinel fires `PhraseEnd`. Per-phrase TTFA is
-    /// ~50 ms (first PCM callback) instead of ~hundreds of ms (full
-    /// phrase coalesce). Closes #114.
+    /// each PCM callback from AVSpeechSynthesizer flows through an
+    /// unbounded `mpsc::channel` and fires `Audio(chunk)` on the
+    /// consumer; the zero-frame EOS sentinel fires `PhraseEnd`.
+    /// Per-phrase TTFA is ~50 ms (first PCM callback) instead of
+    /// ~hundreds of ms (full phrase coalesce). Closes #114.
     fn push_text(&mut self, text: &str, on_event: &mut dyn FnMut(SynthesisEvent)) -> Result<()> {
         for phrase in self.splitter.push(text) {
             synthesize_streaming(&self.voice, &phrase, on_event)?;
@@ -637,252 +574,8 @@ impl SynthesisSession for MacosTtsSession {
     }
 }
 
-/// Concatenate the PCM-callback chunks of one phrase into a single
-/// `AudioChunk`. Returns `None` for empty input or zero-frame phrases
-/// (the splitter can hand us whitespace-only tails).
-///
-/// Every PCM callback within one synthesis call uses the same
-/// `AVAudioFormat`, so the sample rate of the first chunk is the
-/// correct rate for the concatenation.
-#[allow(dead_code)] // Stage-A wrapper helper; deleted in #114 Task 10 cleanup sweep.
-fn coalesce_phrase(chunks: Vec<AudioChunk>) -> Option<AudioChunk> {
-    let sample_rate = chunks.first()?.sample_rate;
-    let samples: Vec<f32> = chunks.into_iter().flat_map(|c| c.samples).collect();
-    if samples.is_empty() {
-        return None;
-    }
-    Some(AudioChunk {
-        samples,
-        sample_rate,
-    })
-}
-
 // ═══════════════════════════════════════════════════════════════════════════
-// Main-thread path
-// ═══════════════════════════════════════════════════════════════════════════
-
-/// Synthesis from the OS main thread (synchronous). Returns one
-/// `AudioChunk` per PCM callback that AVSpeechSynthesizer delivered.
-///
-/// Calls `writeUtterance:toBufferCallback:` on the current (main) thread,
-/// then drives the main NSRunLoop in 10 ms slices — each slice delivers any
-/// pending GCD main-queue callbacks (including AVSpeechSynthesizer PCM
-/// buffers) and returns.
-///
-/// This is intentionally synchronous so that non-Send ObjC types never cross
-/// an `.await` boundary in the calling `async fn synthesize`.
-fn synthesize_to_chunks_main_thread(
-    text: &str,
-    voice: &AVSpeechSynthesisVoice,
-) -> Result<Vec<AudioChunk>> {
-    let accumulator: Accumulator = Arc::new(Mutex::new(Vec::new()));
-    let eos = Arc::new(AtomicBool::new(false));
-
-    // ── 1. Build synthesizer + utterance ────────────────────────────────
-    // SAFETY: called on the main thread.
-    let synth: Retained<AVSpeechSynthesizer> = unsafe { AVSpeechSynthesizer::new() };
-    let ns_text = NSString::from_str(text);
-    // SAFETY: factory method; ns_text lives for the scope.
-    let utterance = unsafe { AVSpeechUtterance::speechUtteranceWithString(&ns_text) };
-    // SAFETY: setVoice: on the main thread.
-    unsafe { utterance.setVoice(Some(voice)) };
-
-    // ── 2. Register the PCM callback ─────────────────────────────────────
-    let accum_cb = Arc::clone(&accumulator);
-    let eos_cb = Arc::clone(&eos);
-
-    type CbBlock = block2::Block<dyn Fn(NonNull<AVAudioBuffer>)>;
-    let cb = block2::RcBlock::new(move |buf_ptr: NonNull<AVAudioBuffer>| {
-        pcm_callback(buf_ptr, &accum_cb, &eos_cb);
-    });
-
-    // ── 3. Start synthesis (returns immediately; callbacks queued async) ─
-    // SAFETY: called on the main thread; `cb` is retained by `RcBlock`.
-    let block_ref: &CbBlock = &cb;
-    let block_ptr: *mut CbBlock = (block_ref as *const CbBlock).cast_mut();
-    unsafe { synth.writeUtterance_toBufferCallback(&utterance, block_ptr) };
-
-    // ── 4. Drain the main NSRunLoop until EOS ────────────────────────────
-    // `runUntilDate:` on the main run loop drains both NSRunLoop sources and
-    // the GCD main queue (they share the same CFRunLoop). Each 10 ms slice
-    // delivers any queued PCM callbacks.
-    let run_loop = NSRunLoop::mainRunLoop();
-    let deadline = Instant::now() + DRAIN_TIMEOUT;
-    loop {
-        if eos.load(Ordering::SeqCst) {
-            break;
-        }
-        if Instant::now() >= deadline {
-            return Err(PrimerError::Speech(
-                "AVSpeechSynthesizer 30s NSRunLoop drain timeout (main-thread path)".into(),
-            ));
-        }
-        let date = NSDate::dateWithTimeIntervalSinceNow(RUN_LOOP_SLICE.as_secs_f64());
-        run_loop.runUntilDate(&date);
-    }
-
-    // `cb` (RcBlock) goes out of scope here, but synthesis callbacks
-    // may still fire afterward. This is safe ONLY because
-    // AVSpeechSynthesizer issues its own Block_retain when assigning
-    // the callback — Rust's Drop of RcBlock decrements the refcount
-    // by 1, leaving the ObjC retain in place. Do not "fix" this by
-    // keeping `cb` alive longer; that would double-retain and leak.
-    drop(cb);
-    let chunks = accumulator.lock().unwrap().clone();
-    Ok(chunks)
-}
-
-// ═══════════════════════════════════════════════════════════════════════════
-// Background-thread path
-// ═══════════════════════════════════════════════════════════════════════════
-
-/// Context bundle passed through `dispatch_async_f`.
-struct SynthCtx {
-    utterance: Retained<AVSpeechUtterance>,
-    /// Shared semaphore — both the trampoline and the waiting background
-    /// thread hold an `Arc` clone. The last drop calls `dispatch_release`.
-    sema: Arc<DispatchSemaphore>,
-    accum: Accumulator,
-    eos: Arc<AtomicBool>,
-}
-
-// SAFETY: `SynthCtx` is moved into the main-queue trampoline; at that point
-// no other thread holds a reference to it. The move is one-shot.
-unsafe impl Send for SynthCtx {}
-
-/// Synthesis from a background thread (pool thread, GUI async task).
-/// Returns one `AudioChunk` per PCM callback that AVSpeechSynthesizer
-/// delivered.
-///
-/// Submits `writeUtterance:toBufferCallback:` to the GCD main queue via
-/// `dispatch_async_f`. The main queue runs on the OS main thread, whose
-/// CFRunLoop must already be spinning — Tauri does this for the GUI; CLI
-/// binaries must invert their threading and call
-/// [`crate::macos::run_main_loop_until`] from `fn main()`. Without that,
-/// the trampoline below never runs and the wait below times out at 30 s.
-/// A `dispatch_semaphore` blocks the calling pool thread until the EOS
-/// callback fires.
-fn synthesize_to_chunks_background(
-    text: &str,
-    voice: &AVSpeechSynthesisVoice,
-) -> Result<Vec<AudioChunk>> {
-    // ── 1. Create the EOS semaphore ──────────────────────────────────────
-    // SAFETY: `dispatch_semaphore_create(0)` returns a valid semaphore.
-    let raw_sema = unsafe { dispatch::dispatch_semaphore_create(0) };
-    if raw_sema.is_null() {
-        return Err(PrimerError::Speech(
-            "dispatch_semaphore_create returned null".into(),
-        ));
-    }
-    // Wrap in Arc so both this thread and the trampoline share ownership.
-    // The last Arc to drop calls `dispatch_release` via the RAII wrapper,
-    // eliminating the use-after-free that occurred when this thread released
-    // on timeout while the trampoline was still queued on the main thread.
-    let sema = Arc::new(DispatchSemaphore(raw_sema));
-
-    // ── 2. Build utterance on the calling thread ─────────────────────────
-    let ns_text = NSString::from_str(text);
-    // SAFETY: factory method.
-    let utterance = unsafe { AVSpeechUtterance::speechUtteranceWithString(&ns_text) };
-    // SAFETY: setVoice:.
-    unsafe { utterance.setVoice(Some(voice)) };
-
-    let accumulator: Accumulator = Arc::new(Mutex::new(Vec::new()));
-    let eos = Arc::new(AtomicBool::new(false));
-
-    // ── 3. Build and submit the synthesis trampoline ─────────────────────
-    extern "C" fn trampoline(ctx_raw: *mut std::ffi::c_void) {
-        // SAFETY: ctx_raw was Box::into_raw'd below; we take ownership here.
-        // When `ctx` drops at end of scope, the `Arc<DispatchSemaphore>`
-        // inside is decremented. If this is the last Arc (i.e. the background
-        // thread already timed out and dropped its Arc), `dispatch_release`
-        // runs here — never on an already-freed semaphore.
-        let ctx = unsafe { Box::from_raw(ctx_raw as *mut SynthCtx) };
-
-        // SAFETY: AVSpeechSynthesizer::new on the main thread.
-        let synth: Retained<AVSpeechSynthesizer> = unsafe { AVSpeechSynthesizer::new() };
-
-        let accum_cb = Arc::clone(&ctx.accum);
-        let eos_cb = Arc::clone(&ctx.eos);
-        // Clone the Arc so the closure captures its own strong reference.
-        // The closure may outlive `ctx`'s drop (ObjC retains the block),
-        // but the Arc ensures the semaphore stays alive until the closure drops.
-        let sema_cb = Arc::clone(&ctx.sema);
-
-        type CbBlock = block2::Block<dyn Fn(NonNull<AVAudioBuffer>)>;
-        let cb = block2::RcBlock::new(move |buf_ptr: NonNull<AVAudioBuffer>| {
-            // Check EOS first so we signal the semaphore exactly once.
-            let is_eos = {
-                let buf: &AVAudioBuffer = unsafe { buf_ptr.as_ref() };
-                let pcm: &AVAudioPCMBuffer = match buf.downcast_ref::<AVAudioPCMBuffer>() {
-                    Some(p) => p,
-                    None => return,
-                };
-                let frame_length = unsafe { pcm.frameLength() } as usize;
-                frame_length == EOS_FRAME_LENGTH
-            };
-
-            pcm_callback(buf_ptr, &accum_cb, &eos_cb);
-
-            if is_eos {
-                // SAFETY: `sema_cb` (Arc) keeps the semaphore alive for at
-                // least as long as this closure lives — safe to signal.
-                unsafe { dispatch::dispatch_semaphore_signal(sema_cb.as_raw()) };
-            }
-        });
-
-        // SAFETY: called on the main thread.
-        let block_ref: &CbBlock = &cb;
-        let block_ptr: *mut CbBlock = (block_ref as *const CbBlock).cast_mut();
-        unsafe { synth.writeUtterance_toBufferCallback(&ctx.utterance, block_ptr) };
-
-        // `cb` (RcBlock) goes out of scope here, but synthesis callbacks
-        // may still fire afterward. This is safe ONLY because
-        // AVSpeechSynthesizer issues its own Block_retain when assigning
-        // the callback — Rust's Drop of RcBlock decrements the refcount
-        // by 1, leaving the ObjC retain in place. Do not "fix" this by
-        // keeping `cb` alive longer; that would double-retain and leak.
-    }
-
-    let ctx = Box::new(SynthCtx {
-        utterance,
-        sema: Arc::clone(&sema),
-        accum: Arc::clone(&accumulator),
-        eos: Arc::clone(&eos),
-    });
-    let ctx_ptr = Box::into_raw(ctx) as *mut std::ffi::c_void;
-
-    // SAFETY: `_dispatch_main_q` is the GCD main queue object.
-    let main_queue: dispatch::dispatch_queue_t =
-        unsafe { &dispatch::_dispatch_main_q as *const _ as dispatch::dispatch_queue_t };
-
-    // SAFETY: `trampoline` takes ownership of `ctx_ptr` exactly once.
-    unsafe { dispatch::dispatch_async_f(main_queue, ctx_ptr, trampoline) };
-
-    // ── 4. Wait for EOS semaphore ────────────────────────────────────────
-    // SAFETY: `sema` Arc keeps the semaphore valid throughout the wait.
-    // `dispatch_time` computes an absolute deadline.
-    let deadline =
-        unsafe { dispatch::dispatch_time(dispatch::DISPATCH_TIME_NOW, dispatch::TIMEOUT_NS) };
-    let wait_result = unsafe { dispatch::dispatch_semaphore_wait(sema.as_raw(), deadline) };
-    // Drop our Arc. If the trampoline has already run and dropped its Arc,
-    // this is the last reference and `dispatch_release` runs here.
-    // If the trampoline is still queued, its Arc keeps the semaphore alive
-    // until the trampoline runs — no UAF.
-    drop(sema);
-
-    if wait_result != 0 {
-        return Err(PrimerError::Speech(
-            "AVSpeechSynthesizer 30s dispatch semaphore timeout (background-thread path)".into(),
-        ));
-    }
-
-    let chunks = accumulator.lock().unwrap().clone();
-    Ok(chunks)
-}
-
-// ═══════════════════════════════════════════════════════════════════════════
-// Shared PCM callback
+// Shared PCM callback (streaming)
 // ═══════════════════════════════════════════════════════════════════════════
 
 /// Convert one PCM buffer from `AVSpeechSynthesizer` into a
@@ -942,53 +635,4 @@ fn stream_pcm_callback(
         sample_rate,
     };
     let _ = tx.send(SynthesisEvent::Audio(chunk));
-}
-
-/// Collect one PCM buffer from `AVSpeechSynthesizer` into `accum` as a
-/// new `AudioChunk`. Sets `eos` when a zero-frame buffer arrives (the EOS
-/// sentinel).
-fn pcm_callback(buf_ptr: NonNull<AVAudioBuffer>, accum: &Accumulator, eos: &Arc<AtomicBool>) {
-    // SAFETY: buf_ptr is non-null and valid for the callback's lifetime.
-    let buf: &AVAudioBuffer = unsafe { buf_ptr.as_ref() };
-
-    let pcm: &AVAudioPCMBuffer = match buf.downcast_ref::<AVAudioPCMBuffer>() {
-        Some(p) => p,
-        None => return,
-    };
-
-    // SAFETY: `frameLength` is an immutable property getter.
-    let frame_length = unsafe { pcm.frameLength() } as usize;
-
-    if frame_length == EOS_FRAME_LENGTH {
-        eos.store(true, Ordering::SeqCst);
-        return;
-    }
-
-    // SAFETY: immutable property getters.
-    let format = unsafe { pcm.format() };
-    let channel_count = unsafe { format.channelCount() };
-    if channel_count != 1 {
-        tracing::warn!(
-            channel_count,
-            "AVSpeechSynthesizer emitted multi-channel PCM; only channel 0 will be captured"
-        );
-    }
-    let sample_rate = unsafe { format.sampleRate() } as u32;
-
-    // SAFETY: `floatChannelData()[0]` is the mono channel of `frame_length`
-    // samples; valid for the callback's lifetime.
-    let data_ptr = unsafe { pcm.floatChannelData() };
-    if data_ptr.is_null() {
-        return;
-    }
-    let chan0_nn: NonNull<f32> = unsafe { *data_ptr };
-    let chan0_ptr: *mut f32 = chan0_nn.as_ptr();
-    // SAFETY: valid mono float slice for the callback's lifetime.
-    let slice: &[f32] = unsafe { std::slice::from_raw_parts(chan0_ptr, frame_length) };
-
-    let mut guard = accum.lock().unwrap();
-    guard.push(AudioChunk {
-        samples: slice.to_vec(),
-        sample_rate,
-    });
 }
