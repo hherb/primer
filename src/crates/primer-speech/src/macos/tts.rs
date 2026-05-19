@@ -413,6 +413,12 @@ impl SynthesisSession for MacosTtsSession {
     /// fires `Audio(chunk)` + `PhraseEnd`. Same observable timing as the
     /// pre-trait-reshape behaviour. Stage B replaces this with a true
     /// channel-streaming path. Tracking: #114.
+    // TODO(#114-stage-b): replace this wrapper with a true channel-streaming
+    // impl — PCM callback (running on the GCD main queue) sends
+    // `SynthesisEvent::Audio(chunk)` into a bounded `mpsc::sync_channel`,
+    // the caller thread drains the channel and fires `on_event` as each
+    // event arrives. Until that lands, the trait's callback shape buys no
+    // user-visible per-phrase TTFA benefit on macOS.
     fn push_text(&mut self, text: &str, on_event: &mut dyn FnMut(SynthesisEvent)) -> Result<()> {
         for phrase in self.splitter.push(text) {
             if let Some(chunk) = coalesce_phrase(synthesize_to_chunks(&self.voice, &phrase)?) {

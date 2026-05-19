@@ -249,6 +249,7 @@ pub struct LoopConfig {
 
 use std::sync::Arc;
 
+use primer_core::consts::speech::DEFAULT_INTER_PHRASE_SILENCE_MS;
 use primer_core::speech::{StreamingSpeechToText, StreamingTextToSpeech, SynthesisEvent};
 
 /// Bound on the VAD event channel. At ~32 events/s (silero on 512-sample
@@ -835,9 +836,8 @@ async fn run_loop_inner<'r, O: LoopObserver>(
             let tts_rate = active_tts.sample_rate();
             // Inter-phrase silence inserted on each `PhraseEnd` event. Value
             // in `primer_core::consts::speech::DEFAULT_INTER_PHRASE_SILENCE_MS`.
-            let inter_phrase_silence_samples = (tts_rate
-                * primer_core::consts::speech::DEFAULT_INTER_PHRASE_SILENCE_MS
-                / 1000) as usize;
+            let inter_phrase_silence_samples =
+                (tts_rate * DEFAULT_INTER_PHRASE_SILENCE_MS / 1000) as usize;
             let mut on_event = |event: SynthesisEvent| match event {
                 SynthesisEvent::Audio(chunk) => on_committed_audio(chunk.samples),
                 SynthesisEvent::PhraseEnd => {

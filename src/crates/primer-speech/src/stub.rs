@@ -109,10 +109,6 @@ mod tests {
     use super::*;
     use primer_core::speech::{StreamingTextToSpeech, SynthesisEvent, VoiceProfile};
 
-    /// `StubTts` claims this rate as a no-op default since it emits silence.
-    /// Mirrors the value used in stub.rs's existing one-shot synthesize body.
-    const STUB_TTS_SAMPLE_RATE: u32 = 16_000;
-
     #[tokio::test]
     async fn stub_tts_streaming_emits_chunk_per_phrase() {
         let tts: Box<dyn StreamingTextToSpeech> = Box::new(StubTts);
