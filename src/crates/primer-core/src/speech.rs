@@ -208,7 +208,8 @@ pub struct AudioChunk {
 ///
 /// `Audio(chunk)` carries PCM data — consumers forward it to the
 /// speaker immediately. `PhraseEnd` is a boundary marker — consumers
-/// typically insert a brief inter-phrase pause (~200 ms of silence)
+/// typically insert a brief inter-phrase pause (see
+/// [`crate::consts::speech::DEFAULT_INTER_PHRASE_SILENCE_MS`])
 /// before the next phrase's audio.
 ///
 /// Separating audio from boundaries (rather than packing a
@@ -219,7 +220,9 @@ pub struct AudioChunk {
 pub enum SynthesisEvent {
     /// PCM data became available.
     Audio(AudioChunk),
-    /// End of one phrase. Consumer typically inserts ~200 ms of silence.
+    /// End of one phrase. Consumer typically inserts a brief inter-phrase
+    /// pause — see
+    /// [`crate::consts::speech::DEFAULT_INTER_PHRASE_SILENCE_MS`].
     PhraseEnd,
 }
 

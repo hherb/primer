@@ -833,12 +833,11 @@ async fn run_loop_inner<'r, O: LoopObserver>(
                 })?;
             let mut session = active_tts.open_session(active_voice)?;
             let tts_rate = active_tts.sample_rate();
-            // ~200 ms of silence inserted between AudioChunks (each `PhraseEnd`
-            // event marks the boundary of one phrase). Gives the listener a
-            // perceptible pause at sentence boundaries without adding much to
-            // total response time.
-            const INTER_PHRASE_SILENCE_MS: u32 = 200;
-            let inter_phrase_silence_samples = (tts_rate * INTER_PHRASE_SILENCE_MS / 1000) as usize;
+            // Inter-phrase silence inserted on each `PhraseEnd` event. Value
+            // in `primer_core::consts::speech::DEFAULT_INTER_PHRASE_SILENCE_MS`.
+            let inter_phrase_silence_samples = (tts_rate
+                * primer_core::consts::speech::DEFAULT_INTER_PHRASE_SILENCE_MS
+                / 1000) as usize;
             let mut on_event = |event: SynthesisEvent| match event {
                 SynthesisEvent::Audio(chunk) => on_committed_audio(chunk.samples),
                 SynthesisEvent::PhraseEnd => {
