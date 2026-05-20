@@ -3,6 +3,7 @@ name = "primer-speech"
 description = "Speech-to-text and text-to-speech backends for the Primer"
 version.workspace = true
 edition.workspace = true
+build = "build.rs"
 
 [dependencies]
 primer-core.workspace = true
