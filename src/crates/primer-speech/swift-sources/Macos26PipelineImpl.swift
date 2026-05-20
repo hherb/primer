@@ -39,12 +39,11 @@ public final class Macos26Pipeline {
     // callers can be replaced by the next iteration's caller awaiting the
     // same in-flight value — only one iter.next() runs at a time.
     //
-    // Task is a Swift struct (non-class), so identity is tracked via a
-    // monotonically-increasing generation counter: the defer block only
-    // clears nextResultTask when the generation hasn't advanced (i.e. no
-    // new task was created while we were awaiting).
+    // Cached in-flight iterator advance. Cleanup happens INSIDE the
+    // Task body so cancellation of the outer Rust future (via
+    // tokio::select! dropping the awaiting future) does not race the
+    // cleanup against the still-running iterator advance.
     private var nextResultTask: Task<ResultEvent?, Error>?
-    private var nextResultGeneration: UInt64 = 0
 
     // Private initializer — external callers use the static factory create(localeBcp47:).
     private init(
@@ -157,9 +156,17 @@ public final class Macos26Pipeline {
         if let existing = nextResultTask {
             return try await existing.value
         }
-        let myGeneration = nextResultGeneration
+        // The cleanup of `nextResultTask = nil` lives INSIDE the inner
+        // Task body so it runs when the iterator advance actually
+        // completes — NOT when the outer wrapper is cancelled by
+        // tokio::select! dropping the future. This eliminates the race
+        // where a cancelled outer wrapper's defer cleared the cached
+        // Task while it was still running, allowing the next call to
+        // create a second concurrent iter.next() and fatal-error in
+        // AsyncStreamBuffer.swift:508.
         let task = Task<ResultEvent?, Error> { [weak self] in
             guard let self = self else { return nil }
+            defer { self.nextResultTask = nil }
             guard var iter = self.resultsIterator else { return nil }
             defer { self.resultsIterator = iter }
             guard let result = try await iter.next() else { return nil }
@@ -176,14 +183,6 @@ public final class Macos26Pipeline {
             )
         }
         nextResultTask = task
-        nextResultGeneration &+= 1
-        defer {
-            // Only clear nextResultTask if no newer task has been registered
-            // since we created ours (i.e. the generation hasn't advanced again).
-            if nextResultGeneration == myGeneration &+ 1 {
-                nextResultTask = nil
-            }
-        }
         return try await task.value
     }
 
