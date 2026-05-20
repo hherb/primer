@@ -81,6 +81,11 @@ mod macos_native_26 {
         println!("cargo:rustc-link-arg=-Wl,-rpath,{}", swift_runtime_dir());
         println!("cargo:rustc-link-arg=-L{}", swift_runtime_dir());
         println!("cargo:rustc-link-arg=-lswiftCore");
+        // libswift_Concurrency.dylib lives only in the dyld shared cache
+        // on macOS 12+ — it has no on-disk file. Add /usr/lib/swift to
+        // the rpath so dyld resolves the @rpath-referenced concurrency
+        // back-deployment lib from the cache rather than failing.
+        println!("cargo:rustc-link-arg=-Wl,-rpath,/usr/lib/swift");
     }
 
     fn swift_target_triple() -> String {

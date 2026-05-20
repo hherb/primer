@@ -27,6 +27,7 @@ const BACKEND_NAME: &str = "macos-26-speech-analyzer";
 /// Locale is fixed at construction time. The actual SpeechAnalyzer
 /// instance is owned by the audio task in `build_local_backends_macos_native_26`,
 /// not by this struct or its sessions.
+#[derive(Debug)]
 pub struct Macos26Stt {
     locale: Locale,
 }
