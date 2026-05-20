@@ -12,4 +12,4 @@
 //! host application actually exists in the repo — see the design doc
 //! "Goals" section.
 
-// Sub-modules land in subsequent plan tasks.
+pub mod audio_session;
