@@ -14,4 +14,5 @@
 
 // Sub-modules land in subsequent plan tasks.
 
+pub mod locale;
 pub mod vad;
