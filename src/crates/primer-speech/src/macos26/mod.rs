@@ -15,6 +15,7 @@
 // Sub-modules land in subsequent plan tasks.
 
 pub mod analyzer;
+pub mod audio_session;
 pub mod bridge;
 pub mod locale;
 pub mod stt;
