@@ -1,0 +1,7 @@
+[toolchain]
+# Mirror the production workspace pin at src/rust-toolchain.toml — the
+# spike depends on primer-speech / primer-core (workspace edition 2024)
+# which require 1.88+. Keep these two files in sync.
+channel = "1.88"
+components = ["rustfmt", "clippy"]
+profile = "minimal"
