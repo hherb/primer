@@ -32,6 +32,20 @@ public final class Macos26Pipeline {
     private let analyzerFormat: AVAudioFormat
     private var resultsIterator: AsyncThrowingStream<SpeechTranscriber.Result, Error>.AsyncIterator?
 
+    // Tracks an in-flight call to the underlying iterator. nextResult() is
+    // non-cancellation-safe at the Swift level (consuming an AsyncIterator
+    // twice concurrently fatal-errors), but Rust's tokio::select! routinely
+    // drops the future when other branches fire. Cache the Task so cancelled
+    // callers can be replaced by the next iteration's caller awaiting the
+    // same in-flight value — only one iter.next() runs at a time.
+    //
+    // Task is a Swift struct (non-class), so identity is tracked via a
+    // monotonically-increasing generation counter: the defer block only
+    // clears nextResultTask when the generation hasn't advanced (i.e. no
+    // new task was created while we were awaiting).
+    private var nextResultTask: Task<ResultEvent?, Error>?
+    private var nextResultGeneration: UInt64 = 0
+
     // Private initializer — external callers use the static factory create(localeBcp47:).
     private init(
         analyzer: SpeechAnalyzer,
@@ -133,20 +147,44 @@ public final class Macos26Pipeline {
 
     /// Pull the next transcriber result, awaiting if necessary. Returns
     /// nil once the underlying stream completes (analyzer stopped).
+    ///
+    /// Cancellation-safe via Task caching: if Rust's tokio::select! drops
+    /// the awaiting future, the cached Task continues running against the
+    /// iterator (so iter.next() is only ever called once at a time). The
+    /// next call from Rust awaits the same Task and receives the value it
+    /// was about to produce — no double-advance of the iterator.
     private func nextResult() async throws -> ResultEvent? {
-        guard var iter = resultsIterator else { return nil }
-        defer { resultsIterator = iter }
-        guard let result = try await iter.next() else { return nil }
-        let text = String(result.text.characters).trimmingCharacters(in: .whitespacesAndNewlines)
-        let startMs = UInt64(max(0, result.range.start.seconds * 1000))
-        let endMs = UInt64(max(0, result.range.end.seconds * 1000))
-        return ResultEvent(
-            text: RustString(text),
-            is_final: result.isFinal,
-            range_start_ms: startMs,
-            range_end_ms: endMs,
-            stream_done: false
-        )
+        if let existing = nextResultTask {
+            return try await existing.value
+        }
+        let myGeneration = nextResultGeneration
+        let task = Task<ResultEvent?, Error> { [weak self] in
+            guard let self = self else { return nil }
+            guard var iter = self.resultsIterator else { return nil }
+            defer { self.resultsIterator = iter }
+            guard let result = try await iter.next() else { return nil }
+            let text = String(result.text.characters)
+                .trimmingCharacters(in: .whitespacesAndNewlines)
+            let startMs = UInt64(max(0, result.range.start.seconds * 1000))
+            let endMs = UInt64(max(0, result.range.end.seconds * 1000))
+            return ResultEvent(
+                text: RustString(text),
+                is_final: result.isFinal,
+                range_start_ms: startMs,
+                range_end_ms: endMs,
+                stream_done: false
+            )
+        }
+        nextResultTask = task
+        nextResultGeneration &+= 1
+        defer {
+            // Only clear nextResultTask if no newer task has been registered
+            // since we created ours (i.e. the generation hasn't advanced again).
+            if nextResultGeneration == myGeneration &+ 1 {
+                nextResultTask = nil
+            }
+        }
+        return try await task.value
     }
 
     /// Non-throwing bridge wrapper around nextResult().
