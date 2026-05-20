@@ -17,4 +17,5 @@
 pub mod analyzer;
 pub mod bridge;
 pub mod locale;
+pub mod stt;
 pub mod vad;
