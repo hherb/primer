@@ -48,7 +48,7 @@ pub use cpal_io::{MicCapture, Resampler, SpeakerSink, push_all_with_bail, wait_f
 #[cfg(feature = "voice-loop")]
 pub mod voice_loop;
 
-#[cfg(all(target_os = "macos", feature = "macos-native"))]
+#[cfg(all(target_os = "macos", any(feature = "macos-native", feature = "macos-native-26")))]
 pub mod macos;
 
 #[cfg(all(target_vendor = "apple", feature = "macos-native-26"))]

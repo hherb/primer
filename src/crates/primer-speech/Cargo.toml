@@ -107,8 +107,10 @@ macos-native = ["dep:objc2", "dep:objc2-foundation", "dep:objc2-avf-audio", "dep
 macos-native-26 = [
     "dep:swift-bridge",
     "swift-bridge-build",
+    "dep:objc2",
     "dep:objc2-foundation",
     "dep:objc2-avf-audio",
+    "dep:block2",
 ]
 
 [[example]]

@@ -19,3 +19,10 @@ pub mod bridge;
 pub mod locale;
 pub mod stt;
 pub mod vad;
+
+// Re-use the AVSpeechSynthesizer TTS — no new TTS surface in macOS 26.
+pub use crate::macos::MacosTextToSpeech;
+
+// Public surface for builders to consume.
+pub use crate::macos26::stt::Macos26Stt;
+pub use crate::macos26::analyzer::TextMessage;
