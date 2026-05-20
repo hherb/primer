@@ -39,6 +39,20 @@ mod macos_native_26 {
         // 2. swiftc — compile the sidecar + generated glue into a static lib.
         let swift_sources = manifest_dir.join("swift-sources");
 
+        // Concatenate the SwiftBridgeCore C header and the bridge-specific C
+        // header into a single bridging header so swiftc can resolve C types
+        // referenced by the generated Swift glue (RustStr, __private__OptionU8, …).
+        let bridging_header = out_dir.join("SwiftBridge_Bridging.h");
+        let core_h = generated.join("SwiftBridgeCore.h");
+        let bridge_h = generated.join(SWIFT_LIB_NAME).join(format!("{SWIFT_LIB_NAME}.h"));
+        let bridging_content = format!(
+            "#include \"{}\"\n#include \"{}\"\n",
+            core_h.display(),
+            bridge_h.display(),
+        );
+        std::fs::write(&bridging_header, &bridging_content)
+            .expect("write bridging header");
+
         let lib_path = out_dir.join(format!("lib{}.a", SWIFT_LIB_NAME));
         let mut cmd = Command::new("swiftc");
         cmd.arg("-emit-library")
@@ -49,8 +63,9 @@ mod macos_native_26 {
             .arg("-sdk").arg(macos_sdk_path())
             .arg("-O")
             .arg("-parse-as-library")
-            .arg(swift_sources.join("Macos26Pipeline.swift"))
-            .args(walk_swift_files(&generated))
+            .arg("-import-objc-header").arg(&bridging_header)
+            .arg(swift_sources.join("Macos26PipelineImpl.swift"))
+            .args(walk_swift_files_recursive(&generated))
             .arg("-o").arg(&lib_path);
         let status = cmd.status().expect("invoke swiftc");
         assert!(status.success(), "swiftc failed");
@@ -94,12 +109,24 @@ mod macos_native_26 {
         format!("{xcode_path}/Toolchains/XcodeDefault.xctoolchain/usr/lib/swift/macosx")
     }
 
-    fn walk_swift_files(dir: &PathBuf) -> Vec<PathBuf> {
-        std::fs::read_dir(dir)
-            .expect("read generated dir")
-            .filter_map(|e| e.ok())
-            .map(|e| e.path())
-            .filter(|p| p.extension().and_then(|s| s.to_str()) == Some("swift"))
-            .collect()
+    // Recursively collect all .swift files under `dir` (including subdirs).
+    fn walk_swift_files_recursive(dir: &PathBuf) -> Vec<PathBuf> {
+        let mut result = Vec::new();
+        fn recurse(dir: &std::path::Path, result: &mut Vec<PathBuf>) {
+            let rd = match std::fs::read_dir(dir) {
+                Ok(r) => r,
+                Err(_) => return,
+            };
+            for entry in rd.filter_map(|e| e.ok()) {
+                let path = entry.path();
+                if path.is_dir() {
+                    recurse(&path, result);
+                } else if path.extension().and_then(|s| s.to_str()) == Some("swift") {
+                    result.push(path);
+                }
+            }
+        }
+        recurse(dir, &mut result);
+        result
     }
 }

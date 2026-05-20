@@ -11,16 +11,6 @@ import CoreMedia
 import Foundation
 import Speech
 
-/// Plain value type pushed to Rust per transcriber result. Strings cross
-/// the bridge cleanly; AttributedString is reduced to plain text on the
-/// Swift side so the Rust side never has to know about it.
-public struct ResultEvent {
-    public let text: String
-    public let isFinal: Bool
-    public let rangeStartMs: UInt64
-    public let rangeEndMs: UInt64
-}
-
 public enum Macos26PipelineError: Error {
     case localeNotSupported(String)
     case noAnalyzerFormat
@@ -28,9 +18,13 @@ public enum Macos26PipelineError: Error {
     case streamClosed
 }
 
+// NOTE: ResultEvent is declared in the swift-bridge generated file
+// (generated/Macos26Pipeline/Macos26Pipeline.swift). Do NOT re-declare it here.
+// The generated struct has snake_case fields and uses RustString for the text.
+
 /// Owns the SpeechAnalyzer + SpeechTranscriber + SpeechDetector trio.
-/// Audio is pushed by Rust via `feedAudio`. Results are pulled by Rust
-/// via `nextResult`, which awaits the next item on `transcriber.results`.
+/// Audio is pushed by Rust via feedAudio. Results are pulled by Rust
+/// via nextResultBridge, which awaits the next item on transcriber.results.
 public final class Macos26Pipeline {
     private let analyzer: SpeechAnalyzer
     private let transcriber: SpeechTranscriber
@@ -38,7 +32,24 @@ public final class Macos26Pipeline {
     private let analyzerFormat: AVAudioFormat
     private var resultsIterator: AsyncThrowingStream<SpeechTranscriber.Result, Error>.AsyncIterator?
 
-    public init(localeBcp47: String) async throws {
+    // Private initializer — external callers use the static factory create(localeBcp47:).
+    private init(
+        analyzer: SpeechAnalyzer,
+        transcriber: SpeechTranscriber,
+        inputContinuation: AsyncStream<AnalyzerInput>.Continuation,
+        analyzerFormat: AVAudioFormat,
+        resultsIterator: AsyncThrowingStream<SpeechTranscriber.Result, Error>.AsyncIterator
+    ) {
+        self.analyzer = analyzer
+        self.transcriber = transcriber
+        self.inputContinuation = inputContinuation
+        self.analyzerFormat = analyzerFormat
+        self.resultsIterator = resultsIterator
+    }
+
+    /// Async factory exposed to Rust via associated_to = Macos26Pipeline.
+    /// Maps to Swift: Macos26Pipeline.create(localeBcp47:).
+    public static func create(localeBcp47: String) async throws -> Macos26Pipeline {
         let locale = Locale(identifier: localeBcp47)
 
         let supported = await SpeechTranscriber.supportedLocales
@@ -52,8 +63,6 @@ public final class Macos26Pipeline {
             preset: .progressiveTranscription
         )
         if !installed.contains(where: { $0.identifier(.bcp47) == localeBcp47 }) {
-            // Apple's OS-managed download. No UI; the friction-free
-            // demo policy is intentional (see spec, "Asset download").
             guard let req = try await AssetInventory.assetInstallationRequest(
                 supporting: [transcriber]
             ) else {
@@ -76,13 +85,7 @@ public final class Macos26Pipeline {
         let (inputStream, inputContinuation) = AsyncStream<AnalyzerInput>.makeStream()
         try await analyzer.start(inputSequence: inputStream)
 
-        self.analyzer = analyzer
-        self.transcriber = transcriber
-        self.inputContinuation = inputContinuation
-        self.analyzerFormat = fmt
-        // Wrap transcriber.results in an AsyncThrowingStream so we have
-        // a concrete iterator type we can drive from nextResult().
-        self.resultsIterator = AsyncThrowingStream<SpeechTranscriber.Result, Error> { cont in
+        let iter = AsyncThrowingStream<SpeechTranscriber.Result, Error> { cont in
             let task = Task {
                 do {
                     for try await r in transcriber.results {
@@ -95,6 +98,14 @@ public final class Macos26Pipeline {
             }
             cont.onTermination = { _ in task.cancel() }
         }.makeAsyncIterator()
+
+        return Macos26Pipeline(
+            analyzer: analyzer,
+            transcriber: transcriber,
+            inputContinuation: inputContinuation,
+            analyzerFormat: fmt,
+            resultsIterator: iter
+        )
     }
 
     /// Sample rate the analyzer wants its input PCM at (typically 16 kHz).
@@ -102,17 +113,19 @@ public final class Macos26Pipeline {
         return analyzerFormat.sampleRate
     }
 
-    /// Push one PCM chunk into the analyzer. `samples` is mono Float32
+    /// Push one PCM chunk into the analyzer. samples is mono Float32
     /// at the analyzer's preferred rate. Rust resamples upstream.
-    public func feedAudio(samples: [Float]) {
+    /// Accepts RustVec<Float> as passed by swift-bridge from Vec<f32>.
+    public func feedAudio(samples: RustVec<Float>) {
+        let count = Int(samples.len())
         guard let buffer = AVAudioPCMBuffer(
             pcmFormat: analyzerFormat,
-            frameCapacity: AVAudioFrameCount(samples.count)
+            frameCapacity: AVAudioFrameCount(count)
         ) else { return }
-        buffer.frameLength = AVAudioFrameCount(samples.count)
+        buffer.frameLength = AVAudioFrameCount(count)
         if let channelData = buffer.floatChannelData {
-            samples.withUnsafeBufferPointer { src in
-                channelData[0].update(from: src.baseAddress!, count: samples.count)
+            for i in 0..<count {
+                channelData[0][i] = samples.get(index: UInt(i))!
             }
         }
         inputContinuation.yield(AnalyzerInput(buffer: buffer))
@@ -120,7 +133,7 @@ public final class Macos26Pipeline {
 
     /// Pull the next transcriber result, awaiting if necessary. Returns
     /// nil once the underlying stream completes (analyzer stopped).
-    public func nextResult() async throws -> ResultEvent? {
+    private func nextResult() async throws -> ResultEvent? {
         guard var iter = resultsIterator else { return nil }
         defer { resultsIterator = iter }
         guard let result = try await iter.next() else { return nil }
@@ -128,16 +141,45 @@ public final class Macos26Pipeline {
         let startMs = UInt64(max(0, result.range.start.seconds * 1000))
         let endMs = UInt64(max(0, result.range.end.seconds * 1000))
         return ResultEvent(
-            text: text,
-            isFinal: result.isFinal,
-            rangeStartMs: startMs,
-            rangeEndMs: endMs
+            text: RustString(text),
+            is_final: result.isFinal,
+            range_start_ms: startMs,
+            range_end_ms: endMs,
+            stream_done: false
         )
+    }
+
+    /// Non-throwing bridge wrapper around nextResult().
+    /// Returns a sentinel ResultEvent with stream_done=true on stream
+    /// completion or any error. swift-bridge 0.1.x cannot bridge
+    /// Option<SharedStruct> from async Swift methods, so we use a
+    /// sentinel value instead of returning Optional.
+    public func nextResultBridge() async -> ResultEvent {
+        guard let event = try? await nextResult() else {
+            return ResultEvent(text: RustString(""), is_final: false, range_start_ms: 0, range_end_ms: 0, stream_done: true)
+        }
+        return event
     }
 
     /// Stop the analyzer and tear down the pipeline.
     public func stop() async {
         inputContinuation.finish()
         try? await analyzer.finalizeAndFinishThroughEndOfInput()
+    }
+}
+
+/// Async factory function bridged to Rust via swift-bridge.
+/// Panics (fatalError) on any error because swift-bridge 0.1.59 cannot
+/// generate valid code for Option<OpaqueType> or Result<OpaqueType, ...>
+/// in extern "Swift" function positions. Callers should verify locale
+/// support before invoking. Maps to bridge.rs: `async fn create`.
+///
+/// Argument label uses snake_case (locale_bcp47) to match swift-bridge output;
+/// parameter type is RustString as passed by the generated bridge glue.
+public func macos26PipelineCreate(locale_bcp47: RustString) async -> Macos26Pipeline {
+    do {
+        return try await Macos26Pipeline.create(localeBcp47: locale_bcp47.toString())
+    } catch {
+        fatalError("macos26PipelineCreate failed: \(error)")
     }
 }

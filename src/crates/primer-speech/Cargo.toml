@@ -64,7 +64,9 @@ block2 = { workspace = true, optional = true }
 
 # swift-bridge — generates the FFI between Rust and the Macos26Pipeline Swift sidecar.
 # Pulled only by the `macos-native-26` feature. The build-dep is the codegen half.
-swift-bridge = { version = "0.1", optional = true }
+# The `async` feature enables the async_swift_support module required for
+# async extern "Swift" method bridges.
+swift-bridge = { version = "0.1", features = ["async"], optional = true }
 
 [build-dependencies]
 swift-bridge-build = { version = "0.1", optional = true }
