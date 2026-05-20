@@ -6,6 +6,12 @@
 //! accepts text input and produces text output. Speech integration
 //! happens in Phase 1 when hardware audio is connected.
 
+#[cfg(all(feature = "macos-native", feature = "macos-native-26"))]
+compile_error!(
+    "`macos-native` and `macos-native-26` are mutually exclusive — pick one \
+     (`macos-native-26` for macOS 26+, `macos-native` for older macOS)"
+);
+
 pub mod locale_defaults;
 pub mod phrase_split;
 pub mod stub;
@@ -44,3 +50,6 @@ pub mod voice_loop;
 
 #[cfg(all(target_os = "macos", feature = "macos-native"))]
 pub mod macos;
+
+#[cfg(all(target_vendor = "apple", feature = "macos-native-26"))]
+pub mod macos26;
