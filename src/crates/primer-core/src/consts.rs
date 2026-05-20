@@ -266,6 +266,28 @@ pub mod speech {
     /// `× pct / 100` formula reads as percentage-of arithmetic rather
     /// than a bare literal.
     pub const PERCENT_DIVISOR: u64 = 100;
+
+    /// Tunable thresholds for the macos-native-26 derived-VAD state machine.
+    /// See `crates/primer-speech/src/macos26/vad.rs` and the design doc at
+    /// `docs/superpowers/specs/2026-05-20-macos-native-26-design.md`.
+    pub mod macos26 {
+        use std::time::Duration;
+
+        /// Empty or whitespace-only transcriber partials don't fire SpeechStart;
+        /// at least this many non-whitespace characters must be present.
+        pub const SPEECH_START_MIN_TEXT_CHARS: usize = 1;
+
+        /// Inactivity threshold after which the state machine emits SpeechEnd
+        /// even if the transcriber never sent `isFinal`. Set to 2× Silero's
+        /// 300 ms default because SpeechTranscriber partials don't fire during
+        /// true silence even mid-utterance, so a longer gap is safe.
+        pub const SPEECH_END_TIMEOUT: Duration = Duration::from_millis(600);
+
+        /// Cadence at which the audio task ticks the state machine to check
+        /// for inactivity-driven SpeechEnd. Anything under `SPEECH_END_TIMEOUT`
+        /// keeps the worst-case detection latency under 2× this value.
+        pub const EVENT_POLL_INTERVAL: Duration = Duration::from_millis(100);
+    }
 }
 
 /// Defaults shared across the CLI, GUI, and frontend for the learner
