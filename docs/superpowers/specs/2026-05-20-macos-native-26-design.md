@@ -41,10 +41,13 @@ This spec covers the integration of those APIs into `primer-speech` behind a new
 
 ```toml
 # primer-speech/Cargo.toml
-macos-native-26 = ["dep:objc2", "dep:objc2-foundation", "dep:objc2-avf-audio", "dep:objc2-speech", "dep:block2"]
+macos-native-26 = ["dep:swift-bridge", "dep:objc2-foundation", "dep:objc2-avf-audio"]
+
+[build-dependencies]
+swift-bridge-build = { version = "0.1", optional = true }  # gated by macos-native-26
 ```
 
-Same objc2 dep set as `macos-native`. No `dep:silero-vad-rust`, no `dep:ort`, no `dep:whisper-cpp-plus`. Mutually exclusive with `macos-native`:
+Notably this does **not** include `objc2-speech` — the new `SpeechAnalyzer` / `SpeechTranscriber` / `SpeechDetector` APIs are **Swift-only types** with no Obj-C class exposure (verified: the macOS 26.5 SDK ships `SF*` headers only). They cannot be reached via `objc2`'s `extern_class!` macros. Bridging happens via `swift-bridge` with a small Swift sidecar (see "Swift sidecar" section below). The dep additions versus `macos-native` are `swift-bridge` (replaces `objc2-speech` + `block2`) and the build-dep on `swift-bridge-build`. No `dep:silero-vad-rust`, no `dep:ort`, no `dep:whisper-cpp-plus`. Mutually exclusive with `macos-native`:
 
 ```rust
 // primer-speech/src/lib.rs
@@ -60,15 +63,53 @@ Mirrored in `primer-cli/src/main.rs` and `primer-gui/src/lib.rs`.
 ### Module layout
 
 ```
-primer-speech/src/macos26/
-├── mod.rs           pub use re-exports + module-level rustdoc
-├── analyzer.rs      objc2 wrapper around SpeechAnalyzer, SpeechTranscriber, SpeechDetector
-├── stt.rs           Macos26Stt + Macos26TranscriptionSession (impl StreamingSpeechToText)
-├── vad.rs           DerivedVadStateMachine — pure logic that turns transcriber Result events
-│                    into VadEvents; no trait impl, consumed directly by the audio thread
-├── locale.rs        primer Locale ↔ BCP47 mapping (en-US, de-DE only)
-└── audio_session.rs cfg-split: macOS no-op vs iOS AVAudioSession setup (single file with divergence)
+primer-speech/
+├── build.rs                              swift-bridge-build invocation + swiftc compile,
+│                                         gated on cfg(feature = "macos-native-26")
+├── swift-sources/
+│   └── Macos26Pipeline.swift             Swift sidecar — owns SpeechAnalyzer + transcriber,
+│                                         exposes a small class via swift-bridge
+└── src/macos26/
+    ├── mod.rs           pub use re-exports + module-level rustdoc
+    ├── bridge.rs        #[swift_bridge::bridge] module — extern "Swift" block
+    ├── analyzer.rs      Rust wrapper around the bridged Macos26Pipeline; consumes
+    │                    next_result() in a loop, feeds events out
+    ├── stt.rs           Macos26Stt + Macos26TranscriptionSession (impl StreamingSpeechToText)
+    ├── vad.rs           DerivedVadStateMachine — pure logic that turns transcriber Result events
+    │                    into VadEvents; no trait impl, consumed directly by the audio thread
+    ├── locale.rs        primer Locale ↔ BCP47 mapping (en-US, de-DE only)
+    └── audio_session.rs cfg-split: macOS no-op vs iOS AVAudioSession setup (single file with divergence)
 ```
+
+### Swift sidecar
+
+`swift-sources/Macos26Pipeline.swift` is a single Swift class (~150 LOC) that owns the SpeechAnalyzer pipeline and exposes a pull-based async interface to Rust. Rust calls `next_result()` in a loop rather than registering a callback — sidesteps the `FnMut`-callback area of `swift-bridge` that's less well documented, and matches Rust's natural async-loop ergonomics. Shape:
+
+```swift
+// swift-sources/Macos26Pipeline.swift (sketch — actual code in plan)
+public class Macos26Pipeline {
+    private let analyzer: SpeechAnalyzer
+    private let transcriber: SpeechTranscriber
+    private let inputBuilder: AsyncStream<AnalyzerInput>.Continuation
+    private var resultIterator: AsyncThrowingIterator<...>?
+
+    public init(localeBcp47: String) async throws { … }   // ensureModel + start analyzer
+    public func feedAudio(samples: [Float]) { … }         // yields AnalyzerInput onto stream
+    public func nextResult() async throws -> ResultEvent? // returns nil when stream ends
+    public func stop() async { … }
+}
+
+public struct ResultEvent {
+    public let text: String           // String, not AttributedString — crosses cleanly
+    public let isFinal: Bool
+    public let rangeStartMs: UInt64
+    public let rangeEndMs: UInt64
+}
+```
+
+`#[swift_bridge::bridge]` module on the Rust side declares the corresponding `extern "Swift"` block. `build.rs` invokes `swift-bridge-build` (generates the bridging Swift + C headers) and then `swiftc` (compiles `swift-sources/*.swift` plus the generated bridging Swift to a `.a` static library), and emits `cargo:rustc-link-lib=static=Macos26Pipeline` plus `cargo:rustc-link-arg=-Wl,-force_load,…` to keep the symbols.
+
+**Build prerequisites grow by one item:** `swiftc` on `PATH` (Xcode-bundled; same prerequisite as building the existing `spikes/macos26_speech/`). No new runtime prerequisite.
 
 `macos26/mod.rs` re-exports `MacosTextToSpeech` from the existing `crate::macos::tts` module — TTS is reused as-is. `macos::permissions` is similarly re-used. The module rustdoc documents the Apple-platform-portability intent (most files use `cfg(target_vendor = "apple")`; rename to `apple26/` is mechanical when iOS scaffolding lands).
 
@@ -252,15 +293,22 @@ Cold build under `macos-native-26` only is minutes faster than under `macos-nati
 
 Captured as proposed work items for the writing-plans skill (not commitments):
 
-1. `objc2-speech` binding probe — verify `SpeechAnalyzer` / `SpeechTranscriber` / `SpeechDetector` types are exposed by the published crate; write minimal FFI shims via raw `objc2` if not.
-2. `macos26/analyzer.rs` — Rust wrapper around the Speech FFI; mirrors the merged Swift spike's setup (`.progressiveTranscription`, `.medium` SpeechDetector). One async function `run(transcriber_results_sink, vad_events_sink)`.
-3. `macos26/vad.rs` — `DerivedVadStateMachine` + unit tests.
-4. `macos26/locale.rs` + `macos26/stt.rs` + `macos26/audio_session.rs` (the last cfg-split between macOS no-op and iOS AVAudioSession).
-5. `macos26/mod.rs` with TTS / permissions re-exports.
-6. `voice_loop::backends::build_local_backends_macos_native_26` glue.
-7. CLI/GUI feature wiring + mutual-exclusion `compile_error!`.
-8. Integration smoke (`#[ignore]`).
-9. CLAUDE.md note documenting the build flags, the A/B latency claim, the Apple-portability intent of the module, and the deferred `apple26/` rename.
+1. Cargo feature scaffold — declare `macos-native-26`, the `swift-bridge` deps, and the mutual-exclusion `compile_error!`. Empty `macos26/` module skeleton.
+2. `macos26/vad.rs` — `DerivedVadStateMachine` + unit tests. Pure logic, host-independent. Highest TDD value.
+3. `macos26/locale.rs` — Locale ↔ BCP47 mapping + tests.
+4. `primer-core::consts::speech::macos26` — the three tunable thresholds.
+5. Swift sidecar — write `swift-sources/Macos26Pipeline.swift` based on the merged spike code (`spikes/macos26_speech/Sources/macos26_speech/main.swift`). Same parameter choices (`.progressiveTranscription`, `.medium` SpeechDetector).
+6. `build.rs` — swift-bridge-build + swiftc invocation, gated on the feature.
+7. `macos26/bridge.rs` — `#[swift_bridge::bridge]` module declaring `extern "Swift"` block for `Macos26Pipeline`.
+8. `macos26/analyzer.rs` — Rust wrapper that drives `next_result()` in a loop, feeds the state machine, emits text + VadEvent on two `mpsc::Sender`s.
+9. `macos26/stt.rs` — `Macos26Stt` + `Macos26TranscriptionSession` (impl `StreamingSpeechToText`).
+10. `macos26/audio_session.rs` — cfg-split between macOS no-op and iOS AVAudioSession (iOS branch is a stub today; concrete impl deferred).
+11. `macos26/mod.rs` — re-exports including reused `MacosTextToSpeech`.
+12. `voice_loop::backends::build_local_backends_macos_native_26` — glue spawning the analyzer task + audio thread + state machine + channels.
+13. CLI feature propagation — `primer-cli/Cargo.toml` + `main.rs` `cfg!` arm + mutual-exclusion `compile_error!`.
+14. GUI feature propagation — same shape for `primer-gui`.
+15. Integration smoke test (`#[ignore]`'d).
+16. CLAUDE.md note documenting the build flags, swift-bridge prerequisite, A/B latency claim, Apple-portability intent of the module, and the deferred `apple26/` rename.
 
 ## Branch strategy
 
