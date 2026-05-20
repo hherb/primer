@@ -1,5 +1,18 @@
 fn main() {
     copy_seed_resources();
+
+    // libswift_Concurrency.dylib lives only in the dyld shared cache on
+    // macOS 12+. Add /usr/lib/swift to the binary's rpath so dyld can
+    // resolve the @rpath-referenced concurrency back-deployment lib
+    // emitted by swiftc. `cargo:rustc-link-arg` is package-scoped — it
+    // does NOT propagate from primer-speech (where the Swift sidecar is
+    // built) to the downstream binary crate, so we duplicate the rpath
+    // here. Mirrors crates/primer-cli/build.rs.
+    #[cfg(feature = "macos-native-26")]
+    {
+        println!("cargo:rustc-link-arg-bins=-Wl,-rpath,/usr/lib/swift");
+    }
+
     tauri_build::build();
 }
 
