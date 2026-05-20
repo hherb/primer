@@ -13,3 +13,5 @@
 //! "Goals" section.
 
 // Sub-modules land in subsequent plan tasks.
+
+pub mod vad;
