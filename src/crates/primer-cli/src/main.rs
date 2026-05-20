@@ -13,6 +13,12 @@
 #[cfg(feature = "speech")]
 mod speech_loop;
 
+#[cfg(all(feature = "macos-native", feature = "macos-native-26"))]
+compile_error!(
+    "`macos-native` and `macos-native-26` are mutually exclusive — pick one \
+     (`macos-native-26` for macOS 26+, `macos-native` for older macOS)"
+);
+
 use std::io::{self, BufRead, Write};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -231,56 +237,77 @@ struct Cli {
     verbose: bool,
 
     /// Run the voice REPL instead of the text REPL. On builds *without*
-    /// `--features macos-native` (the whisper+piper path) requires
-    /// `--whisper-model`, `--voice-onnx`, `--voice-config`. On the
-    /// macOS-native build (`--features speech,macos-native` on macOS)
-    /// SFSpeechRecognizer + AVSpeechSynthesizer carry STT and TTS, so
-    /// those three flags are not declared (closes #112). Available
-    /// only when the binary is built with `--features speech`.
+    /// `--features macos-native` or `--features macos-native-26` (the
+    /// whisper+piper path) requires `--whisper-model`, `--voice-onnx`,
+    /// `--voice-config`. On either Apple-native build SFSpeechRecognizer /
+    /// SpeechAnalyzer + AVSpeechSynthesizer carry STT and TTS, so those
+    /// three flags are not declared (closes #112). Available only when
+    /// the binary is built with `--features speech`.
     #[cfg(feature = "speech")]
     #[cfg_attr(
-        not(all(target_os = "macos", feature = "macos-native")),
+        not(all(
+            target_os = "macos",
+            any(feature = "macos-native", feature = "macos-native-26")
+        )),
         arg(long, requires_all = ["whisper_model", "voice_onnx", "voice_config"])
     )]
-    #[cfg_attr(all(target_os = "macos", feature = "macos-native"), arg(long))]
+    #[cfg_attr(
+        all(
+            target_os = "macos",
+            any(feature = "macos-native", feature = "macos-native-26")
+        ),
+        arg(long)
+    )]
     speech: bool,
 
     /// Path to the whisper.cpp GGML/GGUF model file
     /// (e.g. ~/models/ggml-small.en.bin). Required if --speech.
-    /// Not declared on the macOS-native build (#112).
+    /// Not declared on the macOS-native or macOS-native-26 build (#112).
     #[cfg(all(
         feature = "speech",
-        not(all(target_os = "macos", feature = "macos-native"))
+        not(all(
+            target_os = "macos",
+            any(feature = "macos-native", feature = "macos-native-26")
+        ))
     ))]
     #[arg(long, value_name = "PATH")]
     whisper_model: Option<PathBuf>,
 
     /// Path to the Piper voice ONNX file
     /// (e.g. ~/models/voices/en_GB-alba-medium.onnx). Required if --speech.
-    /// Not declared on the macOS-native build (#112).
+    /// Not declared on the macOS-native or macOS-native-26 build (#112).
     #[cfg(all(
         feature = "speech",
-        not(all(target_os = "macos", feature = "macos-native"))
+        not(all(
+            target_os = "macos",
+            any(feature = "macos-native", feature = "macos-native-26")
+        ))
     ))]
     #[arg(long, value_name = "PATH")]
     voice_onnx: Option<PathBuf>,
 
     /// Path to the matching Piper voice JSON sidecar
     /// (e.g. ~/models/voices/en_GB-alba-medium.onnx.json). Required if --speech.
-    /// Not declared on the macOS-native build (#112).
+    /// Not declared on the macOS-native or macOS-native-26 build (#112).
     #[cfg(all(
         feature = "speech",
-        not(all(target_os = "macos", feature = "macos-native"))
+        not(all(
+            target_os = "macos",
+            any(feature = "macos-native", feature = "macos-native-26")
+        ))
     ))]
     #[arg(long, value_name = "PATH")]
     voice_config: Option<PathBuf>,
 
     /// Voice id used as the VoiceProfile.model_id. Must match the file
     /// stem of --voice-onnx (Piper rejects mismatches at session open).
-    /// Not declared on the macOS-native build (#112).
+    /// Not declared on the macOS-native or macOS-native-26 build (#112).
     #[cfg(all(
         feature = "speech",
-        not(all(target_os = "macos", feature = "macos-native"))
+        not(all(
+            target_os = "macos",
+            any(feature = "macos-native", feature = "macos-native-26")
+        ))
     ))]
     #[arg(long, default_value = "en_GB-alba-medium")]
     voice: String,
@@ -308,7 +335,10 @@ fn parse_mic_silence_ms(s: &str) -> std::result::Result<u32, String> {
 
 #[cfg(all(
     feature = "speech",
-    not(all(target_os = "macos", feature = "macos-native"))
+    not(all(
+        target_os = "macos",
+        any(feature = "macos-native", feature = "macos-native-26")
+    ))
 ))]
 fn validate_speech_assets(
     whisper_model: &Path,
@@ -447,11 +477,21 @@ fn main() -> anyhow::Result<()> {
 /// `await_pending_post_response`, so the user-visible behaviour is
 /// unchanged.
 fn run_tokio_on_main() -> anyhow::Result<()> {
-    #[cfg(all(target_os = "macos", feature = "macos-native"))]
+    // Both macOS-native builds (macos-native and macos-native-26) require a
+    // current-thread runtime on the OS main thread so that AVSpeechSynthesizer
+    // synthesis runs on main (the path that drives NSRunLoop::runUntilDate).
+    // See the doc-comment on this function for the full rationale.
+    #[cfg(all(
+        target_os = "macos",
+        any(feature = "macos-native", feature = "macos-native-26")
+    ))]
     let runtime = tokio::runtime::Builder::new_current_thread()
         .enable_all()
         .build()?;
-    #[cfg(not(all(target_os = "macos", feature = "macos-native")))]
+    #[cfg(not(all(
+        target_os = "macos",
+        any(feature = "macos-native", feature = "macos-native-26")
+    )))]
     let runtime = tokio::runtime::Builder::new_multi_thread()
         .enable_all()
         .build()?;
@@ -892,11 +932,14 @@ async fn async_main() -> anyhow::Result<()> {
 
     #[cfg(feature = "speech")]
     if cli.speech {
-        // On the macOS-native build the four whisper/piper flags are not
-        // declared at all (#112) — SFSpeechRecognizer + AVSpeechSynthesizer
-        // carry STT and TTS and the corresponding `SpeechLoopConfig`
-        // fields are likewise cfg-gated out.
-        #[cfg(not(all(target_os = "macos", feature = "macos-native")))]
+        // On either macOS-native build the four whisper/piper flags are not
+        // declared at all (#112) — SFSpeechRecognizer / SpeechAnalyzer +
+        // AVSpeechSynthesizer carry STT and TTS and the corresponding
+        // `SpeechLoopConfig` fields are likewise cfg-gated out.
+        #[cfg(not(all(
+            target_os = "macos",
+            any(feature = "macos-native", feature = "macos-native-26")
+        )))]
         let cfg = {
             let whisper_model = cli.whisper_model.as_ref().expect("clap requires_all");
             let voice_onnx = cli.voice_onnx.as_ref().expect("clap requires_all");
@@ -912,7 +955,10 @@ async fn async_main() -> anyhow::Result<()> {
                 locale: cli_locale,
             }
         };
-        #[cfg(all(target_os = "macos", feature = "macos-native"))]
+        #[cfg(all(
+            target_os = "macos",
+            any(feature = "macos-native", feature = "macos-native-26")
+        ))]
         let cfg = speech_loop::SpeechLoopConfig {
             mic_silence_ms: cli.mic_silence_ms,
             verbose: cli.verbose,
@@ -1097,19 +1143,28 @@ mod tests {
     // still applies, because `build_local_backends` needs all three
     // model paths to open whisper + piper.
 
-    #[cfg(all(feature = "speech", all(target_os = "macos", feature = "macos-native")))]
+    #[cfg(all(
+        feature = "speech",
+        all(
+            target_os = "macos",
+            any(feature = "macos-native", feature = "macos-native-26")
+        )
+    ))]
     #[test]
     fn speech_alone_parses_on_macos_native_without_whisper_piper_flags() {
         let result = Cli::try_parse_from(["primer", "--speech"]);
         assert!(
             result.is_ok(),
-            "expected --speech alone to parse on macos-native; got: {result:?}"
+            "expected --speech alone to parse on macos-native/macos-native-26; got: {result:?}"
         );
     }
 
     #[cfg(all(
         feature = "speech",
-        not(all(target_os = "macos", feature = "macos-native"))
+        not(all(
+            target_os = "macos",
+            any(feature = "macos-native", feature = "macos-native-26")
+        ))
     ))]
     #[test]
     fn speech_alone_still_rejected_off_macos_native() {
