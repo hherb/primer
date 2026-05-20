@@ -1,0 +1,30 @@
+[package]
+name = "whisper_probe"
+version = "0.0.1"
+edition = "2024"
+publish = false
+
+[[bin]]
+name = "whisper_probe"
+path = "src/main.rs"
+
+[dependencies]
+primer-core = { path = "../../src/crates/primer-core" }
+primer-speech = { path = "../../src/crates/primer-speech", features = ["silero", "whisper", "cpal"] }
+anyhow = "1"
+clap = { version = "4", features = ["derive"] }
+ringbuf = "0.4"
+
+# Standalone workspace so we don't accidentally hook into the production
+# workspace at ../../src and trigger its builds via `cargo build` here.
+[workspace]
+
+# Mirror the production workspace's [patch.crates-io] entries — they pin
+# the vendored silero-vad-rust (load-dynamic feature removed to enable
+# static ORT linking) and piper-rs (ort 2.0.0-rc.10 API compatibility).
+# Without these the spike pulls the upstream silero-vad-rust 6.2.1 from
+# crates.io which dynamic-loads `libonnxruntime.dylib` at runtime and
+# panics because no .dylib is on the search path. Keep these two paths
+# in sync with src/Cargo.toml.
+[patch.crates-io]
+silero-vad-rust = { path = "../../src/vendor/silero-vad-rust" }

@@ -1,9 +1,17 @@
 // Minimal proof: mic -> SpeechAnalyzer/SpeechTranscriber -> stdout partials + finals.
+// Each result line carries timing:
+//   [wall_ms] tag  lag=Xms  range=A..Bms  fin=Cms  "text"
+// where wall_ms is wall-clock ms since first audio frame, range is the audio
+// time the result covers (per SpeechTranscriber.Result.range), fin is
+// resultsFinalizationTime, and lag = wall_ms - range_end_ms (positive means
+// transcript trails the audio it describes).
+//
 // Usage:   swift run macos26_speech [bcp47-locale]
 // Default: en-US. Try de-DE; on first run for a locale, the model downloads.
 // Stop:    Ctrl+C.
 
 import AVFoundation
+import CoreMedia
 import Foundation
 import Speech
 
@@ -56,11 +64,14 @@ struct Spike {
             throw SpikeError.noConverter
         }
 
+        let anchor = TimingAnchor()
+
         audioEngine.inputNode.installTap(
             onBus: 0,
             bufferSize: 4096,
             format: micFormat
         ) { buffer, _ in
+            anchor.markFirstAudio()
             let ratio = analyzerFormat.sampleRate / micFormat.sampleRate
             let capacity = AVAudioFrameCount(Double(buffer.frameLength) * ratio) + 1024
             guard let out = AVAudioPCMBuffer(
@@ -93,9 +104,18 @@ struct Spike {
         print("---")
 
         for try await result in transcriber.results {
-            let text = String(result.text.characters)
-            let tag = result.isFinal ? "FINAL " : "part  "
-            print("\(tag) \(text)")
+            let text = String(result.text.characters).trimmingCharacters(in: .whitespacesAndNewlines)
+            let wallMs = anchor.elapsedMs() ?? 0
+            let rangeStartMs = result.range.start.seconds * 1000
+            let rangeEndMs = result.range.end.seconds * 1000
+            let finMs = result.resultsFinalizationTime.seconds * 1000
+            let lagMs = wallMs - rangeEndMs
+            let tag = result.isFinal ? "FINAL" : "part "
+            let line = String(
+                format: "[%7.0fms] %@  lag=%6.0fms  range=%7.0f..%-7.0fms  fin=%7.0fms  %@",
+                wallMs, tag, lagMs, rangeStartMs, rangeEndMs, finMs, text
+            )
+            print(line)
             fflush(stdout)
         }
     }
@@ -121,6 +141,25 @@ struct Spike {
         }
         try await req.downloadAndInstall()
         log("download complete")
+    }
+}
+
+/// One-time-set wall-clock anchor. Set from the audio tap thread on the
+/// first buffer; read from the result-consumer task. NSLock-guarded so
+/// the cross-thread access is sound under Swift 6 strict concurrency.
+final class TimingAnchor: @unchecked Sendable {
+    private let lock = NSLock()
+    private var firstAudio: CFAbsoluteTime?
+
+    func markFirstAudio() {
+        lock.lock(); defer { lock.unlock() }
+        if firstAudio == nil { firstAudio = CFAbsoluteTimeGetCurrent() }
+    }
+
+    func elapsedMs() -> Double? {
+        lock.lock(); defer { lock.unlock() }
+        guard let start = firstAudio else { return nil }
+        return (CFAbsoluteTimeGetCurrent() - start) * 1000.0
     }
 }
 
