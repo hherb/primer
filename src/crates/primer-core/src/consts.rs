@@ -286,10 +286,14 @@ pub mod speech {
         ///
         /// Empirical tuning (manual smoke, PR #134): 600 ms cuts off mid-
         /// sentence on natural child-paced speech with brief inter-word
-        /// pauses ("hello primer, how are…you?" finalised at "how are").
-        /// 1200 ms covers natural pauses while keeping inter-turn latency
-        /// well under the budget a child notices as "the Primer is slow".
-        pub const SPEECH_END_TIMEOUT: Duration = Duration::from_millis(1200);
+        /// pauses; 1200 ms is too conservative and adds noticeable post-
+        /// utterance latency on short sentences. 1000 ms is the
+        /// compromise: covers natural inter-word pauses while keeping
+        /// the perceived "Primer is silent" gap below the threshold a
+        /// child notices as "slow to respond". Long, naturally-ended
+        /// sentences trip SpeechTranscriber's real `isFinal=true` and
+        /// bypass this timeout entirely.
+        pub const SPEECH_END_TIMEOUT: Duration = Duration::from_millis(1000);
 
         /// Cadence at which the audio task ticks the state machine to check
         /// for inactivity-driven SpeechEnd. Anything under `SPEECH_END_TIMEOUT`
