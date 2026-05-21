@@ -278,10 +278,18 @@ pub mod speech {
         pub const SPEECH_START_MIN_TEXT_CHARS: usize = 1;
 
         /// Inactivity threshold after which the state machine emits SpeechEnd
-        /// even if the transcriber never sent `isFinal`. Set to 2× Silero's
-        /// 300 ms default because SpeechTranscriber partials don't fire during
-        /// true silence even mid-utterance, so a longer gap is safe.
-        pub const SPEECH_END_TIMEOUT: Duration = Duration::from_millis(600);
+        /// even if the transcriber never sent `isFinal`. SpeechTranscriber
+        /// with `.progressiveTranscription` only emits volatile partials
+        /// during free-running audio (real isFinal arrives only on full
+        /// pipeline teardown), so the synthetic-final path at this timeout
+        /// is the load-bearing way transcripts reach the dialogue manager.
+        ///
+        /// Empirical tuning (manual smoke, PR #134): 600 ms cuts off mid-
+        /// sentence on natural child-paced speech with brief inter-word
+        /// pauses ("hello primer, how are…you?" finalised at "how are").
+        /// 1200 ms covers natural pauses while keeping inter-turn latency
+        /// well under the budget a child notices as "the Primer is slow".
+        pub const SPEECH_END_TIMEOUT: Duration = Duration::from_millis(1200);
 
         /// Cadence at which the audio task ticks the state machine to check
         /// for inactivity-driven SpeechEnd. Anything under `SPEECH_END_TIMEOUT`
