@@ -1011,8 +1011,19 @@ pub async fn build_local_backends_macos_native_26(
     let tts: Arc<dyn StreamingTextToSpeech> = Arc::new(MacosTextToSpeech::new(&bcp47)?);
     let tts_sample_rate = tts.sample_rate();
 
-    // ── Input resampler: mic_rate → 16 kHz for SpeechAnalyzer ──
-    let analyzer_rate: u32 = 16_000;
+    // ── Input resampler: mic_rate → analyzer's preferred rate ──
+    // The analyzer's preferred rate is queried from the Swift side
+    // (SpeechAnalyzer.bestAvailableAudioFormat) rather than hardcoded:
+    // SpeechTranscriber's preferred format is not necessarily 16 kHz,
+    // and writing samples at the wrong rate into a buffer claiming the
+    // analyzer's format silently produces inaudible garbage.
+    let analyzer_rate_f64 = pipeline.analyzer_sample_rate();
+    let analyzer_rate: u32 = analyzer_rate_f64.round() as u32;
+    tracing::info!(
+        target: "primer::speech::macos26",
+        "analyzer sample rate: {} Hz (mic: {} Hz)",
+        analyzer_rate, mic_rate
+    );
     let analyzer_chunk: usize = 512;
     let in_chunk_samples: usize =
         (analyzer_chunk as u64 * mic_rate as u64 / analyzer_rate as u64) as usize;

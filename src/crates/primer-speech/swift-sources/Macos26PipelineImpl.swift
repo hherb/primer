@@ -11,6 +11,14 @@ import CoreMedia
 import Foundation
 import Speech
 
+// Diagnostic logger — writes to stderr with a stable tag so primer's
+// `RUST_LOG=...` output and the Swift-side traces can be eyeballed
+// together. Cheap; only fires at startup, on first audio chunk, on
+// every transcriber result, and on stream termination.
+@inline(__always) private func swiftLog(_ msg: String) {
+    FileHandle.standardError.write(Data("[swift:macos26] \(msg)\n".utf8))
+}
+
 public enum Macos26PipelineError: Error {
     case localeNotSupported(String)
     case noAnalyzerFormat
@@ -44,6 +52,9 @@ public final class Macos26Pipeline {
     // tokio::select! dropping the awaiting future) does not race the
     // cleanup against the still-running iterator advance.
     private var nextResultTask: Task<ResultEvent?, Error>?
+
+    // Diagnostic counter — only used by swiftLog gating in feedAudio.
+    private var feedAudioCount: Int = 0
 
     // Private initializer — external callers use the static factory create(localeBcp47:).
     private init(
@@ -95,17 +106,35 @@ public final class Macos26Pipeline {
             throw Macos26PipelineError.noAnalyzerFormat
         }
 
+        swiftLog(
+            "analyzerFormat: sampleRate=\(fmt.sampleRate) channelCount=\(fmt.channelCount) "
+            + "commonFormat=\(fmt.commonFormat.rawValue) "
+            + "isInterleaved=\(fmt.isInterleaved) "
+            + "(pcmFormatFloat32 raw=1, pcmFormatInt16 raw=2, pcmFormatInt32 raw=3, pcmFormatFloat64 raw=4)"
+        )
+
         let (inputStream, inputContinuation) = AsyncStream<AnalyzerInput>.makeStream()
         try await analyzer.start(inputSequence: inputStream)
 
         let iter = AsyncThrowingStream<SpeechTranscriber.Result, Error> { cont in
             let task = Task {
+                swiftLog("transcriber.results subscription started")
+                var resultCount = 0
                 do {
                     for try await r in transcriber.results {
+                        resultCount += 1
+                        // Log every result so the absence of any signal is
+                        // diagnostically loud — a healthy session prints
+                        // dozens of these per spoken phrase.
+                        let txt = String(r.text.characters)
+                            .trimmingCharacters(in: .whitespacesAndNewlines)
+                        swiftLog("result #\(resultCount) isFinal=\(r.isFinal) text=\"\(txt)\"")
                         cont.yield(r)
                     }
+                    swiftLog("transcriber.results stream ended cleanly after \(resultCount) result(s)")
                     cont.finish()
                 } catch {
+                    swiftLog("transcriber.results threw after \(resultCount) result(s): \(error)")
                     cont.finish(throwing: error)
                 }
             }
@@ -131,15 +160,36 @@ public final class Macos26Pipeline {
     /// Accepts RustVec<Float> as passed by swift-bridge from Vec<f32>.
     public func feedAudio(samples: RustVec<Float>) {
         let count = Int(samples.len())
+        feedAudioCount += 1
+        if feedAudioCount == 1 {
+            swiftLog("first feedAudio call: samples=\(count)")
+        } else if feedAudioCount % 200 == 0 {
+            swiftLog("feedAudio call #\(feedAudioCount): samples=\(count)")
+        }
         guard let buffer = AVAudioPCMBuffer(
             pcmFormat: analyzerFormat,
             frameCapacity: AVAudioFrameCount(count)
-        ) else { return }
+        ) else {
+            swiftLog("feedAudio: AVAudioPCMBuffer allocation failed (count=\(count))")
+            return
+        }
         buffer.frameLength = AVAudioFrameCount(count)
-        if let channelData = buffer.floatChannelData {
-            for i in 0..<count {
-                channelData[0][i] = samples.get(index: UInt(i))!
+        guard let channelData = buffer.floatChannelData else {
+            // floatChannelData is nil whenever analyzerFormat.commonFormat
+            // isn't pcmFormatFloat32. Without conversion the analyzer
+            // would receive an empty buffer and emit nothing — surface
+            // it loudly the first few times.
+            if feedAudioCount <= 3 {
+                swiftLog(
+                    "feedAudio: floatChannelData is nil — analyzerFormat is not Float32 "
+                    + "(commonFormat=\(analyzerFormat.commonFormat.rawValue)). "
+                    + "Audio dropped; need AVAudioConverter."
+                )
             }
+            return
+        }
+        for i in 0..<count {
+            channelData[0][i] = samples.get(index: UInt(i))!
         }
         inputContinuation.yield(AnalyzerInput(buffer: buffer))
     }

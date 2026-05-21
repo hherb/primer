@@ -91,20 +91,37 @@ pub async fn run_consumer_loop(
     text_tx: mpsc::Sender<TextMessage>,
     event_tx: mpsc::Sender<VadEvent>,
 ) -> Result<()> {
+    tracing::info!(target: "primer::speech::macos26", "consumer loop starting");
     let mut sm = DerivedVadStateMachine::new();
     let mut buf = PartialBuffer::new();
     let mut tick = tokio::time::interval(EVENT_POLL_INTERVAL);
     // Skip the immediate first tick that tokio fires at t=0.
     tick.tick().await;
+    let mut audio_chunks_received: u64 = 0;
+    let mut results_received: u64 = 0;
 
     loop {
         tokio::select! {
             // Audio in from the mic thread.
             samples = audio_rx.recv() => {
                 match samples {
-                    Some(s) => pipeline.feed_audio(s),
+                    Some(s) => {
+                        audio_chunks_received += 1;
+                        if audio_chunks_received == 1 {
+                            tracing::info!(
+                                target: "primer::speech::macos26",
+                                "first audio chunk reached consumer (len={})", s.len()
+                            );
+                        }
+                        pipeline.feed_audio(s);
+                    }
                     None => {
                         // Mic gone — stop the pipeline gracefully.
+                        tracing::info!(
+                            target: "primer::speech::macos26",
+                            "audio_rx closed; stopping pipeline (chunks={} results={})",
+                            audio_chunks_received, results_received
+                        );
                         pipeline.stop().await;
                         return Ok(());
                     }
@@ -114,7 +131,20 @@ pub async fn run_consumer_loop(
             // ResultEvent with stream_done=true to signal end-of-stream.
             event = pipeline.next_result() => {
                 if event.stream_done {
+                    tracing::info!(
+                        target: "primer::speech::macos26",
+                        "Swift stream ended (stream_done=true), chunks={} results={}",
+                        audio_chunks_received, results_received
+                    );
                     return Ok(());
+                }
+                results_received += 1;
+                if results_received <= 3 || results_received % 50 == 0 {
+                    tracing::info!(
+                        target: "primer::speech::macos26",
+                        "result #{} is_final={} text={:?}",
+                        results_received, event.is_final, event.text
+                    );
                 }
                 let now = Instant::now();
                 if let Some(ev) = sm.on_result(&event.text, event.is_final, now) {
