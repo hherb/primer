@@ -56,6 +56,13 @@ public final class Macos26Pipeline {
     // Diagnostic counter — only used by swiftLog gating in feedAudio.
     private var feedAudioCount: Int = 0
 
+    // Text of the most-recently-yielded result. Cached here because
+    // including a String field in the async-returned shared `ResultEvent`
+    // triggers a libmalloc heap-allocator-mismatch crash in swift-bridge
+    // 0.1.x (see bridge.rs ResultEvent comment). Rust fetches via the
+    // sync `lastResultText()` accessor after each await.
+    private var lastText: String = ""
+
     // Private initializer — external callers use the static factory create(localeBcp47:).
     private init(
         analyzer: SpeechAnalyzer,
@@ -246,10 +253,14 @@ public final class Macos26Pipeline {
             guard let result = try await iter.next() else { return nil }
             let text = String(result.text.characters)
                 .trimmingCharacters(in: .whitespacesAndNewlines)
+            // Cache the text for Rust to retrieve via lastResultText().
+            // Including the String in the returned ResultEvent triggers a
+            // libmalloc abort in swift-bridge 0.1.x; the sync accessor
+            // avoids the async-struct-String marshalling path entirely.
+            self.lastText = text
             let startMs = UInt64(max(0, result.range.start.seconds * 1000))
             let endMs = UInt64(max(0, result.range.end.seconds * 1000))
             return ResultEvent(
-                text: RustString(text),
                 is_final: result.isFinal,
                 range_start_ms: startMs,
                 range_end_ms: endMs,
@@ -267,9 +278,27 @@ public final class Macos26Pipeline {
     /// sentinel value instead of returning Optional.
     public func nextResultBridge() async -> ResultEvent {
         guard let event = try? await nextResult() else {
-            return ResultEvent(text: RustString(""), is_final: false, range_start_ms: 0, range_end_ms: 0, stream_done: true)
+            // On end-of-stream, clear the cached text so a stale value
+            // can't leak to a Rust call paired with stream_done=true.
+            self.lastText = ""
+            return ResultEvent(
+                is_final: false,
+                range_start_ms: 0,
+                range_end_ms: 0,
+                stream_done: true
+            )
         }
         return event
+    }
+
+    /// Sync accessor for the most-recently-yielded result's text. Paired
+    /// with nextResultBridge() — Rust calls this after each await to get
+    /// the transcript that goes with the just-returned ResultEvent.
+    /// Returns RustString so swift-bridge handles the cross-language
+    /// String marshalling at a sync boundary (which is reliable in
+    /// 0.1.x, unlike async shared-struct String fields).
+    public func lastResultText() -> RustString {
+        return RustString(lastText)
     }
 
     /// Stop the analyzer and tear down the pipeline.

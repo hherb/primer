@@ -138,16 +138,21 @@ pub async fn run_consumer_loop(
                     );
                     return Ok(());
                 }
+                // Text comes via a separate sync accessor — see bridge.rs
+                // for the swift-bridge 0.1.x String-in-async-struct bug.
+                // Must call BEFORE next pipeline.next_result() since the
+                // Swift side overwrites lastText on each iteration.
+                let text = pipeline.last_result_text();
                 results_received += 1;
                 if results_received <= 3 || results_received % 50 == 0 {
                     tracing::info!(
                         target: "primer::speech::macos26",
                         "result #{} is_final={} text={:?}",
-                        results_received, event.is_final, event.text
+                        results_received, event.is_final, text
                     );
                 }
                 let now = Instant::now();
-                if let Some(ev) = sm.on_result(&event.text, event.is_final, now) {
+                if let Some(ev) = sm.on_result(&text, event.is_final, now) {
                     if event_tx.try_send(ev).is_err() {
                         tracing::warn!(
                             target: "primer::speech::macos26",
@@ -157,7 +162,7 @@ pub async fn run_consumer_loop(
                 }
                 let msg = TextMessage {
                     segment: TranscriptSegment {
-                        text: event.text,
+                        text,
                         start_ms: event.range_start_ms,
                         end_ms: event.range_end_ms,
                     },
