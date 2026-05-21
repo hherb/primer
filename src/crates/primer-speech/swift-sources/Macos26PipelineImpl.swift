@@ -110,7 +110,7 @@ public final class Macos26Pipeline {
             "analyzerFormat: sampleRate=\(fmt.sampleRate) channelCount=\(fmt.channelCount) "
             + "commonFormat=\(fmt.commonFormat.rawValue) "
             + "isInterleaved=\(fmt.isInterleaved) "
-            + "(pcmFormatFloat32 raw=1, pcmFormatInt16 raw=2, pcmFormatInt32 raw=3, pcmFormatFloat64 raw=4)"
+            + "(pcmFormatFloat32=1, pcmFormatFloat64=2, pcmFormatInt16=3, pcmFormatInt32=4)"
         )
 
         let (inputStream, inputContinuation) = AsyncStream<AnalyzerInput>.makeStream()
@@ -156,8 +156,12 @@ public final class Macos26Pipeline {
     }
 
     /// Push one PCM chunk into the analyzer. samples is mono Float32
-    /// at the analyzer's preferred rate. Rust resamples upstream.
-    /// Accepts RustVec<Float> as passed by swift-bridge from Vec<f32>.
+    /// at the analyzer's preferred sample rate (queried from Rust via
+    /// `analyzer_sample_rate()`). The buffer storage type is dictated
+    /// by `analyzerFormat.commonFormat`; SpeechTranscriber on macOS 26.5
+    /// requests `pcmFormatInt16` for en-US/de-DE, so we convert Float32
+    /// to Int16 inline. Float32 buffers are still supported in case a
+    /// future locale or macOS version chooses a different format.
     public func feedAudio(samples: RustVec<Float>) {
         let count = Int(samples.len())
         feedAudioCount += 1
@@ -174,23 +178,43 @@ public final class Macos26Pipeline {
             return
         }
         buffer.frameLength = AVAudioFrameCount(count)
-        guard let channelData = buffer.floatChannelData else {
-            // floatChannelData is nil whenever analyzerFormat.commonFormat
-            // isn't pcmFormatFloat32. Without conversion the analyzer
-            // would receive an empty buffer and emit nothing — surface
-            // it loudly the first few times.
+
+        switch analyzerFormat.commonFormat {
+        case .pcmFormatFloat32:
+            guard let channelData = buffer.floatChannelData else {
+                if feedAudioCount <= 3 {
+                    swiftLog("feedAudio: float32 buffer has nil floatChannelData (impossible)")
+                }
+                return
+            }
+            for i in 0..<count {
+                channelData[0][i] = samples.get(index: UInt(i))!
+            }
+        case .pcmFormatInt16:
+            guard let channelData = buffer.int16ChannelData else {
+                if feedAudioCount <= 3 {
+                    swiftLog("feedAudio: int16 buffer has nil int16ChannelData (impossible)")
+                }
+                return
+            }
+            // Float32 sample range is [-1.0, 1.0]; clamp then scale to
+            // Int16's full range. 32767 (not 32768) so a Float of +1.0
+            // round-trips cleanly through the symmetric Int16 range.
+            for i in 0..<count {
+                let f = samples.get(index: UInt(i))!
+                let clamped = max(-1.0, min(1.0, f))
+                channelData[0][i] = Int16(clamped * 32767.0)
+            }
+        default:
             if feedAudioCount <= 3 {
                 swiftLog(
-                    "feedAudio: floatChannelData is nil — analyzerFormat is not Float32 "
-                    + "(commonFormat=\(analyzerFormat.commonFormat.rawValue)). "
-                    + "Audio dropped; need AVAudioConverter."
+                    "feedAudio: unsupported commonFormat=\(analyzerFormat.commonFormat.rawValue); "
+                    + "samples dropped. Add conversion path if this fires."
                 )
             }
             return
         }
-        for i in 0..<count {
-            channelData[0][i] = samples.get(index: UInt(i))!
-        }
+
         inputContinuation.yield(AnalyzerInput(buffer: buffer))
     }
 
