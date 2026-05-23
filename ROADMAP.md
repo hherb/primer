@@ -119,6 +119,14 @@ This roadmap is organised around one principle: **get a working conversation loo
 - [ ] Silence handling (long pauses during thinking are normal for children — don't rush them)
 - [x] Voice round-trip POC (`--speech` mode) — end-to-end LISTEN → LATENT_THINK → SPEAK → LISTEN state machine in `primer-cli::speech_loop`. `primer-speech::cpal_io` (`MicCapture`, `SpeakerSink`, `Resampler`). `rust-toolchain.toml` pins Rust 1.87+. `--speech`, `--whisper-model`, `--voice-onnx`, `--voice-config`, `--voice`, `--mic-silence-ms` CLI flags. 10+ mock-driven `speech_loop` tests + 5 `cpal_io` unit tests. 2026-05-02.
 
+### 2.4 — Native Apple speech (macOS / iOS)
+
+- [x] **macOS-native speech backend (`--features macos-native`)** — landed (2026-05-15 STT + 2026-05-19 streaming TTS; PRs #95, #112, #122, #123). `MacosSpeechToText` via `SFSpeechRecognizer` with on-device enforcement (`requiresOnDeviceRecognition = true`; never falls back to network); `MacosTextToSpeech` via `AVSpeechSynthesizer.writeUtterance:toBufferCallback:` with phrase-by-phrase PCM streaming (Stage B, PR #123: PCM chunks flow into the speaker as they're emitted, instead of being buffered into a full-phrase `AudioChunk`). Silero stays as the VAD on this path because macOS-26-only `SpeechDetector` would break the macOS 13 floor. en-US + de-DE only — Hindi is deferred until SpeechAnalyzer ships `hi-IN` on-device.
+- [x] **Supertonic TTS vendor (`--features supertonic`)** — landed (PRs #127, #128, 2026-05-19); available behind the `supertonic` feature for A/B evaluation. Not wired into a default code path.
+- [x] **macOS 26 SpeechAnalyzer streaming-STT spike** — landed (PR #130, 2026-05-20). Spike binary that calls `SpeechAnalyzer` + `SpeechTranscriber` via a Swift sidecar; surfaced the bridge shape that PR #134 builds on.
+- [x] **macOS 26 vs Whisper A/B latency probe** — landed (PR #131, 2026-05-20). Empirical measurement: SpeechAnalyzer is ~100× faster to first partial (~30 ms vs ~3.8 s) and ~2× faster to final (~800 ms vs ~1.8 s) than Whisper `ggml-small.en` on macOS 26.5.
+- [ ] **macOS 26 SpeechAnalyzer backend (`--features macos-native-26`)** — in flight (PR #134, opened 2026-05-20, DRAFT). Spec at `docs/superpowers/specs/2026-05-20-macos-native-26-design.md`, 16-task plan at `docs/superpowers/plans/2026-05-20-macos-native-26.md`. Replaces Whisper + Silero + ONNX runtime with `SpeechAnalyzer` + `SpeechTranscriber` + `SpeechDetector` via a Swift sidecar bridged through `swift-bridge`. Mutually exclusive with `macos-native` at compile time. en-US + de-DE only on macOS 26.5; Hindi `hi-IN` errors loudly at construction (not on-device for `SpeechTranscriber` yet). **Pending a manual mic round-trip smoke** before flipping out of DRAFT.
+
 **Phase 2 exit criteria:** A child can have the Phase 0 conversation entirely by voice, with the Primer speaking responses aloud.
 
 ---
