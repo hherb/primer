@@ -23,6 +23,7 @@ pub fn configure_for_capture() -> Result<()> {
     Err(primer_core::error::PrimerError::Speech(
         "macos26::audio_session: iOS session configuration is not yet \
          implemented. Add the AVAudioSession setup before shipping an \
-         iOS build.".into()
+         iOS build."
+            .into(),
     ))
 }

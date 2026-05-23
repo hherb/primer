@@ -1,11 +1,11 @@
 use anyhow::Result;
 use clap::Parser;
-use std::path::PathBuf;
 use std::fs;
 use std::mem;
+use std::path::PathBuf;
 
 use supertonic_tts::helper::{
-    load_text_to_speech, load_voice_style, timer, write_wav_file, sanitize_filename,
+    load_text_to_speech, load_voice_style, sanitize_filename, timer, write_wav_file,
 };
 
 #[derive(Parser, Debug)]
@@ -131,10 +131,10 @@ fn main() -> Result<()> {
     }
 
     println!("\n=== Synthesis completed successfully! ===");
-    
+
     // Prevent ONNX Runtime sessions from being dropped, which causes mutex cleanup issues
     mem::forget(text_to_speech);
-    
+
     // Use _exit to bypass all cleanup handlers and avoid ONNX Runtime mutex issues on macOS
     unsafe {
         libc::_exit(0);

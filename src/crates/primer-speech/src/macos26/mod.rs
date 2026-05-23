@@ -29,15 +29,12 @@ impl Macos26Stt {
     /// Validates locale support (en-US, de-DE only; Hindi deferred).
     pub async fn new(locale: Locale) -> Result<Self> {
         match locale {
-            Locale::English | Locale::German => {
-                Ok(Macos26Stt { locale })
-            }
-            Locale::Hindi => {
-                Err(PrimerError::Speech(
-                    "Hindi (hi-IN) not yet supported by SpeechTranscriber on macOS 26.5; \
-                     use --features primer-cli/speech without macos-native-26 for the Whisper path".into()
-                ))
-            }
+            Locale::English | Locale::German => Ok(Macos26Stt { locale }),
+            Locale::Hindi => Err(PrimerError::Speech(
+                "Hindi (hi-IN) not yet supported by SpeechTranscriber on macOS 26.5; \
+                     use --features primer-cli/speech without macos-native-26 for the Whisper path"
+                    .into(),
+            )),
         }
     }
 
