@@ -9,6 +9,6 @@
 pub mod helper;
 
 pub use helper::{
-    AEConfig, Config, Style, TTLConfig, TextToSpeech, UnicodeProcessor, VoiceStyleData,
-    is_valid_lang, load_cfgs, load_text_to_speech, load_voice_style,
+    is_valid_lang, load_cfgs, load_text_to_speech, load_voice_style, AEConfig, Config, Style,
+    TTLConfig, TextToSpeech, UnicodeProcessor, VoiceStyleData,
 };

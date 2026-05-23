@@ -55,6 +55,7 @@ use primer_core::speech::{
 
 use crate::PhraseSplitter;
 
+use super::stream_drain::drive_streaming_drain;
 use super::voice::select_voice;
 
 /// Backend identifier returned by `Named::name()` and used in logs.
@@ -92,8 +93,8 @@ const RUN_LOOP_SLICE: Duration = Duration::from_millis(STREAM_RUN_LOOP_SLICE_MS)
 // TODO(#125): Replace raw GCD bindings (extern "C" + raw pointer types)
 // with the `dispatch2` crate. The crate ships safe typed wrappers for
 // dispatch_queue_t / dispatch_async_f and would eliminate the
-// _dispatch_main_q private-symbol binding. Tracked alongside the
-// shared drain-loop helper in #124.
+// _dispatch_main_q private-symbol binding. The shared drain-loop
+// helper (issue #124) now lives in `super::stream_drain`.
 mod dispatch {
     #[allow(non_camel_case_types)]
     pub type dispatch_object_t = *mut std::ffi::c_void;
@@ -322,33 +323,35 @@ fn synthesize_streaming_main_thread(
     unsafe { synth.writeUtterance_toBufferCallback(&utterance, block_ptr) };
 
     // ── 4. Drain loop: interleave runloop slices with channel drains ────
+    //
+    // The shared [`drive_streaming_drain`] helper owns the deadline
+    // check, the `on_event` dispatch, and the PhraseEnd termination
+    // rule. The wait-step closure encodes the main-thread shape:
+    // `try_recv` first (so any events queued by GCD callbacks since
+    // the last slice are drained immediately), then `runUntilDate`
+    // for one slice so the next batch of PCM callbacks gets a chance
+    // to dispatch.
     let run_loop = NSRunLoop::mainRunLoop();
     let deadline = Instant::now() + DRAIN_TIMEOUT;
-    loop {
-        // Drain whatever the channel has now. PhraseEnd terminates.
-        while let Ok(event) = rx.try_recv() {
-            let is_phrase_end = matches!(event, SynthesisEvent::PhraseEnd);
-            on_event(event);
-            if is_phrase_end {
-                // Drop the local sender so a stale Block_retain'd callback
-                // closure dropping later isn't the last sender alive.
-                // `cb` (RcBlock) goes out of scope here; ObjC's own
-                // Block_retain keeps it alive for any late callbacks.
-                drop(tx);
-                drop(cb);
-                return Ok(());
-            }
+    let result = drive_streaming_drain(on_event, deadline, "main-thread streaming", || {
+        if let Ok(event) = rx.try_recv() {
+            return Ok(Some(event));
         }
-        if Instant::now() >= deadline {
-            drop(tx);
-            drop(cb);
-            return Err(PrimerError::Speech(format!(
-                "AVSpeechSynthesizer {STREAM_DRAIN_TIMEOUT_SECS}s NSRunLoop drain timeout (main-thread streaming)"
-            )));
-        }
+        // SAFETY: AVFoundation requires NSRunLoop calls on the main
+        // thread. This branch only runs on the main-thread path
+        // (gated by the caller dispatch in `synthesize_streaming`).
         let date = NSDate::dateWithTimeIntervalSinceNow(RUN_LOOP_SLICE.as_secs_f64());
         run_loop.runUntilDate(&date);
-    }
+        Ok(None)
+    });
+
+    // Drop the local sender so a stale Block_retain'd callback closure
+    // dropping later isn't the last sender alive. `cb` (RcBlock) drops
+    // here too; ObjC's own Block_retain keeps it alive for any late
+    // callbacks.
+    drop(tx);
+    drop(cb);
+    result
 }
 
 /// Background-thread streaming path: PCM callbacks (firing on the GCD
@@ -446,35 +449,25 @@ fn synthesize_streaming_background(
     unsafe { dispatch::dispatch_async_f(main_queue, ctx_ptr, trampoline) };
 
     // ── Drain loop ────────────────────────────────────────────────────
-    // Deadline is checked above the `match` (not just on `Timeout`) so a
-    // runaway producer that keeps firing Audio events without ever
-    // emitting PhraseEnd still trips the sanity cap.
+    //
+    // The shared [`drive_streaming_drain`] helper owns the deadline
+    // check, the `on_event` dispatch, and the PhraseEnd termination
+    // rule. The wait-step closure encodes the background shape:
+    // `recv_timeout` for one poll slice, returning `Ok(None)` on a
+    // benign timeout so the helper re-checks the deadline and tries
+    // again — this is what catches a runaway producer that keeps
+    // firing Audio events without ever emitting PhraseEnd.
     let poll = Duration::from_millis(STREAM_DRAIN_POLL_MS);
     let deadline = Instant::now() + DRAIN_TIMEOUT;
-    loop {
-        if Instant::now() >= deadline {
-            return Err(PrimerError::Speech(format!(
-                "AVSpeechSynthesizer {STREAM_DRAIN_TIMEOUT_SECS}s drain timeout (background streaming)"
-            )));
-        }
+    drive_streaming_drain(on_event, deadline, "background streaming", || {
         match rx.recv_timeout(poll) {
-            Ok(event) => {
-                let is_phrase_end = matches!(event, SynthesisEvent::PhraseEnd);
-                on_event(event);
-                if is_phrase_end {
-                    return Ok(());
-                }
-            }
-            Err(RecvTimeoutError::Timeout) => {
-                // Loop back; deadline check at top handles expiry.
-            }
-            Err(RecvTimeoutError::Disconnected) => {
-                return Err(PrimerError::Speech(
-                    "synth channel disconnected before PhraseEnd".into(),
-                ));
-            }
+            Ok(event) => Ok(Some(event)),
+            Err(RecvTimeoutError::Timeout) => Ok(None),
+            Err(RecvTimeoutError::Disconnected) => Err(PrimerError::Speech(
+                "synth channel disconnected before PhraseEnd".into(),
+            )),
         }
-    }
+    })
 }
 
 // ═══════════════════════════════════════════════════════════════════════════

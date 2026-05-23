@@ -64,7 +64,10 @@ struct Args {
     #[arg(long)]
     voice_style: PathBuf,
     /// Phrase to synthesise.
-    #[arg(long, default_value = "Hello, what would you like to learn about today?")]
+    #[arg(
+        long,
+        default_value = "Hello, what would you like to learn about today?"
+    )]
     text: String,
     /// ISO-639-1 code; supertonic ships en/de/hi/ja/ko/es/fr + 24 more.
     #[arg(long, default_value = "en")]
@@ -131,7 +134,12 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         writer.write_sample((clamped * I16_SCALE) as i16)?;
     }
     writer.finalize()?;
-    println!("Wrote {} ({} Hz, {}-bit mono)", args.out.display(), sample_rate, WAV_BITS_PER_SAMPLE);
+    println!(
+        "Wrote {} ({} Hz, {}-bit mono)",
+        args.out.display(),
+        sample_rate,
+        WAV_BITS_PER_SAMPLE
+    );
 
     Ok(())
 }

@@ -53,7 +53,7 @@ The learner model (what the child knows, how deeply they understand it, what top
 - **OpenAI-compatible inference backend** — `OpenAiCompatBackend` speaks `/v1/chat/completions` with SSE streaming, error classification, and bounded jittered retry. Talks to any OpenAI-API-shaped server: oMLX, LM Studio, vLLM, llama.cpp `--server`, Together, Groq, OpenRouter. Unlocks ~20–40% throughput gains on Apple Silicon via MLX-native servers. See [docs/superpowers/specs/2026-05-15-openai-compat-backend-design.md](docs/superpowers/specs/2026-05-15-openai-compat-backend-design.md).
 - **Voice mode in the desktop GUI** (Phase A — composer-zone widget) — header "Voice mode" toggle ends the current text session and starts a voice session in its place. The composer area swaps to an animated state widget (mic-pulse on LISTEN, thinking-spin on LATENT_THINK, speaker-pulse on SPEAK); the transcript and the evaluation sidebar stay visible alongside. Belt-and-suspenders cancel/exit: Stop button, Esc key, "goodbye"/"bye primer"/"stop primer" voice keywords, and the header toggle itself. Locale-default Whisper + Piper assets auto-download to `~/.cache/primer/models/` on first launch via a consent dialog (or `disable_auto_download` for strict-offline). State machine is the same `primer-speech::voice_loop` shared with the CLI's `--speech` mode — one source of truth for the no-barge-in invariants. Build with `cargo run -p primer-gui --features speech` and click "Voice mode" in the header. The big-central-ear/mouth child-facing visual is Phase B, a separate spec gated on voice-mode reliability validation.
 
-**Phase 0.2 and Phase 0.3 are both complete.** Hybrid retrieval, the hand-drafted CC0 seed corpus across all five planned clusters, a 35-article Simple-English-Wikipedia layer (CC-BY-SA-3.0), and tuned BM25-only AND hybrid retrieval defaults all ship today. Still ahead (see [ROADMAP.md](ROADMAP.md)): local llama.cpp inference, hardening of the speech loop, hardware integration.
+**Phase 0.2 and Phase 0.3 are both complete.** Hybrid retrieval, the hand-drafted CC0 seed corpus across all five planned clusters, a 35-article Simple-English-Wikipedia layer (CC-BY-SA-3.0), and tuned BM25-only AND hybrid retrieval defaults all ship today. Still ahead (see [ROADMAP.md](ROADMAP.md)): local llama.cpp inference, ongoing hardening of the speech loop (macOS-native Apple-platform path ships now; a macOS 26+ SpeechAnalyzer variant is in flight), hardware integration.
 
 ## Architecture
 
@@ -65,7 +65,7 @@ src/
 └── crates/
     ├── primer-core/            # traits + shared types (everyone depends on this)
     ├── primer-inference/       # LLM backends (stub, cloud, ollama; later: llama.cpp, QNN, RKNN)
-    ├── primer-speech/          # VAD + STT + TTS backends (Silero, Whisper, Piper, cpal)
+    ├── primer-speech/          # VAD + STT + TTS backends (Silero, Whisper, Piper, cpal; macos-native: SFSpeechRecognizer + AVSpeechSynthesizer; macos-native-26: SpeechAnalyzer + AVSpeechSynthesizer, in flight)
     ├── primer-knowledge/       # SQLite FTS5 + dense-vector hybrid knowledge base
     ├── primer-storage/         # SQLite session + learner-model persistence
     ├── primer-classifier/      # per-turn engagement classifier (LLM-backed + stub)
@@ -147,6 +147,13 @@ The voice pipeline. Stub backends are always available; real backends sit behind
 - **Whisper STT** (`whisper` feature) — `whisper.cpp` GGML/GGUF model, used for both streaming partial transcripts and the final phrase commit.
 - **Piper TTS** (`piper` feature) — neural text-to-speech, synthesising one phrase at a time (`PhraseSplitter` chunks the LLM stream on `. ! ?` boundaries) so the Primer can begin speaking before generation has fully finished.
 - **cpal I/O** (`cpal` feature) — cross-platform mic capture + speaker playback, gated by an `is_speaking` flag so the Primer's own audio never leaks back through the mic.
+
+Apple-platform alternatives sit behind two mutually-exclusive cargo features:
+
+- **`macos-native`** — `SFSpeechRecognizer` for STT (with `requiresOnDeviceRecognition = true`; never falls back to network) and `AVSpeechSynthesizer.writeUtterance:toBufferCallback:` for phrase-by-phrase streaming TTS via `PhraseSplitter`. Silero stays as the VAD on this path because macOS-26-only `SpeechDetector` would break the macOS 13 floor. en-US + de-DE only — Hindi is deferred until Apple ships on-device `hi-IN`. PCM chunks stream into the speaker ringbuf as `AVSpeechSynthesizer` emits them, so audio begins playing while later phrases are still being synthesised. (PRs #95, #112, #122, #123.)
+- **`macos-native-26`** — in flight (PR #134). Replaces Whisper + Silero + ONNX runtime with `SpeechAnalyzer` + `SpeechTranscriber` + `SpeechDetector` via a Swift sidecar bridged through `swift-bridge`. Motivated by an empirical latency probe (PR #131): SpeechAnalyzer is ~100× faster to first partial (~30 ms vs ~3.8 s) and ~2× faster to final (~800 ms vs ~1.8 s) than Whisper `ggml-small.en` on macOS 26.5. Mutually exclusive with `macos-native` at compile time. en-US + de-DE only; Hindi `hi-IN` errors loudly at construction (not on-device for `SpeechTranscriber` yet).
+
+A vendored **Supertonic TTS** backend (PRs #127, #128) is also available behind a `supertonic` feature for A/B evaluation; not on any default code path.
 
 Two pure helper modules (`vad_debounce`, `phrase_split`) carry the streaming state machines so they can be unit-tested without any backend dep. The `--speech` flag in `primer-cli` is gated by a top-level `speech` feature that pulls all four. See the [Voice mode](#voice-mode-experimental-poc) section below for setup.
 

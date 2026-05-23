@@ -8,9 +8,12 @@
 //!
 //! Closed under `cfg(target_os = "macos", feature = "macos-native")`.
 
-// `tts` and `voice` reuse cleanly across macos-native and macos-native-26 —
-// they only depend on AVSpeechSynthesizer / AVSpeechSynthesisVoice via
-// objc2-avf-audio (+ objc2 + block2), which both features pull in.
+// `tts`, `voice`, and the `stream_drain` helper `tts` uses reuse cleanly
+// across macos-native and macos-native-26 — they only depend on
+// AVSpeechSynthesizer / AVSpeechSynthesisVoice via objc2-avf-audio
+// (+ objc2 + block2), which both features pull in.
+#[cfg(any(feature = "macos-native", feature = "macos-native-26"))]
+mod stream_drain;
 #[cfg(any(feature = "macos-native", feature = "macos-native-26"))]
 pub mod tts;
 #[cfg(any(feature = "macos-native", feature = "macos-native-26"))]
