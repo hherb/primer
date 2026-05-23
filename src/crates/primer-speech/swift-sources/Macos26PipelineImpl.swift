@@ -228,11 +228,26 @@ public final class Macos26Pipeline {
     /// Pull the next transcriber result, awaiting if necessary. Returns
     /// nil once the underlying stream completes (analyzer stopped).
     ///
-    /// Cancellation-safe via Task caching: if Rust's tokio::select! drops
-    /// the awaiting future, the cached Task continues running against the
-    /// iterator (so iter.next() is only ever called once at a time). The
-    /// next call from Rust awaits the same Task and receives the value it
-    /// was about to produce — no double-advance of the iterator.
+    /// **Single-flight, not fully cancellation-safe.** The cached Task
+    /// guarantees `iter.next()` is only ever called once at a time —
+    /// that's the property that prevents the
+    /// `AsyncStreamBuffer.swift:508: attempt to await next() on more than
+    /// one task` fatal error under `tokio::select!` cancellation. While
+    /// the cached Task is still running, a dropped Rust future is
+    /// transparently picked up by the next iteration (both await the
+    /// same `task.value`).
+    ///
+    /// **Known narrow race:** if the cached Task completes during the
+    /// gap between Rust dropping the outer future and the next select!
+    /// branch re-entering this function, the defer below clears the
+    /// cache, and the value held by the completed Task is unreachable —
+    /// the next call spawns a fresh Task that advances the iterator past
+    /// it. The window is microseconds (Task body defer fires immediately
+    /// after the iterator yields); in practice `iter.next()` is much
+    /// slower than a select! ratchet so the cache is almost always still
+    /// in-flight when the next call arrives. Tracked as #143; a robust
+    /// fix would cache the value alongside the Task and drain it on the
+    /// consume path.
     private func nextResult() async throws -> ResultEvent? {
         if let existing = nextResultTask {
             return try await existing.value
