@@ -48,8 +48,20 @@ pub use cpal_io::{MicCapture, Resampler, SpeakerSink, push_all_with_bail, wait_f
 #[cfg(feature = "voice-loop")]
 pub mod voice_loop;
 
-#[cfg(all(target_os = "macos", feature = "macos-native"))]
+#[cfg(all(
+    target_os = "macos",
+    any(feature = "macos-native", feature = "macos-native-26")
+))]
 pub mod macos;
 
-#[cfg(all(target_vendor = "apple", feature = "macos-native-26"))]
+// `macos26` is gated on `target_os = "macos"` (not the aspirational
+// `target_vendor = "apple"`) because today the module is genuinely
+// macOS-only: build.rs hardcodes the `apple-macos26.0` Swift target
+// triple, and the TTS surface re-exports `crate::macos::MacosTextToSpeech`
+// which is itself macOS-gated. The internal files keep
+// `target_vendor = "apple"` cfg gates as structural preparation for an
+// eventual iOS-26 host (audio_session.rs already cfg-splits between the
+// macOS no-op and the iOS placeholder), but the parent gate is the
+// load-bearing one and must reflect actual build support.
+#[cfg(all(target_os = "macos", feature = "macos-native-26"))]
 pub mod macos26;

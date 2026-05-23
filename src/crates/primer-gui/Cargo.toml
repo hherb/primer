@@ -94,3 +94,4 @@ speech = [
 # Combine with `speech` for an Apple-native voice loop. No effect on
 # non-macOS builds. See docs/macos_native_speech.md.
 macos-native = ["primer-speech/macos-native"]
+macos-native-26 = ["primer-speech/macos-native-26"]

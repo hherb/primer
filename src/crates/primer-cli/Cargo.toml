@@ -76,3 +76,9 @@ speech = [
 # Combine with `speech` for an Apple-native voice loop. No effect on
 # non-macOS builds (the underlying primer-speech feature is a no-op there).
 macos-native = ["primer-speech/macos-native"]
+
+# macOS 26+ SpeechAnalyzer-backed STT + AVSpeechSynthesizer TTS.
+# Mutually exclusive with `macos-native` — both enable an Apple-native
+# voice loop but target different OS generations. A compile_error in
+# main.rs enforces the exclusion. No effect on non-macOS builds.
+macos-native-26 = ["primer-speech/macos-native-26"]

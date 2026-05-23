@@ -4,6 +4,12 @@
 //! interesting (commands, state, persistence) lives here so it can be
 //! unit-tested without the Tauri WebView in the loop.
 
+#[cfg(all(feature = "macos-native", feature = "macos-native-26"))]
+compile_error!(
+    "`macos-native` and `macos-native-26` are mutually exclusive — pick one \
+     (`macos-native-26` for macOS 26+, `macos-native` for older macOS)"
+);
+
 pub mod commands;
 pub mod config;
 pub mod csp;
@@ -46,7 +52,10 @@ pub fn run() -> Result<(), Box<dyn std::error::Error>> {
     // and the warning would be unactionable noise for evaluators.
     #[cfg(all(
         feature = "speech",
-        not(all(target_os = "macos", feature = "macos-native"))
+        not(all(
+            target_os = "macos",
+            any(feature = "macos-native", feature = "macos-native-26")
+        ))
     ))]
     probe_espeak_ng_data();
 
@@ -96,7 +105,10 @@ fn init_tracing() {
 /// would be unactionable noise for evaluators.
 #[cfg(all(
     feature = "speech",
-    not(all(target_os = "macos", feature = "macos-native"))
+    not(all(
+        target_os = "macos",
+        any(feature = "macos-native", feature = "macos-native-26")
+    ))
 ))]
 fn probe_espeak_ng_data() {
     if std::env::var_os("PIPER_ESPEAKNG_DATA_DIRECTORY").is_some() {

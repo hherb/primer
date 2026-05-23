@@ -53,3 +53,15 @@ pub use backends::{ChannelStt, LocalBackends, build_local_backends};
     feature = "cpal"
 ))]
 pub use backends::build_local_backends_macos_native;
+
+// Same rationale as above — lives in `backends` (silero + whisper +
+// piper + cpal gate) but only uses silero + cpal + macos-native-26.
+#[cfg(all(
+    target_os = "macos",
+    feature = "macos-native-26",
+    feature = "silero",
+    feature = "whisper",
+    feature = "piper",
+    feature = "cpal"
+))]
+pub use backends::build_local_backends_macos_native_26;

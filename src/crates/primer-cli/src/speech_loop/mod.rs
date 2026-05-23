@@ -15,7 +15,10 @@
 mod dialogue_responder;
 pub mod stdout_observer;
 
-#[cfg(not(all(target_os = "macos", feature = "macos-native")))]
+#[cfg(not(all(
+    target_os = "macos",
+    any(feature = "macos-native", feature = "macos-native-26")
+)))]
 use std::path::PathBuf;
 use std::sync::Arc;
 
@@ -33,13 +36,25 @@ pub use stdout_observer::StdoutObserver;
 /// avoids a `PhantomData<&'a ()>` workaround when the cfg-gated branch
 /// would otherwise leave `'a` unused.
 pub struct SpeechLoopConfig {
-    #[cfg(not(all(target_os = "macos", feature = "macos-native")))]
+    #[cfg(not(all(
+        target_os = "macos",
+        any(feature = "macos-native", feature = "macos-native-26")
+    )))]
     pub whisper_model: PathBuf,
-    #[cfg(not(all(target_os = "macos", feature = "macos-native")))]
+    #[cfg(not(all(
+        target_os = "macos",
+        any(feature = "macos-native", feature = "macos-native-26")
+    )))]
     pub voice_onnx: PathBuf,
-    #[cfg(not(all(target_os = "macos", feature = "macos-native")))]
+    #[cfg(not(all(
+        target_os = "macos",
+        any(feature = "macos-native", feature = "macos-native-26")
+    )))]
     pub voice_config: PathBuf,
-    #[cfg(not(all(target_os = "macos", feature = "macos-native")))]
+    #[cfg(not(all(
+        target_os = "macos",
+        any(feature = "macos-native", feature = "macos-native-26")
+    )))]
     pub voice_id: String,
     pub mic_silence_ms: u32,
     pub verbose: bool,
@@ -60,7 +75,19 @@ pub struct SpeechLoopConfig {
 /// directly so no Arc<Mutex<>> is needed here).
 #[cfg(feature = "speech")]
 pub async fn run(cfg: SpeechLoopConfig, dialogue: &mut DialogueManager) -> Result<()> {
-    #[cfg(all(target_os = "macos", feature = "macos-native"))]
+    #[cfg(all(target_os = "macos", feature = "macos-native-26"))]
+    let mut local = primer_speech::voice_loop::build_local_backends_macos_native_26(
+        cfg.locale,
+        cfg.mic_silence_ms,
+        cfg.verbose,
+    )
+    .await?;
+
+    #[cfg(all(
+        target_os = "macos",
+        feature = "macos-native",
+        not(feature = "macos-native-26"),
+    ))]
     let mut local = primer_speech::voice_loop::build_local_backends_macos_native(
         cfg.locale,
         cfg.mic_silence_ms,
@@ -68,7 +95,10 @@ pub async fn run(cfg: SpeechLoopConfig, dialogue: &mut DialogueManager) -> Resul
     )
     .await?;
 
-    #[cfg(not(all(target_os = "macos", feature = "macos-native")))]
+    #[cfg(not(any(
+        all(target_os = "macos", feature = "macos-native-26"),
+        all(target_os = "macos", feature = "macos-native"),
+    )))]
     let mut local = primer_speech::voice_loop::build_local_backends(
         cfg.voice_onnx.as_path(),
         cfg.voice_config.as_path(),

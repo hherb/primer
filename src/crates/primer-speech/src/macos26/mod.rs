@@ -1,45 +1,39 @@
-//! macOS 26 / iOS 26 SpeechAnalyzer-backed STT + VAD.
+//! macOS 26 SpeechAnalyzer-backed STT + VAD.
 //!
 //! See [`docs/superpowers/specs/2026-05-20-macos-native-26-design.md`].
 //!
-//! Cfg gates in this module use `target_vendor = "apple"` rather than
-//! `target_os = "macos"` because the underlying APIs are identical
-//! across all Apple platforms (iOS 26+, iPadOS 26+, visionOS 26+, tvOS 26+,
-//! macOS 26+). Files that genuinely diverge between macOS and iOS
-//! concentrate that divergence in [`audio_session`].
+//! **Today this module is macOS-only.** The parent cfg gate in
+//! [`crate::lib`] is `target_os = "macos"`, and the TTS re-export below
+//! depends on [`crate::macos`] which is itself macOS-gated. The
+//! [`build.rs`] also hardcodes the `apple-macos26.0` Swift target triple.
 //!
-//! Module rename to `apple26/` is a mechanical follow-up once an iOS
-//! host application actually exists in the repo — see the design doc
-//! "Goals" section.
+//! Internal files use `target_vendor = "apple"` cfg gates as structural
+//! preparation for an eventual iOS-26 host: the underlying APIs
+//! (`SpeechAnalyzer`, `SpeechTranscriber`, `SpeechDetector`,
+//! `AVSpeechSynthesizer`) are identical across all Apple platforms
+//! (iOS 26+, iPadOS 26+, visionOS 26+, tvOS 26+, macOS 26+). Files that
+//! genuinely diverge between macOS and iOS concentrate that divergence
+//! in [`audio_session`] (its iOS branch errors loudly so a developer
+//! can't ship an unconfigured build).
+//!
+//! Lifting the parent gate to `target_vendor = "apple"` is a follow-up
+//! that requires: (a) parameterising the build.rs target triple by
+//! `CARGO_CFG_TARGET_OS`, (b) implementing the iOS AVAudioSession setup
+//! in [`audio_session`], (c) extending [`crate::macos`]'s parent gate to
+//! `target_vendor = "apple"` so the AVSpeechSynthesizer TTS re-export
+//! resolves on iOS. Module rename to `apple26/` is a mechanical
+//! follow-up at that point.
 
+pub mod analyzer;
 pub mod audio_session;
+pub mod bridge;
+pub mod locale;
+pub mod stt;
+pub mod vad;
 
-use primer_core::error::{PrimerError, Result};
-use primer_core::i18n::Locale;
+// Re-use the AVSpeechSynthesizer TTS — no new TTS surface in macOS 26.
+pub use crate::macos::MacosTextToSpeech;
 
-/// Placeholder `Macos26Stt` stub for integration smoke tests.
-/// Full implementation pending (spec: macos-native-26 tasks 4-14).
-#[derive(Debug, Clone)]
-pub struct Macos26Stt {
-    locale: Locale,
-}
-
-impl Macos26Stt {
-    /// Construct a new STT instance for the given locale.
-    /// Validates locale support (en-US, de-DE only; Hindi deferred).
-    pub async fn new(locale: Locale) -> Result<Self> {
-        match locale {
-            Locale::English | Locale::German => Ok(Macos26Stt { locale }),
-            Locale::Hindi => Err(PrimerError::Speech(
-                "Hindi (hi-IN) not yet supported by SpeechTranscriber on macOS 26.5; \
-                     use --features primer-cli/speech without macos-native-26 for the Whisper path"
-                    .into(),
-            )),
-        }
-    }
-
-    /// Return the locale this instance was constructed with.
-    pub fn locale(&self) -> Locale {
-        self.locale
-    }
-}
+// Public surface for builders to consume.
+pub use crate::macos26::analyzer::TextMessage;
+pub use crate::macos26::stt::Macos26Stt;

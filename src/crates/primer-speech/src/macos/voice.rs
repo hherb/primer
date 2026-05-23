@@ -8,16 +8,19 @@ use primer_core::i18n::Locale;
 /// Voice-quality tier, mirroring `AVSpeechSynthesisVoiceQuality` so
 /// callers don't import the objc2 type.
 ///
-/// Variant declaration order encodes the ranking: `Default` < `Premium` <
-/// `Enhanced`. `Premium` ranks below `Enhanced` because Premium voices are
-/// optional ~500 MB downloads that most users will not have installed. We
-/// prefer the reliably-available Enhanced (~100 MB) neural voice over an
-/// absent Premium, and any neural voice over the always-bundled Default.
+/// Variant declaration order encodes the ranking: `Default` < `Enhanced`
+/// < `Premium`. This matches Apple's own ordering. Both Enhanced and
+/// Premium are downloadable neural voices; if the user took the effort
+/// to install Premium, we honour their choice. The original ordering
+/// reversed Premium and Enhanced under the assumption that Premium is
+/// "rarely installed", but Enhanced is also a download and the inversion
+/// just discarded a better voice when both were present — that's now
+/// fixed.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 pub enum VoiceQuality {
     Default,  // lowest — robotic, always-bundled
-    Premium,  // middle — neural, ~500 MB optional download, fewer voices available
-    Enhanced, // highest — neural, ~100 MB optional download, broader coverage; preferred default
+    Enhanced, // middle — neural, downloadable, broad locale coverage
+    Premium,  // highest — neural, downloadable, top tier when available
 }
 
 impl VoiceQuality {
@@ -107,7 +110,13 @@ pub fn select_voice(locale: &Locale) -> Option<VoiceSelection> {
         tracing::warn!(
             target: "primer::speech::macos",
             locale = %want_lang,
-            "only Default-quality voice available; user should install Enhanced via System Settings → Accessibility → Spoken Content → System Voice → Manage Voices for substantially better quality"
+            "only Default-quality voice available; install a Premium or Enhanced voice via System Settings → Accessibility → Spoken Content → System Voice → Manage Voices for substantially better quality"
+        );
+    } else if quality == VoiceQuality::Enhanced {
+        tracing::info!(
+            target: "primer::speech::macos",
+            locale = %want_lang,
+            "selected Enhanced-quality voice; a Premium-quality voice (top tier, neural) is available via System Settings → Accessibility → Spoken Content → System Voice → Manage Voices if you want best-in-class quality"
         );
     }
     Some(VoiceSelection {
@@ -116,4 +125,20 @@ pub fn select_voice(locale: &Locale) -> Option<VoiceSelection> {
         quality,
         voice,
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::VoiceQuality;
+
+    /// Pin the ordering so a future refactor can't silently reverse it again.
+    /// `Default < Enhanced < Premium` matches Apple's AVSpeechSynthesisVoiceQuality
+    /// ranking; reversing this regresses the quality of the selected voice
+    /// when a user has installed Premium for their locale.
+    #[test]
+    fn voice_quality_ordering_matches_apple() {
+        assert!(VoiceQuality::Default < VoiceQuality::Enhanced);
+        assert!(VoiceQuality::Enhanced < VoiceQuality::Premium);
+        assert!(VoiceQuality::Default < VoiceQuality::Premium);
+    }
 }
