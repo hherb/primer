@@ -10,6 +10,7 @@
 
 pub mod locale;
 pub mod permissions;
+mod stream_drain;
 pub mod stt;
 pub mod tts;
 pub mod voice;
