@@ -42,7 +42,9 @@ use primer_core::speech::SynthesisEvent;
 ///
 /// `path_label` is interpolated into the timeout error message so the
 /// two call sites can be distinguished in logs (`"main-thread streaming"`
-/// vs `"background streaming"`).
+/// vs `"background streaming"`). Typed `&'static str` so callers must
+/// pass a string literal — there is no reason to allocate per-call for
+/// a log-only field, and the `'static` bound documents that intent.
 ///
 /// # Errors
 ///
@@ -52,7 +54,7 @@ use primer_core::speech::SynthesisEvent;
 pub(super) fn drive_streaming_drain<F>(
     on_event: &mut dyn FnMut(SynthesisEvent),
     deadline: Instant,
-    path_label: &str,
+    path_label: &'static str,
     mut next_event: F,
 ) -> Result<()>
 where
@@ -93,7 +95,10 @@ mod tests {
     /// `PhraseEnd`. Mirrors the
     /// `streaming_emits_multiple_audio_events_before_phrase_end`
     /// invariant from `tests/macos_tts.rs` — at least 2 audio chunks
-    /// must reach the consumer before the phrase terminator.
+    /// must reach the consumer before the phrase terminator. If that
+    /// real-AVFoundation test ever tightens its floor (or this constant
+    /// is reduced), update both sites in lockstep so the structural
+    /// coverage here keeps mirroring the production invariant.
     const AUDIO_EVENTS_PER_PHRASE: usize = 3;
 
     /// Marker sample-rate stamped onto each synthetic `AudioChunk` so
@@ -270,6 +275,57 @@ mod tests {
         assert!(
             msg.contains("disconnected"),
             "inner error must surface verbatim: {msg}"
+        );
+    }
+
+    /// Mid-stream error: a few `Audio` events dispatch successfully,
+    /// then `next_event` returns `Err(...)` before `PhraseEnd` arrives.
+    /// The helper must dispatch each Audio event exactly once (no
+    /// duplication, no loss), then surface the error verbatim.
+    /// Models the real-world case where the producer disconnects after
+    /// partial PCM delivery — for example, `AVSpeechSynthesizer` failing
+    /// mid-phrase or the GCD trampoline dropping its sender prematurely.
+    #[test]
+    fn propagates_inner_error_after_partial_dispatch() {
+        let deadline = Instant::now() + Duration::from_secs(STRUCTURAL_TEST_TIMEOUT_SECS);
+        let mut events_to_emit: Vec<Result<Option<SynthesisEvent>>> = vec![
+            Ok(Some(make_audio_chunk(0.0))),
+            Ok(Some(make_audio_chunk(1.0))),
+            Err(PrimerError::Speech(
+                "channel disconnected before PhraseEnd".into(),
+            )),
+            // A trailing PhraseEnd the helper must NEVER reach — once
+            // the error bubbles up, the loop is done.
+            Ok(Some(SynthesisEvent::PhraseEnd)),
+        ];
+        events_to_emit.reverse(); // pop from end = emit in order
+        let mut collected: Vec<SynthesisEvent> = Vec::new();
+        let result = drive_streaming_drain(
+            &mut |e| collected.push(e),
+            deadline,
+            "test-mid-stream-error",
+            || events_to_emit.pop().expect("script underflow"),
+        );
+
+        assert!(result.is_err(), "mid-stream error must propagate");
+        let msg = format!("{}", result.unwrap_err());
+        assert!(
+            msg.contains("disconnected"),
+            "inner error must surface verbatim: {msg}"
+        );
+        let audio_count = collected
+            .iter()
+            .filter(|e| matches!(e, SynthesisEvent::Audio(_)))
+            .count();
+        assert_eq!(
+            audio_count, 2,
+            "the two pre-error Audio events must dispatch exactly once each"
+        );
+        assert!(
+            !collected
+                .iter()
+                .any(|e| matches!(e, SynthesisEvent::PhraseEnd)),
+            "PhraseEnd queued after the error must never reach the consumer"
         );
     }
 }
