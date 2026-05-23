@@ -53,8 +53,17 @@ pub(crate) mod ffi {
 
         // Returns the text of the most-recently-yielded result. Sync to
         // avoid the swift-bridge 0.1.x async-shared-struct-String bug.
-        // Callers must invoke this between successive next_result awaits
-        // (each next_result overwrites the cached text).
+        //
+        // Threading contract: the cached `lastText` on the Swift side is
+        // written by `nextResultBridge` (inside its cached `Task`) and
+        // read by this accessor. There is no internal lock — safety
+        // depends on the Rust caller invoking both methods from the
+        // SAME task. Today that's the consumer task spawned in
+        // `voice_loop::backends::build_local_backends_macos_native_26`,
+        // which awaits `next_result()` then immediately calls
+        // `last_result_text()` before the next `next_result()`. Do not
+        // call this from a different task than the one driving
+        // `next_result` — the read could race the cached-text write.
         #[swift_bridge(swift_name = "lastResultText")]
         fn last_result_text(&self) -> String;
 
@@ -69,7 +78,20 @@ pub(crate) use ffi::ResultEvent;
 
 // The generated Macos26Pipeline wrapper is a newtype over *mut c_void.
 // Raw pointers are not Send by default, but the Swift object behind the
-// pointer is an ARC-managed object — safe to move across threads as long
-// as we serialise access. The voice loop drives this from a single tokio
-// task, so the Send impl is sound.
+// pointer is an ARC-managed object — safe to move across threads as
+// long as we serialise access.
+//
+// SAFETY (Send): The voice loop drives this pipeline from a single
+// tokio task (`run_consumer_loop`) — the pipeline is moved into that
+// task once and never shared. `Send` is therefore sound because the
+// pointer ownership transfers from `build_local_backends_macos_native_26`
+// to the spawned task exactly once.
+//
+// SAFETY (NOT Sync): We deliberately do NOT impl `Sync`. The Swift
+// `SpeechAnalyzer` is documented as not thread-safe, and the cached
+// `lastText` field on the Swift side (read by `last_result_text()`,
+// written inside `nextResultBridge`) has no internal lock. Sharing
+// `&Macos26Pipeline` across tasks would allow `last_result_text()` to
+// race the cached-text write. If you ever need multi-task access,
+// wrap in a `tokio::sync::Mutex` rather than adding `unsafe impl Sync`.
 unsafe impl Send for Macos26Pipeline {}

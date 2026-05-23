@@ -14,14 +14,18 @@ use primer_speech::macos26::Macos26Stt;
 #[tokio::test]
 #[ignore = "requires macOS 26 host; not in CI"]
 async fn construct_en_us() {
-    let stt = Macos26Stt::new(Locale::English).await.expect("en-US Macos26Stt constructs");
+    let stt = Macos26Stt::new(Locale::English)
+        .await
+        .expect("en-US Macos26Stt constructs");
     assert_eq!(stt.locale(), Locale::English);
 }
 
 #[tokio::test]
 #[ignore = "requires macOS 26 host; first run downloads de-DE model (~hundreds of MB)"]
 async fn construct_de_de_triggers_download_if_missing() {
-    let stt = Macos26Stt::new(Locale::German).await.expect("de-DE Macos26Stt constructs");
+    let stt = Macos26Stt::new(Locale::German)
+        .await
+        .expect("de-DE Macos26Stt constructs");
     assert_eq!(stt.locale(), Locale::German);
 }
 

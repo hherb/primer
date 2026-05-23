@@ -963,7 +963,7 @@ pub async fn build_local_backends_macos_native_26(
     verbose: bool,
 ) -> Result<LocalBackends> {
     use crate::macos::MacosTextToSpeech;
-    use crate::macos26::analyzer::{run_consumer_loop, TextMessage};
+    use crate::macos26::analyzer::{TextMessage, run_consumer_loop};
     use crate::macos26::audio_session;
     use crate::macos26::bridge::ffi as macos26_ffi;
     use crate::macos26::locale::to_bcp47;
@@ -1048,20 +1048,36 @@ pub async fn build_local_backends_macos_native_26(
     // tokio mpsc: consumer task → bridge task (TextMessage)
     let (text_msg_tx, mut text_msg_rx) = tokio::sync::mpsc::channel::<TextMessage>(64);
     // tokio mpsc: consumer task → voice loop (VadEvent)
-    let (event_tx, event_rx) =
-        tokio::sync::mpsc::channel::<VadEvent>(VAD_EVENT_CHANNEL_CAPACITY);
+    let (event_tx, event_rx) = tokio::sync::mpsc::channel::<VadEvent>(VAD_EVENT_CHANNEL_CAPACITY);
     // std mpsc: bridge task → ChannelStt (final transcripts as String)
     let (transcript_tx, transcript_rx) = std::sync::mpsc::channel::<String>();
     let stop_flag = Arc::new(std::sync::atomic::AtomicBool::new(false));
     let is_speaking = Arc::new(std::sync::atomic::AtomicBool::new(false));
 
     // ── Consumer task: owns Swift pipeline, pulls next_result loop ──
-    let _consumer_handle = tokio::spawn(run_consumer_loop(
-        pipeline,
-        audio_rx,
-        text_msg_tx,
-        event_tx,
-    ));
+    // Wrap in an async block so the task's outcome is logged on
+    // completion. The JoinHandle is intentionally dropped (the task
+    // outlives this function), but unlike a bare `tokio::spawn` of
+    // `run_consumer_loop` directly, a non-`Ok(())` return now surfaces
+    // as a `tracing::warn!` rather than vanishing silently — important
+    // for diagnosing a voice-mode session that appears alive but goes
+    // quiet because Swift's pipeline errored.
+    tokio::spawn(async move {
+        match run_consumer_loop(pipeline, audio_rx, text_msg_tx, event_tx).await {
+            Ok(()) => {
+                tracing::info!(
+                    target: "primer::speech::macos26",
+                    "consumer loop exited cleanly"
+                );
+            }
+            Err(e) => {
+                tracing::warn!(
+                    target: "primer::speech::macos26",
+                    "consumer loop exited with error: {e}"
+                );
+            }
+        }
+    });
 
     // ── Bridge: TextMessage (tokio mpsc) → String (std mpsc) ────
     // Drops volatile partials; only forwards is_final messages to
@@ -1125,8 +1141,11 @@ pub async fn build_local_backends_macos_native_26(
     // VoiceProfile.model_id is set to the bcp47 tag as a human-readable
     // identifier. MacosTextToSpeech ignores VoiceProfile and selects the
     // voice from its own locale — same as the sibling.
+    // Move `bcp47` into VoiceProfile.model_id — last use, no further
+    // borrow needed (TTS construction above and the create() call
+    // already cloned what they needed).
     let voice = VoiceProfile {
-        model_id: bcp47.clone(),
+        model_id: bcp47,
         rate: 0.9,
         ..VoiceProfile::default()
     };

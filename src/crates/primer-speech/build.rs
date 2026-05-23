@@ -44,29 +44,35 @@ mod macos_native_26 {
         // referenced by the generated Swift glue (RustStr, __private__OptionU8, …).
         let bridging_header = out_dir.join("SwiftBridge_Bridging.h");
         let core_h = generated.join("SwiftBridgeCore.h");
-        let bridge_h = generated.join(SWIFT_LIB_NAME).join(format!("{SWIFT_LIB_NAME}.h"));
+        let bridge_h = generated
+            .join(SWIFT_LIB_NAME)
+            .join(format!("{SWIFT_LIB_NAME}.h"));
         let bridging_content = format!(
             "#include \"{}\"\n#include \"{}\"\n",
             core_h.display(),
             bridge_h.display(),
         );
-        std::fs::write(&bridging_header, &bridging_content)
-            .expect("write bridging header");
+        std::fs::write(&bridging_header, &bridging_content).expect("write bridging header");
 
         let lib_path = out_dir.join(format!("lib{}.a", SWIFT_LIB_NAME));
         let mut cmd = Command::new("swiftc");
         cmd.arg("-emit-library")
             .arg("-static")
             .arg("-emit-module")
-            .arg("-module-name").arg(SWIFT_LIB_NAME)
-            .arg("-target").arg(swift_target_triple())
-            .arg("-sdk").arg(macos_sdk_path())
+            .arg("-module-name")
+            .arg(SWIFT_LIB_NAME)
+            .arg("-target")
+            .arg(swift_target_triple())
+            .arg("-sdk")
+            .arg(macos_sdk_path())
             .arg("-O")
             .arg("-parse-as-library")
-            .arg("-import-objc-header").arg(&bridging_header)
+            .arg("-import-objc-header")
+            .arg(&bridging_header)
             .arg(swift_sources.join("Macos26PipelineImpl.swift"))
             .args(walk_swift_files_recursive(&generated))
-            .arg("-o").arg(&lib_path);
+            .arg("-o")
+            .arg(&lib_path);
         let status = cmd.status().expect("invoke swiftc");
         assert!(status.success(), "swiftc failed");
 

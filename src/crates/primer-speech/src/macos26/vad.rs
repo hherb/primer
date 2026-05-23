@@ -6,9 +6,7 @@
 
 use std::time::Instant;
 
-use primer_core::consts::speech::macos26::{
-    EVENT_POLL_INTERVAL, SPEECH_END_TIMEOUT, SPEECH_START_MIN_TEXT_CHARS,
-};
+use primer_core::consts::speech::macos26::{SPEECH_END_TIMEOUT, SPEECH_START_MIN_TEXT_CHARS};
 use primer_core::speech::VadEvent;
 
 /// Internal state of the derived VAD.
@@ -28,7 +26,10 @@ pub struct DerivedVadStateMachine {
 
 impl DerivedVadStateMachine {
     pub fn new() -> Self {
-        Self { state: State::Idle, last_partial_at: None }
+        Self {
+            state: State::Idle,
+            last_partial_at: None,
+        }
     }
 
     /// Reset to `Idle` between utterances.
@@ -39,12 +40,7 @@ impl DerivedVadStateMachine {
 
     /// Handle a transcriber Result. Returns a VadEvent if the result
     /// triggers a state transition, otherwise None.
-    pub fn on_result(
-        &mut self,
-        text: &str,
-        is_final: bool,
-        now: Instant,
-    ) -> Option<VadEvent> {
+    pub fn on_result(&mut self, text: &str, is_final: bool, now: Instant) -> Option<VadEvent> {
         let non_empty = text.trim().chars().count() >= SPEECH_START_MIN_TEXT_CHARS;
         match self.state {
             State::Idle => {
@@ -99,6 +95,7 @@ impl Default for DerivedVadStateMachine {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use primer_core::consts::speech::macos26::EVENT_POLL_INTERVAL;
     use std::time::Duration;
 
     fn at(ms: u64) -> Instant {
@@ -111,7 +108,10 @@ mod tests {
     #[test]
     fn first_non_empty_partial_emits_speech_start() {
         let mut sm = DerivedVadStateMachine::new();
-        assert_eq!(sm.on_result("hello", false, at(100)), Some(VadEvent::SpeechStart));
+        assert_eq!(
+            sm.on_result("hello", false, at(100)),
+            Some(VadEvent::SpeechStart)
+        );
     }
 
     #[test]
@@ -124,32 +124,53 @@ mod tests {
     #[test]
     fn is_final_emits_speech_end() {
         let mut sm = DerivedVadStateMachine::new();
-        assert_eq!(sm.on_result("hello", false, at(100)), Some(VadEvent::SpeechStart));
-        assert_eq!(sm.on_result("hello world.", true, at(2000)), Some(VadEvent::SpeechEnd));
+        assert_eq!(
+            sm.on_result("hello", false, at(100)),
+            Some(VadEvent::SpeechStart)
+        );
+        assert_eq!(
+            sm.on_result("hello world.", true, at(2000)),
+            Some(VadEvent::SpeechEnd)
+        );
     }
 
     #[test]
     fn inactivity_timer_emits_speech_end() {
         let mut sm = DerivedVadStateMachine::new();
-        assert_eq!(sm.on_result("hello", false, at(100)), Some(VadEvent::SpeechStart));
+        assert_eq!(
+            sm.on_result("hello", false, at(100)),
+            Some(VadEvent::SpeechStart)
+        );
         // Tick before the timeout — no event.
         assert_eq!(sm.tick(at(100 + 300)), None);
         // Tick after the timeout — SpeechEnd.
         let timeout_ms = SPEECH_END_TIMEOUT.as_millis() as u64;
-        assert_eq!(sm.tick(at(100 + timeout_ms + 50)), Some(VadEvent::SpeechEnd));
+        assert_eq!(
+            sm.tick(at(100 + timeout_ms + 50)),
+            Some(VadEvent::SpeechEnd)
+        );
     }
 
     #[test]
     fn mid_speaking_partials_extend_timer() {
         let mut sm = DerivedVadStateMachine::new();
         let timeout_ms = SPEECH_END_TIMEOUT.as_millis() as u64;
-        assert_eq!(sm.on_result("hello", false, at(0)), Some(VadEvent::SpeechStart));
+        assert_eq!(
+            sm.on_result("hello", false, at(0)),
+            Some(VadEvent::SpeechStart)
+        );
         // Partial just before the timer would fire — extends last_partial_at.
-        assert_eq!(sm.on_result("hello world", false, at(timeout_ms - 100)), None);
+        assert_eq!(
+            sm.on_result("hello world", false, at(timeout_ms - 100)),
+            None
+        );
         // Original deadline has now passed but the new partial reset the timer.
         assert_eq!(sm.tick(at(timeout_ms + 50)), None);
         // True timeout from the new partial.
-        assert_eq!(sm.tick(at(timeout_ms - 100 + timeout_ms + 50)), Some(VadEvent::SpeechEnd));
+        assert_eq!(
+            sm.tick(at(timeout_ms - 100 + timeout_ms + 50)),
+            Some(VadEvent::SpeechEnd)
+        );
     }
 
     #[test]
@@ -158,7 +179,10 @@ mod tests {
         sm.on_result("hello", false, at(0));
         sm.reset();
         // After reset, next non-empty partial fires SpeechStart cleanly.
-        assert_eq!(sm.on_result("hi", false, at(2000)), Some(VadEvent::SpeechStart));
+        assert_eq!(
+            sm.on_result("hi", false, at(2000)),
+            Some(VadEvent::SpeechStart)
+        );
     }
 
     #[test]

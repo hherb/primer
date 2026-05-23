@@ -15,9 +15,7 @@
 
 use primer_core::error::{PrimerError, Result};
 use primer_core::i18n::Locale;
-use primer_core::speech::{
-    Named, StreamingSpeechToText, TranscriptSegment, TranscriptionSession,
-};
+use primer_core::speech::{Named, StreamingSpeechToText, TranscriptSegment, TranscriptionSession};
 
 use crate::macos26::locale::to_bcp47;
 
