@@ -73,6 +73,14 @@ objc2-foundation = { version = "0.3", default-features = false, features = ["NSD
 objc2-avf-audio = { version = "0.3", default-features = false, features = ["AVAudioSettings", "AVSpeechSynthesis", "AVAudioBuffer", "AVAudioFormat", "AVAudioTypes", "block2"] }
 objc2-speech = "0.3"
 block2 = "0.6"
+# Safe typed wrappers for GCD (Grand Central Dispatch). Replaces the raw
+# `extern "C" { dispatch_async_f; static _dispatch_main_q; }` FFI bindings
+# that primer-speech's macOS-native TTS used to carry. The 0.3 line ships
+# `DispatchQueue::main()` + `exec_async(FnOnce + Send + 'static)`, which
+# expresses "dispatch a one-shot work item onto the main queue" without
+# needing the private `_dispatch_main_q` symbol or an `extern "C"`
+# trampoline. Pulled only via primer-speech's `macos-native` feature.
+dispatch2 = "0.3"
 
 # CLI
 clap = { version = "4", features = ["derive", "env"] }
