@@ -62,6 +62,12 @@ objc2-avf-audio = { workspace = true, optional = true }
 objc2-speech = { workspace = true, optional = true }
 block2 = { workspace = true, optional = true }
 
+# Safe typed wrappers for GCD (Grand Central Dispatch). Used by the
+# macOS-native TTS background-thread streaming path to bounce a one-shot
+# work item onto the main queue without raw FFI to `dispatch_async_f` and
+# the private `_dispatch_main_q` symbol. See issue #125.
+dispatch2 = { workspace = true, optional = true }
+
 # swift-bridge — generates the FFI between Rust and the Macos26Pipeline Swift sidecar.
 # Pulled only by the `macos-native-26` feature. The build-dep is the codegen half.
 # The `async` feature enables the async_swift_support module required for
@@ -101,7 +107,7 @@ voice-loop = ["silero", "whisper", "piper", "cpal"]
 # Enables Speech-to-Text (SFSpeechRecognizer) and Text-to-Speech
 # (AVSpeechSynthesizer) without any external system deps, model
 # downloads, or ort runtime download. See docs/macos_native_speech.md.
-macos-native = ["dep:objc2", "dep:objc2-foundation", "dep:objc2-avf-audio", "dep:objc2-speech", "dep:block2"]
+macos-native = ["dep:objc2", "dep:objc2-foundation", "dep:objc2-avf-audio", "dep:objc2-speech", "dep:block2", "dep:dispatch2"]
 # macOS 26+ STT/VAD via SpeechAnalyzer. Swift sidecar bridged via swift-bridge.
 # Mutually exclusive with macos-native — pick one.
 macos-native-26 = [

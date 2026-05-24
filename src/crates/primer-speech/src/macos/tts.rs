@@ -17,12 +17,12 @@
 //!   between slices. This ensures the main queue is drained between polls.
 //!
 //! **Background-thread path** (GUI background worker; CLI `spawn_blocking`):
-//!   `dispatch_async_f` to the main queue submits the synthesis call to run on
-//!   the main thread (which already has its CFRunLoop spinning), then the pool
-//!   thread drains an `mpsc::channel` via `recv_timeout`. PCM callbacks (which
-//!   run on the GCD main queue) feed `SynthesisEvent::Audio` and the zero-frame
-//!   EOS sentinel feeds `SynthesisEvent::PhraseEnd`, which terminates the
-//!   drain loop.
+//!   `DispatchQueue::main().exec_async(...)` submits the synthesis call to
+//!   run on the main thread (which already has its CFRunLoop spinning), then
+//!   the pool thread drains an `mpsc::channel` via `recv_timeout`. PCM
+//!   callbacks (which run on the GCD main queue) feed `SynthesisEvent::Audio`
+//!   and the zero-frame EOS sentinel feeds `SynthesisEvent::PhraseEnd`,
+//!   which terminates the drain loop.
 //!
 //! # NSRunLoop vs GCD
 //!
@@ -36,6 +36,7 @@ use std::ptr::NonNull;
 use std::time::{Duration, Instant};
 
 use async_trait::async_trait;
+use dispatch2::DispatchQueue;
 use objc2::rc::Retained;
 use objc2_avf_audio::{
     AVAudioBuffer, AVAudioPCMBuffer, AVSampleRateKey, AVSpeechSynthesisVoice, AVSpeechSynthesizer,
@@ -75,45 +76,6 @@ const DRAIN_TIMEOUT: Duration = Duration::from_secs(STREAM_DRAIN_TIMEOUT_SECS);
 /// (including AVSpeechSynthesizer PCM callbacks) before returning. Sourced
 /// from [`STREAM_RUN_LOOP_SLICE_MS`].
 const RUN_LOOP_SLICE: Duration = Duration::from_millis(STREAM_RUN_LOOP_SLICE_MS);
-
-/// Raw libdispatch bindings for the background-thread path.
-///
-/// libdispatch ships in `/usr/lib/system/libdispatch.dylib` and is
-/// re-exported by `libSystem.B.dylib`, which every macOS binary links.
-/// `dispatch_get_main_queue()` is an inline C function that returns a
-/// pointer to `_dispatch_main_q`; we bind the underlying symbol directly.
-///
-/// After the streaming refactor (issue #114) the only dispatch primitives
-/// we still need are `dispatch_async_f` and `_dispatch_main_q` — the
-/// background streaming path drains a `mpsc::channel`'s
-/// `SynthesisEvent::PhraseEnd` to signal completion instead of a
-/// `dispatch_semaphore`. The `dispatch_semaphore_*` family was removed
-/// together with the `DispatchSemaphore` RAII wrapper and `SynthCtx`.
-///
-// TODO(#125): Replace raw GCD bindings (extern "C" + raw pointer types)
-// with the `dispatch2` crate. The crate ships safe typed wrappers for
-// dispatch_queue_t / dispatch_async_f and would eliminate the
-// _dispatch_main_q private-symbol binding. The shared drain-loop
-// helper (issue #124) now lives in `super::stream_drain`.
-mod dispatch {
-    #[allow(non_camel_case_types)]
-    pub type dispatch_object_t = *mut std::ffi::c_void;
-    #[allow(non_camel_case_types)]
-    pub type dispatch_queue_t = dispatch_object_t;
-
-    #[link(name = "System")]
-    unsafe extern "C" {
-        /// The GCD main queue object. `dispatch_get_main_queue()` in C is an
-        /// inline function returning `&_dispatch_main_q`; we bind the symbol.
-        pub static _dispatch_main_q: std::ffi::c_void;
-
-        pub fn dispatch_async_f(
-            queue: dispatch_queue_t,
-            context: *mut std::ffi::c_void,
-            work: extern "C" fn(*mut std::ffi::c_void),
-        );
-    }
-}
 
 /// Query the native PCM sample rate that `AVSpeechSynthesizer` will use for
 /// `voice`. The rate is encoded in the dictionary returned by
@@ -384,23 +346,54 @@ fn synthesize_streaming_background(
     // SAFETY: setVoice:.
     unsafe { utterance.setVoice(Some(voice)) };
 
-    // ── Trampoline context: utterance + sender ────────────────────────
+    // ── Dispatch work-item context: utterance + sender ────────────────
+    //
+    // The closure captures `ctx` by move and runs on the GCD main queue
+    // exactly once (FnOnce). At that point no other thread holds a
+    // reference to the captured `utterance` / `tx`. The `unsafe impl
+    // Send` is required because `Retained<AVSpeechUtterance>` is not
+    // `Send` by default (objc2 marks `Retained<T>: Send` only when `T:
+    // Send + Sync`, which Apple's ObjC classes generally aren't), but
+    // the move semantics make the cross-thread transfer single-use and
+    // race-free.
+    //
+    // The `let owned = ctx;` re-binding INSIDE the closure body is
+    // load-bearing: under Rust 2021's disjoint capture (RFC 2229),
+    // accessing `ctx.utterance` and `ctx.tx` — OR destructuring `ctx`
+    // with `let StreamCtx { utterance, tx } = ctx;` — captures each
+    // field individually, and the per-field capture of `utterance:
+    // Retained<AVSpeechUtterance>` would inherit only its own
+    // (non-`Send`) bound, defeating the struct-level `unsafe impl
+    // Send`. An identity-rebind expression like `let owned = ctx;`
+    // refers to `ctx` as a whole value, which forces whole-struct
+    // capture; the closure then becomes `Send` via the unsafe impl,
+    // and the subsequent destructure on the local `owned` is just a
+    // routine in-scope binding.
     struct StreamCtx {
         utterance: Retained<AVSpeechUtterance>,
         tx: std::sync::mpsc::Sender<SynthesisEvent>,
     }
-    // SAFETY: `StreamCtx` is moved into the main-queue trampoline; at that
+    // SAFETY: `StreamCtx` is moved into the main-queue closure; at that
     // point no other thread holds a reference. The move is one-shot.
     unsafe impl Send for StreamCtx {}
 
-    extern "C" fn trampoline(ctx_raw: *mut std::ffi::c_void) {
-        // SAFETY: ctx_raw was Box::into_raw'd below; we take ownership here.
-        let ctx = unsafe { Box::from_raw(ctx_raw as *mut StreamCtx) };
+    let ctx = StreamCtx { utterance, tx };
+
+    // SAFETY rationale for the closure body: it runs on the GCD main
+    // queue (via `DispatchQueue::main().exec_async`), which is the queue
+    // AVSpeechSynthesizer requires for both `AVSpeechSynthesizer::new()`
+    // and `writeUtterance:toBufferCallback:`. The closure is `FnOnce +
+    // Send + 'static` as `exec_async` requires.
+    DispatchQueue::main().exec_async(move || {
+        // Force whole-struct capture under RFC 2229 disjoint capture
+        // (see comment above the `StreamCtx` declaration).
+        let owned = ctx;
+        let StreamCtx { utterance, tx } = owned;
 
         // SAFETY: AVSpeechSynthesizer::new on the main thread.
         let synth: Retained<AVSpeechSynthesizer> = unsafe { AVSpeechSynthesizer::new() };
 
-        let tx_cb = ctx.tx.clone();
+        let tx_cb = tx.clone();
         type CbBlock = block2::Block<dyn Fn(NonNull<AVAudioBuffer>)>;
         let cb = block2::RcBlock::new(move |buf_ptr: NonNull<AVAudioBuffer>| {
             stream_pcm_callback(buf_ptr, &tx_cb);
@@ -409,7 +402,7 @@ fn synthesize_streaming_background(
         // SAFETY: called on the main thread.
         let block_ref: &CbBlock = &cb;
         let block_ptr: *mut CbBlock = (block_ref as *const CbBlock).cast_mut();
-        unsafe { synth.writeUtterance_toBufferCallback(&ctx.utterance, block_ptr) };
+        unsafe { synth.writeUtterance_toBufferCallback(&utterance, block_ptr) };
 
         // ── Drop order at end of scope ──────────────────────────────────
         // `cb` drops here; AVSpeechSynthesizer's Block_retain keeps it
@@ -420,33 +413,24 @@ fn synthesize_streaming_background(
         // PhraseEnd).
         //
         // SAFETY-CRITICAL on macOS 13–15 (verified): `synth`
-        // (Retained<AVSpeechSynthesizer>) and `ctx.utterance` both drop
+        // (Retained<AVSpeechSynthesizer>) and `utterance` (moved out of
+        // the captured `StreamCtx`) both drop
         // here, even though PCM callbacks may still fire asynchronously
         // on the main queue afterward. This is load-bearing on
         // AVSpeechSynthesizer self-retaining internally while utterances
         // are in flight — Apple's headers don't make this explicit, but
         // the Stage-A code shipped with the same shape (synth scoped to
-        // the trampoline body) and observed no crashes during voice-loop
-        // testing on macOS 13.x–15.x. If a future macOS release changes
-        // this and we see UAF crashes after the trampoline returns, the
-        // fix is to move `synth` ownership into a struct retained by the
-        // closure (alongside `tx_cb`) so it stays alive until
-        // AVSpeechSynthesizer releases the block. Do NOT try to extend
-        // `synth`'s lifetime by holding an Arc here; the trampoline is a
-        // one-shot dispatched work item with no place to park it. Audit
-        // tag: grep for `SAFETY-CRITICAL on macOS` when bumping the
-        // supported macOS floor.
-    }
-
-    let ctx = Box::new(StreamCtx { utterance, tx });
-    let ctx_ptr = Box::into_raw(ctx) as *mut std::ffi::c_void;
-
-    // SAFETY: `_dispatch_main_q` is the GCD main queue object.
-    let main_queue: dispatch::dispatch_queue_t =
-        unsafe { &dispatch::_dispatch_main_q as *const _ as dispatch::dispatch_queue_t };
-
-    // SAFETY: `trampoline` takes ownership of `ctx_ptr` exactly once.
-    unsafe { dispatch::dispatch_async_f(main_queue, ctx_ptr, trampoline) };
+        // the dispatched work-item body) and observed no crashes during
+        // voice-loop testing on macOS 13.x–15.x. If a future macOS release
+        // changes this and we see UAF crashes after the work-item returns,
+        // the fix is to move `synth` ownership into a struct retained by
+        // the PCM-callback closure (alongside `tx_cb`) so it stays alive
+        // until AVSpeechSynthesizer releases the block. Do NOT try to
+        // extend `synth`'s lifetime by holding an Arc here; the dispatched
+        // work item is one-shot with no place to park it. Audit tag: grep
+        // for `SAFETY-CRITICAL on macOS` when bumping the supported macOS
+        // floor.
+    });
 
     // ── Drain loop ────────────────────────────────────────────────────
     //
