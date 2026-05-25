@@ -4,7 +4,7 @@
 
 #![cfg(all(target_vendor = "apple", feature = "macos-native-26"))]
 
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 use primer_core::consts::speech::macos26::{SPEECH_END_TIMEOUT, SPEECH_START_MIN_TEXT_CHARS};
 use primer_core::speech::VadEvent;
@@ -22,13 +22,23 @@ enum State {
 pub struct DerivedVadStateMachine {
     state: State,
     last_partial_at: Option<Instant>,
+    inactivity_timeout: Duration,
 }
 
 impl DerivedVadStateMachine {
     pub fn new() -> Self {
+        Self::with_inactivity_timeout(SPEECH_END_TIMEOUT)
+    }
+
+    /// Build a state machine with a custom inactivity timeout. Useful for
+    /// fast unit tests of orchestration code that drive `tick` end-to-end
+    /// without waiting the full production [`SPEECH_END_TIMEOUT`]
+    /// wallclock window.
+    pub fn with_inactivity_timeout(inactivity_timeout: Duration) -> Self {
         Self {
             state: State::Idle,
             last_partial_at: None,
+            inactivity_timeout,
         }
     }
 
@@ -74,7 +84,7 @@ impl DerivedVadStateMachine {
             return None;
         }
         let last = self.last_partial_at?;
-        if now.duration_since(last) > SPEECH_END_TIMEOUT {
+        if now.duration_since(last) > self.inactivity_timeout {
             self.state = State::Idle;
             self.last_partial_at = None;
             Some(VadEvent::SpeechEnd)
@@ -190,5 +200,23 @@ mod tests {
         assert_eq!(SPEECH_START_MIN_TEXT_CHARS, 1);
         // Sanity: POLL interval is under timeout.
         assert!(EVENT_POLL_INTERVAL < SPEECH_END_TIMEOUT);
+    }
+
+    #[test]
+    fn with_inactivity_timeout_overrides_const_used_by_default_ctor() {
+        // The custom ctor must let callers (mainly fast-running unit tests
+        // of the consumer loop) shrink the inactivity window below
+        // SPEECH_END_TIMEOUT without monkeypatching the global const.
+        let short = Duration::from_millis(50);
+        let mut sm = DerivedVadStateMachine::with_inactivity_timeout(short);
+        assert_eq!(
+            sm.on_result("hi", false, at(0)),
+            Some(VadEvent::SpeechStart)
+        );
+        // Inside the short window: no inactivity event.
+        assert_eq!(sm.tick(at(20)), None);
+        // Past the short window: SpeechEnd. The default-ctor variant
+        // would NOT have fired here (its window is 1000 ms).
+        assert_eq!(sm.tick(at(80)), Some(VadEvent::SpeechEnd));
     }
 }
