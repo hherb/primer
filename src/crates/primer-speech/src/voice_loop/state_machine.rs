@@ -844,6 +844,52 @@ async fn run_loop_inner<'r, O: LoopObserver>(
                     on_committed_audio(vec![0.0_f32; inter_phrase_silence_samples])
                 }
             };
+            // Sync calls deliberately not wrapped in `tokio::task::spawn_blocking`,
+            // even though the trait's `# Blocking` doc-section asks async callers
+            // to do so. Rationale per production backend:
+            //
+            // * **macOS-native CLI** (`Builder::new_current_thread()` on the OS
+            //   main thread): `spawn_blocking` would hop work to a worker
+            //   thread; `synthesize_streaming` then sees `is_main_thread() ==
+            //   false` and takes the GCD-bounce path; that path drains via
+            //   `dispatch2::DispatchQueue::main().exec_async(...)` which only
+            //   runs when main is owned by `NSApplicationMain` or
+            //   `dispatch_main()`. The CLI's main thread is running tokio's
+            //   current-thread runtime instead — the bounced work is queued
+            //   onto GCD main but nothing drains it, so synthesis stalls. The
+            //   direct sync call keeps `push_text` on main and lets
+            //   `synthesize_streaming` take the main-thread `runUntilDate`
+            //   path — the architecture the CLI binary is built around (see
+            //   the `run_tokio_on_main` doc-comment in
+            //   `primer-cli/src/main.rs` for the full deadlock argument).
+            //
+            // * **macOS-native GUI** (multi-thread tokio + Tauri's
+            //   `NSApplicationMain` on main): the direct call blocks one
+            //   tokio worker for the synth duration. Other workers keep
+            //   running, and the GCD bounce drains because Tauri owns main.
+            //   A `spawn_blocking` wrap would free the one worker but
+            //   `push_text` still has to bounce to main eventually, so the
+            //   net wallclock cost on synthesis is unchanged. Worker-block
+            //   accepted as a known cost; background tokio tasks queued
+            //   during SPEAK catch up at the next turn via
+            //   `DialogueManager::await_pending_post_response`.
+            //
+            // * **Piper backend (default Linux speech build)**:
+            //   `PiperSession::synth_phrase` runs ONNX inference synchronously
+            //   on the calling worker. No main-thread requirement; the wrap
+            //   would free one worker but the multi-thread runtime has
+            //   several so this isn't a regression to leave it.
+            //
+            // What would have to change for the wrap to matter:
+            // - A non-Apple multi-tenant runtime where the synth worker-block
+            //   starves dense background tasks during SPEAK.
+            // - A new backend that can synthesize off-main without bouncing
+            //   to a specific thread (so `spawn_blocking` would have no
+            //   side-effect on which thread the synth runs on).
+            // - The macOS-native CLI moving to multi-thread tokio (which
+            //   itself requires either calling `NSApplicationMain` or a
+            //   GCD-main pump — see the `run_tokio_on_main` doc-comment
+            //   in `primer-cli/src/main.rs`).
             session.push_text(&tts_text, &mut on_event)?;
             session.finalize(&mut on_event)?;
             // Flush sentinel: empty Vec signals on_audio to drain any
