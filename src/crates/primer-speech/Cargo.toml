@@ -110,6 +110,11 @@ voice-loop = ["silero", "whisper", "piper", "cpal"]
 macos-native = ["dep:objc2", "dep:objc2-foundation", "dep:objc2-avf-audio", "dep:objc2-speech", "dep:block2", "dep:dispatch2"]
 # macOS 26+ STT/VAD via SpeechAnalyzer. Swift sidecar bridged via swift-bridge.
 # Mutually exclusive with macos-native — pick one.
+#
+# `dep:dispatch2` is shared with `macos-native` because `macos/tts.rs` (compiled
+# under `any(macos-native, macos-native-26)` per the CLAUDE.md "macOS-native"
+# bullet) imports `dispatch2::DispatchQueue` unconditionally for the
+# background-thread AVSpeechSynthesizer path. See issue #148.
 macos-native-26 = [
     "dep:swift-bridge",
     "swift-bridge-build",
@@ -117,6 +122,7 @@ macos-native-26 = [
     "dep:objc2-foundation",
     "dep:objc2-avf-audio",
     "dep:block2",
+    "dep:dispatch2",
 ]
 
 [[example]]

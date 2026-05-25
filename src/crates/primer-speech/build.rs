@@ -20,7 +20,7 @@ fn main() {
 
 #[cfg(feature = "macos-native-26")]
 mod macos_native_26 {
-    use std::path::PathBuf;
+    use std::path::{Path, PathBuf};
     use std::process::Command;
 
     const SWIFT_LIB_NAME: &str = "Macos26Pipeline";
@@ -54,7 +54,7 @@ mod macos_native_26 {
         );
         std::fs::write(&bridging_header, &bridging_content).expect("write bridging header");
 
-        let lib_path = out_dir.join(format!("lib{}.a", SWIFT_LIB_NAME));
+        let lib_path = out_dir.join(format!("lib{SWIFT_LIB_NAME}.a"));
         let mut cmd = Command::new("swiftc");
         cmd.arg("-emit-library")
             .arg("-static")
@@ -78,7 +78,7 @@ mod macos_native_26 {
 
         // 3. Link directives.
         println!("cargo:rustc-link-search=native={}", out_dir.display());
-        println!("cargo:rustc-link-lib=static={}", SWIFT_LIB_NAME);
+        println!("cargo:rustc-link-lib=static={SWIFT_LIB_NAME}");
         // Swift runtime libraries — required when linking a Swift staticlib.
         println!("cargo:rustc-link-search=native={}", swift_runtime_dir());
         for fw in ["Foundation", "AVFoundation", "CoreMedia", "Speech"] {
@@ -121,9 +121,9 @@ mod macos_native_26 {
     }
 
     // Recursively collect all .swift files under `dir` (including subdirs).
-    fn walk_swift_files_recursive(dir: &PathBuf) -> Vec<PathBuf> {
+    fn walk_swift_files_recursive(dir: &Path) -> Vec<PathBuf> {
         let mut result = Vec::new();
-        fn recurse(dir: &std::path::Path, result: &mut Vec<PathBuf>) {
+        fn recurse(dir: &Path, result: &mut Vec<PathBuf>) {
             let rd = match std::fs::read_dir(dir) {
                 Ok(r) => r,
                 Err(_) => return,

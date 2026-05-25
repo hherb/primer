@@ -73,9 +73,7 @@ impl DerivedVadStateMachine {
         if self.state != State::Speaking {
             return None;
         }
-        let Some(last) = self.last_partial_at else {
-            return None;
-        };
+        let last = self.last_partial_at?;
         if now.duration_since(last) > SPEECH_END_TIMEOUT {
             self.state = State::Idle;
             self.last_partial_at = None;
