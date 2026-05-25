@@ -576,13 +576,22 @@ pub async fn build_local_backends_macos_native_26(
     });
 
     // ── Audio thread: mic → resample → audio_tx ─────────────────
+    //
+    // Buffering is delegated to `PendingMicBuffer` so the pre-speak /
+    // post-speak transition behaviour can be unit-tested without an
+    // audio backend dep (closes #139 — pre-speak samples used to leak
+    // into the post-speak transcription as a phantom partial). The
+    // resampler call and `audio_tx.try_send` stay inline because they
+    // depend on the rubato/tokio types this thread owns.
     let stop_flag_thread = Arc::clone(&stop_flag);
     let is_speaking_thread = Arc::clone(&is_speaking);
     let audio_thread = std::thread::Builder::new()
         .name("primer-speech-audio-macos26".into())
         .spawn(move || -> Result<()> {
+            use crate::voice_loop::macos26_audio_buffer::PendingMicBuffer;
             use ringbuf::traits::Consumer;
-            let mut pending: Vec<f32> = Vec::with_capacity(in_chunk_samples * 4);
+
+            let mut buffer = PendingMicBuffer::new(in_chunk_samples);
             let mut tmp = [0f32; 1024];
             let mut mic_cons = mic_cons;
             while !stop_flag_thread.load(std::sync::atomic::Ordering::SeqCst) {
@@ -591,13 +600,9 @@ pub async fn build_local_backends_macos_native_26(
                     std::thread::sleep(std::time::Duration::from_millis(5));
                     continue;
                 }
-                // Anti-feedback: discard mic samples while the Primer is speaking.
-                if is_speaking_thread.load(std::sync::atomic::Ordering::SeqCst) {
-                    continue;
-                }
-                pending.extend_from_slice(&tmp[..popped]);
-                while pending.len() >= in_chunk_samples {
-                    let chunk: Vec<f32> = pending.drain(..in_chunk_samples).collect();
+                let is_speaking_now = is_speaking_thread.load(std::sync::atomic::Ordering::SeqCst);
+                let chunks = buffer.feed(&tmp[..popped], is_speaking_now);
+                for chunk in chunks {
                     let resampled = match input_resampler.as_mut() {
                         Some(r) => r
                             .process(&chunk)

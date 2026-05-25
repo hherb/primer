@@ -45,6 +45,12 @@ pub mod backends;
 ))]
 pub mod backends_macos;
 
+/// Pure helper for the macos-native-26 audio thread's pre-resample
+/// chunk buffer; clears on `is_speaking` to prevent pre-speak audio
+/// leaking into the post-speak transcription (closes #139).
+#[cfg(all(target_os = "macos", feature = "cpal", feature = "macos-native-26"))]
+pub(crate) mod macos26_audio_buffer;
+
 pub use observer::{ExitReason, LoopObserver, TurnCompletePayload, VoiceState};
 pub use state_machine::{
     DrainHook, LoopBackends, LoopConfig, LoopHandle, Responder, VAD_EVENT_CHANNEL_CAPACITY,
