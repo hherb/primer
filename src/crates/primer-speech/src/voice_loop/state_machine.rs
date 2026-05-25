@@ -860,8 +860,8 @@ async fn run_loop_inner<'r, O: LoopObserver>(
             //   direct sync call keeps `push_text` on main and lets
             //   `synthesize_streaming` take the main-thread `runUntilDate`
             //   path — the architecture the CLI binary is built around (see
-            //   `primer-cli/src/main.rs` runtime selection + CLAUDE.md macOS-
-            //   native bullet).
+            //   the `run_tokio_on_main` doc-comment in
+            //   `primer-cli/src/main.rs` for the full deadlock argument).
             //
             // * **macOS-native GUI** (multi-thread tokio + Tauri's
             //   `NSApplicationMain` on main): the direct call blocks one
@@ -870,7 +870,9 @@ async fn run_loop_inner<'r, O: LoopObserver>(
             //   A `spawn_blocking` wrap would free the one worker but
             //   `push_text` still has to bounce to main eventually, so the
             //   net wallclock cost on synthesis is unchanged. Worker-block
-            //   accepted as a known cost.
+            //   accepted as a known cost; background tokio tasks queued
+            //   during SPEAK catch up at the next turn via
+            //   `DialogueManager::await_pending_post_response`.
             //
             // * **Piper backend (default Linux speech build)**:
             //   `PiperSession::synth_phrase` runs ONNX inference synchronously
@@ -886,9 +888,8 @@ async fn run_loop_inner<'r, O: LoopObserver>(
             //   side-effect on which thread the synth runs on).
             // - The macOS-native CLI moving to multi-thread tokio (which
             //   itself requires either calling `NSApplicationMain` or a
-            //   GCD-main pump — see the macOS-native section of CLAUDE.md).
-            //
-            // Closes #126.
+            //   GCD-main pump — see the `run_tokio_on_main` doc-comment
+            //   in `primer-cli/src/main.rs`).
             session.push_text(&tts_text, &mut on_event)?;
             session.finalize(&mut on_event)?;
             // Flush sentinel: empty Vec signals on_audio to drain any
