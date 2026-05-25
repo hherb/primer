@@ -16,6 +16,16 @@
 pub mod observer;
 pub mod state_machine;
 
+/// Shared [`LocalBackends`] / [`ChannelStt`] types — gated only on `cpal`
+/// because every concrete backend builder (whisper+piper or macOS-native)
+/// needs the cpal-owned `MicCapture`/`SpeakerSink` but nothing else.
+#[cfg(feature = "cpal")]
+pub mod backends_common;
+
+/// Whisper + piper backend builder — gated on the full
+/// `silero + whisper + piper + cpal` set because the function body uses
+/// all four. Shares `LocalBackends` / `ChannelStt` with the macOS
+/// builders via [`backends_common`].
 #[cfg(all(
     feature = "silero",
     feature = "whisper",
@@ -24,44 +34,41 @@ pub mod state_machine;
 ))]
 pub mod backends;
 
+/// macOS-native backend builders (SFSpeechRecognizer-based and
+/// SpeechAnalyzer-based). File-level gate is the *union* of what either
+/// builder needs — `cpal + any(macos-native, macos-native-26)`; each
+/// `pub` item inside carries its own narrower gate.
+#[cfg(all(
+    target_os = "macos",
+    feature = "cpal",
+    any(feature = "macos-native", feature = "macos-native-26")
+))]
+pub mod backends_macos;
+
 pub use observer::{ExitReason, LoopObserver, TurnCompletePayload, VoiceState};
 pub use state_machine::{
     DrainHook, LoopBackends, LoopConfig, LoopHandle, Responder, VAD_EVENT_CHANNEL_CAPACITY,
     VoiceLoopError, run_loop, run_loop_borrowed,
 };
 
+#[cfg(feature = "cpal")]
+pub use backends_common::{ChannelStt, LocalBackends};
+
 #[cfg(all(
     feature = "silero",
     feature = "whisper",
     feature = "piper",
     feature = "cpal"
 ))]
-pub use backends::{ChannelStt, LocalBackends, build_local_backends};
+pub use backends::build_local_backends;
 
-// The re-export gate matches `backends`'s module-level cfg (silero +
-// whisper + piper + cpal) because that's where the function lives;
-// the function itself only requires silero + cpal + macos-native.
-// Once a follow-up PR extracts the macos-native builder into its own
-// module gated on the narrower set, this re-export can drop the
-// whisper/piper requirements. Tracking: plan task 8 review.
 #[cfg(all(
     target_os = "macos",
-    feature = "macos-native",
+    feature = "cpal",
     feature = "silero",
-    feature = "whisper",
-    feature = "piper",
-    feature = "cpal"
+    feature = "macos-native"
 ))]
-pub use backends::build_local_backends_macos_native;
+pub use backends_macos::build_local_backends_macos_native;
 
-// Same rationale as above — lives in `backends` (silero + whisper +
-// piper + cpal gate) but only uses silero + cpal + macos-native-26.
-#[cfg(all(
-    target_os = "macos",
-    feature = "macos-native-26",
-    feature = "silero",
-    feature = "whisper",
-    feature = "piper",
-    feature = "cpal"
-))]
-pub use backends::build_local_backends_macos_native_26;
+#[cfg(all(target_os = "macos", feature = "cpal", feature = "macos-native-26"))]
+pub use backends_macos::build_local_backends_macos_native_26;
