@@ -414,8 +414,6 @@ mod tests {
     struct ScriptedPipeline {
         script: VecDeque<(ResultEvent, String)>,
         last_text: String,
-        feed_audio_calls: usize,
-        stop_calls: usize,
     }
 
     impl ScriptedPipeline {
@@ -423,16 +421,12 @@ mod tests {
             Self {
                 script: script.into_iter().collect(),
                 last_text: String::new(),
-                feed_audio_calls: 0,
-                stop_calls: 0,
             }
         }
     }
 
     impl PipelineSource for ScriptedPipeline {
-        fn feed_audio(&mut self, _samples: Vec<f32>) {
-            self.feed_audio_calls += 1;
-        }
+        fn feed_audio(&mut self, _samples: Vec<f32>) {}
 
         fn next_result(&mut self) -> Pin<Box<dyn Future<Output = ResultEvent> + Send + '_>> {
             Box::pin(async move {
@@ -441,7 +435,10 @@ mod tests {
                     event
                 } else {
                     // Hang so the inactivity tick arm wins the select.
-                    std::future::pending().await
+                    // Explicit type annotation guards against future
+                    // changes to `ResultEvent`'s shape producing a
+                    // confusing inference error here.
+                    std::future::pending::<ResultEvent>().await
                 }
             })
         }
@@ -451,7 +448,6 @@ mod tests {
         }
 
         fn stop(&mut self) -> Pin<Box<dyn Future<Output = ()> + Send + '_>> {
-            self.stop_calls += 1;
             Box::pin(async {})
         }
     }
@@ -518,8 +514,10 @@ mod tests {
         // Wait long enough for: (1) the volatile partial to be sent →
         // text_rx fills its single slot, (2) the inactivity timeout
         // (30 ms) + a tick (5 ms) to elapse so the SpeechEnd branch
-        // attempts to send the synthetic-final.
-        tokio::time::sleep(Duration::from_millis(80)).await;
+        // attempts to send the synthetic-final. 150 ms gives ~115 ms of
+        // slack on the ~35 ms minimum so a loaded CI runner doesn't
+        // race the tick firing.
+        tokio::time::sleep(Duration::from_millis(150)).await;
 
         // Drain the volatile partial. This MUST succeed — if it
         // doesn't, the loop never sent it and the rest of the test is
@@ -575,6 +573,93 @@ mod tests {
         let _ = tokio::time::timeout(Duration::from_millis(200), handle).await;
     }
 
+    /// **Result-branch end-to-end coverage for #140.**
+    ///
+    /// Locks in the result-branch behavioural envelope across an
+    /// utterance pair: volatile partial → real-final → new volatile +
+    /// tick-derived synthetic. Concrete invariants pinned:
+    ///
+    /// 1. **Volatile partials and real-finals both reach `text_tx`**
+    ///    with the correct `is_final` flag — the result branch's
+    ///    TextMessage construction + send path is exercised.
+    /// 2. **`buf.record(&msg)` runs on every result.** Removing the
+    ///    line (or moving it after a path that exits the loop early)
+    ///    would mean no synthetic-final ever arrives after the third
+    ///    volatile — the trailing `(true, "next")` row drops out.
+    /// 3. **The state machine cleanly re-enters `Speaking` after a
+    ///    real-final**, so a subsequent volatile + tick still produces
+    ///    SpeechStart + SpeechEnd via the inactivity path. The event
+    ///    sequence assertion locks in the alternation.
+    ///
+    /// `PartialBuffer`'s narrow `is_final`-clears-buffer behaviour is
+    /// pinned at the unit-test layer by
+    /// `real_final_clears_buffer_to_prevent_duplicate_synthesis` (a
+    /// few lines above); this orchestration test sits one layer up.
+    #[tokio::test]
+    async fn real_final_clears_buffer_so_next_synthetic_uses_fresh_partial() {
+        let pipeline = ScriptedPipeline::new(vec![
+            (result_event(false, false), "hi".to_string()),
+            (result_event(true, false), "hi world".to_string()),
+            (result_event(false, false), "next".to_string()),
+        ]);
+        let (audio_tx, audio_rx) = mpsc::channel::<Vec<f32>>(8);
+        let (text_tx, mut text_rx) = mpsc::channel::<TextMessage>(16);
+        let (event_tx, mut event_rx) = mpsc::channel::<VadEvent>(16);
+
+        let handle = tokio::spawn(run_consumer_loop_with_config(
+            pipeline,
+            audio_rx,
+            text_tx,
+            event_tx,
+            fast_test_config(),
+        ));
+
+        // Wait for the three scripted results to flow AND the inactivity
+        // timer (30 ms past the "next" partial) to fire its synthetic.
+        // 150 ms covers ~3 result-branch iterations (<5 ms each) + the
+        // 30 ms inactivity window + ~115 ms slack for loaded CI.
+        tokio::time::sleep(Duration::from_millis(150)).await;
+
+        // Drain text_rx. Expected (in order):
+        //   volatile "hi", real-final "hi world", volatile "next",
+        //   synthetic-final "next" (NOT "hi" — the load-bearing check).
+        let mut texts = Vec::new();
+        while let Ok(msg) = text_rx.try_recv() {
+            texts.push((msg.is_final, msg.segment.text));
+        }
+        assert_eq!(
+            texts,
+            vec![
+                (false, "hi".to_string()),
+                (true, "hi world".to_string()),
+                (false, "next".to_string()),
+                (true, "next".to_string()),
+            ],
+            "#140: buf.record must clear on is_final so the next tick-derived synthetic uses the fresh partial, NOT the stale one"
+        );
+
+        // Drain event_rx. Expected: SpeechStart (from "hi"),
+        // SpeechEnd (from real "hi world"), SpeechStart (from "next"),
+        // SpeechEnd (from inactivity tick after "next").
+        let mut events = Vec::new();
+        while let Ok(ev) = event_rx.try_recv() {
+            events.push(ev);
+        }
+        assert_eq!(
+            events,
+            vec![
+                VadEvent::SpeechStart,
+                VadEvent::SpeechEnd,
+                VadEvent::SpeechStart,
+                VadEvent::SpeechEnd,
+            ],
+            "VadEvent sequence must alternate cleanly across the real-final + restart"
+        );
+
+        drop(audio_tx);
+        let _ = tokio::time::timeout(Duration::from_millis(200), handle).await;
+    }
+
     /// Sanity test: a `stream_done=true` sentinel from the pipeline
     /// terminates the consumer loop cleanly with `Ok(())`. Pins the
     /// other documented exit path (besides `audio_rx` closing).
@@ -604,9 +689,8 @@ mod tests {
     }
 
     /// Sanity test: closing the audio mpsc terminates the consumer
-    /// loop cleanly via the `audio_rx.recv() = None` branch, and the
-    /// pipeline's `stop()` is invoked exactly once. Pins the second
-    /// documented exit path.
+    /// loop cleanly via the `audio_rx.recv() = None` branch. Pins the
+    /// second documented exit path.
     #[tokio::test]
     async fn audio_channel_close_exits_cleanly() {
         let pipeline = ScriptedPipeline::new(vec![]);
