@@ -36,7 +36,7 @@ use primer_core::speech::{
 };
 
 use crate::voice_loop::backends_common::{ChannelStt, LocalBackends};
-use crate::voice_loop::{LoopBackends, VAD_EVENT_CHANNEL_CAPACITY};
+use crate::voice_loop::{DrainHook, LoopBackends, VAD_EVENT_CHANNEL_CAPACITY};
 use crate::{MicCapture, PiperTts, Resampler, SileroVad, SileroVadParams, SpeakerSink, WhisperStt};
 
 /// Body of the audio capture thread.
@@ -383,7 +383,7 @@ pub async fn build_local_backends(
     // ── Drain hook ──────────────────────────────────────────────
     let spk_prod_for_drain = Arc::clone(&spk_prod);
     let spk_errored_for_drain = Arc::clone(&spk_errored);
-    let drain_hook: crate::voice_loop::DrainHook = Box::new(move || {
+    let drain_hook: DrainHook = Box::new(move || {
         let prod = Arc::clone(&spk_prod_for_drain);
         let errored = Arc::clone(&spk_errored_for_drain);
         Box::pin(async move {

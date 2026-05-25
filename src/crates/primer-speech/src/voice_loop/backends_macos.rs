@@ -27,7 +27,7 @@ use primer_core::error::{PrimerError, Result};
 use primer_core::speech::{StreamingTextToSpeech, VadEvent, VoiceProfile};
 
 use crate::voice_loop::backends_common::{ChannelStt, LocalBackends};
-use crate::voice_loop::{LoopBackends, VAD_EVENT_CHANNEL_CAPACITY};
+use crate::voice_loop::{DrainHook, LoopBackends, VAD_EVENT_CHANNEL_CAPACITY};
 use crate::{MicCapture, Resampler, SpeakerSink};
 
 // Imports for the macos-native (SFSpeechRecognizer) builder only.
@@ -388,7 +388,7 @@ pub async fn build_local_backends_macos_native(
     // ── Drain hook ──────────────────────────────────────────────
     let spk_prod_for_drain = Arc::clone(&spk_prod);
     let spk_errored_for_drain = Arc::clone(&spk_errored);
-    let drain_hook: crate::voice_loop::DrainHook = Box::new(move || {
+    let drain_hook: DrainHook = Box::new(move || {
         let prod = Arc::clone(&spk_prod_for_drain);
         let errored = Arc::clone(&spk_errored_for_drain);
         Box::pin(async move {
@@ -702,7 +702,7 @@ pub async fn build_local_backends_macos_native_26(
     // ── Drain hook ──────────────────────────────────────────────
     let spk_prod_for_drain_26 = Arc::clone(&spk_prod);
     let spk_errored_for_drain_26 = Arc::clone(&spk_errored);
-    let drain_hook: crate::voice_loop::DrainHook = Box::new(move || {
+    let drain_hook: DrainHook = Box::new(move || {
         let prod = Arc::clone(&spk_prod_for_drain_26);
         let errored = Arc::clone(&spk_errored_for_drain_26);
         Box::pin(async move {
