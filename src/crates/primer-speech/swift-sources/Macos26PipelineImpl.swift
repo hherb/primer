@@ -253,8 +253,16 @@ public final class Macos26Pipeline {
     /// `AsyncStreamBuffer.swift:508: attempt to await next() on more than
     /// one task` fatal error under `tokio::select!` cancellation. While
     /// the cached Task is still running, a dropped Rust future is
-    /// transparently picked up by the next iteration (both await the
-    /// same `task.value`).
+    /// transparently picked up by the next iteration: both await the
+    /// same `task.value`, the dropped caller's resumption is discarded,
+    /// and the live caller drains `pendingResult` for the yielded
+    /// event. The cache makes the drain single-winner; this is safe
+    /// only because Rust's consumer loop is itself single-flighted
+    /// (`run_consumer_loop` polls one `nextResult` future at a time via
+    /// `tokio::select!`). If a future caller pattern introduced two
+    /// concurrent Rust awaiters of `nextResult`, only one would see
+    /// the event and the other would observe `stream_done` — revisit
+    /// the cache then.
     ///
     /// **Issue #143 cache:** the inner Task writes its yielded
     /// `ResultEvent` into `pendingResult` BEFORE its defer clears
@@ -328,6 +336,20 @@ public final class Macos26Pipeline {
             // drains it via the Layer 1 branch. Inverting this — moving
             // the write into a `defer` AFTER the nextResultTask clear —
             // would reintroduce the #143 race.
+            //
+            // Defensive guard: we should be the only writer that sets
+            // pendingResult to a non-nil value (Layer 1 and Layer 2
+            // drain to nil; stop() writes nil; the cold branch is only
+            // entered when pendingResult is already nil and the task
+            // body cannot run concurrently with itself given current
+            // call paths). If a future change to call paths violates
+            // that invariant, fail fast rather than silently
+            // overwriting a still-undrained event.
+            precondition(
+                self.pendingResult == nil,
+                "Macos26Pipeline.nextResult: pendingResult invariant violated; "
+                + "a prior event would be silently dropped. See issue #143 cache notes."
+            )
             self.pendingResult = event
             return event
         }
