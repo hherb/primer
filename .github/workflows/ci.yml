@@ -123,4 +123,10 @@ jobs:
           CXX_aarch64_linux_android: ${{ steps.ndk.outputs.ndk-path }}/toolchains/llvm/prebuilt/linux-x86_64/bin/aarch64-linux-android24-clang++
           AR_aarch64_linux_android: ${{ steps.ndk.outputs.ndk-path }}/toolchains/llvm/prebuilt/linux-x86_64/bin/llvm-ar
           CARGO_TARGET_AARCH64_LINUX_ANDROID_LINKER: ${{ steps.ndk.outputs.ndk-path }}/toolchains/llvm/prebuilt/linux-x86_64/bin/aarch64-linux-android24-clang
-        run: cargo build --target aarch64-linux-android --workspace --bin primer
+        # NB: `--bin primer` only (no `--workspace`). The `primer-gui`
+        # crate's Tauri 2.x deps don't cross-compile to Android (webkit2gtk
+        # etc.) and GUI on Android is explicitly out-of-scope for Phase 0
+        # — see docs/superpowers/specs/2026-05-26-redmagic-termux-port-design.md.
+        # `cargo build --bin primer` builds only that binary's dep graph,
+        # which excludes `primer-gui` (sibling crate, not a dep).
+        run: cargo build --target aarch64-linux-android --bin primer

@@ -50,9 +50,11 @@ export CC_aarch64_linux_android=<NDK>/toolchains/llvm/prebuilt/darwin-x86_64/bin
 export CXX_aarch64_linux_android=<NDK>/toolchains/llvm/prebuilt/darwin-x86_64/bin/aarch64-linux-android<API>-clang++
 export AR_aarch64_linux_android=<NDK>/toolchains/llvm/prebuilt/darwin-x86_64/bin/llvm-ar
 export CARGO_TARGET_AARCH64_LINUX_ANDROID_LINKER=$CC_aarch64_linux_android
-cargo build --target aarch64-linux-android --workspace --bin primer
+cargo build --target aarch64-linux-android --bin primer
 ```
-Expected: compiles to completion. If any crate fails, capture the error and:
+Expected: compiles to completion. `--bin primer` (without `--workspace`) builds only the `primer` binary's dep graph, which excludes `primer-gui` — Tauri 2.x deps don't cross-compile to Android (webkit2gtk etc.) and GUI on Android is explicitly out of Phase 0 scope per the spec.
+
+If you forgot to add the target to the workspace-pinned 1.88 toolchain (the `rust-toolchain.toml`), the build fails with "can't find crate for core" — `rustup target add aarch64-linux-android --toolchain 1.88` fixes it. The default-toolchain target install (Step 1) is not sufficient. If any crate fails, capture the error and:
 - If it's a unix-only transitive dep: gate via `[target.'cfg(not(target_os = "android"))'.dependencies]` in the offending crate's `Cargo.toml`. Re-run.
 - If it's a C-toolchain issue (missing `libgcc`, wrong `--target` for clang): adjust the env vars; the prebuilt NDK toolchains have predictable names.
 - If it's a `rusqlite` bundled-build issue: it shouldn't be — bundled SQLite needs only clang, which the NDK provides. If it does fail, capture the error verbatim for the quickstart troubleshooting section.
@@ -517,7 +519,10 @@ Open `.github/workflows/ci.yml`. After the existing `test:` job (and any other e
           CXX_aarch64_linux_android: ${{ steps.ndk.outputs.ndk-path }}/toolchains/llvm/prebuilt/linux-x86_64/bin/aarch64-linux-android24-clang++
           AR_aarch64_linux_android: ${{ steps.ndk.outputs.ndk-path }}/toolchains/llvm/prebuilt/linux-x86_64/bin/llvm-ar
           CARGO_TARGET_AARCH64_LINUX_ANDROID_LINKER: ${{ steps.ndk.outputs.ndk-path }}/toolchains/llvm/prebuilt/linux-x86_64/bin/aarch64-linux-android24-clang
-        run: cargo build --target aarch64-linux-android --workspace --bin primer
+        # `--bin primer` only (no `--workspace`). primer-gui doesn't
+        # cross-compile to Android and GUI on Android is out of Phase 0
+        # scope per the spec.
+        run: cargo build --target aarch64-linux-android --bin primer
 ```
 
 - [ ] **Step 2: Verify the YAML parses**
@@ -753,7 +758,7 @@ Edit `README.md`, `ROADMAP.md`, and `CLAUDE.md` to annotate hybrid retrieval as 
 In `.github/workflows/ci.yml`, add a second cross-compile job (or extend the existing one) to run:
 
 ```yaml
-        run: cargo build --target aarch64-linux-android --workspace --bin primer --features primer-cli/embedding
+        run: cargo build --target aarch64-linux-android --bin primer --features primer-cli/embedding
 ```
 
 Land it `continue-on-error: true` first.
