@@ -205,6 +205,13 @@ public final class Macos26Pipeline {
         }
         buffer.frameLength = AVAudioFrameCount(count)
 
+        // Contiguous-buffer view into the Rust Vec<f32>. Replaces a per-sample
+        // RustVec.get(index:)! that did a function call + Optional unwrap on
+        // every Float. `samples` is held by ARC for the duration of this call
+        // (it's a function parameter), so the pointer is valid throughout.
+        // Closes issue #144.
+        let srcPtr = samples.as_ptr()
+
         switch analyzerFormat.commonFormat {
         case .pcmFormatFloat32:
             guard let channelData = buffer.floatChannelData else {
@@ -213,9 +220,11 @@ public final class Macos26Pipeline {
                 }
                 return
             }
-            for i in 0..<count {
-                channelData[0][i] = samples.get(index: UInt(i))!
-            }
+            // Direct memcpy from the Rust Vec buffer to the PCM buffer's float
+            // channel. update(from:count:) is the Swift-stdlib memcpy on typed
+            // pointers; same bytes as the old per-element loop, without the
+            // per-sample Optional indirection.
+            channelData[0].update(from: srcPtr, count: count)
         case .pcmFormatInt16:
             guard let channelData = buffer.int16ChannelData else {
                 if feedAudioCount <= 3 {
@@ -226,10 +235,12 @@ public final class Macos26Pipeline {
             // Float32 sample range is [-1.0, 1.0]; clamp then scale to
             // Int16's full range. 32767 (not 32768) so a Float of +1.0
             // round-trips cleanly through the symmetric Int16 range.
+            // Tight pointer-indexed loop replaces the per-sample
+            // RustVec.get(index:)! Optional unwrap.
+            let dstPtr = channelData[0]
             for i in 0..<count {
-                let f = samples.get(index: UInt(i))!
-                let clamped = max(-1.0, min(1.0, f))
-                channelData[0][i] = Int16(clamped * 32767.0)
+                let clamped = max(-1.0, min(1.0, srcPtr[i]))
+                dstPtr[i] = Int16(clamped * 32767.0)
             }
         default:
             if feedAudioCount <= 3 {
