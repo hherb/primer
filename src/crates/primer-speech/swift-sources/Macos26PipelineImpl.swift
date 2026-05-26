@@ -53,6 +53,25 @@ public final class Macos26Pipeline {
     // cleanup against the still-running iterator advance.
     private var nextResultTask: Task<ResultEvent?, Error>?
 
+    // Holds the most recent iterator-advance result so it survives the
+    // narrow race tracked as issue #143: the inner Task can complete
+    // (writing pendingResult and clearing nextResultTask via its defer)
+    // in the microsecond gap between Rust dropping the outer awaiting
+    // future and the next select! branch re-entering nextResult(). Before
+    // this cache, the value held only by the dropped Task was unreachable
+    // and the next call spawned a fresh Task that advanced the iterator
+    // past it. With the cache, the next caller drains pendingResult on
+    // entry and never observes the gap.
+    //
+    // Invariant: the inner Task writes pendingResult BEFORE its defer
+    // clears nextResultTask, so a caller arriving in any post-write state
+    // — pendingResult Some, nextResultTask either still Some or already
+    // nil — drains the cached value successfully. End-of-stream (Task
+    // returns nil) and throwing iter.next() both leave pendingResult nil;
+    // the next call spawns a fresh Task, which is the same behaviour as
+    // before this cache was added.
+    private var pendingResult: ResultEvent?
+
     // Diagnostic counter — only used by swiftLog gating in feedAudio.
     private var feedAudioCount: Int = 0
 
@@ -228,38 +247,58 @@ public final class Macos26Pipeline {
     /// Pull the next transcriber result, awaiting if necessary. Returns
     /// nil once the underlying stream completes (analyzer stopped).
     ///
-    /// **Single-flight, not fully cancellation-safe.** The cached Task
-    /// guarantees `iter.next()` is only ever called once at a time —
-    /// that's the property that prevents the
+    /// **Single-flight, cancellation-safe via two-layer cache.** The
+    /// cached Task guarantees `iter.next()` is only ever called once at
+    /// a time — that's the property that prevents the
     /// `AsyncStreamBuffer.swift:508: attempt to await next() on more than
     /// one task` fatal error under `tokio::select!` cancellation. While
     /// the cached Task is still running, a dropped Rust future is
     /// transparently picked up by the next iteration (both await the
     /// same `task.value`).
     ///
-    /// **Known narrow race:** if the cached Task completes during the
-    /// gap between Rust dropping the outer future and the next select!
-    /// branch re-entering this function, the defer below clears the
-    /// cache, and the value held by the completed Task is unreachable —
-    /// the next call spawns a fresh Task that advances the iterator past
-    /// it. The window is microseconds (Task body defer fires immediately
-    /// after the iterator yields); in practice `iter.next()` is much
-    /// slower than a select! ratchet so the cache is almost always still
-    /// in-flight when the next call arrives. Tracked as #143; a robust
-    /// fix would cache the value alongside the Task and drain it on the
-    /// consume path.
+    /// **Issue #143 cache:** the inner Task writes its yielded
+    /// `ResultEvent` into `pendingResult` BEFORE its defer clears
+    /// `nextResultTask`. Any caller arriving after the Task completed —
+    /// including the case where the outer Rust future was dropped in
+    /// the microsecond gap between defer firing and the next select!
+    /// branch entering this function — drains `pendingResult` on entry
+    /// and recovers the value. Before this cache, the value held only
+    /// by the completed Task was unreachable and the next call spawned
+    /// a fresh Task that advanced the iterator past it. End-of-stream
+    /// (`iter.next() == nil`) and throwing `iter.next()` both leave
+    /// `pendingResult` nil — same behaviour as before the cache, since
+    /// re-running `iter.next()` on an exhausted iterator yields nil
+    /// idempotently and re-throwing the same error is correct
+    /// propagation.
     private func nextResult() async throws -> ResultEvent? {
-        if let existing = nextResultTask {
-            return try await existing.value
+        // Layer 1: drain a value left behind by a completed Task whose
+        // outer awaiter was dropped before consuming it. Hits the #143
+        // race window where pendingResult is Some and nextResultTask
+        // has already been cleared by the inner defer.
+        if let cached = pendingResult {
+            pendingResult = nil
+            return cached
         }
+        // Layer 2: a Task is still in flight (typical select!-cancel
+        // case). Await it; the Task body writes pendingResult before
+        // clearing nextResultTask, so a successful advance lands in
+        // pendingResult before our await returns.
+        if let existing = nextResultTask {
+            _ = try await existing.value
+            let drained = pendingResult
+            pendingResult = nil
+            return drained
+        }
+        // Cold path: no cached value, no in-flight Task. Spawn one.
+        //
         // The cleanup of `nextResultTask = nil` lives INSIDE the inner
         // Task body so it runs when the iterator advance actually
         // completes — NOT when the outer wrapper is cancelled by
-        // tokio::select! dropping the future. This eliminates the race
-        // where a cancelled outer wrapper's defer cleared the cached
-        // Task while it was still running, allowing the next call to
-        // create a second concurrent iter.next() and fatal-error in
-        // AsyncStreamBuffer.swift:508.
+        // tokio::select! dropping the future. This eliminates the
+        // earlier race where a cancelled outer wrapper's defer cleared
+        // the cached Task while it was still running, allowing the
+        // next call to create a second concurrent iter.next() and
+        // fatal-error in AsyncStreamBuffer.swift:508.
         let task = Task<ResultEvent?, Error> { [weak self] in
             guard let self = self else { return nil }
             defer { self.nextResultTask = nil }
@@ -275,15 +314,28 @@ public final class Macos26Pipeline {
             self.lastText = text
             let startMs = UInt64(max(0, result.range.start.seconds * 1000))
             let endMs = UInt64(max(0, result.range.end.seconds * 1000))
-            return ResultEvent(
+            let event = ResultEvent(
                 is_final: result.isFinal,
                 range_start_ms: startMs,
                 range_end_ms: endMs,
                 stream_done: false
             )
+            // ORDER MATTERS: write pendingResult BEFORE the defer that
+            // clears nextResultTask fires (defers run on return; this
+            // assignment is part of the body and runs first). A caller
+            // arriving in the microsecond gap between defers and the
+            // outer awaiter being dropped reads Some(event) here and
+            // drains it via the Layer 1 branch. Inverting this — moving
+            // the write into a `defer` AFTER the nextResultTask clear —
+            // would reintroduce the #143 race.
+            self.pendingResult = event
+            return event
         }
         nextResultTask = task
-        return try await task.value
+        _ = try await task.value
+        let drained = pendingResult
+        pendingResult = nil
+        return drained
     }
 
     /// Non-throwing bridge wrapper around nextResult().
@@ -320,6 +372,13 @@ public final class Macos26Pipeline {
     public func stop() async {
         inputContinuation.finish()
         try? await analyzer.finalizeAndFinishThroughEndOfInput()
+        // Clear any value cached by the #143 race-fix so a stop()
+        // followed by a stray nextResult() (e.g. a tokio::select!
+        // still-pending future ratcheting after the consumer loop
+        // chose the stop branch) returns stream_done rather than a
+        // stale pre-stop event. Same intent as the lastText="" clear
+        // in nextResultBridge's end-of-stream path.
+        pendingResult = nil
     }
 }
 
