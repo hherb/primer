@@ -88,13 +88,10 @@ jobs:
   # breakage before it surprises a developer in Termux on RedMagic 11.
   # This job does NOT validate runtime behaviour on Android — only that
   # the workspace cross-compiles. The actual on-device validation is
-  # documented in docs/devel/redmagic-termux-quickstart.md. Starts as
-  # continue-on-error so the workflow lands green; flip to required
-  # after a clean run on main.
+  # documented in docs/devel/redmagic-termux-quickstart.md.
   android-cross-compile:
     name: cargo build (aarch64-linux-android)
     runs-on: ubuntu-latest
-    continue-on-error: true
     defaults:
       run:
         working-directory: src
