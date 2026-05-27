@@ -8,18 +8,37 @@
 //!      into a static library.
 //!   3. Emits cargo:rustc-link-* directives so the final Rust binary
 //!      pulls in the .a and the Swift runtime.
+//!
+//! All Xcode-toolchain probes (`xcrun`, `xcode-select`) and the `swiftc`
+//! invocation route through the [`build_hints`] helpers below so missing
+//! tools / non-zero exits surface as `cargo:warning=` lines with an
+//! actionable install hint, not as cryptic Rust panic strings. See
+//! issue #141.
 
 fn main() {
     println!("cargo:rerun-if-changed=build.rs");
     println!("cargo:rerun-if-changed=swift-sources");
     println!("cargo:rerun-if-changed=src/macos26/bridge.rs");
+    println!("cargo:rerun-if-changed=src/macos26/build_hints.rs");
 
     #[cfg(feature = "macos-native-26")]
     macos_native_26::build();
 }
 
+// Loaded via `#[path]` (rather than the conventional file-relative `mod`
+// resolution) so the lib crate's `#[cfg(test)] mod build_hints;` in
+// [`src/macos26/mod.rs`] points at the same source file and unit-tests
+// the helpers without duplicating logic.
+#[cfg(feature = "macos-native-26")]
+#[path = "src/macos26/build_hints.rs"]
+mod build_hints;
+
 #[cfg(feature = "macos-native-26")]
 mod macos_native_26 {
+    use crate::build_hints::{
+        ProbeOutcome, SWIFTC_HINT, XCODE_HINT, cargo_warning_lines, classify,
+        format_failure_message,
+    };
     use std::path::{Path, PathBuf};
     use std::process::Command;
 
@@ -73,8 +92,17 @@ mod macos_native_26 {
             .args(walk_swift_files_recursive(&generated))
             .arg("-o")
             .arg(&lib_path);
-        let status = cmd.status().expect("invoke swiftc");
-        assert!(status.success(), "swiftc failed");
+        match cmd.status() {
+            Ok(status) if status.success() => (),
+            Ok(status) => {
+                emit_hint(SWIFTC_HINT);
+                panic!("swiftc exited with status {status}");
+            }
+            Err(err) => {
+                emit_hint(XCODE_HINT);
+                panic!("failed to invoke `swiftc`: {err}");
+            }
+        }
 
         // 3. Link directives.
         println!("cargo:rustc-link-search=native={}", out_dir.display());
@@ -94,6 +122,31 @@ mod macos_native_26 {
         println!("cargo:rustc-link-arg=-Wl,-rpath,/usr/lib/swift");
     }
 
+    /// Print a hint as `cargo:warning=` lines so it surfaces in front of
+    /// the user before the subsequent `panic!` is rendered as the cargo
+    /// build failure.
+    fn emit_hint(hint: &str) {
+        for line in cargo_warning_lines(hint) {
+            println!("{line}");
+        }
+    }
+
+    /// Run a probe command (`xcrun`, `xcode-select`) and return its
+    /// trimmed stdout, panicking with [`XCODE_HINT`] on either spawn
+    /// failure or a non-zero exit.
+    fn run_xcode_probe(name: &str, args: &[&str]) -> String {
+        let outcome = classify(Command::new(name).args(args).output());
+        match outcome {
+            ProbeOutcome::Ok(stdout) => stdout,
+            ref failure => {
+                emit_hint(XCODE_HINT);
+                let msg = format_failure_message(name, args, failure)
+                    .expect("non-Ok outcome must produce a failure message");
+                panic!("{msg}");
+            }
+        }
+    }
+
     fn swift_target_triple() -> String {
         let arch = match std::env::var("CARGO_CFG_TARGET_ARCH").unwrap().as_str() {
             "aarch64" => "arm64",
@@ -104,19 +157,11 @@ mod macos_native_26 {
     }
 
     fn macos_sdk_path() -> String {
-        let out = Command::new("xcrun")
-            .args(["--show-sdk-path", "--sdk", "macosx"])
-            .output()
-            .expect("invoke xcrun");
-        String::from_utf8(out.stdout).unwrap().trim().to_string()
+        run_xcode_probe("xcrun", &["--show-sdk-path", "--sdk", "macosx"])
     }
 
     fn swift_runtime_dir() -> String {
-        let xcode = Command::new("xcode-select")
-            .arg("-p")
-            .output()
-            .expect("invoke xcode-select");
-        let xcode_path = String::from_utf8(xcode.stdout).unwrap().trim().to_string();
+        let xcode_path = run_xcode_probe("xcode-select", &["-p"]);
         format!("{xcode_path}/Toolchains/XcodeDefault.xctoolchain/usr/lib/swift/macosx")
     }
 

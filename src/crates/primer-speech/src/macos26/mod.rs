@@ -31,6 +31,13 @@ pub mod locale;
 pub mod stt;
 pub mod vad;
 
+// `build_hints` is the pure-helper module that [`crate::build.rs`] also
+// pulls in via `#[path]`. Gated `cfg(test)` here so the lib build doesn't
+// carry unused code in production; cargo test picks up the inline unit
+// tests when run with `--features macos-native-26`. See issue #141.
+#[cfg(test)]
+mod build_hints;
+
 // Re-use the AVSpeechSynthesizer TTS — no new TTS surface in macOS 26.
 pub use crate::macos::MacosTextToSpeech;
 
