@@ -5,6 +5,9 @@ on:
     branches: [main]
   pull_request:
 
+permissions:
+  contents: read
+
 # Cancel in-flight runs on the same branch when a new push lands.
 concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
@@ -80,3 +83,53 @@ jobs:
         env:
           RUSTFLAGS: -D warnings
         run: cargo test --workspace --no-fail-fast
+
+  # Android cross-compile drift-guard. Catches transitive-dep platform
+  # breakage before it surprises a developer in Termux on RedMagic 11.
+  # This job does NOT validate runtime behaviour on Android — only that
+  # the workspace cross-compiles. The actual on-device validation is
+  # documented in docs/devel/redmagic-termux-quickstart.md. Starts as
+  # continue-on-error so the workflow lands green; flip to required
+  # after a clean run on main.
+  android-cross-compile:
+    name: cargo build (aarch64-linux-android)
+    runs-on: ubuntu-latest
+    continue-on-error: true
+    defaults:
+      run:
+        working-directory: src
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust toolchain with Android target
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: aarch64-linux-android
+
+      - name: Cache cargo registry + build
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: src
+          key: android-aarch64
+
+      - name: Install Android NDK
+        id: ndk
+        uses: nttld/setup-ndk@v1
+        with:
+          ndk-version: r26d
+
+      - name: Cross-compile primer binary
+        env:
+          # NDK toolchain paths. API 24 is the lowest sensible floor;
+          # bump if any transitive dep needs newer APIs.
+          CC_aarch64_linux_android: ${{ steps.ndk.outputs.ndk-path }}/toolchains/llvm/prebuilt/linux-x86_64/bin/aarch64-linux-android24-clang
+          CXX_aarch64_linux_android: ${{ steps.ndk.outputs.ndk-path }}/toolchains/llvm/prebuilt/linux-x86_64/bin/aarch64-linux-android24-clang++
+          AR_aarch64_linux_android: ${{ steps.ndk.outputs.ndk-path }}/toolchains/llvm/prebuilt/linux-x86_64/bin/llvm-ar
+          CARGO_TARGET_AARCH64_LINUX_ANDROID_LINKER: ${{ steps.ndk.outputs.ndk-path }}/toolchains/llvm/prebuilt/linux-x86_64/bin/aarch64-linux-android24-clang
+        # NB: `--bin primer` only (no `--workspace`). The `primer-gui`
+        # crate's Tauri 2.x deps don't cross-compile to Android (webkit2gtk
+        # etc.) and GUI on Android is explicitly out-of-scope for Phase 0
+        # — see docs/superpowers/specs/2026-05-26-redmagic-termux-port-design.md.
+        # `cargo build --bin primer` builds only that binary's dep graph,
+        # which excludes `primer-gui` (sibling crate, not a dep).
+        run: cargo build --target aarch64-linux-android --bin primer
