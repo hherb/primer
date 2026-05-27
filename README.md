@@ -67,7 +67,7 @@ src/
 └── crates/
     ├── primer-core/            # traits + shared types (everyone depends on this)
     ├── primer-inference/       # LLM backends (stub, cloud, ollama; later: llama.cpp, QNN, RKNN)
-    ├── primer-speech/          # VAD + STT + TTS backends (Silero, Whisper, Piper, cpal; macos-native: SFSpeechRecognizer + AVSpeechSynthesizer; macos-native-26: SpeechAnalyzer + AVSpeechSynthesizer, in flight)
+    ├── primer-speech/          # VAD + STT + TTS backends (Silero, Whisper, Piper, cpal; macos-native: SFSpeechRecognizer + AVSpeechSynthesizer; macos-native-26: SpeechAnalyzer + AVSpeechSynthesizer)
     ├── primer-knowledge/       # SQLite FTS5 + dense-vector hybrid knowledge base
     ├── primer-storage/         # SQLite session + learner-model persistence
     ├── primer-classifier/      # per-turn engagement classifier (LLM-backed + stub)
@@ -153,7 +153,7 @@ The voice pipeline. Stub backends are always available; real backends sit behind
 Apple-platform alternatives sit behind two mutually-exclusive cargo features:
 
 - **`macos-native`** — `SFSpeechRecognizer` for STT (with `requiresOnDeviceRecognition = true`; never falls back to network) and `AVSpeechSynthesizer.writeUtterance:toBufferCallback:` for phrase-by-phrase streaming TTS via `PhraseSplitter`. Silero stays as the VAD on this path because macOS-26-only `SpeechDetector` would break the macOS 13 floor. en-US + de-DE only — Hindi is deferred until Apple ships on-device `hi-IN`. PCM chunks stream into the speaker ringbuf as `AVSpeechSynthesizer` emits them, so audio begins playing while later phrases are still being synthesised. (PRs #95, #112, #122, #123.)
-- **`macos-native-26`** — in flight (PR #134). Replaces Whisper + Silero + ONNX runtime with `SpeechAnalyzer` + `SpeechTranscriber` + `SpeechDetector` via a Swift sidecar bridged through `swift-bridge`. Motivated by an empirical latency probe (PR #131): SpeechAnalyzer is ~100× faster to first partial (~30 ms vs ~3.8 s) and ~2× faster to final (~800 ms vs ~1.8 s) than Whisper `ggml-small.en` on macOS 26.5. Mutually exclusive with `macos-native` at compile time. en-US + de-DE only; Hindi `hi-IN` errors loudly at construction (not on-device for `SpeechTranscriber` yet).
+- **`macos-native-26`** — landed (PR #134, 2026-05-23). Replaces Whisper + Silero + ONNX runtime with `SpeechAnalyzer` + `SpeechTranscriber` + `SpeechDetector` via a Swift sidecar bridged through `swift-bridge`. Motivated by an empirical latency probe (PR #131): SpeechAnalyzer is ~100× faster to first partial (~30 ms vs ~3.8 s) and ~2× faster to final (~800 ms vs ~1.8 s) than Whisper `ggml-small.en` on macOS 26.5. Mutually exclusive with `macos-native` at compile time. en-US + de-DE only; Hindi `hi-IN` errors loudly at construction (not on-device for `SpeechTranscriber` yet).
 
 A vendored **Supertonic TTS** backend (PRs #127, #128) is also available behind a `supertonic` feature for A/B evaluation; not on any default code path.
 

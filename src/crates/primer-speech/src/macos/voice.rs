@@ -51,10 +51,12 @@ impl VoiceSelection {
     }
 }
 
-/// Pick the best available voice for `locale`. Preference is `Enhanced`
-/// over `Premium` over `Default`: Enhanced voices are good neural voices
-/// in the ~100 MB range; Premium are ~500 MB and optional; Default is
-/// the always-bundled robotic-edge fallback.
+/// Pick the best available voice for `locale`. Preference is `Premium`
+/// over `Enhanced` over `Default`, matching the `VoiceQuality` enum
+/// ordering and Apple's own `AVSpeechSynthesisVoiceQuality` ranking:
+/// Premium are top-tier neural voices (~500 MB, opt-in); Enhanced are
+/// good neural voices (~100 MB, downloadable); Default is the always-
+/// bundled robotic-edge fallback.
 ///
 /// Returns `None` if no voice matches the locale's BCP-47 language tag at all.
 pub fn select_voice(locale: &Locale) -> Option<VoiceSelection> {
