@@ -39,7 +39,7 @@ pub async fn build_loop_backends(
     ))]
     {
         if matches!(backend, SpeechBackend::MacosNative) {
-            return primer_speech::voice_loop::backends::build_local_backends_macos_native_26(
+            return primer_speech::voice_loop::build_local_backends_macos_native_26(
                 locale,
                 mic_silence_ms,
                 // The GUI logs via tracing, never stderr.
@@ -62,7 +62,7 @@ pub async fn build_loop_backends(
     ))]
     {
         if matches!(backend, SpeechBackend::MacosNative) {
-            return primer_speech::voice_loop::backends::build_local_backends_macos_native(
+            return primer_speech::voice_loop::build_local_backends_macos_native(
                 locale,
                 mic_silence_ms,
                 // The GUI logs via tracing, never stderr.

@@ -1,7 +1,7 @@
 #![cfg(all(target_os = "macos", feature = "macos-native", feature = "voice-loop"))]
 
 use primer_core::i18n::Locale;
-use primer_speech::voice_loop::backends::build_local_backends_macos_native;
+use primer_speech::voice_loop::build_local_backends_macos_native;
 
 #[tokio::test]
 async fn macos_native_builder_returns_local_backends() {

@@ -34,16 +34,18 @@ pub mod backends_common;
 ))]
 pub mod backends;
 
-/// macOS-native backend builders (SFSpeechRecognizer-based and
-/// SpeechAnalyzer-based). File-level gate is the *union* of what either
-/// builder needs — `cpal + any(macos-native, macos-native-26)`; each
-/// `pub` item inside carries its own narrower gate.
-#[cfg(all(
-    target_os = "macos",
-    feature = "cpal",
-    any(feature = "macos-native", feature = "macos-native-26")
-))]
-pub mod backends_macos;
+/// macOS-native backend builder (SFSpeechRecognizer + Silero VAD). One
+/// file per builder so each `pub` item lives behind exactly the narrow
+/// feature gate that reflects its body, and each file stays well under
+/// the 500-line guideline. Closes #149.
+#[cfg(all(target_os = "macos", feature = "cpal", feature = "macos-native"))]
+pub mod backends_macos_native;
+
+/// macOS 26 native backend builder (SpeechAnalyzer + derived VAD).
+/// Sibling of [`backends_macos_native`]; both share the mic/speaker/
+/// closure helpers in [`backends_common`].
+#[cfg(all(target_os = "macos", feature = "cpal", feature = "macos-native-26"))]
+pub mod backends_macos_native_26;
 
 /// Pure helper for the macos-native-26 audio thread's pre-resample
 /// chunk buffer; clears on `is_speaking` to prevent pre-speak audio
@@ -74,7 +76,7 @@ pub use backends::build_local_backends;
     feature = "silero",
     feature = "macos-native"
 ))]
-pub use backends_macos::build_local_backends_macos_native;
+pub use backends_macos_native::build_local_backends_macos_native;
 
 #[cfg(all(target_os = "macos", feature = "cpal", feature = "macos-native-26"))]
-pub use backends_macos::build_local_backends_macos_native_26;
+pub use backends_macos_native_26::build_local_backends_macos_native_26;
