@@ -84,6 +84,69 @@ jobs:
           RUSTFLAGS: -D warnings
         run: cargo test --workspace --no-fail-fast
 
+  # Non-default feature build drift-guard. The default `cargo test` step
+  # only exercises the default feature stack — non-default features like
+  # `supertonic` and `fastembed` are invisible to that signal, and rotted
+  # silently in PR #127 (broken supertonic build) and PR #150 (broken
+  # macos-native-26 build) before reaching review. This job runs
+  # `cargo check` against each Linux-buildable non-default feature stack
+  # so transitive-dep API drift fails CI on the PR rather than during a
+  # developer's later re-verification. Build-only (no `cargo test`) is
+  # sufficient: the bug class we are guarding against is "API drift
+  # broke compilation," not runtime regressions. macOS-only features
+  # (`macos-native`, `macos-native-26`) are not covered here — they need
+  # platform-specific runners; see issues #129 and #151 for the broader
+  # matrix proposal.
+  feature-combos:
+    name: cargo check (non-default features)
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: src
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Tauri Linux system deps
+        # primer-speech itself doesn't need webkit2gtk, but the
+        # workspace `Cargo.lock` resolution still pulls in some crates
+        # that transitively reference Tauri's optional deps when the
+        # workspace is checked. Match the default-test job's deps to
+        # keep the resolution identical.
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            libwebkit2gtk-4.1-dev \
+            libxdo-dev \
+            libssl-dev \
+            libayatana-appindicator3-dev \
+            librsvg2-dev
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache cargo registry + build
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: src
+          key: feature-combos
+
+      - name: cargo check --features supertonic
+        # Closes #129. PR #127 landed a broken ort rc.7 → rc.10 migration
+        # in the vendored supertonic-rs that was invisible to default-CI
+        # (no `--features supertonic` ever ran). PR #128 fixed it
+        # after-the-fact. This step makes the same bug class fail loudly
+        # on the PR introducing it. ONNX runtime downloads from
+        # cdn.pyke.io on first build; the rust-cache layer above keeps
+        # subsequent runs warm.
+        run: cargo check -p primer-speech --features supertonic
+
+      - name: cargo check --features fastembed
+        # Mirrors the supertonic guard for the embedding path. The
+        # workspace pin of `ort = "=2.0.0-rc.10"` is load-bearing for
+        # both stacks (see CLAUDE.md); breaking either silently regresses
+        # hybrid retrieval (fastembed) or the supertonic A/B comparison.
+        run: cargo check -p primer-embedding --features fastembed
+
   # Android cross-compile drift-guard. Catches transitive-dep platform
   # breakage before it surprises a developer in Termux on RedMagic 11.
   # This job does NOT validate runtime behaviour on Android — only that

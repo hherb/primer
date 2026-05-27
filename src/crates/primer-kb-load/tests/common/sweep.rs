@@ -405,13 +405,26 @@ mod hybrid {
     /// RRF k constant explored. 60.0 is the production default; smaller
     /// weights the very top of each leg more, larger flattens.
     pub const HYBRID_RRF_K_GRID: &[f64] = &[30.0, 60.0, 90.0];
+    /// Post-fusion score floor explored. RRF scores are bounded by ~`1/k`
+    /// per leg (≈0.0164 at `rrf_k=60` for the top-ranked hit in one leg),
+    /// so a meaningful floor lives near `0.0..=0.02`. 0.0 is the
+    /// production default (no filtering); non-zero floors drop low-
+    /// confidence fused passages and can either trim noise or regress
+    /// recall on marginal queries. See issue #46.
+    pub const HYBRID_MIN_SCORE_GRID: &[f64] = &[0.0, 0.005, 0.01, 0.02];
     /// RRF k value used as the tie-break preference. Coupled at compile
     /// time to the production default so a future change to
     /// [`primer_core::consts::retrieval::RRF_K`] doesn't silently drift
     /// from the sweep's tie-break preference.
     pub const HYBRID_PREFERRED_RRF_K: f64 = primer_core::consts::retrieval::RRF_K;
+    /// `min_score` value used as the tie-break preference. Coupled to the
+    /// production default so flipping `KB_MIN_SCORE` (today `0.0` — no
+    /// floor) automatically realigns the sweep's tie-break preference.
+    pub const HYBRID_PREFERRED_MIN_SCORE: f64 = primer_core::consts::retrieval::KB_MIN_SCORE;
     /// Width of the dashed separator line under the hybrid table header.
-    pub const HYBRID_DASH_WIDTH: usize = 70;
+    /// Widened from 70 to 76 columns to accommodate the new `Floor`
+    /// column added for the `min_score` axis (issue #46).
+    pub const HYBRID_DASH_WIDTH: usize = 76;
 
     pub struct HybridSweepConfig<'a> {
         pub locale: Locale,
@@ -427,6 +440,7 @@ mod hybrid {
         pub vector_top_k: usize,
         pub final_top_k: usize,
         pub rrf_k: f64,
+        pub min_score: f64,
         pub loose_pass: usize,
         pub loose_total: usize,
         pub strict_pass: usize,
@@ -458,6 +472,7 @@ mod hybrid {
         vector_top_k: usize,
         final_top_k: usize,
         rrf_k: f64,
+        min_score: f64,
     ) -> HybridCellMetrics {
         let mut loose_pass = 0;
         let mut loose_total = 0;
@@ -470,7 +485,7 @@ mod hybrid {
                 vector_top_k,
                 final_top_k,
                 rrf_k,
-                min_score: 0.0,
+                min_score,
                 source_filter: vec![],
             };
             let hits = kb
@@ -503,6 +518,7 @@ mod hybrid {
             vector_top_k,
             final_top_k,
             rrf_k,
+            min_score,
             loose_pass,
             loose_total,
             strict_pass,
@@ -511,9 +527,18 @@ mod hybrid {
     }
 
     /// Lex-selection: max strict, max loose, min final_top_k, RRF k
-    /// closest to the production default `HYBRID_PREFERRED_RRF_K`.
-    /// Defensive `.unwrap_or(Ordering::Equal)` on every partial_cmp
-    /// (closes #67).
+    /// closest to the production default `HYBRID_PREFERRED_RRF_K`,
+    /// `min_score` closest to the production default
+    /// `HYBRID_PREFERRED_MIN_SCORE`. Defensive
+    /// `.unwrap_or(Ordering::Equal)` on every partial_cmp (closes #67).
+    ///
+    /// The `min_score` tie-break is last because RRF rank-fusion already
+    /// quasi-normalises the score scale (max contribution per leg is
+    /// `1/(rrf_k+1)`), so the floor's practical effect at production
+    /// `final_top_k` is small. Putting it after RRF k means a sweep that
+    /// finds an outperforming non-zero floor will surface in the printed
+    /// table; the tie-break preference for the production default keeps
+    /// "no change" the algorithmic winner when the new axis is neutral.
     fn pick_hybrid_winner(cells: &[HybridCellMetrics]) -> &HybridCellMetrics {
         cells
             .iter()
@@ -531,6 +556,13 @@ mod hybrid {
                         (a.rrf_k - HYBRID_PREFERRED_RRF_K)
                             .abs()
                             .partial_cmp(&(b.rrf_k - HYBRID_PREFERRED_RRF_K).abs())
+                            .unwrap_or(Ordering::Equal)
+                            .reverse(),
+                    )
+                    .then(
+                        (a.min_score - HYBRID_PREFERRED_MIN_SCORE)
+                            .abs()
+                            .partial_cmp(&(b.min_score - HYBRID_PREFERRED_MIN_SCORE).abs())
                             .unwrap_or(Ordering::Equal)
                             .reverse(),
                     )
@@ -555,8 +587,8 @@ mod hybrid {
         reembed_kb(&kb, embedder.as_ref(), false, 32).await.unwrap();
 
         println!(
-            "{:>4} {:>4} {:>4} {:>5} {:>14} {:>15}",
-            "BM25", "Vec", "Top", "RRF", "loose_recall", "strict_recall"
+            "{:>4} {:>4} {:>4} {:>5} {:>5} {:>14} {:>15}",
+            "BM25", "Vec", "Top", "RRF", "Floor", "loose_recall", "strict_recall"
         );
         println!("{}", "-".repeat(HYBRID_DASH_WIDTH));
 
@@ -565,30 +597,34 @@ mod hybrid {
             for &vector_top_k in HYBRID_VECTOR_TOP_K_GRID {
                 for &final_top_k in HYBRID_FINAL_TOP_K_GRID {
                     for &rrf_k in HYBRID_RRF_K_GRID {
-                        let m = evaluate_hybrid_cell(
-                            &kb,
-                            embedder.as_ref(),
-                            cfg.queries,
-                            bm25_top_k,
-                            vector_top_k,
-                            final_top_k,
-                            rrf_k,
-                        )
-                        .await;
-                        println!(
-                            "{:>4} {:>4} {:>4} {:>5.0} {:>9}/{:>3}={:>3.0}% {:>9}/{:>3}={:>3.0}%",
-                            m.bm25_top_k,
-                            m.vector_top_k,
-                            m.final_top_k,
-                            m.rrf_k,
-                            m.loose_pass,
-                            m.loose_total,
-                            m.loose_recall() * 100.0,
-                            m.strict_pass,
-                            m.strict_total,
-                            m.strict_recall() * 100.0,
-                        );
-                        cells.push(m);
+                        for &min_score in HYBRID_MIN_SCORE_GRID {
+                            let m = evaluate_hybrid_cell(
+                                &kb,
+                                embedder.as_ref(),
+                                cfg.queries,
+                                bm25_top_k,
+                                vector_top_k,
+                                final_top_k,
+                                rrf_k,
+                                min_score,
+                            )
+                            .await;
+                            println!(
+                                "{:>4} {:>4} {:>4} {:>5.0} {:>5.3} {:>9}/{:>3}={:>3.0}% {:>9}/{:>3}={:>3.0}%",
+                                m.bm25_top_k,
+                                m.vector_top_k,
+                                m.final_top_k,
+                                m.rrf_k,
+                                m.min_score,
+                                m.loose_pass,
+                                m.loose_total,
+                                m.loose_recall() * 100.0,
+                                m.strict_pass,
+                                m.strict_total,
+                                m.strict_recall() * 100.0,
+                            );
+                            cells.push(m);
+                        }
                     }
                 }
             }
@@ -596,12 +632,13 @@ mod hybrid {
 
         let winner = pick_hybrid_winner(&cells);
         println!(
-            "\n>>> {}: bm25_top_k={}, vector_top_k={}, final_top_k={}, rrf_k={:.0}",
+            "\n>>> {}: bm25_top_k={}, vector_top_k={}, final_top_k={}, rrf_k={:.0}, min_score={:.3}",
             cfg.winner_label,
             winner.bm25_top_k,
             winner.vector_top_k,
             winner.final_top_k,
-            winner.rrf_k
+            winner.rrf_k,
+            winner.min_score,
         );
         println!(
             ">>> strict_recall={:.0}%, loose_recall={:.0}%",
@@ -616,7 +653,8 @@ mod hybrid {
         //! Characterisation tests for [`pick_hybrid_winner`].
         //!
         //! Pins the lex-selection rule: max strict_recall → max loose_recall
-        //! → min final_top_k → RRF k closest to [`HYBRID_PREFERRED_RRF_K`].
+        //! → min final_top_k → RRF k closest to [`HYBRID_PREFERRED_RRF_K`]
+        //! → `min_score` closest to [`HYBRID_PREFERRED_MIN_SCORE`].
         //! Each test isolates one axis so a future hand-edit that inverts
         //! a `.then(...)` clause fails loudly here.
         use super::*;
@@ -624,6 +662,7 @@ mod hybrid {
         fn cell(
             final_top_k: usize,
             rrf_k: f64,
+            min_score: f64,
             loose_pass: usize,
             strict_pass: usize,
         ) -> HybridCellMetrics {
@@ -632,6 +671,7 @@ mod hybrid {
                 vector_top_k: 30,
                 final_top_k,
                 rrf_k,
+                min_score,
                 loose_pass,
                 loose_total: 10,
                 strict_pass,
@@ -641,21 +681,21 @@ mod hybrid {
 
         #[test]
         fn strict_recall_wins_over_loose_recall() {
-            let cells = vec![cell(5, 60.0, 10, 1), cell(5, 60.0, 0, 2)];
+            let cells = vec![cell(5, 60.0, 0.0, 10, 1), cell(5, 60.0, 0.0, 0, 2)];
             let winner = pick_hybrid_winner(&cells);
             assert_eq!(winner.strict_pass, 2);
         }
 
         #[test]
         fn loose_recall_breaks_strict_tie() {
-            let cells = vec![cell(5, 60.0, 3, 1), cell(5, 60.0, 5, 1)];
+            let cells = vec![cell(5, 60.0, 0.0, 3, 1), cell(5, 60.0, 0.0, 5, 1)];
             let winner = pick_hybrid_winner(&cells);
             assert_eq!(winner.loose_pass, 5);
         }
 
         #[test]
         fn smaller_final_top_k_breaks_recall_tie() {
-            let cells = vec![cell(5, 60.0, 5, 1), cell(3, 60.0, 5, 1)];
+            let cells = vec![cell(5, 60.0, 0.0, 5, 1), cell(3, 60.0, 0.0, 5, 1)];
             let winner = pick_hybrid_winner(&cells);
             assert_eq!(winner.final_top_k, 3);
         }
@@ -665,9 +705,9 @@ mod hybrid {
             // strict + loose + final_top_k equal → rrf_k closest to
             // HYBRID_PREFERRED_RRF_K wins. Production default is 60.
             let cells = vec![
-                cell(5, 30.0, 5, 1),
-                cell(5, 60.0, 5, 1),
-                cell(5, 90.0, 5, 1),
+                cell(5, 30.0, 0.0, 5, 1),
+                cell(5, 60.0, 0.0, 5, 1),
+                cell(5, 90.0, 0.0, 5, 1),
             ];
             let winner = pick_hybrid_winner(&cells);
             assert!(
@@ -676,6 +716,40 @@ mod hybrid {
                 winner.rrf_k,
                 HYBRID_PREFERRED_RRF_K,
             );
+        }
+
+        #[test]
+        fn preferred_min_score_wins_over_distant_min_score() {
+            // strict + loose + final_top_k + rrf_k equal → min_score
+            // closest to HYBRID_PREFERRED_MIN_SCORE wins. Production
+            // default is 0.0 (no floor); the grid offers {0.0, 0.005,
+            // 0.01, 0.02} so the production default must lex-win on a
+            // four-way recall tie.
+            let cells = vec![
+                cell(5, 60.0, 0.0, 5, 1),
+                cell(5, 60.0, 0.005, 5, 1),
+                cell(5, 60.0, 0.01, 5, 1),
+                cell(5, 60.0, 0.02, 5, 1),
+            ];
+            let winner = pick_hybrid_winner(&cells);
+            assert!(
+                (winner.min_score - HYBRID_PREFERRED_MIN_SCORE).abs() < f64::EPSILON,
+                "winner min_score={} should match HYBRID_PREFERRED_MIN_SCORE={}",
+                winner.min_score,
+                HYBRID_PREFERRED_MIN_SCORE,
+            );
+        }
+
+        #[test]
+        fn nontrivial_floor_wins_when_recall_strictly_better() {
+            // If a non-zero floor produces a strictly better strict_recall,
+            // it must beat the production default — the new axis's whole
+            // purpose is to surface such an improvement. Pins that the
+            // tie-break preference does not mask a real recall win.
+            let cells = vec![cell(5, 60.0, 0.0, 5, 1), cell(5, 60.0, 0.01, 5, 2)];
+            let winner = pick_hybrid_winner(&cells);
+            assert_eq!(winner.strict_pass, 2);
+            assert!((winner.min_score - 0.01).abs() < f64::EPSILON);
         }
     }
 }
