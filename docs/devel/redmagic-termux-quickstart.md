@@ -259,7 +259,60 @@ You ran `--resume` without matching `--name` or `--session-db` to the
 original session — the CLI defaulted the session DB path to a different
 file. See the "Gotcha" callout under "Resume a prior session" above.
 
-## What works, what doesn't (as of 2026-05-26)
+## Hybrid retrieval (`--embedder-backend fastembed`)
+
+❌ **Does not build on Android ARM64** as of 2026-05-27.
+
+```bash
+cargo build -p primer-cli --features embedding
+```
+
+fails at the `ort-sys` build script:
+
+```
+error[E0432]: unresolved import `self::internal::dirs::cache_dir`
+   --> ort-sys-2.0.0-rc.10/build.rs:26:5
+   |
+26 | use self::internal::dirs::cache_dir;
+   |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ no `cache_dir` in `internal::dirs`
+   |
+note: found an item that was configured out
+   --> ort-sys-2.0.0-rc.10/src/internal/dirs.rs:177:8
+   |
+175 | #[cfg(target_os = "linux")]
+176 | #[must_use]
+177 | pub fn cache_dir() -> Option<std::path::PathBuf> {
+```
+
+Root cause: `ort-sys 2.0.0-rc.10`'s `cache_dir()` helper is gated on
+`target_os` being one of `windows | linux | macos`. There is no
+`target_os = "android"` arm, so the import in `build.rs:26` doesn't
+resolve and the build script fails before any compilation begins.
+
+The workspace pins ORT at `2.0.0-rc.10` because the vendored
+silero / whisper / piper crates require it (see CLAUDE.md). Unblocking
+requires one of:
+
+- **(a)** Upstream PR to `pyke/ort` adding a `target_os = "android"`
+  arm in `ort-sys/src/internal/dirs.rs` (the Linux arm's `XDG_CACHE_HOME`
+  fallback would likely work as-is for Android).
+- **(b)** Bumping ORT past rc.10 in lockstep with the speech vendor
+  patches — non-trivial because three vendored crates rely on the
+  current ort API surface.
+- **(c)** A workspace `[patch.crates-io] ort-sys = { path = … }` that
+  adds the Android arm locally. Cleanest short-term fix if anyone
+  pursues this.
+
+**Until resolved, the recommended Android setting is
+`--embedder-backend none`** (BM25-only retrieval). This is a graceful
+fallback, not a broken feature — the retrieval-quality benchmark suite
+passes at 100% strict recall on the 91-query English benchmark under
+BM25-only defaults, and `KNOWN_FAILING_QUERIES_HYBRID` is empty
+post-issue-#45 so there are no documented hybrid-only wins to lose.
+
+Follow-up GitHub issue tracking this: [#157](https://github.com/hherb/primer/issues/157).
+
+## What works, what doesn't (as of 2026-05-27)
 
 | Feature                                       | Status                                    |
 | --------------------------------------------- | ----------------------------------------- |
@@ -271,7 +324,7 @@ file. See the "Gotcha" callout under "Resume a prior session" above.
 | `--resume <uuid>` flow                        | ✅ works (mind the `--name` gotcha)        |
 | Auto-seeded knowledge base (91 passages)      | ✅ works                                   |
 | Engagement / extractor / comprehension chain  | ✅ wires up; full quality not bench'd here |
-| Hybrid retrieval (`--embedder-backend fastembed`) | ⏳ pending PR 2 probe                  |
+| Hybrid retrieval (`--embedder-backend fastembed`) | ❌ `ort-sys 2.0.0-rc.10` has no Android arm (see section above) |
 | Voice mode (`--speech`)                       | ❌ not validated on Android (Phase 2 work) |
 | GUI (Tauri desktop binary)                    | ❌ not in scope                            |
 | Reasoning-mode models on Ollama               | ❌ leak `<think>` / `<unused>` tokens into response |
