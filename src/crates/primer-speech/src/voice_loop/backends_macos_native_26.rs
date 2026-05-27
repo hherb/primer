@@ -26,7 +26,6 @@ use primer_core::speech::{StreamingTextToSpeech, VadEvent, VoiceProfile};
 use crate::Resampler;
 use crate::voice_loop::backends_common::{
     ChannelStt, LocalBackends, MicPipeline, SpeakerPipeline, make_drain_hook, make_on_audio,
-    open_mic_with_resampler,
 };
 use crate::voice_loop::{LoopBackends, VAD_EVENT_CHANNEL_CAPACITY};
 
@@ -40,9 +39,15 @@ use crate::voice_loop::{LoopBackends, VAD_EVENT_CHANNEL_CAPACITY};
 /// Audio flow: cpal mic → std::thread (resample) → tokio mpsc → Swift
 /// SpeechAnalyzer → DerivedVadStateMachine → VadEvent + TextMessage →
 /// bridge task → std::sync::mpsc<String> → ChannelStt → voice loop.
+///
+/// `_mic_silence_ms` is a Silero-VAD knob used by the sibling
+/// [`super::backends_macos_native::build_local_backends_macos_native`];
+/// the macos-26 path uses transcript-derived VAD instead. The parameter
+/// is kept for signature parity with the sibling builder; the leading
+/// underscore tells the compiler the unused-variable is deliberate.
 pub async fn build_local_backends_macos_native_26(
     locale: primer_core::i18n::Locale,
-    mic_silence_ms: u32,
+    _mic_silence_ms: u32,
     verbose: bool,
 ) -> Result<LocalBackends> {
     use crate::macos::MacosTextToSpeech;
@@ -50,11 +55,6 @@ pub async fn build_local_backends_macos_native_26(
     use crate::macos26::audio_session;
     use crate::macos26::bridge::ffi as macos26_ffi;
     use crate::macos26::locale::to_bcp47;
-
-    // mic_silence_ms is a Silero-VAD knob in the sibling; the macos26
-    // path uses transcript-derived VAD instead. The parameter is kept
-    // for signature parity; we silence the unused-variable warning.
-    let _ = mic_silence_ms;
 
     let bcp47 = to_bcp47(locale)?.to_string();
     audio_session::configure_for_capture()?;
@@ -86,7 +86,7 @@ pub async fn build_local_backends_macos_native_26(
         mic_cons,
         mut input_resampler,
         in_chunk_samples,
-    } = open_mic_with_resampler(analyzer_rate, analyzer_chunk, verbose)?;
+    } = MicPipeline::start(analyzer_rate, analyzer_chunk, verbose)?;
     tracing::info!(
         target: "primer::speech::macos26",
         "analyzer sample rate: {} Hz (mic: {} Hz)",

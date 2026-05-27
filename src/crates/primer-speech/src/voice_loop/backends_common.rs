@@ -3,9 +3,9 @@
 //! Holds [`LocalBackends`] (the bundle every builder returns) and
 //! [`ChannelStt`] (the streaming-STT adapter that decouples the audio
 //! capture thread from the voice loop), plus a small set of factories
-//! ([`SpeakerPipeline`], [`MicPipeline`], [`make_on_audio`],
-//! [`make_drain_hook`], [`open_mic_with_resampler`]) that absorb the
-//! ~250-line tail every concrete builder used to copy verbatim.
+//! ([`SpeakerPipeline::start`], [`MicPipeline::start`],
+//! [`make_on_audio`], [`make_drain_hook`]) that absorb the ~250-line
+//! tail every concrete builder used to copy verbatim.
 //!
 //! All concrete backend builders — whisper+piper in [`super::backends`],
 //! SFSpeechRecognizer + Silero in [`super::backends_macos_native`], and
@@ -16,6 +16,12 @@
 //! denominator: every builder needs `MicCapture`/`SpeakerSink`), so the
 //! macOS builders don't have to inherit `whisper`/`piper`/`silero`
 //! dependencies they never touch.
+//!
+//! TODO(#163): split this file once the test module grows. Production
+//! helpers are ~400 lines and read well together today; the file pushes
+//! past 500 only because of `#[cfg(test)] mod tests`. Trigger to act:
+//! a second test fixture, a second test module, or any new production
+//! helper that lifts the non-test portion past ~500 lines.
 
 use std::sync::Arc;
 use std::sync::Mutex;
@@ -213,7 +219,7 @@ impl Drop for LocalBackends {
 // Shared builder helpers
 // ───────────────────────────────────────────────────────────────────────
 
-/// Bundle returned by [`open_mic_with_resampler`].
+/// Bundle returned by [`MicPipeline::start`].
 ///
 /// Every voice-loop builder needs the four pieces together (mic stream
 /// owner, mic ringbuf consumer for the audio thread, optional input
@@ -226,40 +232,47 @@ pub(super) struct MicPipeline {
     pub(super) in_chunk_samples: usize,
 }
 
-/// Open the system mic and (lazily) build the input resampler to
-/// `target_rate`. `target_chunk_samples` is the STT/VAD chunk size at
-/// `target_rate`; `in_chunk_samples` is the matching window at mic rate.
-///
-/// `verbose` prints one stderr line on success — the CLI flips this on,
-/// the GUI flips it off and logs via tracing in the caller.
-pub(super) fn open_mic_with_resampler(
-    target_rate: u32,
-    target_chunk_samples: usize,
-    verbose: bool,
-) -> Result<MicPipeline> {
-    let (mic, mic_cons) = MicCapture::start()?;
-    let mic_rate = mic.sample_rate;
-    if verbose {
-        eprintln!(
-            "[speech] mic opened: {}Hz, {} channels",
-            mic_rate, mic.channels
-        );
+impl MicPipeline {
+    /// Open the system mic and (lazily) build the input resampler to
+    /// `target_rate`. `target_chunk_samples` is the STT/VAD chunk size
+    /// at `target_rate`; `in_chunk_samples` is the matching window at
+    /// mic rate.
+    ///
+    /// `verbose` prints one stderr line on success — the CLI flips this
+    /// on, the GUI flips it off and logs via tracing in the caller.
+    ///
+    /// Naming mirrors [`SpeakerPipeline::start`] so the two
+    /// open-a-device-and-bundle-its-resampler entry points read
+    /// symmetrically at the builder call sites.
+    pub(super) fn start(
+        target_rate: u32,
+        target_chunk_samples: usize,
+        verbose: bool,
+    ) -> Result<Self> {
+        let (mic, mic_cons) = MicCapture::start()?;
+        let mic_rate = mic.sample_rate;
+        if verbose {
+            eprintln!(
+                "[speech] mic opened: {}Hz, {} channels",
+                mic_rate, mic.channels
+            );
+        }
+
+        let in_chunk_samples: usize =
+            (target_chunk_samples as u64 * mic_rate as u64 / target_rate as u64) as usize;
+        let input_resampler: Option<Resampler> = if mic_rate != target_rate {
+            Some(Resampler::new(mic_rate, target_rate, in_chunk_samples)?)
+        } else {
+            None
+        };
+
+        Ok(Self {
+            mic,
+            mic_cons,
+            input_resampler,
+            in_chunk_samples,
+        })
     }
-
-    let in_chunk_samples: usize =
-        (target_chunk_samples as u64 * mic_rate as u64 / target_rate as u64) as usize;
-    let input_resampler: Option<Resampler> = if mic_rate != target_rate {
-        Some(Resampler::new(mic_rate, target_rate, in_chunk_samples)?)
-    } else {
-        None
-    };
-
-    Ok(MicPipeline {
-        mic,
-        mic_cons,
-        input_resampler,
-        in_chunk_samples,
-    })
 }
 
 /// Bundle returned by [`SpeakerPipeline::start`].
@@ -337,7 +350,9 @@ pub(super) fn make_on_audio(
         let is_flush = samples.is_empty();
         let mut samples = samples;
         if need_output_resample {
-            let mut guard = output_resampler.lock().unwrap();
+            let mut guard = output_resampler
+                .lock()
+                .expect("output resampler mutex poisoned");
             if let Some(resampler) = guard.as_mut() {
                 let mut combined: Vec<f32> =
                     Vec::with_capacity(output_leftover.len() + samples.len());

@@ -9,11 +9,12 @@
 //! GUI voice-mode work so the CLI and GUI share one builder.
 //!
 //! Shared types (`LocalBackends`, `ChannelStt`) and the audio-pipeline
-//! helpers (`SpeakerPipeline`, `make_on_audio`, `make_drain_hook`,
-//! `open_mic_with_resampler`) live in [`super::backends_common`] so the
-//! macOS-native builders in [`super::backends_macos_native`] and
-//! [`super::backends_macos_native_26`] can share them without inheriting
-//! the whisper/piper dependency this module pulls in.
+//! helpers (`SpeakerPipeline::start`, `MicPipeline::start`,
+//! `make_on_audio`, `make_drain_hook`) live in
+//! [`super::backends_common`] so the macOS-native builders in
+//! [`super::backends_macos_native`] and
+//! [`super::backends_macos_native_26`] can share them without
+//! inheriting the whisper/piper dependency this module pulls in.
 //!
 //! Lifecycle: callers receive a [`LocalBackends`] struct that holds the
 //! audio resources (mic stream, speaker stream, audio thread handle).
@@ -39,7 +40,6 @@ use primer_core::speech::{
 
 use crate::voice_loop::backends_common::{
     ChannelStt, LocalBackends, MicPipeline, SpeakerPipeline, make_drain_hook, make_on_audio,
-    open_mic_with_resampler,
 };
 use crate::voice_loop::{LoopBackends, VAD_EVENT_CHANNEL_CAPACITY};
 use crate::{PiperTts, Resampler, SileroVad, SileroVadParams, WhisperStt};
@@ -242,7 +242,7 @@ pub async fn build_local_backends(
         mic_cons,
         mut input_resampler,
         in_chunk_samples,
-    } = open_mic_with_resampler(vad_rate, vad_chunk, verbose)?;
+    } = MicPipeline::start(vad_rate, vad_chunk, verbose)?;
 
     // ── Open speaker + output resampler ──────────────────────────
     let pipeline = SpeakerPipeline::start(tts_sample_rate, verbose)?;

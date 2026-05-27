@@ -27,7 +27,6 @@ use primer_core::speech::{
 
 use crate::voice_loop::backends_common::{
     ChannelStt, LocalBackends, MicPipeline, SpeakerPipeline, make_drain_hook, make_on_audio,
-    open_mic_with_resampler,
 };
 use crate::voice_loop::{LoopBackends, VAD_EVENT_CHANNEL_CAPACITY};
 use crate::{Resampler, SileroVad, SileroVadParams};
@@ -225,7 +224,7 @@ pub async fn build_local_backends_macos_native(
         mic_cons,
         mut input_resampler,
         in_chunk_samples,
-    } = open_mic_with_resampler(vad_rate, vad_chunk, verbose)?;
+    } = MicPipeline::start(vad_rate, vad_chunk, verbose)?;
 
     // ── Open speaker + output resampler ──────────────────────────
     let pipeline = SpeakerPipeline::start(tts_sample_rate, verbose)?;
