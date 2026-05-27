@@ -101,10 +101,23 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - name: Install Rust toolchain with Android target
+      - name: Install Rust toolchain
+        # NB: `dtolnay/rust-toolchain`'s `targets:` installs the cross
+        # target for the action's `toolchain:` (here, `stable`). But the
+        # workspace pins Rust 1.88 via `src/rust-toolchain.toml`, and
+        # cargo invocations from `src/` use that pin — so the cross
+        # target on `stable` is never reached and the build fails with
+        # `can't find crate for std/core`. The next step installs the
+        # target for whatever toolchain the workspace actually uses,
+        # by running rustup from `src/` where the pin is honored.
         uses: dtolnay/rust-toolchain@stable
-        with:
-          targets: aarch64-linux-android
+
+      - name: Install Android target for workspace-pinned toolchain
+        # rustup from inside `src/` resolves to the pinned 1.88
+        # toolchain and adds the target to it. Don't hard-code the
+        # version here — `rust-toolchain.toml` is the single source
+        # of truth for the workspace's Rust version.
+        run: rustup target add aarch64-linux-android
 
       - name: Cache cargo registry + build
         uses: Swatinem/rust-cache@v2
