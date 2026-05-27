@@ -55,6 +55,8 @@ The learner model (what the child knows, how deeply they understand it, what top
 
 **Phase 0.2 and Phase 0.3 are both complete.** Hybrid retrieval, the hand-drafted CC0 seed corpus across all five planned clusters, a 35-article Simple-English-Wikipedia layer (CC-BY-SA-3.0), and tuned BM25-only AND hybrid retrieval defaults all ship today. Still ahead (see [ROADMAP.md](ROADMAP.md)): local llama.cpp inference, ongoing hardening of the speech loop (macOS-native Apple-platform path ships now; a macOS 26+ SpeechAnalyzer variant is in flight), hardware integration.
 
+**Validated platforms (2026-05-26):** Phase 0 text REPL runs end-to-end on a RedMagic 11 Pro (Snapdragon 8 Elite, 24 GB RAM) via Termux — cloud backend against Anthropic, session persistence, full classifier/extractor/comprehension chain. See [docs/devel/redmagic-termux-quickstart.md](docs/devel/redmagic-termux-quickstart.md). On-device Ollama at 4B Q4 on CPU is functionally correct but **too slow for conversational use** — the standalone-phone path is dependent on Phase 1.2 (`QnnBackend` for the Hexagon NPU).
+
 ## Architecture
 
 The codebase is a Rust workspace under `src/`, organised into fourteen crates. The core design principle is **trait-based hardware abstraction**: the pedagogical engine doesn't know or care whether it's talking to a local 7B model on a phone's NPU, llama.cpp on a laptop, or Claude over the network. Backend selection is a runtime config choice, not a code change.

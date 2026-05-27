@@ -8,7 +8,7 @@ This roadmap is organised around one principle: **get a working conversation loo
 
 **Goal:** A text-mode Primer that holds a genuine Socratic conversation with a child, running on any machine with Rust and an internet connection.
 
-**Runs on:** MacBook, Spark DGX, any Linux box, RedMagic 11 Pro (via Termux or adb shell).
+**Runs on:** MacBook, Spark DGX, any Linux box, RedMagic 11 Pro (via Termux or adb shell). ✅ RedMagic 11 Pro validated 2026-05-26 — see [docs/devel/redmagic-termux-quickstart.md](docs/devel/redmagic-termux-quickstart.md). Cloud REPL is fully usable; on-device Ollama at 4B Q4 on CPU is too slow for conversational dialogue (the spec's "phone-as-Primer viability" question — answered: needs NPU, i.e. Phase 1.2).
 
 **No special hardware required.** This is where all three contributors can work in parallel right now.
 
