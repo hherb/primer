@@ -1,9 +1,47 @@
 name: CI
 
+# Skip the workflow for changes that touch only documentation surfaces.
+# Rationale (closes #168):
+#   - macOS-runner minutes are ~10× the cost of Linux minutes on GitHub's
+#     billing. A docs-only push (README, ROADMAP, CLAUDE.md, NEXT_SESSION.md,
+#     anything under docs/, handoff snapshots) cannot break the build, so
+#     spinning up the macOS feature-combos drift-guard + the Android
+#     cross-compile + the Linux test/clippy jobs is pure waste.
+#   - `**/*.md` is safe today: no Rust test reads a committed `.md` file
+#     (verified via `grep -rn include_str.*\\.md src/`); the only `.md`
+#     references inside tests are tempfile fixtures (e.g.
+#     primer-kb-load/src/lib.rs:510) that synthesise their own files.
+#   - `docs/**` is somewhat redundant with `**/*.md` (most of docs/ is .md)
+#     but defends against future non-md additions there (PDFs, images).
+#   - Data surfaces are deliberately NOT in the ignore list. Anything under
+#     `data/seed/` (corpus JSONL) or `data/ingest/` (Python ingest pipeline)
+#     can change retrieval-quality test expectations and MUST run CI.
+#
+# Branch-protection caveat: if `cargo test (default features)` is wired as
+# a required status check on `main` (still overdue per CLAUDE.md), a
+# docs-only PR would be stuck waiting for a job that never runs. Two known
+# mitigations:
+#   1. "Skipped-but-required" stub job whose name matches the required-check
+#      name and always passes on docs-only paths.
+#   2. Per-job `paths:` allowlists so non-matching jobs get a `skipped`
+#      conclusion (which branch protection accepts as passing).
+# Branch protection is not yet wired, so the simpler workflow-level
+# `paths-ignore` is sufficient today. Revisit at the same time as flipping
+# the branch-protection setting.
 on:
   push:
     branches: [main]
+    paths-ignore:
+      - '**/*.md'
+      - 'docs/**'
+      - '.gitignore'
+      - 'LICENSE'
   pull_request:
+    paths-ignore:
+      - '**/*.md'
+      - 'docs/**'
+      - '.gitignore'
+      - 'LICENSE'
 
 permissions:
   contents: read
