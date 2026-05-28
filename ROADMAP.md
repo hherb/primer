@@ -81,12 +81,12 @@ This roadmap is organised around one principle: **get a working conversation loo
 
 ### 1.2 — Qualcomm NPU (RedMagic / Snapdragon 8 Elite) 🟡
 
-Design spec at [docs/superpowers/specs/2026-05-28-qnn-backend-design.md](docs/superpowers/specs/2026-05-28-qnn-backend-design.md); implementation plan at [docs/superpowers/plans/2026-05-28-qnn-backend.md](docs/superpowers/plans/2026-05-28-qnn-backend.md). Steps 1.2.1, 1.2.2, and 1.2.3 (FFI scaffold, safe wrapper, per-token streaming bridge) have all landed. Step 1.2.0 (QAIRT install + chatapp_android device validation), step 1.2.4 (CLI wiring under `--backend qnn`), step 1.2.5 (4K context-window tuning), and step 1.2.6 (benchmark + thermal harness) remain.
+Design spec at [docs/superpowers/specs/2026-05-28-qnn-backend-design.md](docs/superpowers/specs/2026-05-28-qnn-backend-design.md); implementation plan at [docs/superpowers/plans/2026-05-28-qnn-backend.md](docs/superpowers/plans/2026-05-28-qnn-backend.md). Steps 1.2.1, 1.2.2, 1.2.3, and 1.2.4 (FFI scaffold, safe wrapper, per-token streaming bridge, CLI wiring) have all landed. Step 1.2.0 (QAIRT install + chatapp_android device validation), step 1.2.5 (4K context-window tuning), and step 1.2.6 (benchmark + thermal harness) remain.
 
 - [x] FFI scaffold: `primer-qnn-sys` crate with hand-rolled Genie C API decls + runtime dlopen wrapper (step 1.2.1)
 - [x] `QnnBackend` safe wrapper: trait-abstracted Genie library handle, `primer-meta.json` parser, `minijinja` chat-template renderer, mutex-serialised `GenieDialog` session, ABI smoke check at construction (step 1.2.2)
 - [x] Per-token streaming bridge: C-ABI callback feeds an `mpsc::UnboundedSender` boxed via `Box::into_raw` for stable `user_data`; receiver wrapped as `TokenStream`; `GenieDialog_query` runs inside `tokio::task::spawn_blocking` so multi-second decodes never starve the runtime (step 1.2.3)
-- [ ] CLI wiring: `--backend qnn`, `--qnn-bundle-dir`, classifier-chain auto-routing (step 1.2.4)
+- [x] CLI wiring: `--backend qnn`, `--qnn-bundle-dir`, `--qnn-qairt-lib-dir` (+ `PRIMER_QNN_BUNDLE_DIR` / `PRIMER_QNN_QAIRT_LIB_DIR` env-var fallbacks), classifier-chain auto-inheritance with all-NPU serialisation warning (step 1.2.4)
 - [ ] Per-backend context-window budget for 4K-bound models (step 1.2.5)
 - [ ] Benchmark + thermal harness: `examples/qnn_bench.rs` (step 1.2.6)
 - [ ] Target: 15+ tok/s decode on Qwen3-4B W4A16; TTFT < 3s

@@ -129,7 +129,18 @@ impl QnnBackend {
             .map_err(|e| PrimerError::Inference(e.into_inference_error()))?;
 
         if run_smoke_check {
-            smoke_check(&*dialog).await?;
+            // Fire the smoke-check query *synchronously* so the
+            // `&dyn GenieDialog` borrow does not escape into an async
+            // body. Then drain the receiver asynchronously — the
+            // receiver is owned, so the resulting future captures
+            // only `UnboundedReceiver`, not the dialog reference.
+            // Keeping the borrow off the async path is what lets
+            // `QnnBackend::new`'s future remain `Send` (and therefore
+            // satisfies the Tauri-command Send bound in `primer-gui`)
+            // even though `dyn GenieDialog` deliberately omits the
+            // `Sync` bound per the trait-design comment.
+            let rx = fire_smoke_check_query(&*dialog);
+            drain_smoke_check_receiver(rx).await?;
         }
 
         let name = format!("{QNN_NAME_PREFIX}{}", meta.model_id);
@@ -175,24 +186,47 @@ pub fn validate_bundle_dir(
     Ok(())
 }
 
-/// Run the ABI smoke check: drive one tiny throwaway streaming query
-/// and confirm it produces no `Err` chunks before the channel closes.
+/// Fire the smoke-check streaming query synchronously and return the
+/// receiver end. Borrow on `dialog` ends with this function's return.
 ///
-/// Step 1.2.3: the smoke check now goes through the same streaming
-/// path as production turns, so a successful smoke check exercises
-/// exactly the FFI sequence
-/// (`dialog_set_token_callback` → `dialog_query` → callback fires →
-/// final done chunk) the real conversation will hit. Any error chunk
-/// the dialog emits is surfaced as the construction failure.
-///
-/// Kept free-standing so tests don't have to construct a full backend
-/// to pin the contract.
-async fn smoke_check(dialog: &dyn GenieDialog) -> Result<()> {
-    let (tx, mut rx) = mpsc::unbounded::<Result<TokenChunk>>();
+/// Split from [`smoke_check`] so the `&dyn GenieDialog` borrow does
+/// NOT cross an `.await` boundary — that's what lets
+/// [`QnnBackend::new`]'s future remain `Send` even though
+/// `dyn GenieDialog` deliberately omits the `Sync` bound (the trait
+/// is `Send` only by design; concurrent access is mediated by the
+/// `tokio::sync::Mutex` in the backend, never by sharing `&dyn` across
+/// threads). Without this split, holding the parameter in
+/// `smoke_check`'s `async fn` state past the `rx.next().await` would
+/// force `&dyn GenieDialog: Send`, which in turn forces
+/// `dyn GenieDialog: Sync` — a contract the C-side cannot legally
+/// provide.
+fn fire_smoke_check_query(dialog: &dyn GenieDialog) -> mpsc::UnboundedReceiver<Result<TokenChunk>> {
+    let (tx, rx) = mpsc::unbounded::<Result<TokenChunk>>();
     dialog.query_streaming(SMOKE_CHECK_PROMPT, tx);
     // `query_streaming` consumed the sender; the channel closes when
-    // it returns. Drain and surface any error chunk; ignore Ok body /
-    // done chunks (we deliberately discard the throwaway response).
+    // it returns. The caller drains.
+    rx
+}
+
+/// Drain the smoke-check receiver, surfacing the first `Err` chunk
+/// as the construction failure.
+///
+/// Takes ownership of the receiver so the resulting future captures
+/// only `UnboundedReceiver<Result<TokenChunk>>` (which is `Send`) and
+/// NOT any reference to the dialog. Together with
+/// [`fire_smoke_check_query`] this two-step shape replaces an earlier
+/// single-async-fn that held `&dyn GenieDialog` across its `await`,
+/// which would have forced `dyn GenieDialog: Sync` and conflicted
+/// with the trait's deliberate `Send`-only design.
+///
+/// Pure inputs/outputs from the caller's perspective: feed in a
+/// receiver, get back `Ok(())` on success or the first `Err` chunk.
+/// Step 1.2.3: a successful smoke check exercises exactly the FFI
+/// sequence (`dialog_set_token_callback` → `dialog_query` →
+/// callback fires → final done chunk) the real conversation will hit.
+async fn drain_smoke_check_receiver(
+    mut rx: mpsc::UnboundedReceiver<Result<TokenChunk>>,
+) -> Result<()> {
     while let Some(chunk_result) = rx.next().await {
         chunk_result?;
     }

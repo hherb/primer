@@ -82,3 +82,12 @@ macos-native = ["primer-speech/macos-native"]
 # voice loop but target different OS generations. A compile_error in
 # main.rs enforces the exclusion. No effect on non-macOS builds.
 macos-native-26 = ["primer-speech/macos-native-26"]
+
+# Qualcomm NPU inference backend (Phase 1.2). Wires `--backend qnn`
+# through to `QnnBackend` via `primer-engine`. The flags
+# `--qnn-bundle-dir` and `--qnn-qairt-lib-dir` are declared only when
+# this feature is on so the default `--help` stays uncluttered.
+# Targets Android in production; on a non-Android host the runtime
+# error from `primer-qnn-sys::GenieLibrary::open` (PlatformUnsupported)
+# surfaces cleanly via the existing inference-error rendering.
+qnn = ["primer-inference/qnn", "primer-engine/qnn"]

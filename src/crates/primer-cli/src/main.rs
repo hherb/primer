@@ -7,6 +7,7 @@
 //!   primer --backend cloud                              # Anthropic Claude API (default model)
 //!   primer --backend cloud --model claude-opus-4-7      # Override the cloud model
 //!   primer --backend ollama --model llama3.2            # Local Ollama server
+//!   primer --backend qnn --qnn-bundle-dir <path>        # Qualcomm NPU (Android only; --features qnn)
 //!   primer --name Binti --age 8                         # Set learner profile
 //!   primer --resume <uuid>                              # Resume a past session
 
@@ -45,12 +46,17 @@ use uuid::Uuid;
 #[derive(Parser, Debug)]
 #[command(name = "primer", about = "The Primer — a Socratic learning companion")]
 struct Cli {
-    /// Inference backend: "stub", "cloud", or "ollama".
+    /// Inference backend: "stub", "cloud", "ollama", "openai-compat",
+    /// or "qnn" (the last requires `--features qnn` at build time and
+    /// targets the Qualcomm NPU on Android).
     #[arg(long, default_value = "stub")]
     backend: String,
 
     /// Model identifier. For cloud: Anthropic model id (default: claude-sonnet-4-6).
     /// For ollama: local model tag (e.g., "llama3.2", "qwen2.5:7b") — required.
+    /// For openai-compat: server-specific model id — required.
+    /// For qnn: ignored — the model id is read from `primer-meta.json`
+    /// inside the bundle and surfaced as `qnn:<model_id>`.
     #[arg(long)]
     model: Option<String>,
 
@@ -320,6 +326,30 @@ struct Cli {
     #[cfg(feature = "speech")]
     #[arg(long, default_value_t = 600, value_parser = parse_mic_silence_ms)]
     mic_silence_ms: u32,
+
+    /// Path to a QNN bundle directory containing `genie_config.json`,
+    /// `primer-meta.json`, and the per-shard context binaries.
+    /// Required when `--backend qnn`. Falls back to the
+    /// `PRIMER_QNN_BUNDLE_DIR` env var when neither is passed.
+    /// Declared only on `--features qnn` so `--help` stays uncluttered
+    /// on the default text-REPL build.
+    #[cfg(feature = "qnn")]
+    #[arg(
+        long,
+        value_name = "DIR",
+        env = "PRIMER_QNN_BUNDLE_DIR",
+        required_if_eq("backend", "qnn")
+    )]
+    qnn_bundle_dir: Option<PathBuf>,
+
+    /// Path to the QAIRT runtime library directory (containing
+    /// `libGenie.so`). Optional; defaults to
+    /// `<qnn_bundle_dir>/../qairt/lib/aarch64-android/` matching the
+    /// AI Hub apps layout. Override when QAIRT is installed elsewhere
+    /// (or via `PRIMER_QNN_QAIRT_LIB_DIR`).
+    #[cfg(feature = "qnn")]
+    #[arg(long, value_name = "DIR", env = "PRIMER_QNN_QAIRT_LIB_DIR")]
+    qnn_qairt_lib_dir: Option<PathBuf>,
 }
 
 #[cfg(feature = "speech")]
@@ -421,6 +451,82 @@ fn probe_espeak_ng_data(verbose: bool) {
             return;
         }
     }
+}
+
+/// Emit best-effort startup-time warnings about subsystem-backend
+/// combinations under `--backend qnn`:
+///
+/// - **All-qnn** (classifier / extractor / comprehension either
+///   defaulted to the main backend or explicitly set to qnn): every
+///   background LLM call serialises through the dialog mutex along
+///   with the main chat turn. Functionally correct, but on a
+///   memory-constrained device this means classifier work piles up
+///   behind a multi-second decode. The warning is informational —
+///   nothing is rejected.
+/// - **All-stub** (every subsystem explicitly stubbed): the
+///   conversation loses classifier-driven features (engagement
+///   detection, concept extraction, comprehension depth promotion).
+///   This is sometimes a deliberate choice for offline smoke tests;
+///   surfaced as a warning, not an error.
+///
+/// The "cloud-backed subsystem with missing `ANTHROPIC_API_KEY`" case
+/// from the plan is already covered structurally by the
+/// `build_classifier` / `build_extractor` / `build_comprehension`
+/// builders — they call `build_backend("cloud", ...)` which errors
+/// when `api_key` is `None`. No extra check needed here.
+///
+/// Pure inspection of the `Cli` struct — no I/O. Kept as a free
+/// function so we can unit-test the decision logic via the small
+/// `npu_serialisation_warning` helper below.
+fn warn_on_npu_serialisation(cli: &Cli) {
+    let decision = npu_serialisation_warning(
+        cli.classifier_backend.as_deref(),
+        cli.extractor_backend.as_deref(),
+        cli.comprehension_backend.as_deref(),
+    );
+    if let Some(msg) = decision {
+        eprintln!("Warning: {msg}");
+    }
+}
+
+/// Decide whether to warn about NPU serialisation or feature loss
+/// given the explicit subsystem-backend overrides. Returns `None`
+/// when the configuration is mixed (some NPU, some not) — the most
+/// reasonable case, no warning needed.
+///
+/// Inputs are `Option<&str>` because each subsystem flag defaults to
+/// "unset → reuse the main backend". Under `--backend qnn`, "unset"
+/// effectively means "qnn".
+fn npu_serialisation_warning(
+    classifier: Option<&str>,
+    extractor: Option<&str>,
+    comprehension: Option<&str>,
+) -> Option<String> {
+    // Resolve each subsystem to its effective backend name under
+    // `--backend qnn`: None → "qnn" (inherit), explicit value wins.
+    let resolved: [&str; 3] = [
+        classifier.unwrap_or("qnn"),
+        extractor.unwrap_or("qnn"),
+        comprehension.unwrap_or("qnn"),
+    ];
+
+    if resolved.iter().all(|&b| b == "qnn") {
+        return Some(
+            "every subsystem (classifier, extractor, comprehension) is set to qnn — \
+             all background LLM work will serialise behind the chat turn through the \
+             dialog mutex. Consider --classifier-backend stub or a separate small model."
+                .to_string(),
+        );
+    }
+    if resolved.iter().all(|&b| b == "stub") {
+        return Some(
+            "every subsystem (classifier, extractor, comprehension) is stub — \
+             the conversation runs without engagement detection, concept extraction, \
+             or comprehension depth promotion. This is fine for smoke tests."
+                .to_string(),
+        );
+    }
+    None
 }
 
 fn main() -> anyhow::Result<()> {
@@ -525,6 +631,11 @@ async fn async_main() -> anyhow::Result<()> {
 
     // Resolve the model for the main backend early so we can report it
     // in the banner AND pass the resolved value to build_classifier later.
+    // For `qnn` the model id is read from `primer-meta.json` inside the
+    // bundle and isn't known until after construction — we seed an
+    // "unknown" placeholder here and overwrite from `backend.name()`
+    // after `build_backend` returns. `cli.model` is intentionally
+    // ignored for qnn (documented on the flag).
     let main_model: String = match cli.backend.as_str() {
         "cloud" => cli
             .model
@@ -538,12 +649,36 @@ async fn async_main() -> anyhow::Result<()> {
             eprintln!("Error: --model required for openai-compat backend.");
             std::process::exit(1);
         }),
+        "qnn" => {
+            // Surface a one-line note when the user passed `--model`
+            // alongside `--backend qnn`. Documented behaviour is that
+            // the flag is ignored (the bundle's `primer-meta.json` is
+            // authoritative), but silent ignore is a UX hazard — a
+            // user who explicitly typed `--model claude-opus-4-7`
+            // would otherwise see `qnn:Qwen3-4B` in the banner with no
+            // explanation. Emitted unconditionally so it's visible
+            // even without `--verbose`.
+            if cli.model.is_some() {
+                eprintln!(
+                    "Note: --model is ignored under --backend qnn; \
+                     the model id comes from primer-meta.json inside the bundle."
+                );
+            }
+            "qnn-pending".to_string()
+        }
         // stub (and anything else — will error in build_backend below)
         _ => cli.model.clone().unwrap_or_else(|| "stub".to_string()),
     };
 
     // Extract the fields that build_backend / build_classifier need BEFORE
     // any partial moves of other Cli fields (knowledge_db, session_db etc.).
+    //
+    // The two QNN fields are populated only when the `qnn` cargo
+    // feature is on (the flag declarations themselves are
+    // `#[cfg(feature = "qnn")]`-gated). On the default build the
+    // fields stay `None`, which is exactly what
+    // `wiring::build_qnn_backend`'s `not(feature = "qnn")` arm expects
+    // — it returns a rebuild hint regardless of input.
     let backend_params = BackendParams {
         api_key: cli.api_key.clone(),
         ollama_url: cli.ollama_url.clone(),
@@ -555,6 +690,14 @@ async fn async_main() -> anyhow::Result<()> {
         extractor_model: cli.extractor_model.clone(),
         comprehension_backend: cli.comprehension_backend.clone(),
         comprehension_model: cli.comprehension_model.clone(),
+        #[cfg(feature = "qnn")]
+        qnn_bundle_dir: cli.qnn_bundle_dir.clone(),
+        #[cfg(not(feature = "qnn"))]
+        qnn_bundle_dir: None,
+        #[cfg(feature = "qnn")]
+        qnn_qairt_lib_dir: cli.qnn_qairt_lib_dir.clone(),
+        #[cfg(not(feature = "qnn"))]
+        qnn_qairt_lib_dir: None,
     };
 
     let backend: Arc<dyn InferenceBackend> =
@@ -565,6 +708,16 @@ async fn async_main() -> anyhow::Result<()> {
                 std::process::exit(1);
             }
         };
+
+    // For QNN the real model id comes from `primer-meta.json`; rebind
+    // `main_model` to `backend.name()` (e.g. "qnn:Qwen3-4B") so the
+    // downstream classifier/extractor/comprehension identifiers carry
+    // the real model id instead of the "qnn-pending" placeholder.
+    let main_model: String = if cli.backend == "qnn" {
+        backend.name().to_string()
+    } else {
+        main_model
+    };
 
     match cli.backend.as_str() {
         "stub" => eprintln!("Using stub inference backend (canned Socratic responses)."),
@@ -577,9 +730,13 @@ async fn async_main() -> anyhow::Result<()> {
             "Using openai-compat backend at {} with model {main_model}.",
             cli.openai_compat_url
         ),
+        "qnn" => {
+            eprintln!("Using qnn (Qualcomm NPU) backend with {main_model}.");
+            warn_on_npu_serialisation(&cli);
+        }
         other => {
             eprintln!(
-                "Unknown backend: {other}. Use 'stub', 'cloud', 'ollama', or 'openai-compat'."
+                "Unknown backend: {other}. Use 'stub', 'cloud', 'ollama', 'openai-compat', or 'qnn'."
             );
             std::process::exit(1);
         }
@@ -1218,6 +1375,181 @@ mod tests {
         // clap's range(1..) rejects it with a clear error.
         let result = Cli::try_parse_from(["primer", "--vocab-max-per-prompt", "0"]);
         assert!(result.is_err(), "0 should be rejected; got: {result:?}");
+    }
+
+    // ─── NPU serialisation warning (Phase 1.2 step 1.2.4) ────────────────
+
+    #[test]
+    fn warn_when_every_subsystem_inherits_main_qnn() {
+        // No overrides → each subsystem inherits the main backend.
+        // Under --backend qnn this means everything runs on the NPU
+        // and serialises through the dialog mutex.
+        let w = npu_serialisation_warning(None, None, None);
+        assert!(w.is_some(), "expected a warning; got None");
+        let msg = w.unwrap();
+        assert!(
+            msg.contains("serialise") || msg.contains("serialize"),
+            "expected serialisation hint; got: {msg}"
+        );
+    }
+
+    #[test]
+    fn warn_when_every_subsystem_is_explicitly_qnn() {
+        // Equivalent semantically to "all None under --backend qnn"
+        // (both resolve to `"qnn"` per the inherit-the-main-backend
+        // rule), but pinned separately because a future refactor
+        // that handled the explicit case differently from the
+        // inherit case would silently break this contract.
+        let w = npu_serialisation_warning(Some("qnn"), Some("qnn"), Some("qnn"));
+        assert!(w.is_some(), "expected a warning; got None");
+        let msg = w.unwrap();
+        assert!(
+            msg.contains("serialise") || msg.contains("serialize"),
+            "expected serialisation hint; got: {msg}"
+        );
+    }
+
+    #[test]
+    fn warn_when_every_subsystem_is_stub() {
+        // All-stub means the conversation runs without classifier-
+        // driven features. Deliberate for smoke tests, but worth
+        // calling out so a fresh user doesn't think it's broken.
+        let w = npu_serialisation_warning(Some("stub"), Some("stub"), Some("stub"));
+        assert!(w.is_some(), "expected a warning; got None");
+        let msg = w.unwrap();
+        assert!(msg.contains("stub"), "expected stub hint; got: {msg}");
+    }
+
+    #[test]
+    fn no_warning_for_mixed_subsystem_config() {
+        // One subsystem stubbed, two inherited → reasonable shape,
+        // no warning. Specifically: classifier-on-stub is the
+        // canonical "let me focus the NPU on chat" configuration.
+        let w = npu_serialisation_warning(Some("stub"), None, None);
+        assert!(w.is_none(), "mixed config should not warn; got: {w:?}");
+    }
+
+    #[test]
+    fn no_warning_when_subsystems_use_external_backend() {
+        // Classifier on cloud, others inherit qnn → mixed shape.
+        let w = npu_serialisation_warning(Some("cloud"), None, None);
+        assert!(
+            w.is_none(),
+            "cloud-classifier config should not warn; got: {w:?}"
+        );
+    }
+
+    // ─── --backend qnn clap parse acceptance ─────────────────────────────
+
+    #[cfg(feature = "qnn")]
+    #[test]
+    fn qnn_backend_requires_qnn_bundle_dir_at_parse() {
+        // `--backend qnn` without `--qnn-bundle-dir` (and without the
+        // `PRIMER_QNN_BUNDLE_DIR` env var) is rejected by clap before
+        // any backend construction is attempted.
+        // Use `std::env::remove_var` indirectly by capturing the
+        // missing-env scenario: clap's required_if_eq fires when no
+        // value source resolved a value. We can't reliably scrub the
+        // env from a test (it's process-wide), so this test only
+        // asserts the clap-required path. Running this test with
+        // PRIMER_QNN_BUNDLE_DIR set in the environment will produce
+        // an Ok parse — that's an acceptable degenerate case.
+        if std::env::var_os("PRIMER_QNN_BUNDLE_DIR").is_some() {
+            // Env var is set externally — the env fallback applies and
+            // the required_if_eq check is satisfied. Print the skip so
+            // a passing-but-skipped result is visible under `--nocapture`
+            // rather than indistinguishable from a real green.
+            eprintln!(
+                "[skip] qnn_backend_requires_qnn_bundle_dir_at_parse: \
+                 PRIMER_QNN_BUNDLE_DIR is set; clap's env fallback satisfies \
+                 required_if_eq so we cannot assert the rejection path."
+            );
+            return;
+        }
+        let result = Cli::try_parse_from(["primer", "--backend", "qnn"]);
+        assert!(
+            result.is_err(),
+            "expected clap to reject --backend qnn without --qnn-bundle-dir; got: {result:?}"
+        );
+    }
+
+    #[cfg(feature = "qnn")]
+    #[test]
+    fn qnn_backend_with_bundle_dir_parses() {
+        // Happy path: clap accepts `--backend qnn --qnn-bundle-dir <p>`.
+        // Construction itself happens later in async_main and is the
+        // engine's responsibility — this test pins the parse contract.
+        //
+        // Env-var defensive skip: clap's `env = "..."` resolves the
+        // optional `--qnn-qairt-lib-dir` from `PRIMER_QNN_QAIRT_LIB_DIR`
+        // if set in the test runner's environment, which would make
+        // the `cli.qnn_qairt_lib_dir.is_none()` assertion fail. Skip
+        // visibly so a developer with QAIRT installed locally doesn't
+        // chase a misleading red.
+        if std::env::var_os("PRIMER_QNN_QAIRT_LIB_DIR").is_some() {
+            eprintln!(
+                "[skip] qnn_backend_with_bundle_dir_parses: PRIMER_QNN_QAIRT_LIB_DIR is set; \
+                 clap's env fallback would populate qnn_qairt_lib_dir."
+            );
+            return;
+        }
+        let cli = Cli::try_parse_from([
+            "primer",
+            "--backend",
+            "qnn",
+            "--qnn-bundle-dir",
+            "/tmp/bundle",
+        ])
+        .expect("expected --backend qnn --qnn-bundle-dir to parse");
+        assert_eq!(cli.backend, "qnn");
+        assert_eq!(
+            cli.qnn_bundle_dir.as_deref(),
+            Some(Path::new("/tmp/bundle"))
+        );
+        assert!(
+            cli.qnn_qairt_lib_dir.is_none(),
+            "--qnn-qairt-lib-dir should default to None (engine resolves it)"
+        );
+    }
+
+    #[cfg(feature = "qnn")]
+    #[test]
+    fn qnn_backend_accepts_optional_qairt_lib_dir() {
+        let cli = Cli::try_parse_from([
+            "primer",
+            "--backend",
+            "qnn",
+            "--qnn-bundle-dir",
+            "/tmp/bundle",
+            "--qnn-qairt-lib-dir",
+            "/opt/qairt/lib/aarch64-android",
+        ])
+        .expect("expected --qnn-qairt-lib-dir to be accepted alongside --qnn-bundle-dir");
+        assert_eq!(
+            cli.qnn_qairt_lib_dir.as_deref(),
+            Some(Path::new("/opt/qairt/lib/aarch64-android"))
+        );
+    }
+
+    #[cfg(feature = "qnn")]
+    #[test]
+    fn qnn_backend_compatible_with_no_persist_at_parse() {
+        // --no-persist conflicts with --resume and --session-db, but
+        // --backend qnn is orthogonal. Pin the compatibility so a
+        // future conflicts-with bug fails this test instead of leaking
+        // to runtime.
+        let result = Cli::try_parse_from([
+            "primer",
+            "--backend",
+            "qnn",
+            "--qnn-bundle-dir",
+            "/tmp/bundle",
+            "--no-persist",
+        ]);
+        assert!(
+            result.is_ok(),
+            "expected --backend qnn + --no-persist to parse; got: {result:?}"
+        );
     }
 }
 
