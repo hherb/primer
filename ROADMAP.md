@@ -81,10 +81,14 @@ This roadmap is organised around one principle: **get a working conversation loo
 
 ### 1.2 — Qualcomm NPU (RedMagic / Snapdragon 8 Elite) 🟡
 
-Design spec at [docs/superpowers/specs/2026-05-28-qnn-backend-design.md](docs/superpowers/specs/2026-05-28-qnn-backend-design.md); implementation plan at [docs/superpowers/plans/2026-05-28-qnn-backend.md](docs/superpowers/plans/2026-05-28-qnn-backend.md). Step 1.2.1 (the `primer-qnn-sys` FFI crate scaffold — `libloading`-based dlopen + raw `extern "C"` declarations of the six Genie functions the Primer needs) is the first dev-machine-buildable artefact and has landed; vendored Genie headers + `bindgen` remain deferred behind the QAIRT-SDK licence pass that step 1.2.0 unblocks.
+Design spec at [docs/superpowers/specs/2026-05-28-qnn-backend-design.md](docs/superpowers/specs/2026-05-28-qnn-backend-design.md); implementation plan at [docs/superpowers/plans/2026-05-28-qnn-backend.md](docs/superpowers/plans/2026-05-28-qnn-backend.md). Step 1.2.1 (the `primer-qnn-sys` FFI crate scaffold) and step 1.2.2 (the `QnnBackend` safe wrapper in `primer-inference`) have both landed. Step 1.2.0 (QAIRT install + chatapp_android device validation), step 1.2.3 (per-token streaming callback bridge), step 1.2.4 (CLI wiring under `--backend qnn`), step 1.2.5 (4K context-window tuning), and step 1.2.6 (benchmark + thermal harness) remain.
 
-- [ ] Implement `QnnBackend` using QNN SDK for Hexagon NPU inference (target: Qwen3-4B on RedMagic 11 Pro)
 - [x] FFI scaffold: `primer-qnn-sys` crate with hand-rolled Genie C API decls + runtime dlopen wrapper (step 1.2.1)
+- [x] `QnnBackend` safe wrapper: trait-abstracted Genie library handle, `primer-meta.json` parser, `minijinja` chat-template renderer, mutex-serialised `GenieDialog` session, ABI smoke check at construction, single-shot `generate_stream` (step 1.2.2)
+- [ ] Per-token streaming bridge via C-ABI callback + mpsc receiver (step 1.2.3)
+- [ ] CLI wiring: `--backend qnn`, `--qnn-bundle-dir`, classifier-chain auto-routing (step 1.2.4)
+- [ ] Per-backend context-window budget for 4K-bound models (step 1.2.5)
+- [ ] Benchmark + thermal harness: `examples/qnn_bench.rs` (step 1.2.6)
 - [ ] Target: 15+ tok/s decode on Qwen3-4B W4A16; TTFT < 3s
 - [ ] Test thermal behaviour under sustained conversation (the phone in an enclosure will need monitoring; target <70°C peak)
 

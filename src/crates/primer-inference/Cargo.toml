@@ -4,6 +4,18 @@ description = "LLM inference backends for the Primer"
 version.workspace = true
 edition.workspace = true
 
+[features]
+default = []
+
+# Qualcomm NPU backend (Phase 1.2). Adds the `qnn` module re-exporting
+# `QnnBackend`, plus the Genie FFI scaffold from `primer-qnn-sys` and the
+# `minijinja` chat-template renderer. Disabled by default so desktop CI
+# and non-Android consumers stay light. Selecting this on a non-Android
+# host compiles fine — `QnnBackend::new` returns a typed error at runtime
+# via the `primer-qnn-sys` `PlatformUnsupported` path, exactly the shape
+# step 1.2.4 will need for the `--backend qnn` CLI flag.
+qnn = ["dep:primer-qnn-sys", "dep:minijinja"]
+
 [dependencies]
 primer-core.workspace = true
 async-trait.workspace = true
@@ -15,8 +27,13 @@ futures.workspace = true
 tracing.workspace = true
 thiserror.workspace = true
 
+# Optional — only pulled when the `qnn` feature is enabled.
+primer-qnn-sys = { workspace = true, optional = true }
+minijinja = { workspace = true, optional = true }
+
 [dev-dependencies]
 chrono.workspace = true
+tempfile.workspace = true
 
 # llama.cpp bindings — uncomment when integrating:
 # llama-cpp-2 = "0.1"
