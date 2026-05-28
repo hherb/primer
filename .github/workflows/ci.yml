@@ -173,6 +173,12 @@ jobs:
   feature-combos-macos:
     name: cargo clippy (macOS feature combos)
     runs-on: macos-latest
+    # Defensive cap on macOS-runner billing. macOS minutes are ~10× the
+    # cost of Linux minutes; a wedged clippy invocation should not be
+    # able to run out the 360 min GitHub default. 30 min comfortably
+    # accommodates a cold ort-runtime download + three clippy builds
+    # (observed: 2m23s warm-cache on this PR's first run).
+    timeout-minutes: 30
     defaults:
       run:
         working-directory: src
@@ -183,10 +189,10 @@ jobs:
         # rust-toolchain.toml at src/rust-toolchain.toml pins the
         # workspace version (currently 1.88) + rustfmt + clippy. The
         # action picks it up when invoked from src/. Leave channel on
-        # `stable` so rustup honors the toolchain file.
+        # `stable` so rustup honors the toolchain file; the toolchain
+        # file is the single source of truth for components, matching
+        # the Linux `feature-combos` job's shape.
         uses: dtolnay/rust-toolchain@stable
-        with:
-          components: clippy
 
       - name: Cache cargo registry + build
         uses: Swatinem/rust-cache@v2
