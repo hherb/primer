@@ -1,35 +1,22 @@
-//! Local backend builder for the voice loop (whisper + piper).
+//! macOS-native local backend builder (SFSpeechRecognizer + Silero VAD).
 //!
-//! Constructs the cpal mic + speaker, silero VAD, whisper streaming STT,
-//! piper TTS, the audio capture thread (which owns the VAD + whisper
-//! streaming session), and the `on_audio` closure + drain hook the loop
-//! consumes.
+//! Builds a [`LocalBackends`] for macOS ≤ 25 where on-device speech
+//! recognition is exposed via SFSpeechRecognizer (added to AppKit in
+//! macOS 10.15) and AVSpeechSynthesizer. The VAD is still Silero because
+//! SFSpeechRecognizer doesn't expose a "speech started / ended" stream
+//! and the macOS 26 `SpeechDetector` would break our macOS 13 floor.
 //!
-//! Lifted from `primer-cli/src/speech_loop/mod.rs::run` in PR 4 of the
-//! GUI voice-mode work so the CLI and GUI share one builder.
+//! Sibling of [`super::backends_macos_native_26`] (SpeechAnalyzer +
+//! derived VAD); both consume the shared mic/speaker/closure helpers in
+//! [`super::backends_common`] so the only thing that differs between the
+//! two macOS builders is the STT/VAD pipeline and the audio-thread body.
 //!
-//! Shared types (`LocalBackends`, `ChannelStt`) and the audio-pipeline
-//! helpers (`SpeakerPipeline::start`, `MicPipeline::start`,
-//! `make_on_audio`, `make_drain_hook`) live in
-//! [`super::backends_common`] so the macOS-native builders in
-//! [`super::backends_macos_native`] and
-//! [`super::backends_macos_native_26`] can share them without
-//! inheriting the whisper/piper dependency this module pulls in.
-//!
-//! Lifecycle: callers receive a [`LocalBackends`] struct that holds the
-//! audio resources (mic stream, speaker stream, audio thread handle).
-//! They must keep it alive until after `run_loop`/`run_loop_borrowed`
-//! returns and then call [`LocalBackends::shutdown`] to drain the audio
-//! thread cleanly.
+//! Lives in a sibling module gated only on
+//! `target_os = "macos" + cpal + macos-native` so the whisper/piper
+//! dependency stack stays out of the macOS-native build.
 
-#![cfg(all(
-    feature = "silero",
-    feature = "whisper",
-    feature = "piper",
-    feature = "cpal"
-))]
+#![cfg(all(target_os = "macos", feature = "cpal", feature = "macos-native"))]
 
-use std::path::Path;
 use std::sync::Arc;
 
 use primer_core::error::{PrimerError, Result};
@@ -42,29 +29,22 @@ use crate::voice_loop::backends_common::{
     ChannelStt, LocalBackends, MicPipeline, SpeakerPipeline, make_drain_hook, make_on_audio,
 };
 use crate::voice_loop::{LoopBackends, VAD_EVENT_CHANNEL_CAPACITY};
-use crate::{PiperTts, Resampler, SileroVad, SileroVadParams, WhisperStt};
+use crate::{Resampler, SileroVad, SileroVadParams};
 
-/// Body of the audio capture thread.
+/// Audio capture thread body — generic over the STT backend.
 ///
-/// Pulls mic samples from `mic_cons`, resamples to the VAD rate when
-/// needed, runs the VAD on fixed-size chunks, and drives the per-
-/// utterance whisper session: open on `SpeechStart`, push every chunk
-/// while in speech, finalize on `SpeechEnd` and SEND the transcript on
-/// `transcript_tx` BEFORE forwarding the `SpeechEnd` event on `event_tx`.
-/// That ordering guarantees `ChannelSttSession::finalize` (called by the
-/// voice loop after seeing the event) finds a transcript.
-///
-/// Polling cadence: a 5 ms sleep between empty mic-buffer reads. cpal's
-/// callback fires every few ms, so this stays well within real-time
-/// tolerances.
+/// Identical in shape to the whisper-specific `run_audio_thread` in
+/// [`super::backends`] except it accepts any
+/// `Arc<dyn StreamingSpeechToText + Send + Sync>` instead of a concrete
+/// `Arc<WhisperStt>`. Supplied here with `MacosSpeechToText`.
 #[allow(clippy::too_many_arguments)]
-fn run_audio_thread(
+fn run_audio_thread_stt(
     mut mic_cons: ringbuf::HeapCons<f32>,
     mut input_resampler: Option<Resampler>,
     in_chunk_samples: usize,
     vad_chunk_samples: usize,
     vad: &mut SileroVad,
-    whisper: Arc<WhisperStt>,
+    stt: Arc<dyn StreamingSpeechToText + Send + Sync>,
     event_tx: tokio::sync::mpsc::Sender<VadEvent>,
     transcript_tx: std::sync::mpsc::Sender<String>,
     stop_flag: Arc<std::sync::atomic::AtomicBool>,
@@ -86,8 +66,7 @@ fn run_audio_thread(
         }
 
         // Anti-feedback gate: while the voice loop is in SPEAK, drop
-        // everything the mic captures and discard any partial whisper
-        // session.
+        // everything the mic captures and discard any partial STT session.
         if is_speaking.load(std::sync::atomic::Ordering::SeqCst) {
             while mic_cons.try_pop().is_some() {}
             if let Some(s) = active_session.take() {
@@ -137,7 +116,7 @@ fn run_audio_thread(
             vad_chunk.extend(vad_in_buf.drain(..vad_chunk_samples));
             if let Some(session) = active_session.as_mut() {
                 if let Err(e) = session.push_audio(&vad_chunk) {
-                    tracing::warn!("whisper push_audio: {e}");
+                    tracing::warn!("stt push_audio: {e}");
                 }
             }
             let frame = match vad.process_chunk(&vad_chunk) {
@@ -150,9 +129,9 @@ fn run_audio_thread(
             match frame.event {
                 VadEvent::SpeechStart => {
                     if active_session.is_none() {
-                        match whisper.open_session() {
+                        match stt.open_session() {
                             Ok(s) => active_session = Some(s),
-                            Err(e) => tracing::warn!("whisper open_session: {e}"),
+                            Err(e) => tracing::warn!("stt open_session: {e}"),
                         }
                     }
                     if event_tx.blocking_send(VadEvent::SpeechStart).is_err() {
@@ -160,11 +139,19 @@ fn run_audio_thread(
                     }
                 }
                 VadEvent::SpeechEnd => {
+                    // TODO(macos-native): MacosSttSession::finalize() blocks the audio
+                    // capture thread for up to 2 s waiting for SFSpeechRecognizer's final
+                    // segment (FINALIZE_POLL_TIMEOUT in stt.rs). During this window the
+                    // mic ringbuf keeps filling (5 s of headroom) but new VAD events are
+                    // not processed. For fast back-and-forth speech this is a latency
+                    // cliff. The fix is to move finalize() to a short-lived helper thread
+                    // and signal completion via a channel, letting the audio loop keep
+                    // pumping. Deferred to a follow-up PR — see plan task 8 review.
                     let segments = match active_session.take() {
                         Some(s) => match s.finalize() {
                             Ok(segs) => segs,
                             Err(e) => {
-                                tracing::warn!("whisper finalize: {e}");
+                                tracing::warn!("stt finalize: {e}");
                                 Vec::new()
                             }
                         },
@@ -190,28 +177,30 @@ fn run_audio_thread(
     }
 }
 
-/// Construct every local backend the voice loop needs: cpal mic + speaker,
-/// silero VAD, whisper STT, piper TTS, audio capture thread, plus the
-/// `on_audio` closure and drain hook.
+/// Construct every local backend the voice loop needs using macOS-native
+/// speech backends: cpal mic + speaker, silero VAD, `MacosSpeechToText`
+/// (SFSpeechRecognizer, on-device), `MacosTextToSpeech` (AVSpeechSynthesizer),
+/// audio capture thread, plus the `on_audio` closure and drain hook.
+///
+/// Same `LocalBackends` shape as `build_local_backends`; only the STT/TTS
+/// `Arc`s differ. Silero VAD and the cpal mic/speaker construction are
+/// unchanged. Callers choose which builder to invoke based on compile-time
+/// feature flags and, optionally, a runtime config selector.
 ///
 /// `mic_silence_ms` configures the Silero VAD's `min_silence_ms` parameter
 /// (how long after speech ends before firing `SpeechEnd`).
 ///
-/// **Async signature:** today the function body is sync (each backend
-/// loads synchronously). The `async fn` shape future-proofs for any
-/// post-load setup that needs the tokio reactor.
-///
 /// `verbose` only controls a couple of stderr lines about mic/speaker
 /// open rates; flip to false from the GUI.
-pub async fn build_local_backends(
-    piper_onnx: &Path,
-    piper_config: &Path,
-    whisper_model: &Path,
-    voice_id: &str,
+pub async fn build_local_backends_macos_native(
     locale: primer_core::i18n::Locale,
     mic_silence_ms: u32,
     verbose: bool,
 ) -> Result<LocalBackends> {
+    use crate::macos::{MacosSpeechToText, MacosTextToSpeech};
+
+    let bcp47 = locale.bcp47();
+
     // ── Build VAD ────────────────────────────────────────────────
     let vad_params = SileroVadParams {
         min_silence_ms: mic_silence_ms,
@@ -219,22 +208,15 @@ pub async fn build_local_backends(
     };
     let mut audio_vad = SileroVad::new(vad_params)?;
 
-    // ── Build STT (whisper.cpp) ──────────────────────────────────
-    // Pass the learner's locale as the transcription language so a
-    // multilingual model (e.g. `ggml-small.bin` for `de`) actually
-    // transcribes in that language. Without this, Whisper falls back
-    // to its `"en"` default, forces non-English audio into approximate
-    // English, and the LLM never sees the original utterance — silent
-    // failure for every non-English locale. `Locale::pack_id()` returns
-    // ISO-639-1 ("en", "de", …) which is exactly the form Whisper
-    // accepts; pinned in `whisper::tests::pack_id_is_iso_639_1_for_whisper`.
-    let whisper = Arc::new(WhisperStt::new(whisper_model)?.with_language(locale.pack_id()));
+    // ── Build STT (macOS native, on-device-only by construction) ─
+    let stt: Arc<dyn StreamingSpeechToText + Send + Sync> =
+        Arc::new(MacosSpeechToText::new(bcp47)?);
 
-    // ── Build TTS (piper) ────────────────────────────────────────
-    let tts: Arc<dyn StreamingTextToSpeech> = Arc::new(PiperTts::new(piper_onnx, piper_config)?);
+    // ── Build TTS (macOS native, locale-resolved voice) ──────────
+    let tts: Arc<dyn StreamingTextToSpeech> = Arc::new(MacosTextToSpeech::new(bcp47)?);
     let tts_sample_rate = tts.sample_rate();
 
-    // ── Open mic + input resampler (target: VAD/whisper at 16 kHz) ─
+    // ── Open mic + input resampler (target: Silero/STT at 16 kHz) ─
     let vad_rate = audio_vad.sample_rate();
     let vad_chunk = audio_vad.chunk_samples();
     let MicPipeline {
@@ -254,19 +236,19 @@ pub async fn build_local_backends(
     let is_speaking = Arc::new(std::sync::atomic::AtomicBool::new(false));
 
     // ── Spawn audio capture thread ──────────────────────────────
-    let whisper_for_thread = Arc::clone(&whisper);
+    let stt_for_thread = Arc::clone(&stt);
     let stop_flag_thread = Arc::clone(&stop_flag);
     let is_speaking_thread = Arc::clone(&is_speaking);
     let audio_thread = std::thread::Builder::new()
-        .name("primer-speech-audio".into())
+        .name("primer-speech-audio-macos".into())
         .spawn(move || {
-            run_audio_thread(
+            run_audio_thread_stt(
                 mic_cons,
                 input_resampler.take(),
                 in_chunk_samples,
                 vad_chunk,
                 &mut audio_vad,
-                whisper_for_thread,
+                stt_for_thread,
                 event_tx,
                 transcript_tx,
                 stop_flag_thread,
@@ -275,10 +257,14 @@ pub async fn build_local_backends(
         })
         .map_err(|e| PrimerError::Speech(format!("spawn audio thread: {e}")))?;
 
-    // ── Build LoopBackends (single-locale; the ChannelStt adapter
-    //    reads transcripts from the audio thread). ────────────────
+    // ── Build LoopBackends (single-locale; ChannelStt adapter reads
+    //    transcripts from the audio thread). ──────────────────────
+    // For the macOS-native path there is no piper model-id; the
+    // VoiceProfile.model_id field is set to the bcp47 tag as a
+    // human-readable identifier. MacosTextToSpeech ignores the
+    // VoiceProfile and selects the voice from its own locale.
     let voice = VoiceProfile {
-        model_id: voice_id.to_string(),
+        model_id: bcp47.to_string(),
         rate: 0.9,
         ..VoiceProfile::default()
     };
