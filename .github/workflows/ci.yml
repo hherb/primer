@@ -147,6 +147,84 @@ jobs:
         # hybrid retrieval (fastembed) or the supertonic A/B comparison.
         run: cargo check -p primer-embedding --features fastembed
 
+  # macOS feature-combo drift-guard. The Apple-native speech backends
+  # (`macos-native`, `macos-native-26`) and the `voice-loop` state
+  # machine they wire into are platform-specific and invisible to the
+  # default `ubuntu-latest` test job — so they rot silently between PRs.
+  # PR #162 surfaced this: the `voice-loop + macos-native*` combo had
+  # been broken in main for 11 days post-#147 because no CI job exercised
+  # the import path. Issue #151 tracks the broader matrix; this job
+  # closes the most acute gap (the combos that have actually rotted).
+  #
+  # `cargo clippy -- -D warnings` rather than `cargo check`: PR #150
+  # uncovered three lints that had rotted in `build.rs` and
+  # `macos26/vad.rs` because that feature gate had never been clippy'd.
+  # The pattern is "drift catches both build breaks AND lint rot", so
+  # clippy is the right tool here.
+  #
+  # Not covered yet:
+  # - `macos-native-26`: requires macOS 26.x specifically; GitHub
+  #   Actions does not yet provide a hosted macos-26 image. Defer until
+  #   the image lands or a self-hosted runner is wired (issue #151).
+  # - `voice-loop` on its own (no macos-native): structurally covered
+  #   by the `voice-loop,macos-native` step since the voice-loop layer
+  #   compiles either way; a standalone Linux check is a low-value
+  #   addition until a bug actually surfaces.
+  feature-combos-macos:
+    name: cargo clippy (macOS feature combos)
+    runs-on: macos-latest
+    # Defensive cap on macOS-runner billing. macOS minutes are ~10× the
+    # cost of Linux minutes; a wedged clippy invocation should not be
+    # able to run out the 360 min GitHub default. 30 min comfortably
+    # accommodates a cold ort-runtime download + three clippy builds
+    # (observed: 2m23s warm-cache on this PR's first run).
+    timeout-minutes: 30
+    defaults:
+      run:
+        working-directory: src
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust toolchain
+        # rust-toolchain.toml at src/rust-toolchain.toml pins the
+        # workspace version (currently 1.88) + rustfmt + clippy. The
+        # action picks it up when invoked from src/. Leave channel on
+        # `stable` so rustup honors the toolchain file; the toolchain
+        # file is the single source of truth for components, matching
+        # the Linux `feature-combos` job's shape.
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache cargo registry + build
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: src
+          # Distinct key so the macOS cache doesn't collide with the
+          # Linux feature-combos cache (different OS, different target
+          # triple, different ort runtime binary).
+          key: feature-combos-macos
+
+      - name: cargo clippy -p primer-speech --features macos-native
+        # SFSpeechRecognizer + AVSpeechSynthesizer wired through the
+        # speech traits. macOS 13+ floor. Bundles `objc2-speech`,
+        # `objc2-avf-audio`, `block2`, `dispatch2` — any one of which
+        # could break across an Apple SDK update.
+        run: cargo clippy -p primer-speech --features macos-native --all-targets -- -D warnings
+
+      - name: cargo clippy -p primer-speech --features voice-loop,macos-native
+        # The exact combo that broke in main for 11 days post-#147
+        # before PR #162 caught it. Wires the shared LISTEN → THINK →
+        # SPEAK state machine over Apple-native STT/TTS via the
+        # `backends_macos_native` builder.
+        run: cargo clippy -p primer-speech --features voice-loop,macos-native --all-targets -- -D warnings
+
+      - name: cargo clippy -p primer-cli --features speech,macos-native
+        # Full primer-cli assembly under the production macOS speech
+        # build (the binary that ships to end-user macOS devices).
+        # Catches drift in the cfg-gated `SpeechLoopConfig` shape, the
+        # main-thread tokio runtime selection, and the espeak-ng probe
+        # — all of which differ across the macos-native build.
+        run: cargo clippy -p primer-cli --features speech,macos-native --all-targets -- -D warnings
+
   # Android cross-compile drift-guard. Catches transitive-dep platform
   # breakage before it surprises a developer in Termux on RedMagic 11.
   # This job does NOT validate runtime behaviour on Android — only that
