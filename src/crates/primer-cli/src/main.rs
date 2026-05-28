@@ -649,7 +649,23 @@ async fn async_main() -> anyhow::Result<()> {
             eprintln!("Error: --model required for openai-compat backend.");
             std::process::exit(1);
         }),
-        "qnn" => "qnn-pending".to_string(),
+        "qnn" => {
+            // Surface a one-line note when the user passed `--model`
+            // alongside `--backend qnn`. Documented behaviour is that
+            // the flag is ignored (the bundle's `primer-meta.json` is
+            // authoritative), but silent ignore is a UX hazard — a
+            // user who explicitly typed `--model claude-opus-4-7`
+            // would otherwise see `qnn:Qwen3-4B` in the banner with no
+            // explanation. Emitted unconditionally so it's visible
+            // even without `--verbose`.
+            if cli.model.is_some() {
+                eprintln!(
+                    "Note: --model is ignored under --backend qnn; \
+                     the model id comes from primer-meta.json inside the bundle."
+                );
+            }
+            "qnn-pending".to_string()
+        }
         // stub (and anything else — will error in build_backend below)
         _ => cli.model.clone().unwrap_or_else(|| "stub".to_string()),
     };
@@ -1378,6 +1394,22 @@ mod tests {
     }
 
     #[test]
+    fn warn_when_every_subsystem_is_explicitly_qnn() {
+        // Equivalent semantically to "all None under --backend qnn"
+        // (both resolve to `"qnn"` per the inherit-the-main-backend
+        // rule), but pinned separately because a future refactor
+        // that handled the explicit case differently from the
+        // inherit case would silently break this contract.
+        let w = npu_serialisation_warning(Some("qnn"), Some("qnn"), Some("qnn"));
+        assert!(w.is_some(), "expected a warning; got None");
+        let msg = w.unwrap();
+        assert!(
+            msg.contains("serialise") || msg.contains("serialize"),
+            "expected serialisation hint; got: {msg}"
+        );
+    }
+
+    #[test]
     fn warn_when_every_subsystem_is_stub() {
         // All-stub means the conversation runs without classifier-
         // driven features. Deliberate for smoke tests, but worth
@@ -1424,8 +1456,14 @@ mod tests {
         // an Ok parse — that's an acceptable degenerate case.
         if std::env::var_os("PRIMER_QNN_BUNDLE_DIR").is_some() {
             // Env var is set externally — the env fallback applies and
-            // the required_if_eq check is satisfied. Skip the assertion
-            // for this run.
+            // the required_if_eq check is satisfied. Print the skip so
+            // a passing-but-skipped result is visible under `--nocapture`
+            // rather than indistinguishable from a real green.
+            eprintln!(
+                "[skip] qnn_backend_requires_qnn_bundle_dir_at_parse: \
+                 PRIMER_QNN_BUNDLE_DIR is set; clap's env fallback satisfies \
+                 required_if_eq so we cannot assert the rejection path."
+            );
             return;
         }
         let result = Cli::try_parse_from(["primer", "--backend", "qnn"]);
@@ -1441,6 +1479,20 @@ mod tests {
         // Happy path: clap accepts `--backend qnn --qnn-bundle-dir <p>`.
         // Construction itself happens later in async_main and is the
         // engine's responsibility — this test pins the parse contract.
+        //
+        // Env-var defensive skip: clap's `env = "..."` resolves the
+        // optional `--qnn-qairt-lib-dir` from `PRIMER_QNN_QAIRT_LIB_DIR`
+        // if set in the test runner's environment, which would make
+        // the `cli.qnn_qairt_lib_dir.is_none()` assertion fail. Skip
+        // visibly so a developer with QAIRT installed locally doesn't
+        // chase a misleading red.
+        if std::env::var_os("PRIMER_QNN_QAIRT_LIB_DIR").is_some() {
+            eprintln!(
+                "[skip] qnn_backend_with_bundle_dir_parses: PRIMER_QNN_QAIRT_LIB_DIR is set; \
+                 clap's env fallback would populate qnn_qairt_lib_dir."
+            );
+            return;
+        }
         let cli = Cli::try_parse_from([
             "primer",
             "--backend",
