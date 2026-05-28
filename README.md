@@ -105,7 +105,9 @@ Three backends today, all implementing `InferenceBackend::generate_stream()`:
 - **CloudBackend** — streams from the Anthropic Messages API via SSE (`event:`/`data:` framing). Requires an API key.
 - **OllamaBackend** — streams from a local Ollama server via NDJSON (one JSON object per `\n`-terminated line). Useful for prototype testing against real local models without integrating llama.cpp directly.
 
-Future backends (not yet implemented): `LlamaCppBackend` (CPU/Vulkan), `QnnBackend` (Qualcomm Hexagon NPU — Phase 1.2 in progress; FFI scaffold `primer-qnn-sys` landed, safe wrapper still to come), `RknnBackend` (Rockchip RK1828 NPU).
+- **QnnBackend** *(behind the `qnn` cargo feature on `primer-inference`)* — Qualcomm Hexagon NPU via the Genie SDK, lazy-dlopened from `primer-qnn-sys`. Step 1.2.2 of the Phase 1.2 plan lands the safe wrapper (`primer-meta.json` parsing, chat-template renderer via `minijinja`, mutex-serialised `GenieDialog` session, ABI smoke check at construction, single-shot `generate_stream`). Real on-device run-through is gated on Phase 1.2 step 1.2.0 (QAIRT install + chatapp_android validation) and step 1.2.3 (per-token streaming callback bridge).
+
+Future backends (not yet implemented): `LlamaCppBackend` (CPU/Vulkan), `RknnBackend` (Rockchip RK1828 NPU).
 
 ### primer-pedagogy
 

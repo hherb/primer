@@ -9,8 +9,10 @@
 //!   testing against real models without integrating llama.cpp directly.
 //! - `OpenAiCompatBackend`: Calls any OpenAI-compatible server (oMLX, LM
 //!   Studio, vLLM, Together, Groq, OpenRouter, llama.cpp `--server`).
+//! - `QnnBackend`: Qualcomm QNN SDK for Snapdragon NPU (behind the
+//!   `qnn` cargo feature; Phase 1.2 step 1.2.2 lands the safe wrapper
+//!   on top of [`primer-qnn-sys`]).
 //! - `LlamaCppBackend`: (TODO) Binds to llama.cpp for local inference.
-//! - `QnnBackend`: (TODO) Qualcomm QNN SDK for Snapdragon NPU.
 //! - `RknnBackend`: (TODO) Rockchip RKNN-LLM for RK1828 NPU.
 
 pub mod cloud;
@@ -18,7 +20,13 @@ pub mod ollama;
 pub mod openai_compat;
 pub mod stub;
 
+#[cfg(feature = "qnn")]
+pub mod qnn;
+
 pub use cloud::CloudBackend;
 pub use ollama::OllamaBackend;
 pub use openai_compat::OpenAiCompatBackend;
 pub use stub::StubBackend;
+
+#[cfg(feature = "qnn")]
+pub use qnn::QnnBackend;

@@ -101,8 +101,16 @@ tempfile = "3"
 tauri = { version = "2", default-features = false }
 tauri-build = { version = "2" }
 
+# Jinja2-shape template renderer. Pulled in by primer-inference's `qnn`
+# feature to render the chat-template stored in each genie_bundle's
+# `primer-meta.json` (Phase 1.2 design §4). MIT-licensed, pure-Rust, no
+# unsafe, ~150 KB compiled — small enough that the cost of pulling it in
+# only when the qnn feature is on is acceptable. Pinned to 2.x.
+minijinja = "2"
+
 # Workspace crates
 primer-core = { path = "crates/primer-core" }
+primer-qnn-sys = { path = "crates/primer-qnn-sys" }
 primer-inference = { path = "crates/primer-inference" }
 primer-speech = { path = "crates/primer-speech" }
 primer-knowledge = { path = "crates/primer-knowledge" }
