@@ -8,7 +8,7 @@
 ## Prerequisites
 
 - A Linux or macOS dev box with at least 32 GB RAM + swap. The `qai-hub-models` export step needs significant memory.
-- Python 3.10 installed (newer versions may work but 3.10 is what upstream recommends).
+- [`uv`](https://docs.astral.sh/uv/) installed — it fetches the pinned Python 3.10 interpreter itself (`uv venv --python 3.10`), so no system Python install is required. (3.10 is what upstream recommends; newer versions may work.)
 - Android Studio 2024.3.1 or newer.
 - A Qualcomm developer portal account (free signup at https://qpm.qualcomm.com/) for QAIRT SDK download. **No paid licence required for evaluation.**
 - A free `qai-hub` account at https://aihub.qualcomm.com/ (needed by the `qai-hub-models` exporter to fetch pre-compiled context binaries).
@@ -37,20 +37,21 @@
 ## Step 2 — Export the Qwen3-4B genie_bundle
 
 ```bash
-# Fresh venv to avoid clashing with system Python deps.
-python3.10 -m venv ~/venvs/qai-hub
+# Fresh venv to avoid clashing with system Python deps. uv fetches the
+# pinned 3.10 interpreter itself — no system Python needed.
+uv venv --python 3.10 ~/venvs/qai-hub
 source ~/venvs/qai-hub/bin/activate
 
 # Install the model package. The exact extras name is per the AI Hub
 # model card — verify at https://aihub.qualcomm.com/models/qwen3_4b
 # (the convention is underscores → hyphens for the extras name).
-pip install -U "qai-hub-models[qwen3-4b]"
+uv pip install -U "qai-hub-models[qwen3-4b]"
 
 # Authenticate with AI Hub (one-time; opens browser).
 qai-hub configure --api_token <your-aihub-token>
 
 # Qwen3-4B weights are not gated — no `hf auth login` needed. (Llama-3.x
-# would require `pip install -U 'huggingface_hub[cli]' && hf auth login`.)
+# would require `uv pip install -U 'huggingface_hub[cli]' && hf auth login`.)
 
 # Export. This is the multi-hour step. Run it in a tmux/screen session.
 mkdir -p ~/primer-bundles
