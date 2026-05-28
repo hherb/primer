@@ -152,6 +152,20 @@ impl GenieCallError {
         // a translated message demands it.
         primer_core::error::InferenceError::Other(self.to_string())
     }
+
+    /// Convert a borrowed `GenieCallError` into the `PrimerError::Inference`
+    /// shape expected on the streaming channel.
+    ///
+    /// Used at every error site in the streaming path (real impl + mock)
+    /// so the dev-facing string is identical by construction rather than
+    /// by review. Takes `&self` because the mock's `Script::TokensThenError`
+    /// retains ownership of the error across queries (it cannot move out
+    /// of a borrowed enum variant).
+    pub fn to_primer_error(&self) -> primer_core::error::PrimerError {
+        primer_core::error::PrimerError::Inference(primer_core::error::InferenceError::Other(
+            self.to_string(),
+        ))
+    }
 }
 
 #[cfg(test)]
@@ -207,8 +221,8 @@ mod tests {
         }
     }
 
-    #[test]
-    fn mock_library_records_open_and_query_in_order() {
+    #[tokio::test]
+    async fn mock_library_records_open_and_query_in_order() {
         use futures::StreamExt;
         use futures::channel::mpsc;
         use mock::{MockEvent, MockGenieLibrary};
@@ -219,7 +233,7 @@ mod tests {
             .unwrap();
         let (tx, rx) = mpsc::unbounded();
         dialog.query_streaming("Why is the sky blue?", tx);
-        let chunks: Vec<_> = futures::executor::block_on(rx.collect::<Vec<_>>());
+        let chunks: Vec<_> = rx.collect::<Vec<_>>().await;
         drop(dialog);
         // Single canned response → 1 body chunk + 1 done chunk = 2 chunks.
         assert_eq!(chunks.len(), 2, "{chunks:?}");

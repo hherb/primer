@@ -30,7 +30,7 @@ use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 
 use futures::channel::mpsc::UnboundedSender;
-use primer_core::error::{PrimerError, Result as PrimerResult};
+use primer_core::error::Result as PrimerResult;
 use primer_core::inference::TokenChunk;
 
 use super::{GenieCallError, GenieDialog, GenieLibrary};
@@ -255,28 +255,23 @@ impl GenieDialog for MockGenieDialog {
             // dropped; ignore — Genie has no cancellation API and the
             // contract documented on the trait requires tolerating
             // this.
-            let _ = sender.unbounded_send(Err(PrimerError::Inference(err.into_inference_error())));
+            let _ = sender.unbounded_send(Err(err.to_primer_error()));
             // sender drops here, closing the channel.
             return;
         }
 
         // Drive the configured script. We can't move out of the
         // `Script` because the mock may be queried multiple times in
-        // serialisation tests, so we clone the token Vec and rebuild
-        // the error on each iteration (the latter is constructed
-        // ad-hoc via the helper since `GenieCallError` is not Clone).
+        // serialisation tests; `GenieCallError::to_primer_error` takes
+        // `&self` precisely so the borrowed error in `TokensThenError`
+        // can be reused across queries without requiring `Clone` on
+        // the variant (which transitively requires `Clone` on
+        // `std::io::Error`).
         match &self.inner.script {
             Script::Tokens(tokens) => emit_tokens_then_done(tokens, &sender),
             Script::TokensThenError { tokens, err } => {
                 emit_tokens(tokens, &sender);
-                let _ = sender.unbounded_send(Err(PrimerError::Inference(
-                    // GenieCallError is not Clone — re-create the
-                    // dev-facing string equivalent via Display. This is
-                    // safe because the i18n boundary already collapses
-                    // the variant into `Other(dev_string)` (see
-                    // [`super::GenieCallError::into_inference_error`]).
-                    primer_core::error::InferenceError::Other(err.to_string()),
-                )));
+                let _ = sender.unbounded_send(Err(err.to_primer_error()));
                 // No done chunk after an error: the dialogue manager
                 // drops partial turns on stream-error per existing
                 // contract.

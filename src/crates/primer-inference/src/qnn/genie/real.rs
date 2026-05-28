@@ -12,7 +12,7 @@ use std::ptr;
 use std::sync::Arc;
 
 use futures::channel::mpsc::UnboundedSender;
-use primer_core::error::{InferenceError, PrimerError, Result as PrimerResult};
+use primer_core::error::Result as PrimerResult;
 use primer_core::inference::TokenChunk;
 use primer_qnn_sys::{
     GENIE_DIALOG_SENTENCE_COMPLETE, GENIE_STATUS_SUCCESS, Genie_Dialog_SentenceCode_t,
@@ -165,7 +165,7 @@ impl GenieDialog for RealGenieDialog {
                 let err = GenieCallError::BadConfigPath {
                     detail: format!("embedded NUL in prompt at position {}", e.nul_position()),
                 };
-                let _ = sender.unbounded_send(Err(genie_to_primer_error(err)));
+                let _ = sender.unbounded_send(Err(err.to_primer_error()));
                 return;
             }
         };
@@ -201,7 +201,7 @@ impl GenieDialog for RealGenieDialog {
                 operation: "GenieDialog_setTokenCallback",
                 status: set_status,
             };
-            let _ = sender.unbounded_send(Err(genie_to_primer_error(err)));
+            let _ = sender.unbounded_send(Err(err.to_primer_error()));
             return;
         }
 
@@ -238,7 +238,7 @@ impl GenieDialog for RealGenieDialog {
                 operation: "GenieDialog_query",
                 status: query_status,
             };
-            let _ = sender.unbounded_send(Err(genie_to_primer_error(err)));
+            let _ = sender.unbounded_send(Err(err.to_primer_error()));
             // No done chunk after an error — see the trait
             // documentation for the rationale.
         } else {
@@ -263,13 +263,6 @@ unsafe fn reclaim_sender_box(
 ) -> Box<UnboundedSender<PrimerResult<TokenChunk>>> {
     // SAFETY: caller upholds the invariant documented above.
     unsafe { Box::from_raw(ptr) }
-}
-
-/// Convert a `GenieCallError` into the `PrimerError::Inference` shape
-/// expected on the streaming channel. Centralised so the dev-facing
-/// string is identical at every error site.
-fn genie_to_primer_error(err: GenieCallError) -> PrimerError {
-    PrimerError::Inference(InferenceError::Other(err.to_string()))
 }
 
 impl Drop for RealGenieDialog {

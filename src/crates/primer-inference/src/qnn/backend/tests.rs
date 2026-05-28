@@ -425,13 +425,22 @@ async fn generate_stream_mid_stream_error_yields_partial_chunks_then_err_and_clo
 }
 
 #[tokio::test]
-async fn generate_stream_serialises_concurrent_callers() {
+async fn generate_stream_concurrent_callers_each_receive_full_chunk_shape() {
     // Two concurrent `generate_stream` calls against the same backend
     // share one dialog handle, which is single-session-per-Genie-contract.
     // The dialog mutex serialises them. This test pins that both calls
     // complete cleanly, with the full chunk shape (N body + 1 done) on
     // each receiver — i.e. neither call drops chunks or panics when
     // contending on the mutex.
+    //
+    // NOTE on naming: this does NOT prove the mutex actually serialises
+    // the dialog_query calls in real time. With a synchronous fast mock,
+    // both queries complete in microseconds and we can't distinguish
+    // sequential from interleaved execution. The mutex correctness is
+    // structural — `generate_stream` always acquires the lock before
+    // calling `query_streaming`. What this test does prove: contention
+    // on the dialog mutex doesn't drop chunks, panic, or corrupt the
+    // mock's recorded events.
     let dir = tempdir().unwrap();
     write_genie_config(dir.path());
     write_primer_meta(dir.path());
