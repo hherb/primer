@@ -3571,6 +3571,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "primer-qnn-sys"
+version = "0.1.0"
+dependencies = [
+ "libloading",
+ "thiserror 2.0.18",
+]
+
+[[package]]
 name = "primer-speech"
 version = "0.1.0"
 dependencies = [

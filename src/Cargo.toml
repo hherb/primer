@@ -15,6 +15,7 @@ members = [
     "crates/primer-embedding",
     "crates/primer-engine",
     "crates/primer-gui",
+    "crates/primer-qnn-sys",
 ]
 exclude = ["vendor/piper-rs", "vendor/silero-vad-rust", "vendor/supertonic-rs"]
 

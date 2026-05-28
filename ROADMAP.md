@@ -79,11 +79,14 @@ This roadmap is organised around one principle: **get a working conversation loo
 - [ ] Add automatic backend fallback: try local model first, fall back to cloud if local is too slow or unavailable
 - [ ] Add a 3B model fallback path for constrained devices
 
-### 1.2 — Qualcomm NPU (RedMagic / Snapdragon 8 Elite)
+### 1.2 — Qualcomm NPU (RedMagic / Snapdragon 8 Elite) 🟡
 
-- [ ] Implement `QnnBackend` using QNN SDK for Hexagon NPU inference
-- [ ] Target: 15+ tok/s on Qwen3 7B W4A16 quantisation
-- [ ] Test thermal behaviour under sustained conversation (the phone in an enclosure will need monitoring)
+Design spec at [docs/superpowers/specs/2026-05-28-qnn-backend-design.md](docs/superpowers/specs/2026-05-28-qnn-backend-design.md); implementation plan at [docs/superpowers/plans/2026-05-28-qnn-backend.md](docs/superpowers/plans/2026-05-28-qnn-backend.md). Step 1.2.1 (the `primer-qnn-sys` FFI crate scaffold — `libloading`-based dlopen + raw `extern "C"` declarations of the six Genie functions the Primer needs) is the first dev-machine-buildable artefact and has landed; vendored Genie headers + `bindgen` remain deferred behind the QAIRT-SDK licence pass that step 1.2.0 unblocks.
+
+- [ ] Implement `QnnBackend` using QNN SDK for Hexagon NPU inference (target: Qwen3-4B on RedMagic 11 Pro)
+- [x] FFI scaffold: `primer-qnn-sys` crate with hand-rolled Genie C API decls + runtime dlopen wrapper (step 1.2.1)
+- [ ] Target: 15+ tok/s decode on Qwen3-4B W4A16; TTFT < 3s
+- [ ] Test thermal behaviour under sustained conversation (the phone in an enclosure will need monitoring; target <70°C peak)
 
 ### 1.3 — Hybrid inference
 

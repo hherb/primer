@@ -78,6 +78,7 @@ All green on macOS / Linux / Termux.
 5. Chat-template render: read `primer-meta.json::chat_template` (Jinja2 string), substitute system+messages. Decide between `minijinja` and hand-rolled (see open question §12.2 of the spec). Prefer `minijinja` if it's already in the tree.
 6. `primer-meta.json` parser as a small module `qnn::meta`.
 7. New `Drop` impl that calls `GenieDialog_free` + `GenieDialogConfig_free`.
+8. **ABI smoke check at construction**: immediately after `GenieDialog_create` succeeds, issue a tiny throwaway `GenieDialog_query` (e.g. a single-token prompt) and verify the returned `Genie_Status_t` is `GENIE_STATUS_SUCCESS`. Step 1.2.1 (PR #171) deliberately defers full ABI fidelity verification to first real call ([primer-qnn-sys/src/lib.rs](../../../../src/crates/primer-qnn-sys/src/lib.rs) "Full type-fidelity verification happens at the first real call on the device"). This smoke check is what makes "first real call" happen synchronously inside `QnnBackend::new` instead of mid-conversation, so an ABI mismatch surfaces at startup with a clean error rather than corrupting a child's turn. Wrap as a feature behind `QnnBackend::new_with_smoke_check(...)` (default on) so the test path can opt out for mock-library scenarios.
 
 ### Tests
 

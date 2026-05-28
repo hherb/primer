@@ -307,14 +307,31 @@ jobs:
         with:
           ndk-version: r26d
 
+      - name: Export NDK toolchain env for downstream cargo steps
+        # Single source of truth for the four NDK env vars every
+        # `cargo build --target aarch64-linux-android …` step in this
+        # job needs. Writing them to $GITHUB_ENV here (rather than
+        # duplicating per-step `env:` blocks) keeps the NDK path
+        # interpolation in one place — bumping API level or migrating
+        # off `nttld/setup-ndk` becomes a one-line change. API 24 is
+        # the lowest sensible floor; bump if any transitive dep needs
+        # newer APIs.
+        #
+        # Job-level `env:` is NOT an option here: it's evaluated before
+        # any step runs, so `${{ steps.ndk.outputs.ndk-path }}` would
+        # resolve to the empty string. Step-level $GITHUB_ENV writes
+        # are the documented pattern for env that depends on a prior
+        # step's output.
+        run: |
+          NDK_BIN="${{ steps.ndk.outputs.ndk-path }}/toolchains/llvm/prebuilt/linux-x86_64/bin"
+          {
+            echo "CC_aarch64_linux_android=${NDK_BIN}/aarch64-linux-android24-clang"
+            echo "CXX_aarch64_linux_android=${NDK_BIN}/aarch64-linux-android24-clang++"
+            echo "AR_aarch64_linux_android=${NDK_BIN}/llvm-ar"
+            echo "CARGO_TARGET_AARCH64_LINUX_ANDROID_LINKER=${NDK_BIN}/aarch64-linux-android24-clang"
+          } >> "$GITHUB_ENV"
+
       - name: Cross-compile primer binary
-        env:
-          # NDK toolchain paths. API 24 is the lowest sensible floor;
-          # bump if any transitive dep needs newer APIs.
-          CC_aarch64_linux_android: ${{ steps.ndk.outputs.ndk-path }}/toolchains/llvm/prebuilt/linux-x86_64/bin/aarch64-linux-android24-clang
-          CXX_aarch64_linux_android: ${{ steps.ndk.outputs.ndk-path }}/toolchains/llvm/prebuilt/linux-x86_64/bin/aarch64-linux-android24-clang++
-          AR_aarch64_linux_android: ${{ steps.ndk.outputs.ndk-path }}/toolchains/llvm/prebuilt/linux-x86_64/bin/llvm-ar
-          CARGO_TARGET_AARCH64_LINUX_ANDROID_LINKER: ${{ steps.ndk.outputs.ndk-path }}/toolchains/llvm/prebuilt/linux-x86_64/bin/aarch64-linux-android24-clang
         # NB: `--bin primer` only (no `--workspace`). The `primer-gui`
         # crate's Tauri 2.x deps don't cross-compile to Android (webkit2gtk
         # etc.) and GUI on Android is explicitly out-of-scope for Phase 0
@@ -322,3 +339,14 @@ jobs:
         # `cargo build --bin primer` builds only that binary's dep graph,
         # which excludes `primer-gui` (sibling crate, not a dep).
         run: cargo build --target aarch64-linux-android --bin primer
+
+      - name: Cross-compile primer-qnn-sys
+        # The Phase 1.2 Genie/QNN FFI crate is `target_os = "android"`-gated
+        # for its real-dlopen path; on every other target `GenieLibrary::open`
+        # returns `PlatformUnsupported`. Until step 1.2.4 wires `--backend qnn`
+        # through `primer-cli`, this crate is NOT in the `--bin primer` dep
+        # graph above, so we need a dedicated build step to catch drift on
+        # the Android-cfg branch (e.g. a transitive libloading bump that
+        # silently breaks NDK linking). NDK env vars are inherited from
+        # the earlier "Export NDK toolchain env" step.
+        run: cargo build --target aarch64-linux-android -p primer-qnn-sys

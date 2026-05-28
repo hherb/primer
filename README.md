@@ -59,7 +59,7 @@ The learner model (what the child knows, how deeply they understand it, what top
 
 ## Architecture
 
-The codebase is a Rust workspace under `src/`, organised into fourteen crates. The core design principle is **trait-based hardware abstraction**: the pedagogical engine doesn't know or care whether it's talking to a local 7B model on a phone's NPU, llama.cpp on a laptop, or Claude over the network. Backend selection is a runtime config choice, not a code change.
+The codebase is a Rust workspace under `src/`, organised into fifteen crates. The core design principle is **trait-based hardware abstraction**: the pedagogical engine doesn't know or care whether it's talking to a local 7B model on a phone's NPU, llama.cpp on a laptop, or Claude over the network. Backend selection is a runtime config choice, not a code change.
 
 ```
 src/
@@ -67,6 +67,7 @@ src/
 └── crates/
     ├── primer-core/            # traits + shared types (everyone depends on this)
     ├── primer-inference/       # LLM backends (stub, cloud, ollama; later: llama.cpp, QNN, RKNN)
+    ├── primer-qnn-sys/         # Phase 1.2 FFI scaffold: dlopen + raw Genie C API decls (Android-only path)
     ├── primer-speech/          # VAD + STT + TTS backends (Silero, Whisper, Piper, cpal; macos-native: SFSpeechRecognizer + AVSpeechSynthesizer; macos-native-26: SpeechAnalyzer + AVSpeechSynthesizer)
     ├── primer-knowledge/       # SQLite FTS5 + dense-vector hybrid knowledge base
     ├── primer-storage/         # SQLite session + learner-model persistence
@@ -104,7 +105,7 @@ Three backends today, all implementing `InferenceBackend::generate_stream()`:
 - **CloudBackend** — streams from the Anthropic Messages API via SSE (`event:`/`data:` framing). Requires an API key.
 - **OllamaBackend** — streams from a local Ollama server via NDJSON (one JSON object per `\n`-terminated line). Useful for prototype testing against real local models without integrating llama.cpp directly.
 
-Future backends (not yet implemented): `LlamaCppBackend` (CPU/Vulkan), `QnnBackend` (Qualcomm Hexagon NPU), `RknnBackend` (Rockchip RK1828 NPU).
+Future backends (not yet implemented): `LlamaCppBackend` (CPU/Vulkan), `QnnBackend` (Qualcomm Hexagon NPU — Phase 1.2 in progress; FFI scaffold `primer-qnn-sys` landed, safe wrapper still to come), `RknnBackend` (Rockchip RK1828 NPU).
 
 ### primer-pedagogy
 
