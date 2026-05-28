@@ -81,11 +81,11 @@ This roadmap is organised around one principle: **get a working conversation loo
 
 ### 1.2 — Qualcomm NPU (RedMagic / Snapdragon 8 Elite) 🟡
 
-Design spec at [docs/superpowers/specs/2026-05-28-qnn-backend-design.md](docs/superpowers/specs/2026-05-28-qnn-backend-design.md); implementation plan at [docs/superpowers/plans/2026-05-28-qnn-backend.md](docs/superpowers/plans/2026-05-28-qnn-backend.md). Step 1.2.1 (the `primer-qnn-sys` FFI crate scaffold) and step 1.2.2 (the `QnnBackend` safe wrapper in `primer-inference`) have both landed. Step 1.2.0 (QAIRT install + chatapp_android device validation), step 1.2.3 (per-token streaming callback bridge), step 1.2.4 (CLI wiring under `--backend qnn`), step 1.2.5 (4K context-window tuning), and step 1.2.6 (benchmark + thermal harness) remain.
+Design spec at [docs/superpowers/specs/2026-05-28-qnn-backend-design.md](docs/superpowers/specs/2026-05-28-qnn-backend-design.md); implementation plan at [docs/superpowers/plans/2026-05-28-qnn-backend.md](docs/superpowers/plans/2026-05-28-qnn-backend.md). Steps 1.2.1, 1.2.2, and 1.2.3 (FFI scaffold, safe wrapper, per-token streaming bridge) have all landed. Step 1.2.0 (QAIRT install + chatapp_android device validation), step 1.2.4 (CLI wiring under `--backend qnn`), step 1.2.5 (4K context-window tuning), and step 1.2.6 (benchmark + thermal harness) remain.
 
 - [x] FFI scaffold: `primer-qnn-sys` crate with hand-rolled Genie C API decls + runtime dlopen wrapper (step 1.2.1)
-- [x] `QnnBackend` safe wrapper: trait-abstracted Genie library handle, `primer-meta.json` parser, `minijinja` chat-template renderer, mutex-serialised `GenieDialog` session, ABI smoke check at construction, single-shot `generate_stream` (step 1.2.2)
-- [ ] Per-token streaming bridge via C-ABI callback + mpsc receiver (step 1.2.3)
+- [x] `QnnBackend` safe wrapper: trait-abstracted Genie library handle, `primer-meta.json` parser, `minijinja` chat-template renderer, mutex-serialised `GenieDialog` session, ABI smoke check at construction (step 1.2.2)
+- [x] Per-token streaming bridge: C-ABI callback feeds an `mpsc::UnboundedSender` boxed via `Box::into_raw` for stable `user_data`; receiver wrapped as `TokenStream`; `GenieDialog_query` runs inside `tokio::task::spawn_blocking` so multi-second decodes never starve the runtime (step 1.2.3)
 - [ ] CLI wiring: `--backend qnn`, `--qnn-bundle-dir`, classifier-chain auto-routing (step 1.2.4)
 - [ ] Per-backend context-window budget for 4K-bound models (step 1.2.5)
 - [ ] Benchmark + thermal harness: `examples/qnn_bench.rs` (step 1.2.6)

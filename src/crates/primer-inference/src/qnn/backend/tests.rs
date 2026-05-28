@@ -5,9 +5,11 @@
 //! construction → query → drop happy path entirely on host.
 
 use super::*;
+use crate::qnn::genie::GenieCallError;
 use crate::qnn::genie::mock::{MockEvent, MockGenieLibrary};
 use crate::qnn::meta::PRIMER_META_FILENAME;
 use futures::StreamExt;
+use primer_core::error::Result as PrimerResult;
 use primer_core::inference::{Message, Role};
 use tempfile::tempdir;
 
@@ -243,7 +245,12 @@ async fn dialog_is_dropped_when_backend_drops() {
 }
 
 #[tokio::test]
-async fn generate_stream_returns_canned_response_as_single_chunk() {
+async fn generate_stream_emits_canned_response_as_body_chunk_then_done() {
+    // Step 1.2.3 contract: a single canned response (the back-compat
+    // shape from `new_with_response`) reaches the consumer as exactly
+    // two chunks — one body chunk carrying the text, then one done
+    // chunk with empty text. Pins that the streaming path doesn't
+    // accidentally coalesce or drop the body chunk.
     let dir = tempdir().unwrap();
     write_genie_config(dir.path());
     write_primer_meta(dir.path());
@@ -258,13 +265,20 @@ async fn generate_stream_returns_canned_response_as_single_chunk() {
         .generate_stream(&prompt, &GenerationParams::default())
         .await
         .unwrap();
-    let first = stream
+    let body = stream
         .next()
         .await
-        .expect("stream yields at least one chunk")
+        .expect("stream yields a body chunk first")
         .unwrap();
-    assert_eq!(first.text, "Yes, gravity is real.");
-    assert!(first.done, "step 1.2.2 returns a single done chunk");
+    assert_eq!(body.text, "Yes, gravity is real.");
+    assert!(!body.done, "body chunk: done=false");
+    let done = stream
+        .next()
+        .await
+        .expect("stream yields a final done chunk")
+        .unwrap();
+    assert_eq!(done.text, "");
+    assert!(done.done, "final chunk: done=true sentinel");
     // No further chunks.
     assert!(stream.next().await.is_none());
 }
@@ -324,4 +338,137 @@ async fn render_prompt_pins_chatml_shape() {
         .unwrap();
     assert!(rendered.contains("<|im_start|>user\nwhy is the sky blue?<|im_end|>"));
     assert!(rendered.trim_end().ends_with("<|im_start|>assistant"));
+}
+
+// ===== Phase 1.2 step 1.2.3 — streaming token bridge =====
+//
+// The next three tests pin the per-token streaming contract introduced
+// by step 1.2.3:
+//
+// - The mock backend emits N body chunks (`done = false`) followed by
+//   one final `done = true` chunk. Total = N + 1.
+// - A mid-stream Genie error replaces the final done chunk with an
+//   `Err(PrimerError::Inference(...))` and closes the channel.
+// - Two concurrent `generate_stream` calls against the same backend
+//   serialise through the dialog mutex without panicking or dropping
+//   chunks.
+
+#[tokio::test]
+async fn generate_stream_yields_n_body_chunks_then_done() {
+    let dir = tempdir().unwrap();
+    write_genie_config(dir.path());
+    write_primer_meta(dir.path());
+    let arc_lib: Arc<MockGenieLibrary> = Arc::new(MockGenieLibrary::new_with_tokens([
+        "Yes,", " gravity", " is", " real.",
+    ]));
+    let lib: Arc<dyn GenieLibrary> = Arc::clone(&arc_lib) as Arc<dyn GenieLibrary>;
+    let backend = QnnBackend::new_with_library(dir.path().to_path_buf(), lib, false)
+        .await
+        .unwrap();
+    let prompt = user_prompt("Is gravity real?");
+    let stream = backend
+        .generate_stream(&prompt, &GenerationParams::default())
+        .await
+        .unwrap();
+    let results: Vec<PrimerResult<TokenChunk>> = stream.collect().await;
+    let chunks: Vec<TokenChunk> = results
+        .into_iter()
+        .map(|r| r.expect("no error chunks expected on happy path"))
+        .collect();
+    assert_eq!(chunks.len(), 5, "4 body + 1 done = 5: {chunks:?}");
+    assert_eq!(chunks[0].text, "Yes,");
+    assert!(!chunks[0].done);
+    assert_eq!(chunks[1].text, " gravity");
+    assert!(!chunks[1].done);
+    assert_eq!(chunks[2].text, " is");
+    assert!(!chunks[2].done);
+    assert_eq!(chunks[3].text, " real.");
+    assert!(!chunks[3].done);
+    // Final chunk: done marker, text is empty.
+    assert_eq!(chunks[4].text, "");
+    assert!(chunks[4].done);
+}
+
+#[tokio::test]
+async fn generate_stream_mid_stream_error_yields_partial_chunks_then_err_and_closes() {
+    let dir = tempdir().unwrap();
+    write_genie_config(dir.path());
+    write_primer_meta(dir.path());
+    let arc_lib: Arc<MockGenieLibrary> = Arc::new(MockGenieLibrary::new_with_tokens_then_error(
+        ["partial1", "partial2"],
+        GenieCallError::NonSuccess {
+            operation: "GenieDialog_query",
+            status: -9,
+        },
+    ));
+    let lib: Arc<dyn GenieLibrary> = Arc::clone(&arc_lib) as Arc<dyn GenieLibrary>;
+    let backend = QnnBackend::new_with_library(dir.path().to_path_buf(), lib, false)
+        .await
+        .unwrap();
+    let prompt = user_prompt("doesn't matter");
+    let stream = backend
+        .generate_stream(&prompt, &GenerationParams::default())
+        .await
+        .unwrap();
+    let results: Vec<PrimerResult<TokenChunk>> = stream.collect().await;
+    assert_eq!(results.len(), 3, "2 body + 1 err = 3: {results:?}");
+    assert_eq!(results[0].as_ref().unwrap().text, "partial1");
+    assert!(!results[0].as_ref().unwrap().done);
+    assert_eq!(results[1].as_ref().unwrap().text, "partial2");
+    assert!(!results[1].as_ref().unwrap().done);
+    let err = results[2]
+        .as_ref()
+        .expect_err("third item is the error chunk");
+    let msg = err.to_string();
+    assert!(msg.contains("GenieDialog_query"), "{msg}");
+    assert!(msg.contains("-9"), "{msg}");
+}
+
+#[tokio::test]
+async fn generate_stream_serialises_concurrent_callers() {
+    // Two concurrent `generate_stream` calls against the same backend
+    // share one dialog handle, which is single-session-per-Genie-contract.
+    // The dialog mutex serialises them. This test pins that both calls
+    // complete cleanly, with the full chunk shape (N body + 1 done) on
+    // each receiver — i.e. neither call drops chunks or panics when
+    // contending on the mutex.
+    let dir = tempdir().unwrap();
+    write_genie_config(dir.path());
+    write_primer_meta(dir.path());
+    let arc_lib: Arc<MockGenieLibrary> =
+        Arc::new(MockGenieLibrary::new_with_tokens(["a", "b", "c"]));
+    let lib: Arc<dyn GenieLibrary> = Arc::clone(&arc_lib) as Arc<dyn GenieLibrary>;
+    let backend = Arc::new(
+        QnnBackend::new_with_library(dir.path().to_path_buf(), lib, false)
+            .await
+            .unwrap(),
+    );
+    let p1 = user_prompt("first prompt");
+    let p2 = user_prompt("second prompt");
+    let s1 = backend
+        .generate_stream(&p1, &GenerationParams::default())
+        .await
+        .unwrap();
+    let s2 = backend
+        .generate_stream(&p2, &GenerationParams::default())
+        .await
+        .unwrap();
+    let (r1, r2): (Vec<_>, Vec<_>) = tokio::join!(s1.collect(), s2.collect());
+    assert_eq!(r1.len(), 4, "first receiver: 3 body + 1 done");
+    assert_eq!(r2.len(), 4, "second receiver: 3 body + 1 done");
+    assert!(r1.iter().all(|r: &PrimerResult<TokenChunk>| r.is_ok()));
+    assert!(r2.iter().all(|r: &PrimerResult<TokenChunk>| r.is_ok()));
+    // Both Query events should be present; the mutex makes them
+    // sequential rather than interleaved, but with a fast mock we can't
+    // distinguish strict ordering without inserting a barrier — what we
+    // CAN check is that both queries were actually issued.
+    let events = arc_lib.events();
+    let query_count = events
+        .iter()
+        .filter(|e| matches!(e, MockEvent::Query { .. }))
+        .count();
+    assert_eq!(
+        query_count, 2,
+        "both prompts must hit the dialog: {events:?}"
+    );
 }

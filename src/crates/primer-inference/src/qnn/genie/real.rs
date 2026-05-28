@@ -11,6 +11,9 @@ use std::path::Path;
 use std::ptr;
 use std::sync::Arc;
 
+use futures::channel::mpsc::UnboundedSender;
+use primer_core::error::{InferenceError, PrimerError, Result as PrimerResult};
+use primer_core::inference::TokenChunk;
 use primer_qnn_sys::{
     GENIE_DIALOG_SENTENCE_COMPLETE, GENIE_STATUS_SUCCESS, Genie_Dialog_SentenceCode_t,
     GenieDialog_Handle_t, GenieDialog_TokenCallback_t, GenieDialogConfig_Handle_t,
@@ -150,53 +153,71 @@ struct RealGenieDialog {
 unsafe impl Send for RealGenieDialog {}
 
 impl GenieDialog for RealGenieDialog {
-    fn query_blocking(&self, prompt: &str) -> Result<String, GenieCallError> {
+    fn query_streaming(&self, prompt: &str, sender: UnboundedSender<PrimerResult<TokenChunk>>) {
         // Genie's query takes a NUL-terminated UTF-8 prompt. An
         // embedded NUL in the prompt is operator error (the Primer's
-        // prompt builder never emits NULs); surface as
-        // `BadConfigPath` for now — step 1.2.3 may introduce a
-        // dedicated `BadPrompt` variant once the streaming path
-        // surfaces additional prompt-validation concerns.
-        let c_prompt = CString::new(prompt).map_err(|e| GenieCallError::BadConfigPath {
-            detail: format!("embedded NUL in prompt at position {}", e.nul_position()),
-        })?;
+        // prompt builder never emits NULs); the streaming contract
+        // requires us to surface this through the channel, not return
+        // it.
+        let c_prompt = match CString::new(prompt) {
+            Ok(c) => c,
+            Err(e) => {
+                let err = GenieCallError::BadConfigPath {
+                    detail: format!("embedded NUL in prompt at position {}", e.nul_position()),
+                };
+                let _ = sender.unbounded_send(Err(genie_to_primer_error(err)));
+                return;
+            }
+        };
 
-        // Accumulator the C-ABI callback appends to. Boxed so we have
-        // a stable address for the `user_data` pointer. Single-shot
-        // for step 1.2.2; step 1.2.3 will swap this for an mpsc
-        // sender to bridge into a streaming receiver.
-        let mut accumulator: Box<String> = Box::default();
-        let user_data = accumulator.as_mut() as *mut String as *mut c_void;
+        // Box the sender so we have a stable address for the
+        // `user_data` pointer. Plan §1.2.3 task 1: `Box::into_raw` the
+        // sender, recover via `Box::from_raw` after `dialog_query`
+        // returns so the box is dropped exactly once (closing the
+        // channel).
+        let boxed_sender: Box<UnboundedSender<PrimerResult<TokenChunk>>> = Box::new(sender);
+        let raw_sender_ptr = Box::into_raw(boxed_sender);
+        let user_data = raw_sender_ptr as *mut c_void;
 
-        // SAFETY: `accumulator_token_callback` is `unsafe extern "C"`
-        // and we re-register it on every query so the most recently
-        // installed `user_data` is always the live `Box<String>` for
-        // the in-flight `dialog_query`. The Genie C API may retain
-        // the callback + user_data pointer across queries (the public
-        // header gives no lifetime guarantee that they are forgotten
-        // after a query returns); we rely on Genie NOT firing the
-        // callback outside a `dialog_query` invocation. If a future
-        // QAIRT release breaks that assumption, the previous query's
-        // `user_data` pointer becomes dangling between calls and the
-        // safe wrapper has to be reworked to keep the accumulator
-        // alive across queries (e.g. owned by `RealGenieDialog`). The
-        // C ABI signature matches `GenieDialog_TokenCallback_t`.
-        let callback: GenieDialog_TokenCallback_t = accumulator_token_callback;
-        let status =
+        // SAFETY: `streaming_token_callback` is `unsafe extern "C"`
+        // and we register it on every query, so the most recently
+        // installed `user_data` is always the live
+        // `Box<UnboundedSender<...>>` for the in-flight query. The C
+        // ABI signature matches `GenieDialog_TokenCallback_t`. The
+        // box address is stable across the call because we hold the
+        // raw pointer and don't touch the box until after
+        // `dialog_query` returns.
+        let callback: GenieDialog_TokenCallback_t = streaming_token_callback;
+        let set_status =
             unsafe { (self.lib.dialog_set_token_callback)(self.dialog, callback, user_data) };
-        if status != GENIE_STATUS_SUCCESS {
-            return Err(GenieCallError::NonSuccess {
+        if set_status != GENIE_STATUS_SUCCESS {
+            // No callback ever fires — reclaim the box, send a single
+            // error chunk through the now-reclaimed sender, drop.
+            // SAFETY: `raw_sender_ptr` came from `Box::into_raw` above
+            // and no callback has fired, so nothing else holds the
+            // pointer.
+            let sender = unsafe { reclaim_sender_box(raw_sender_ptr) };
+            let err = GenieCallError::NonSuccess {
                 operation: "GenieDialog_setTokenCallback",
-                status,
-            });
+                status: set_status,
+            };
+            let _ = sender.unbounded_send(Err(genie_to_primer_error(err)));
+            return;
         }
 
+        // Run the (blocking) query. The C-ABI callback fires N times
+        // during this call, each time forwarding a body chunk into
+        // the sender. Genie's documented contract is that callbacks
+        // are dispatched synchronously inside `dialog_query` and not
+        // retained past its return — that's the load-bearing
+        // assumption that lets us reclaim the box below.
+        //
         // SAFETY: `self.dialog` is a non-null pointer produced by a
-        // successful `GenieDialog_create` and not yet freed (Drop
-        // hasn't fired). The prompt pointer is bounded by `c_prompt`.
-        // We pass `null_mut()` for `response_out` because we route
-        // all output through the callback registered above.
-        let status = unsafe {
+        // successful `GenieDialog_create` and not yet freed. The
+        // prompt pointer is bounded by `c_prompt`. We pass
+        // `null_mut()` for `response_out` because all output flows
+        // through the callback.
+        let query_status = unsafe {
             (self.lib.dialog_query)(
                 self.dialog,
                 c_prompt.as_ptr(),
@@ -204,15 +225,51 @@ impl GenieDialog for RealGenieDialog {
                 ptr::null_mut(),
             )
         };
-        if status != GENIE_STATUS_SUCCESS {
-            return Err(GenieCallError::NonSuccess {
-                operation: "GenieDialog_query",
-                status,
-            });
-        }
 
-        Ok(*accumulator)
+        // Reclaim the sender so we can emit the final chunk and close
+        // the channel by dropping the box.
+        // SAFETY: `dialog_query` has returned, so per the contract
+        // above no further callbacks will fire and we are the sole
+        // owner of `raw_sender_ptr`.
+        let sender = unsafe { reclaim_sender_box(raw_sender_ptr) };
+
+        if query_status != GENIE_STATUS_SUCCESS {
+            let err = GenieCallError::NonSuccess {
+                operation: "GenieDialog_query",
+                status: query_status,
+            };
+            let _ = sender.unbounded_send(Err(genie_to_primer_error(err)));
+            // No done chunk after an error — see the trait
+            // documentation for the rationale.
+        } else {
+            let _ = sender.unbounded_send(Ok(TokenChunk {
+                text: String::new(),
+                done: true,
+            }));
+        }
+        // sender drops here, closing the channel.
     }
+}
+
+/// Reclaim ownership of the boxed sender from a raw pointer.
+///
+/// # Safety
+///
+/// `ptr` must have been produced by `Box::into_raw` and not yet
+/// reclaimed. After this call the caller owns the box; the raw pointer
+/// must not be used again.
+unsafe fn reclaim_sender_box(
+    ptr: *mut UnboundedSender<PrimerResult<TokenChunk>>,
+) -> Box<UnboundedSender<PrimerResult<TokenChunk>>> {
+    // SAFETY: caller upholds the invariant documented above.
+    unsafe { Box::from_raw(ptr) }
+}
+
+/// Convert a `GenieCallError` into the `PrimerError::Inference` shape
+/// expected on the streaming channel. Centralised so the dev-facing
+/// string is identical at every error site.
+fn genie_to_primer_error(err: GenieCallError) -> PrimerError {
+    PrimerError::Inference(InferenceError::Other(err.to_string()))
 }
 
 impl Drop for RealGenieDialog {
@@ -285,19 +342,30 @@ impl<'lib> Drop for ConfigHandleGuard<'lib> {
 }
 
 /// C-ABI callback invoked once per token (or token chunk) during a
-/// `GenieDialog_query`. Appends the bytes pointed to by `response_str`
-/// to the `Box<String>` whose address is in `user_data`.
+/// `GenieDialog_query`. Forwards the bytes pointed to by `response_str`
+/// into the boxed [`UnboundedSender`] whose address is in `user_data`.
 ///
 /// # Safety
 ///
 /// - `response_str` must point to a NUL-terminated byte sequence the
 ///   callee reads only between callback entry and return.
-/// - `user_data` must be a non-null pointer to a `Box<String>` that
-///   outlives every callback firing for this query.
+/// - `user_data` must be a non-null pointer to a
+///   `Box<UnboundedSender<PrimerResult<TokenChunk>>>` that outlives
+///   every callback firing for this query (i.e. spans the
+///   `dialog_query` invocation).
 ///
 /// Both invariants are upheld by the call-site in
-/// [`RealGenieDialog::query_blocking`].
-unsafe extern "C" fn accumulator_token_callback(
+/// [`RealGenieDialog::query_streaming`]. The callback only borrows the
+/// sender — the box is not reconstructed here. That keeps the lifetime
+/// bookkeeping linear: exactly one `Box::into_raw` at query start,
+/// exactly one `Box::from_raw` at query end, an unbounded number of
+/// non-consuming borrows in between.
+///
+/// Send-failure on the channel is ignored: per the trait contract,
+/// consumers may drop the receiver mid-stream (cancellation) and
+/// Genie has no in-flight-cancellation API, so we let `dialog_query`
+/// run to completion regardless and discard the unsent tokens.
+unsafe extern "C" fn streaming_token_callback(
     response_str: *const std::ffi::c_char,
     _sentence_code: Genie_Dialog_SentenceCode_t,
     user_data: *mut c_void,
@@ -311,9 +379,14 @@ unsafe extern "C" fn accumulator_token_callback(
     // an `extern "C"` callback, which would unwind across an FFI
     // boundary (UB on most platforms).
     let token = unsafe { std::ffi::CStr::from_ptr(response_str) }.to_string_lossy();
-    // SAFETY: `user_data` was constructed by `Box::as_mut() as *mut
-    // String as *mut c_void` and the `Box<String>` it points to
-    // lives until the end of the query call.
-    let acc = unsafe { &mut *(user_data as *mut String) };
-    acc.push_str(&token);
+    // SAFETY: `user_data` was constructed by `Box::into_raw` on a
+    // `Box<UnboundedSender<PrimerResult<TokenChunk>>>` and the box is
+    // still alive (the call-site reclaims it only after
+    // `dialog_query` returns). Borrowing the sender via `&*` does
+    // not consume the box.
+    let sender = unsafe { &*(user_data as *const UnboundedSender<PrimerResult<TokenChunk>>) };
+    let _ = sender.unbounded_send(Ok(TokenChunk {
+        text: token.into_owned(),
+        done: false,
+    }));
 }
