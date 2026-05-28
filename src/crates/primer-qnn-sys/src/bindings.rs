@@ -104,6 +104,13 @@ pub const GENIE_DIALOG_SENTENCE_COMPLETE: Genie_Dialog_SentenceCode_t = 0;
 ///   design §3 — *"`generate_stream` flow"*).
 ///
 /// The C ABI signature is `void (*)(const char*, int32_t, void*)`.
+///
+/// We treat the callback as non-nullable (bare `unsafe extern "C" fn` rather
+/// than `Option<unsafe extern "C" fn ...>`) because the Primer always
+/// registers a real callback — there is no use case for clearing it. If a
+/// future QAIRT release documents `NULL` as a callback-clear sentinel and
+/// the safe wrapper needs that behaviour, swap this alias for the `Option`
+/// form; nullability is the only ABI-relevant difference.
 pub type GenieDialog_TokenCallback_t = unsafe extern "C" fn(
     response_str: *const c_char,
     sentence_code: Genie_Dialog_SentenceCode_t,

@@ -16,7 +16,3 @@ publish = false
 libloading = "0.8"
 
 thiserror.workspace = true
-
-[dev-dependencies]
-# Tokio test-util/macros for the (currently host-side only) sanity test.
-tokio = { workspace = true, features = ["macros", "rt"] }
