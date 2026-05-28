@@ -28,13 +28,19 @@ pub struct MockGenieLibrary {
 
 struct MockInner {
     events: Mutex<Vec<MockEvent>>,
-    open_result: Mutex<OpenResult>,
+    /// `Some(err)` → the next `open_dialog` returns `Err(err)` and
+    /// resets to `None`; `None` → `open_dialog` returns a fresh
+    /// `MockGenieDialog`. One-shot to keep behaviour predictable —
+    /// `GenieCallError` is not `Clone` (transitively through
+    /// `std::io::Error`) so a persistent error would force a
+    /// `Box::leak`-style workaround for marginal value.
+    open_error: Mutex<Option<GenieCallError>>,
+    /// `Some(err)` → the next `query_blocking` against any dialog
+    /// returned by this library returns `Err(err)` and resets to
+    /// `None`; `None` → returns the canned response. Same one-shot
+    /// rationale as `open_error`.
+    query_error: Mutex<Option<GenieCallError>>,
     canned_response: String,
-}
-
-enum OpenResult {
-    Ok,
-    Err(GenieCallError),
 }
 
 impl MockGenieLibrary {
@@ -44,19 +50,41 @@ impl MockGenieLibrary {
         Self {
             inner: Arc::new(MockInner {
                 events: Mutex::new(Vec::new()),
-                open_result: Mutex::new(OpenResult::Ok),
+                open_error: Mutex::new(None),
+                query_error: Mutex::new(None),
                 canned_response: canned_response.into(),
             }),
         }
     }
 
-    /// Mock that returns the given error from `open_dialog`. Used to
-    /// exercise the construction-error path of the safe wrapper.
+    /// Mock that returns the given error from the next `open_dialog`
+    /// call (one-shot), then returns `Ok` for any subsequent calls.
+    /// Used to exercise the construction-error path of the safe
+    /// wrapper.
     pub fn new_failing_open(err: GenieCallError) -> Self {
         Self {
             inner: Arc::new(MockInner {
                 events: Mutex::new(Vec::new()),
-                open_result: Mutex::new(OpenResult::Err(err)),
+                open_error: Mutex::new(Some(err)),
+                query_error: Mutex::new(None),
+                canned_response: String::new(),
+            }),
+        }
+    }
+
+    /// Mock whose first `query_blocking` returns the given error and
+    /// subsequent queries return the empty canned response. Used to
+    /// exercise the smoke-check failure path in
+    /// [`super::super::backend::QnnBackend::new_with_library`]: the
+    /// smoke check is the first query against a freshly-opened
+    /// dialog, so a one-shot failing query is exactly the right
+    /// shape.
+    pub fn new_failing_query(err: GenieCallError) -> Self {
+        Self {
+            inner: Arc::new(MockInner {
+                events: Mutex::new(Vec::new()),
+                open_error: Mutex::new(None),
+                query_error: Mutex::new(Some(err)),
                 canned_response: String::new(),
             }),
         }
@@ -82,17 +110,18 @@ impl GenieLibrary for MockGenieLibrary {
             .push(MockEvent::OpenDialog {
                 config_path: config_path.to_path_buf(),
             });
-        let mut slot = self
+        if let Some(err) = self
             .inner
-            .open_result
+            .open_error
             .lock()
-            .expect("mock open_result mutex poisoned");
-        match std::mem::replace(&mut *slot, OpenResult::Ok) {
-            OpenResult::Ok => Ok(Box::new(MockGenieDialog {
-                inner: Arc::clone(&self.inner),
-            })),
-            OpenResult::Err(e) => Err(e),
+            .expect("mock open_error mutex poisoned")
+            .take()
+        {
+            return Err(err);
         }
+        Ok(Box::new(MockGenieDialog {
+            inner: Arc::clone(&self.inner),
+        }))
     }
 }
 
@@ -109,6 +138,15 @@ impl GenieDialog for MockGenieDialog {
             .push(MockEvent::Query {
                 prompt: prompt.to_string(),
             });
+        if let Some(err) = self
+            .inner
+            .query_error
+            .lock()
+            .expect("mock query_error mutex poisoned")
+            .take()
+        {
+            return Err(err);
+        }
         Ok(self.inner.canned_response.clone())
     }
 }

@@ -165,6 +165,56 @@ async fn construct_propagates_open_dialog_error() {
 }
 
 #[tokio::test]
+async fn construct_propagates_smoke_check_error() {
+    // The smoke check (`run_smoke_check = true`) is THE differentiator
+    // vs. "construction silently succeeds even when the FFI ABI is
+    // broken". If the very first query against a freshly-opened
+    // dialog fails, `QnnBackend::new_with_library` must surface that
+    // error rather than handing back a half-broken backend the
+    // dialogue manager will only hit mid-conversation.
+    let dir = tempdir().unwrap();
+    write_genie_config(dir.path());
+    write_primer_meta(dir.path());
+    let lib: Arc<dyn GenieLibrary> = Arc::new(MockGenieLibrary::new_failing_query(
+        GenieCallError::NonSuccess {
+            operation: "GenieDialog_query",
+            status: -7,
+        },
+    ));
+    let result = QnnBackend::new_with_library(dir.path().to_path_buf(), lib, true).await;
+    match result {
+        Err(PrimerError::Inference(inner)) => {
+            let msg = inner.to_string();
+            assert!(msg.contains("GenieDialog_query"), "{msg}");
+            assert!(msg.contains("-7"), "{msg}");
+        }
+        other => panic!("expected Inference error from smoke check, got {other:?}"),
+    }
+}
+
+#[tokio::test]
+async fn smoke_check_disabled_does_not_propagate_query_error() {
+    // Twin of the above: with `run_smoke_check = false`, the failing
+    // query is never issued at construction time, so construction
+    // succeeds. Pins that the smoke-check fail-fast behaviour is
+    // gated by the flag rather than by some other code path
+    // accidentally querying during `new_with_library`.
+    let dir = tempdir().unwrap();
+    write_genie_config(dir.path());
+    write_primer_meta(dir.path());
+    let lib: Arc<dyn GenieLibrary> = Arc::new(MockGenieLibrary::new_failing_query(
+        GenieCallError::NonSuccess {
+            operation: "GenieDialog_query",
+            status: -7,
+        },
+    ));
+    let backend = QnnBackend::new_with_library(dir.path().to_path_buf(), lib, false)
+        .await
+        .expect("construction with smoke check disabled should succeed");
+    assert_eq!(backend.name(), "qnn:qwen3-4b");
+}
+
+#[tokio::test]
 async fn dialog_is_dropped_when_backend_drops() {
     let dir = tempdir().unwrap();
     write_genie_config(dir.path());

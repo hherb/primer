@@ -140,8 +140,14 @@ struct RealGenieDialog {
 // `Arc<RawGenieLibrary>` is `Send + Sync` (the underlying
 // `libloading::Library` is `Send + Sync` and the resolved function
 // pointers are `Copy`).
+//
+// `Sync` is deliberately NOT impl'd: Genie forbids concurrent queries
+// against the same dialog handle, and the safe wrapper relies on
+// `tokio::sync::Mutex` to serialise access. `tokio::sync::Mutex<T>` is
+// already `Send + Sync` when `T: Send` — so the backend struct stays
+// `Send + Sync` without us claiming a `Sync` here we can't actually
+// honour.
 unsafe impl Send for RealGenieDialog {}
-unsafe impl Sync for RealGenieDialog {}
 
 impl GenieDialog for RealGenieDialog {
     fn query_blocking(&self, prompt: &str) -> Result<String, GenieCallError> {
@@ -163,11 +169,18 @@ impl GenieDialog for RealGenieDialog {
         let user_data = accumulator.as_mut() as *mut String as *mut c_void;
 
         // SAFETY: `accumulator_token_callback` is `unsafe extern "C"`
-        // and we register it for the duration of one synchronous
-        // query call. The `user_data` pointer is the address of our
-        // own `Box<String>`, which lives until the end of this
-        // function (so it outlives the callback firings). The C ABI
-        // matches `GenieDialog_TokenCallback_t`.
+        // and we re-register it on every query so the most recently
+        // installed `user_data` is always the live `Box<String>` for
+        // the in-flight `dialog_query`. The Genie C API may retain
+        // the callback + user_data pointer across queries (the public
+        // header gives no lifetime guarantee that they are forgotten
+        // after a query returns); we rely on Genie NOT firing the
+        // callback outside a `dialog_query` invocation. If a future
+        // QAIRT release breaks that assumption, the previous query's
+        // `user_data` pointer becomes dangling between calls and the
+        // safe wrapper has to be reworked to keep the accumulator
+        // alive across queries (e.g. owned by `RealGenieDialog`). The
+        // C ABI signature matches `GenieDialog_TokenCallback_t`.
         let callback: GenieDialog_TokenCallback_t = accumulator_token_callback;
         let status =
             unsafe { (self.lib.dialog_set_token_callback)(self.dialog, callback, user_data) };

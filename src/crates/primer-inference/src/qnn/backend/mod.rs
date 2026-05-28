@@ -62,10 +62,12 @@ pub struct QnnBackend {
     /// Cached `"qnn:{model_id}"` so [`InferenceBackend::name`] can return
     /// a `&str` without allocating on the hot path.
     name: String,
-    /// Parsed `primer-meta.json` — exposed for future tunables
-    /// (context_length, stop_sequences). Held by value because the meta
-    /// is small (<1 KB) and shared ownership adds nothing.
-    #[allow(dead_code)]
+    /// Parsed `primer-meta.json` — `model_id` and `context_length` are
+    /// already read by [`Self::fmt`]; `vocab_size` and `stop_sequences`
+    /// will be wired into the per-backend context-budget logic in step
+    /// 1.2.5 and the streaming generation halt path in step 1.2.3
+    /// respectively. Held by value because the meta is small (<1 KB)
+    /// and shared ownership adds nothing.
     meta: PrimerMeta,
     /// Compiled chat template. Cloned per call (cheap, inner `Arc`).
     template: ChatTemplate,

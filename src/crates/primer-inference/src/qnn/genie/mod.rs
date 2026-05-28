@@ -47,7 +47,14 @@ pub trait GenieLibrary: Send + Sync {
 /// concurrent queries against the same dialog are undefined behaviour.
 /// [`super::backend::QnnBackend`] wraps this in a `tokio::sync::Mutex` to
 /// serialise callers.
-pub trait GenieDialog: Send + Sync {
+///
+/// The trait bound is `Send` only (deliberately not `Sync`): exclusive
+/// access is mediated by the `tokio::sync::Mutex` in the backend, and
+/// `tokio::sync::Mutex<T>: Send + Sync` already holds when `T: Send`.
+/// Requiring `Sync` would be tighter than the Genie C contract actually
+/// supports (it forbids concurrent queries) and would falsely advertise
+/// a property the impl can't legally provide.
+pub trait GenieDialog: Send {
     /// Single-shot blocking query.
     ///
     /// Sends `prompt` to the dialog and collects the full response into a

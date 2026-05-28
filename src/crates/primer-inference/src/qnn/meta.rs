@@ -192,14 +192,18 @@ pub enum MetaError {
 
 /// Derive a model id from the final path component of a directory.
 ///
-/// Pure helper — exposed so tests can pin its behaviour without staging a
-/// real directory. Returns `"unknown"` when the path has no final
-/// component (e.g. `.` or `/`).
+/// Pure helper — exposed so tests can pin its behaviour without staging
+/// a real directory. Returns `"unknown"` when the path has no final
+/// component (`/`) or the final component is one of the relative-path
+/// sentinels (`.`, `..`) — those would otherwise leak into
+/// `InferenceBackend::name()` as e.g. `"qnn:."`, which is technically
+/// valid but obviously a user staging mistake we'd rather flag with
+/// the same fallback string the missing-name path already uses.
 pub fn derive_model_id_from_dir(bundle_dir: &Path) -> String {
     bundle_dir
         .file_name()
         .map(|s| s.to_string_lossy().into_owned())
-        .filter(|s| !s.is_empty())
+        .filter(|s| !s.is_empty() && s != "." && s != "..")
         .unwrap_or_else(|| "unknown".to_string())
 }
 
@@ -361,14 +365,16 @@ mod tests {
     #[test]
     fn derive_id_returns_unknown_for_root_and_relative_dot() {
         assert_eq!(derive_model_id_from_dir(Path::new("/")), "unknown");
-        // Plain `.` returns "." per `file_name`, which is acceptable —
-        // a user pointing at `.` is staging a config mistake the safe
-        // wrapper will surface separately when reading `genie_config.json`.
-        // What matters here is that the function never panics on edge paths.
-        let dot = derive_model_id_from_dir(Path::new("."));
-        // Don't assert on `dot`'s exact value (platforms differ on what
-        // `Path::new(".").file_name()` returns) — just that it's a
-        // non-empty string.
-        assert!(!dot.is_empty());
+        // `.` and `..` would otherwise leak into the backend name as
+        // `"qnn:."` / `"qnn:.."`; the filter in `derive_model_id_from_dir`
+        // routes them to the same fallback as the empty path. Note:
+        // `Path::new(".").file_name()` returns `None` on most platforms
+        // (the root path has no basename to extract), so this exercises
+        // the early-`None` branch too; the explicit string check
+        // protects against any platform where `file_name()` does return
+        // `Some(".")`.
+        assert_eq!(derive_model_id_from_dir(Path::new(".")), "unknown");
+        assert_eq!(derive_model_id_from_dir(Path::new("..")), "unknown");
+        assert_eq!(derive_model_id_from_dir(Path::new("./.")), "unknown");
     }
 }
