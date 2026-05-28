@@ -62,18 +62,39 @@ mod stream_cache {
 
         /// Take the cached value if present. Returns `None` on a
         /// poisoned mutex too — the caller's cold-start path is the
-        /// same recovery, so we don't propagate the poison.
+        /// same recovery, so we don't propagate the poison. A poisoned
+        /// mutex permanently disables reuse on this instance, so we log
+        /// it once-per-call to make the (otherwise invisible) loss of
+        /// the perf optimisation debuggable.
         pub(super) fn take(&self) -> Option<T> {
-            self.slot.lock().ok().and_then(|mut g| g.take())
+            match self.slot.lock() {
+                Ok(mut g) => g.take(),
+                Err(_) => {
+                    tracing::warn!(
+                        target: "primer::speech::whisper",
+                        "WhisperStream cache mutex poisoned on take(); falling back to cold-start"
+                    );
+                    None
+                }
+            }
         }
 
-        /// Put a value back into the cache. Silently drops the value
-        /// when the mutex is poisoned — symmetric with [`Self::take`]:
-        /// the next caller will simply construct a fresh value, which
-        /// is functionally identical to a cache miss.
+        /// Put a value back into the cache. Drops the value (without
+        /// caching) when the mutex is poisoned — symmetric with
+        /// [`Self::take`]: the next caller will simply construct a
+        /// fresh value, which is functionally identical to a cache
+        /// miss. Logs the (otherwise silent) drop so the perf
+        /// regression is debuggable.
         pub(super) fn put(&self, value: T) {
-            if let Ok(mut g) = self.slot.lock() {
-                *g = Some(value);
+            match self.slot.lock() {
+                Ok(mut g) => *g = Some(value),
+                Err(_) => {
+                    tracing::warn!(
+                        target: "primer::speech::whisper",
+                        "WhisperStream cache mutex poisoned on put(); dropping value"
+                    );
+                    drop(value);
+                }
             }
         }
     }
@@ -220,14 +241,23 @@ impl StreamingSpeechToText for WhisperStt {
 
 struct WhisperSession {
     /// `Option` only so `finalize` and `Drop` can `take()` ownership of
-    /// the stream out of the session and return it to the parent cache.
-    /// Outside those two exit paths the slot is always `Some`.
+    /// the stream out of the session. `finalize` returns the stream to
+    /// the parent cache on success and discards it on flush error;
+    /// `Drop` discards (the only-reached-on-unhappy-path policy). The
+    /// slot is invariantly `Some` between `open_session` and the first
+    /// of those two exits — the `debug_assert!` guards in
+    /// [`WhisperSession::push_audio`] and [`WhisperSession::finalize`]
+    /// pin this invariant in debug builds.
     stream: Option<WhisperStream>,
     cache: Arc<StreamCache<WhisperStream>>,
 }
 
 impl TranscriptionSession for WhisperSession {
     fn push_audio(&mut self, samples: &[f32]) -> Result<Vec<TranscriptSegment>> {
+        debug_assert!(
+            self.stream.is_some(),
+            "WhisperSession::push_audio must only be called while the session owns the stream"
+        );
         let stream = self
             .stream
             .as_mut()
@@ -243,32 +273,60 @@ impl TranscriptionSession for WhisperSession {
     }
 
     fn finalize(mut self: Box<Self>) -> Result<Vec<TranscriptSegment>> {
+        debug_assert!(
+            self.stream.is_some(),
+            "WhisperSession::finalize must only be called while the session owns the stream"
+        );
         let mut stream = self
             .stream
             .take()
             .expect("WhisperSession::finalize after stream was returned to cache");
-        let flush_result = stream.flush();
-        // Return the stream to the cache regardless of `flush` outcome:
-        // the next `open_session` calls `reset()` which clears any
-        // partial state. Holding the stream back on a flush error would
-        // force every subsequent utterance to pay the ≈500 ms cold-start
-        // cost for the rest of the process lifetime.
-        self.cache.put(stream);
-        let segments =
-            flush_result.map_err(|e| PrimerError::Speech(format!("whisper flush: {e}")))?;
-        Ok(segments.into_iter().map(to_transcript_segment).collect())
+        match stream.flush() {
+            Ok(segments) => {
+                // Happy path: stream is in a known-clean post-flush state.
+                // Return it to the cache so the next `open_session` reuses
+                // the ≈500 ms-to-allocate KV cache + GPU compute buffers.
+                self.cache.put(stream);
+                Ok(segments.into_iter().map(to_transcript_segment).collect())
+            }
+            Err(e) => {
+                // Error path: deliberately drop the stream rather than
+                // re-cache it. `reset()` only clears input-side buffers
+                // (audio_buf, pcmf32_old, prompt_tokens, n_iter,
+                // total_samples_processed); it does not touch the
+                // underlying WhisperState, so a flush-failed stream may
+                // leave decoder/KV state we cannot characterise. Paying
+                // one cold-start tax to recover is preferable to silently
+                // biasing the next utterance with stale state.
+                tracing::warn!(
+                    target: "primer::speech::whisper",
+                    error = %e,
+                    "WhisperStream flush failed; discarding stream from cache"
+                );
+                drop(stream);
+                Err(PrimerError::Speech(format!("whisper flush: {e}")))
+            }
+        }
     }
 }
 
 impl Drop for WhisperSession {
-    /// Return the stream to the cache if `finalize` was never called
-    /// (early-return on a `push_audio` error, panic in the caller, …).
-    /// `WhisperStream::reset` in the next `open_session` normalises any
-    /// partial `audio_buf` / `prompt_tokens` state, so the dropped
-    /// stream is safe to reuse.
+    /// `finalize` is the only happy-path exit; it `take()`s the stream
+    /// before this `Drop` runs. If `Drop` still sees the stream, the
+    /// session went through an *unhappy* path (push_audio error,
+    /// panic in the caller, early return without finalize, …) and the
+    /// stream's internal state is unknown. Deliberately discard it
+    /// rather than re-cache: one cold-start tax on the next session is
+    /// safer than silently reusing a partially-processed stream whose
+    /// WhisperState `reset()` cannot fully normalise. Logs the
+    /// (otherwise silent) discard so the perf regression is debuggable.
     fn drop(&mut self) {
         if let Some(stream) = self.stream.take() {
-            self.cache.put(stream);
+            tracing::warn!(
+                target: "primer::speech::whisper",
+                "WhisperSession dropped without finalize(); discarding stream from cache"
+            );
+            drop(stream);
         }
     }
 }
@@ -346,12 +404,13 @@ mod stream_cache_tests {
         assert!(cache.take().is_none());
     }
 
-    /// `put` overwrites whatever was there. This is the Drop-after-
-    /// finalize safety case: if `WhisperSession::finalize` already put
-    /// the stream back and the `Drop` impl also calls `put`, the
-    /// later (None) doesn't matter because finalize takes the stream
-    /// out of the session first — but we still want the invariant
-    /// "last put wins" to hold in case finalize ordering ever changes.
+    /// `put` overwrites whatever was there. Pins the "last put wins"
+    /// invariant for the rare-but-possible case where two
+    /// `open_session` calls race: both `take()` (one gets the cached
+    /// stream, the other constructs fresh), both finalize, both
+    /// `put()`. The second `put` replaces the first; the displaced
+    /// stream is dropped. Safe: both streams were independently in
+    /// known-clean post-flush states when they were put back.
     #[test]
     fn put_replaces_existing_value() {
         let cache: StreamCache<i32> = StreamCache::new();
