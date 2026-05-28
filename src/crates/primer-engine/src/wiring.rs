@@ -5,6 +5,7 @@
 //! lives here so `primer-cli` and `primer-gui` produce identical
 //! wiring from identical inputs.
 
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use primer_classifier::{
@@ -38,6 +39,42 @@ pub struct BackendParams {
     pub extractor_model: Option<String>,
     pub comprehension_backend: Option<String>,
     pub comprehension_model: Option<String>,
+    /// QNN bundle directory (Phase 1.2 step 1.2.4). Contains
+    /// `genie_config.json`, `primer-meta.json`, and the per-shard
+    /// context binaries. Consumed by the `"qnn"` arm of
+    /// [`build_backend`]; ignored by every other arm. Always present
+    /// in the struct (not `#[cfg(feature = "qnn")]`-gated) so the
+    /// struct shape stays identical across feature combinations —
+    /// the qnn arm itself is the only feature-gated piece.
+    pub qnn_bundle_dir: Option<PathBuf>,
+    /// QNN QAIRT library directory (containing `libGenie.so` +
+    /// dependencies). Consumed by the `"qnn"` arm only. Callers can
+    /// resolve a sensible default with [`default_qairt_lib_dir`] from
+    /// a known bundle dir; the CLI surfaces this as the optional
+    /// `--qnn-qairt-lib-dir` flag with the same default applied when
+    /// unset.
+    pub qnn_qairt_lib_dir: Option<PathBuf>,
+}
+
+/// Conventional default location of the QAIRT runtime libraries
+/// relative to a QNN bundle directory.
+///
+/// Pure helper — no filesystem access, no library load. Returns the
+/// path `<bundle>/../qairt/lib/aarch64-android/` exactly as the QAIRT
+/// SDK layout documents under "AI Hub apps" assets. Callers may pass
+/// this directly to [`build_backend`] via
+/// [`BackendParams::qnn_qairt_lib_dir`] when the user did not provide
+/// an explicit override.
+pub fn default_qairt_lib_dir(bundle_dir: &Path) -> PathBuf {
+    bundle_dir
+        .parent()
+        .map(|parent| parent.join("qairt/lib/aarch64-android"))
+        // Bundle paths are always absolute in practice (CLI clamps
+        // to `PathBuf`), but tolerate the missing-parent case by
+        // returning a same-directory-relative fallback rather than
+        // panicking — the downstream `RealGenieLibrary::open` will
+        // produce a clear `LibraryLoad` error.
+        .unwrap_or_else(|| PathBuf::from("qairt/lib/aarch64-android"))
 }
 
 /// Construct an `InferenceBackend` of the named type with the given model.
@@ -74,10 +111,55 @@ pub async fn build_backend(
                 params.openai_compat_api_key.clone(),
             ),
         )),
+        "qnn" => build_qnn_backend(params).await,
         other => Err(PrimerError::Inference(
             format!("unknown backend: {other}").into(),
         )),
     }
+}
+
+/// Construct the QNN backend from [`BackendParams`].
+///
+/// Behind the `qnn` cargo feature this validates the required
+/// `qnn_bundle_dir`, falls back to [`default_qairt_lib_dir`] when
+/// `qnn_qairt_lib_dir` is unset, and delegates to
+/// [`primer_inference::QnnBackend::new`] — which itself returns
+/// `InferenceError::Other("...PlatformUnsupported...")` on non-Android
+/// hosts, so the dispatch arm fires cleanly even when running on a
+/// developer laptop.
+///
+/// Without the feature, returns a clear "rebuild with `--features qnn`"
+/// error so the CLI's "unknown backend"-style hint stays one diagnostic
+/// per audience: build-time vs. runtime.
+///
+/// Kept as a free function (not inlined into the match arm) so the
+/// cfg-gating is one shape, not two; the no-feature branch becomes a
+/// dead-simple one-liner and the qnn-feature branch carries all the
+/// validation logic.
+#[cfg(feature = "qnn")]
+async fn build_qnn_backend(params: &BackendParams) -> Result<Arc<dyn InferenceBackend>> {
+    let bundle_dir = params.qnn_bundle_dir.as_ref().ok_or_else(|| {
+        PrimerError::Inference(
+            "--qnn-bundle-dir is required for --backend qnn \
+             (or set PRIMER_QNN_BUNDLE_DIR)"
+                .into(),
+        )
+    })?;
+    let qairt_lib_dir = params
+        .qnn_qairt_lib_dir
+        .clone()
+        .unwrap_or_else(|| default_qairt_lib_dir(bundle_dir));
+    let backend = primer_inference::QnnBackend::new(bundle_dir.clone(), qairt_lib_dir).await?;
+    Ok(Arc::new(backend))
+}
+
+#[cfg(not(feature = "qnn"))]
+async fn build_qnn_backend(_params: &BackendParams) -> Result<Arc<dyn InferenceBackend>> {
+    Err(PrimerError::Inference(
+        "qnn backend requires the `qnn` cargo feature. \
+         Build with `cargo build --features primer-cli/qnn` (Android target only)."
+            .into(),
+    ))
 }
 
 /// Construct the engagement classifier according to the dispatch matrix:
@@ -435,6 +517,8 @@ mod classifier_construction_tests {
             extractor_model: None,
             comprehension_backend: None,
             comprehension_model: None,
+            qnn_bundle_dir: None,
+            qnn_qairt_lib_dir: None,
         }
     }
 
@@ -586,6 +670,8 @@ mod extractor_construction_tests {
             extractor_model: extractor_model.map(String::from),
             comprehension_backend: None,
             comprehension_model: None,
+            qnn_bundle_dir: None,
+            qnn_qairt_lib_dir: None,
         }
     }
 
@@ -693,6 +779,8 @@ mod comprehension_construction_tests {
             extractor_model: None,
             comprehension_backend: comprehension_backend.map(String::from),
             comprehension_model: comprehension_model.map(String::from),
+            qnn_bundle_dir: None,
+            qnn_qairt_lib_dir: None,
         }
     }
 
@@ -767,5 +855,153 @@ mod comprehension_construction_tests {
         .await
         .unwrap();
         assert_eq!(c.identifier(), "llm:ollama:haiku");
+    }
+}
+
+#[cfg(test)]
+mod qnn_dispatch_tests {
+    //! Pin the `--backend qnn` dispatch path of [`build_backend`].
+    //!
+    //! The QNN backend's *positive* construction path is unit-tested
+    //! at the [`primer_inference::qnn`] module (via the mock
+    //! `GenieLibrary` trait split). Here we only need to pin
+    //! [`build_backend`]'s dispatch:
+    //!
+    //! - With the feature compiled in, missing `qnn_bundle_dir` is a
+    //!   clear error from `build_backend` itself (before any FFI).
+    //! - With the feature compiled in and `qnn_bundle_dir` set,
+    //!   dispatch reaches `QnnBackend::new`, which on every non-Android
+    //!   host returns the typed `PlatformUnsupported` error — proving
+    //!   that the qnn arm fired (any other arm would have produced
+    //!   either Ok or a different error message).
+    //! - With the feature *not* compiled in, the user gets a
+    //!   "rebuild with --features qnn" hint, NOT the generic
+    //!   "unknown backend" message — that distinction is the
+    //!   load-bearing UX win of the per-feature dispatch.
+    use super::*;
+
+    /// Build a `BackendParams` skeleton for the qnn dispatch tests.
+    fn params() -> BackendParams {
+        BackendParams {
+            api_key: None,
+            ollama_url: "http://localhost:11434".into(),
+            openai_compat_url: "http://localhost:8000".into(),
+            openai_compat_api_key: None,
+            classifier_backend: None,
+            classifier_model: None,
+            extractor_backend: None,
+            extractor_model: None,
+            comprehension_backend: None,
+            comprehension_model: None,
+            qnn_bundle_dir: None,
+            qnn_qairt_lib_dir: None,
+        }
+    }
+
+    #[test]
+    fn default_qairt_lib_dir_lives_one_dir_up_alongside_qairt_lib() {
+        // The conventional QAIRT layout from AI Hub apps puts the
+        // bundle dir alongside `qairt/` at the same parent level:
+        //   ~/primer-bundles/qwen3-4b/{genie_config.json, ...}
+        //   ~/primer-bundles/qairt/lib/aarch64-android/libGenie.so
+        let bundle = PathBuf::from("/home/user/primer-bundles/qwen3-4b");
+        let lib = default_qairt_lib_dir(&bundle);
+        assert_eq!(
+            lib,
+            PathBuf::from("/home/user/primer-bundles/qairt/lib/aarch64-android")
+        );
+    }
+
+    #[test]
+    fn default_qairt_lib_dir_tolerates_root_bundle_path() {
+        // A bundle at the filesystem root (no parent) is unusual but
+        // should not panic. We fall back to a same-directory relative
+        // path — downstream `RealGenieLibrary::open` will report a
+        // useful `LibraryLoad` error rather than us deciding here.
+        let bundle = PathBuf::from("/");
+        let lib = default_qairt_lib_dir(&bundle);
+        // On `/`, `.parent()` is `None`, so we fall back to the bare
+        // relative path. Exact form is documented in the helper.
+        assert_eq!(lib, PathBuf::from("qairt/lib/aarch64-android"));
+    }
+
+    /// Without the `qnn` feature, the dispatch arm hands back a build
+    /// hint, NOT the generic "unknown backend: qnn" string. The
+    /// distinction matters because users who haven't compiled in qnn
+    /// need a different action than users who typo'd the backend name.
+    #[cfg(not(feature = "qnn"))]
+    #[tokio::test]
+    async fn qnn_without_feature_returns_build_hint() {
+        let p = params();
+        let result = build_backend("qnn", "qnn-placeholder".into(), &p).await;
+        let err = match result {
+            Ok(_) => panic!("expected qnn-without-feature to error, got Ok"),
+            Err(e) => e,
+        };
+        let msg = format!("{err}");
+        assert!(
+            msg.contains("qnn") && msg.contains("feature"),
+            "expected build hint mentioning qnn + feature; got: {msg}"
+        );
+        // And NOT the generic unknown-backend phrasing:
+        assert!(
+            !msg.contains("unknown backend"),
+            "qnn-without-feature should be distinct from unknown-backend; got: {msg}"
+        );
+    }
+
+    /// With the `qnn` feature compiled in but no `qnn_bundle_dir`
+    /// set in params, the dispatch arm reports the missing required
+    /// input BEFORE any FFI is attempted — exactly the "fast clap-style
+    /// rejection" UX the plan calls for.
+    #[cfg(feature = "qnn")]
+    #[tokio::test]
+    async fn qnn_with_feature_missing_bundle_dir_errors_pre_ffi() {
+        let p = params();
+        let result = build_backend("qnn", "qnn-placeholder".into(), &p).await;
+        let err = match result {
+            Ok(_) => panic!("expected qnn-with-no-bundle to error, got Ok"),
+            Err(e) => e,
+        };
+        let msg = format!("{err}");
+        assert!(
+            msg.contains("qnn-bundle-dir") || msg.contains("bundle"),
+            "expected missing-bundle-dir hint; got: {msg}"
+        );
+    }
+
+    /// With the `qnn` feature compiled in and a `qnn_bundle_dir`
+    /// set, dispatch reaches `QnnBackend::new`. On every host the
+    /// repo's CI runs on (Linux + macOS), this surfaces the typed
+    /// `PlatformUnsupported` error from `primer-qnn-sys`. That proves
+    /// the qnn arm fired — neither the "unknown backend" arm nor the
+    /// "missing bundle dir" guard could have produced this string.
+    #[cfg(all(feature = "qnn", not(target_os = "android")))]
+    #[tokio::test]
+    async fn qnn_with_feature_and_bundle_dir_dispatches_to_real_lib_on_host() {
+        // Build params with a fake (nonexistent) bundle dir — the
+        // dispatch arm hands these straight to `QnnBackend::new`, which
+        // tries to dlopen `libGenie.so` from the qairt lib dir FIRST.
+        // On a non-Android host, that returns `PlatformUnsupported`
+        // before the bundle's existence is checked.
+        let p = BackendParams {
+            qnn_bundle_dir: Some(PathBuf::from("/nonexistent/bundle")),
+            ..params()
+        };
+        let result = build_backend("qnn", "qnn-placeholder".into(), &p).await;
+        let err = match result {
+            Ok(_) => panic!("expected PlatformUnsupported on non-Android host, got Ok"),
+            Err(e) => e,
+        };
+        let msg = format!("{err}");
+        // The dev-facing error string from
+        // `GenieCallError::PlatformUnsupported` carries the platform
+        // name. On macOS this is `"macos"`, on Linux it's `"linux"`.
+        assert!(
+            msg.to_lowercase().contains("android")
+                || msg.to_lowercase().contains("platform")
+                || msg.to_lowercase().contains("only supported"),
+            "expected PlatformUnsupported-flavoured error; got: {msg}"
+        );
     }
 }

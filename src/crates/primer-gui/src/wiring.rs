@@ -139,6 +139,15 @@ async fn build_with_strategy(
         extractor_model: config.extractor.model.clone(),
         comprehension_backend: subsystem_kind(&config.comprehension),
         comprehension_model: config.comprehension.model.clone(),
+        // QNN backend (Phase 1.2 step 1.2.4): the GUI does not yet
+        // expose a "QNN bundle" picker, so these stay `None` here.
+        // Selecting `--backend qnn` from the GUI without surfacing
+        // the bundle path will deliberately error via
+        // `build_qnn_backend`'s "qnn-bundle-dir required" message —
+        // exactly the structural cue that the GUI settings page needs
+        // a follow-up step to land. Tracked in the same Phase 1.2 work.
+        qnn_bundle_dir: None,
+        qnn_qairt_lib_dir: None,
     };
 
     // ─── Main backend (locale-independent) ───────────────────────────

@@ -22,4 +22,5 @@ pub use paths::{
 pub use wiring::{
     BackendParams, build_backend, build_classifier, build_comprehension, build_extractor,
     build_fastembed_embedder, build_ollama_embedder, build_openai_compat_embedder,
+    default_qairt_lib_dir,
 };

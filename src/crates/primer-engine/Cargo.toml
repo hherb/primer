@@ -33,3 +33,11 @@ ollama-embedding = ["primer-embedding/ollama"]
 
 # OpenAI-compatible embedder (oMLX, LM Studio, vLLM, Together, etc.).
 openai-compat-embedding = ["primer-embedding/openai-compat"]
+
+# Qualcomm NPU inference backend (Phase 1.2). Adds the `qnn` arm to
+# `build_backend` and pulls in `primer-inference/qnn` so the safe
+# `QnnBackend` wrapper is in the dep graph. Disabled by default; the
+# wiring still compiles on non-Android hosts because
+# `QnnBackend::new` returns a typed `PlatformUnsupported` error from
+# `primer-qnn-sys` rather than failing to link.
+qnn = ["primer-inference/qnn"]
