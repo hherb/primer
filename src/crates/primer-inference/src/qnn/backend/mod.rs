@@ -11,12 +11,13 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use async_trait::async_trait;
-use futures::stream;
+use futures::StreamExt;
+use futures::channel::mpsc;
 use primer_core::error::{PrimerError, Result};
 use primer_core::inference::{GenerationParams, InferenceBackend, Prompt, TokenChunk, TokenStream};
 use tokio::sync::Mutex;
 
-use super::genie::{GenieCallError, GenieDialog, GenieLibrary, RealGenieLibrary};
+use super::genie::{GenieDialog, GenieLibrary, RealGenieLibrary};
 use super::meta::PrimerMeta;
 use super::template::{ChatTemplate, TemplateError};
 
@@ -128,7 +129,7 @@ impl QnnBackend {
             .map_err(|e| PrimerError::Inference(e.into_inference_error()))?;
 
         if run_smoke_check {
-            smoke_check(&*dialog).map_err(|e| PrimerError::Inference(e.into_inference_error()))?;
+            smoke_check(&*dialog).await?;
         }
 
         let name = format!("{QNN_NAME_PREFIX}{}", meta.model_id);
@@ -174,13 +175,27 @@ pub fn validate_bundle_dir(
     Ok(())
 }
 
-/// Run the ABI smoke check: issue one tiny throwaway query and confirm
-/// it returns `Ok`. Discards the response.
+/// Run the ABI smoke check: drive one tiny throwaway streaming query
+/// and confirm it produces no `Err` chunks before the channel closes.
 ///
-/// Pure-ish (no I/O beyond the Genie call); kept free-standing so tests
-/// don't have to construct a full backend to pin the contract.
-fn smoke_check(dialog: &dyn GenieDialog) -> std::result::Result<(), GenieCallError> {
-    let _ = dialog.query_blocking(SMOKE_CHECK_PROMPT)?;
+/// Step 1.2.3: the smoke check now goes through the same streaming
+/// path as production turns, so a successful smoke check exercises
+/// exactly the FFI sequence
+/// (`dialog_set_token_callback` → `dialog_query` → callback fires →
+/// final done chunk) the real conversation will hit. Any error chunk
+/// the dialog emits is surfaced as the construction failure.
+///
+/// Kept free-standing so tests don't have to construct a full backend
+/// to pin the contract.
+async fn smoke_check(dialog: &dyn GenieDialog) -> Result<()> {
+    let (tx, mut rx) = mpsc::unbounded::<Result<TokenChunk>>();
+    dialog.query_streaming(SMOKE_CHECK_PROMPT, tx);
+    // `query_streaming` consumed the sender; the channel closes when
+    // it returns. Drain and surface any error chunk; ignore Ok body /
+    // done chunks (we deliberately discard the throwaway response).
+    while let Some(chunk_result) = rx.next().await {
+        chunk_result?;
+    }
     Ok(())
 }
 
@@ -207,32 +222,32 @@ impl InferenceBackend for QnnBackend {
             PrimerError::Inference(format!("chat template render failed: {e}").into())
         })?;
 
-        // Single-shot for step 1.2.2. The streaming-callback bridge from
-        // step 1.2.3 will replace this body without changing the trait
-        // surface or the consumer side.
+        // Phase 1.2.3 streaming bridge:
+        //
+        // 1. Build an mpsc channel for the token receiver path.
+        // 2. Clone the dialog `Arc<Mutex>` into a tokio blocking task.
+        // 3. The blocking task acquires the mutex (Genie does not
+        //    support concurrent queries on the same dialog handle;
+        //    this serialises concurrent `generate_stream` callers), then
+        //    drives `query_streaming` which forwards each Genie callback
+        //    fire into the sender. When `query_streaming` returns, the
+        //    sender is dropped and the receiver sees end-of-stream.
+        // 4. Return immediately with the receiver wrapped as a
+        //    `TokenStream`; the consumer drives it without blocking the
+        //    runtime even when the underlying Genie call takes seconds.
+        let (tx, rx) = mpsc::unbounded::<Result<TokenChunk>>();
         let dialog = Arc::clone(&self.dialog);
-        let response = {
-            let guard = dialog.lock().await;
-            // The mock impl is fast (~µs); the real impl can block for
-            // seconds. `spawn_blocking` keeps the tokio runtime healthy
-            // when the real Genie call lands.
-            let dialog_inner = &*guard;
-            // `dialog_inner: &Box<dyn GenieDialog>` is not `Send`-bound by
-            // its trait, but the trait does require `Send + Sync` so
-            // calling through it from a single async task is safe. We
-            // intentionally do NOT cross the await boundary holding the
-            // dialog through `spawn_blocking` for step 1.2.2 — the synch
-            // call returns quickly enough on the mock-driven test path.
-            // Step 1.2.3 (real device) wraps this in `spawn_blocking`.
-            dialog_inner.query_blocking(&rendered)
-        }
-        .map_err(|e| PrimerError::Inference(e.into_inference_error()))?;
-
-        let chunk = TokenChunk {
-            text: response,
-            done: true,
-        };
-        Ok(Box::pin(stream::once(async { Ok(chunk) })))
+        tokio::task::spawn_blocking(move || {
+            // `blocking_lock` is the documented way to acquire a
+            // `tokio::sync::Mutex` from inside `spawn_blocking`; it
+            // does not poll the runtime so we cannot deadlock on the
+            // current-thread runtime even if the runtime has no idle
+            // worker.
+            let guard = dialog.blocking_lock();
+            guard.query_streaming(&rendered, tx);
+            // Sender dropped on guard drop / fn return → channel closes.
+        });
+        Ok(Box::pin(rx))
     }
 }
 

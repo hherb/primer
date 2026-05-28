@@ -9,7 +9,7 @@
 //! This module implements that abstraction:
 //!
 //! - [`GenieLibrary`] — open a dialog from a `genie_config.json` path.
-//! - [`GenieDialog`] — query the dialog (blocking, single-shot for 1.2.2);
+//! - [`GenieDialog`] — query the dialog (per-token streaming as of step 1.2.3);
 //!   `Drop` releases the underlying handle.
 //!
 //! The real (`libGenie.so`-backed) implementation lives in [`real`] and is
@@ -18,13 +18,17 @@
 //! the filesystem (delegated to [`primer_qnn_sys::GenieLibrary::open`]).
 //!
 //! A [`mock`] module ships under `#[cfg(test)]` with a programmable
-//! [`mock::MockGenieLibrary`] that records calls and returns canned
-//! responses. The [`super::backend::QnnBackend`] is generic over
-//! `dyn GenieLibrary` so tests can substitute the mock without touching
-//! any FFI symbol.
+//! [`mock::MockGenieLibrary`] that records calls and replays scripted
+//! token sequences (one body chunk per token + a final done chunk; or
+//! N body chunks + a mid-stream `Err`). The [`super::backend::QnnBackend`]
+//! is generic over `dyn GenieLibrary` so tests can substitute the mock
+//! without touching any FFI symbol.
 
 use std::path::Path;
 
+use futures::channel::mpsc::UnboundedSender;
+use primer_core::error::Result as PrimerResult;
+use primer_core::inference::TokenChunk;
 use thiserror::Error;
 
 mod real;
@@ -55,18 +59,38 @@ pub trait GenieLibrary: Send + Sync {
 /// supports (it forbids concurrent queries) and would falsely advertise
 /// a property the impl can't legally provide.
 pub trait GenieDialog: Send {
-    /// Single-shot blocking query.
+    /// Run a streaming query against the dialog.
     ///
-    /// Sends `prompt` to the dialog and collects the full response into a
-    /// `String`. This is the step-1.2.2 contract — step 1.2.3 will add a
-    /// streaming variant that returns a token receiver and supersedes this
-    /// one.
+    /// Per-token streaming bridge (step 1.2.3): the implementation
+    /// forwards generated tokens through `sender` as they're produced,
+    /// then closes the channel by dropping the sender before returning.
     ///
-    /// The real implementation runs the underlying C call inside
-    /// [`tokio::task::spawn_blocking`] at the call site (in
-    /// [`super::backend`]); the trait itself is synchronous so mocks
-    /// don't have to fake an async boundary.
-    fn query_blocking(&self, prompt: &str) -> Result<String, GenieCallError>;
+    /// Contract:
+    ///
+    /// - For each token (or token chunk) produced by the model, emit
+    ///   `Ok(TokenChunk { text, done: false })`.
+    /// - On clean completion, emit one final
+    ///   `Ok(TokenChunk { text: String::new(), done: true })` after the
+    ///   last body chunk. The final chunk is the structural "stream
+    ///   complete" sentinel — downstream `DialogueManager` relies on it
+    ///   to commit the assistant turn.
+    /// - On a Genie API error (callback registration failure, query
+    ///   failure, malformed prompt), emit one
+    ///   `Err(PrimerError::Inference(...))` instead of the final done
+    ///   chunk and close. Any body chunks already emitted reach the
+    ///   consumer; the dialogue manager's existing error path drops the
+    ///   partial assistant turn.
+    /// - Consumers may drop the receiver mid-stream (e.g. cancellation).
+    ///   Implementations MUST tolerate `sender.unbounded_send` returning
+    ///   `Err(SendError)` and continue to completion (Genie has no
+    ///   cancellation API; the unsent tokens are simply discarded).
+    ///
+    /// This method is synchronous and potentially long-running. The
+    /// real implementation is invoked from `tokio::task::spawn_blocking`
+    /// in [`super::backend::QnnBackend::generate_stream`]; the mock
+    /// returns essentially instantly and is safe to call from any
+    /// context.
+    fn query_streaming(&self, prompt: &str, sender: UnboundedSender<PrimerResult<TokenChunk>>);
 }
 
 /// Errors produced by [`GenieLibrary`] or [`GenieDialog`] calls.
@@ -128,6 +152,20 @@ impl GenieCallError {
         // a translated message demands it.
         primer_core::error::InferenceError::Other(self.to_string())
     }
+
+    /// Convert a borrowed `GenieCallError` into the `PrimerError::Inference`
+    /// shape expected on the streaming channel.
+    ///
+    /// Used at every error site in the streaming path (real impl + mock)
+    /// so the dev-facing string is identical by construction rather than
+    /// by review. Takes `&self` because the mock's `Script::TokensThenError`
+    /// retains ownership of the error across queries (it cannot move out
+    /// of a borrowed enum variant).
+    pub fn to_primer_error(&self) -> primer_core::error::PrimerError {
+        primer_core::error::PrimerError::Inference(primer_core::error::InferenceError::Other(
+            self.to_string(),
+        ))
+    }
 }
 
 #[cfg(test)]
@@ -183,16 +221,33 @@ mod tests {
         }
     }
 
-    #[test]
-    fn mock_library_records_open_and_query_in_order() {
+    #[tokio::test]
+    async fn mock_library_records_open_and_query_in_order() {
+        use futures::StreamExt;
+        use futures::channel::mpsc;
         use mock::{MockEvent, MockGenieLibrary};
+
         let lib = MockGenieLibrary::new_with_response("hello from the mock model");
         let dialog = lib
             .open_dialog(Path::new("/some/genie_config.json"))
             .unwrap();
-        let response = dialog.query_blocking("Why is the sky blue?").unwrap();
+        let (tx, rx) = mpsc::unbounded();
+        dialog.query_streaming("Why is the sky blue?", tx);
+        let chunks: Vec<_> = rx.collect::<Vec<_>>().await;
         drop(dialog);
-        assert_eq!(response, "hello from the mock model");
+        // Single canned response → 1 body chunk + 1 done chunk = 2 chunks.
+        assert_eq!(chunks.len(), 2, "{chunks:?}");
+        let body = chunks[0]
+            .as_ref()
+            .expect("body chunk should be Ok on canned-response path");
+        assert_eq!(body.text, "hello from the mock model");
+        assert!(!body.done);
+        let done = chunks[1]
+            .as_ref()
+            .expect("final chunk should be Ok on canned-response path");
+        assert_eq!(done.text, "");
+        assert!(done.done);
+
         let events = lib.events();
         assert_eq!(events.len(), 3);
         assert!(matches!(
