@@ -322,3 +322,23 @@ jobs:
         # `cargo build --bin primer` builds only that binary's dep graph,
         # which excludes `primer-gui` (sibling crate, not a dep).
         run: cargo build --target aarch64-linux-android --bin primer
+
+      - name: Cross-compile primer-qnn-sys
+        env:
+          # Same NDK env as the previous step — primer-qnn-sys is a pure
+          # libloading wrapper and only pulls libc + thiserror transitively,
+          # so it does not need a C compiler at link time. Setting the env
+          # vars defensively in case a future transitive dep gains a
+          # build-script that does need them.
+          CC_aarch64_linux_android: ${{ steps.ndk.outputs.ndk-path }}/toolchains/llvm/prebuilt/linux-x86_64/bin/aarch64-linux-android24-clang
+          CXX_aarch64_linux_android: ${{ steps.ndk.outputs.ndk-path }}/toolchains/llvm/prebuilt/linux-x86_64/bin/aarch64-linux-android24-clang++
+          AR_aarch64_linux_android: ${{ steps.ndk.outputs.ndk-path }}/toolchains/llvm/prebuilt/linux-x86_64/bin/llvm-ar
+          CARGO_TARGET_AARCH64_LINUX_ANDROID_LINKER: ${{ steps.ndk.outputs.ndk-path }}/toolchains/llvm/prebuilt/linux-x86_64/bin/aarch64-linux-android24-clang
+        # The Phase 1.2 Genie/QNN FFI crate is `target_os = "android"`-gated
+        # for its real-dlopen path; on every other target `GenieLibrary::open`
+        # returns `PlatformUnsupported`. Until step 1.2.4 wires `--backend qnn`
+        # through `primer-cli`, this crate is NOT in the `--bin primer` dep
+        # graph above, so we need a dedicated build step to catch drift on
+        # the Android-cfg branch (e.g. a transitive libloading bump that
+        # silently breaks NDK linking).
+        run: cargo build --target aarch64-linux-android -p primer-qnn-sys

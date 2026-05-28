@@ -1,0 +1,22 @@
+[package]
+name = "primer-qnn-sys"
+description = "Low-level FFI bindings + runtime dlopen for the Qualcomm Genie SDK (Phase 1.2 NPU backend)"
+version.workspace = true
+edition.workspace = true
+publish = false
+
+[dependencies]
+# Runtime dlopen of libGenie.so + supporting QAIRT libs. We deliberately avoid
+# `#[link(name = "Genie")]` because the QAIRT runtime is user-installed at a
+# configurable path (see Phase 1.2 design §5: bundled QAIRT distribution).
+# Linking at compile time would either force the runtime to be staged in
+# `$LIBRARY_PATH` at every primer build OR require us to redistribute the
+# closed-source Qualcomm .so files, both of which are wrong choices for a
+# children's product with strict offline-first + AGPL constraints.
+libloading = "0.8"
+
+thiserror.workspace = true
+
+[dev-dependencies]
+# Tokio test-util/macros for the (currently host-side only) sanity test.
+tokio = { workspace = true, features = ["macros", "rt"] }
