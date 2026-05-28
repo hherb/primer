@@ -90,11 +90,11 @@ default = []
 silero = ["dep:silero-vad-rust", "dep:ort"]
 whisper = ["dep:whisper-cpp-plus"]
 piper = ["dep:piper-rs", "dep:serde_json"]
-# Supertonic TTS smoke gate. No primer-speech glue code lands behind this
-# yet — Stage A of the evaluation just lifts the vendored library into
-# the workspace dep graph and a smoke example. A real `TextToSpeech` /
-# `StreamingTextToSpeech` impl arrives in a follow-up once the rc.10
-# migration is empirically validated locally and an asset-flow is wired.
+# Supertonic TTS gate. Enables the `supertonic` module which implements
+# `TextToSpeech` + `StreamingTextToSpeech` over the vendored library
+# (`src/vendor/supertonic-rs/`). Asset auto-download, voice-loop wiring,
+# and CLI/GUI flags arrive in later stages of issue #170; today this
+# gates the trait impls and the `tts_supertonic_hello` smoke example.
 supertonic = ["dep:supertonic-tts"]
 cpal = ["dep:cpal", "dep:ringbuf", "dep:rubato"]
 # Shared voice loop state machine (LISTEN → LATENT_THINK → SPEAK → LISTEN).
