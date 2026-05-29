@@ -326,6 +326,7 @@
                 <option value="stub">stub (no API key)</option>
                 <option value="cloud">cloud (Anthropic)</option>
                 <option value="ollama">ollama (local)</option>
+                <option value="openai-compat">openai-compat (oMLX / LM Studio / vLLM)</option>
               </select>
             </label>
             <label class="field">
@@ -342,6 +343,14 @@
                 type="text"
                 id="f-backend-ollama-url"
                 placeholder="http://localhost:11434"
+              />
+            </label>
+            <label class="field" id="f-backend-openai-compat-url-field">
+              <span>Server URL</span>
+              <input
+                type="text"
+                id="f-backend-openai-compat-url"
+                placeholder="http://localhost:8000"
               />
             </label>
           </div>
@@ -375,6 +384,46 @@
                 spellcheck="false"
               />
               <small class="hint muted" id="f-api-key-hint"></small>
+            </label>
+          </fieldset>
+
+          <fieldset
+            class="api-key-fieldset"
+            id="f-openai-compat-api-key-fieldset"
+            hidden
+          >
+            <legend>Server API key (openai-compat)</legend>
+            <label class="radio">
+              <input
+                type="radio"
+                name="openai-compat-api-key-source"
+                value="env"
+                id="f-openai-compat-api-key-env"
+              />
+              <span>Read from <code>OPENAI_COMPAT_API_KEY</code> environment variable</span>
+            </label>
+            <label class="radio">
+              <input
+                type="radio"
+                name="openai-compat-api-key-source"
+                value="inline"
+                id="f-openai-compat-api-key-inline"
+              />
+              <span>Store inline in config file (mode 0600)</span>
+            </label>
+            <label
+              class="field field-indent"
+              id="f-openai-compat-api-key-input-field"
+              hidden
+            >
+              <span id="f-openai-compat-api-key-input-label">Server API key</span>
+              <input
+                type="password"
+                id="f-openai-compat-api-key-input"
+                autocomplete="off"
+                spellcheck="false"
+              />
+              <small class="hint muted" id="f-openai-compat-api-key-hint"></small>
             </label>
           </fieldset>
         </details>
@@ -476,6 +525,7 @@
                 <option value="stub">stub (testing only)</option>
                 <option value="fastembed">fastembed (local, ~570 MB)</option>
                 <option value="ollama">ollama (remote)</option>
+                <option value="openai-compat">openai-compat</option>
               </select>
             </label>
             <label class="field">
@@ -492,6 +542,14 @@
                 type="text"
                 id="f-embedder-ollama-url"
                 placeholder="http://localhost:11434"
+              />
+            </label>
+            <label class="field" id="f-embedder-openai-compat-url-field">
+              <span>Embedder server URL</span>
+              <input
+                type="text"
+                id="f-embedder-openai-compat-url"
+                placeholder="(falls back to backend server URL)"
               />
             </label>
           </div>
