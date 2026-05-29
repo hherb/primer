@@ -306,6 +306,25 @@ jobs:
         # of truth for the workspace's Rust version.
         run: rustup target add aarch64-linux-android
 
+      - name: Guard ort-sys android cache_dir cfg patch (issue #180)
+        # The vendored `ort-sys` android `cache_dir` cfg arm (PR #179,
+        # issue #157) fixes a build.rs E0432 that ONLY manifests when
+        # building natively on an Android HOST (Termux). Every cargo
+        # step in this job cross-compiles FROM Linux, so `ort-sys`'s
+        # build.rs compiles for the Linux host and the android arm is
+        # never exercised — a regression of that patch would keep CI
+        # green while native Termux builds break again.
+        #
+        # This script codifies PR #179's manual probe: it compiles a
+        # build.rs-mimicking consumer with `rustc --target
+        # aarch64-linux-android --emit=metadata` (no NDK linker needed)
+        # against both the patched dirs.rs (must pass) and a
+        # cfg-reverted counterfactual (must fail with E0432, proving the
+        # guard has teeth). Runs from `src/` so `rustc` resolves to the
+        # workspace-pinned toolchain; placed before the NDK download so
+        # a regression fails fast.
+        run: ../scripts/check-ort-sys-android-cfg.sh
+
       - name: Cache cargo registry + build
         uses: Swatinem/rust-cache@v2
         with:
