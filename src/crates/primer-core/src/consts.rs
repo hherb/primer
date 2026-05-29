@@ -143,9 +143,15 @@ pub mod retrieval {
     /// backend is a small-context (≈4K-token) backend
     /// ([`crate::backend::is_small_context_backend`]). Three passages keep
     /// the per-turn retrieval payload small enough to leave context-window
-    /// headroom for the conversation history under a 4K budget; the EN/DE
-    /// retrieval-quality benchmarks still reach 95% loose recall at
-    /// `top_k = 3` (see `KB_FINAL_TOP_K`). Phase 1.2 step 1.2.5.
+    /// headroom for the conversation history under a 4K budget. Measured
+    /// cost of the `5 → 3` shrink at the production `min_score = 0.5`
+    /// (BM25-only sweeps, `primer-kb-load/tests/retrieval_sweep{,_de}.rs`):
+    /// EN loose recall 99% → 95% (strict 88% unchanged); DE loose 90% → 87%
+    /// (strict 88% → 84%). The handful of additional misses are the
+    /// already-documented corpus-coverage paraphrase gaps (e.g. the DE
+    /// gänsehaut / ebbe-und-flut queries), not ranking-depth losses that
+    /// more passages would recover. See `KB_FINAL_TOP_K` for the
+    /// large-context default. Phase 1.2 step 1.2.5.
     pub const KB_FINAL_TOP_K_SMALL_CONTEXT: usize = 3;
 
     /// Post-fusion score floor for the KB hybrid path. Zero rather than
