@@ -40,6 +40,11 @@ pub mod piper_config;
 #[cfg(feature = "piper")]
 pub use piper::PiperTts;
 
+#[cfg(feature = "supertonic")]
+pub mod supertonic;
+#[cfg(feature = "supertonic")]
+pub use supertonic::SupertonicTts;
+
 #[cfg(feature = "cpal")]
 pub mod cpal_io;
 #[cfg(feature = "cpal")]

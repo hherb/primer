@@ -89,7 +89,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         .to_str()
         .ok_or("--voice-style must be valid UTF-8")?;
 
-    println!("Loading TTS components from {} …", onnx_dir);
+    println!("Loading TTS components from {onnx_dir} …");
     let load_start = Instant::now();
     let mut tts = load_text_to_speech(onnx_dir, /* use_gpu */ false)?;
     let sample_rate = tts.sample_rate as u32;
@@ -99,7 +99,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         sample_rate,
     );
 
-    println!("Loading voice style from {} …", voice_style_path);
+    println!("Loading voice style from {voice_style_path} …");
     let style = load_voice_style(&[voice_style_path.to_string()], /* verbose */ true)?;
 
     println!("Synthesising: {:?} (lang={})", args.text, args.lang);
