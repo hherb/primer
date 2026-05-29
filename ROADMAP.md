@@ -41,7 +41,7 @@ Status key: ✅ done · 🟡 in progress · [ ] not started.
 ### 0.4 — Developer experience
 
 - ✅ OpenAI-compatible inference + embedding backend (`OpenAiCompatBackend`, `OpenAiCompatEmbedder`): `/v1/chat/completions` SSE + `/v1/embeddings` batch. Unblocks oMLX, LM Studio, vLLM, llama.cpp `--server`, Together/Groq/OpenRouter.
-- ✅ Tauri desktop GUI (`primer-gui`): full working app — session picker, streaming chat with mid-stream cancel, settings modal, resume, pedagogy/learner sidebar, voice mode (`--features speech`). Backend + embedder parity with the CLI including `openai-compat`.
+- ✅ Tauri desktop GUI (`primer-gui`): full working app — session picker, streaming chat with mid-stream cancel, settings modal, resume, pedagogy/learner sidebar, voice mode (`--features speech`). Backend + embedder parity with the CLI including `openai-compat` and `qnn` (bundle-dir / QAIRT-lib-dir pickers in Settings; qnn construction needs `--features qnn`).
 - ✅ `CLAUDE.md`, `--verbose` pedagogical-decision tracing, `.env`/`~/.primer_env` auto-loading.
 - 🟡 CI (GitHub Actions): Linux complete (test + fmt + clippy + non-default-feature drift-guards + Android cross-compile + ort-sys cfg guard); macOS partial (clippy drift-guard for Apple-native combos). Missing: full `cargo test` on macOS, `macos-native-26` coverage (no hosted image yet). Branch protection on `main` is the recommended structural fix.
 - [ ] `primer-knowledge` is the only crate still without retrieval test coverage.
@@ -68,6 +68,7 @@ Steps 1.2.1–1.2.5 landed; 1.2.0 (QAIRT install + device validation) and 1.2.6 
 - [x] `QnnBackend` safe wrapper: trait-abstracted Genie handle, `primer-meta.json` parser, minijinja template, mutex-serialised dialog, ABI smoke check.
 - [x] Per-token streaming bridge: C-ABI callback → `mpsc::UnboundedSender`, query in `spawn_blocking`.
 - [x] CLI wiring: `--backend qnn`, `--qnn-bundle-dir`, `--qnn-qairt-lib-dir` (+ env fallbacks).
+- [x] GUI wiring: QNN backend + bundle-dir / QAIRT-lib-dir pickers in Settings (always shown; selecting qnn on a non-`qnn`-feature build surfaces the "rebuild with --features qnn" hint inline). Host-tested; runtime still device-unverified.
 - [x] Per-backend 4K context budget for small-context backends (12-turn window, 3-passage top-K), keyed off `QNN_NAME_PREFIX`.
 - [ ] Benchmark + thermal harness (`examples/qnn_bench.rs`); target 15+ tok/s decode on Qwen3-4B W4A16, TTFT < 3s, peak < 70°C.
 

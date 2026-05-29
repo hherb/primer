@@ -46,6 +46,10 @@ const dom = {
     backendOllamaUrlField: document.getElementById("f-backend-ollama-url-field"),
     backendOpenaiCompatUrl: document.getElementById("f-backend-openai-compat-url"),
     backendOpenaiCompatUrlField: document.getElementById("f-backend-openai-compat-url-field"),
+    backendQnnBundleDir: document.getElementById("f-backend-qnn-bundle-dir"),
+    backendQnnBundleDirField: document.getElementById("f-backend-qnn-bundle-dir-field"),
+    backendQnnQairtLibDir: document.getElementById("f-backend-qnn-qairt-lib-dir"),
+    backendQnnQairtLibDirField: document.getElementById("f-backend-qnn-qairt-lib-dir-field"),
     apiKeyFieldset: document.getElementById("f-api-key-fieldset"),
     apiKeyEnv: document.getElementById("f-api-key-env"),
     apiKeyInline: document.getElementById("f-api-key-inline"),
@@ -246,6 +250,8 @@ function populate(view) {
   f.backendModel.value = view.backend.model ?? "";
   f.backendOllamaUrl.value = view.backend.ollama_url;
   f.backendOpenaiCompatUrl.value = view.backend.openai_compat_url ?? "";
+  f.backendQnnBundleDir.value = view.backend.qnn_bundle_dir ?? "";
+  f.backendQnnQairtLibDir.value = view.backend.qnn_qairt_lib_dir ?? "";
   applyBackendKindReveal(view.backend.kind);
 
   // API key (cloud)
@@ -438,6 +444,10 @@ function applyBackendKindReveal(kind) {
   dom.fields.backendOllamaUrlField.hidden = kind !== "ollama";
   // OpenAI-compat server URL only relevant for that backend.
   dom.fields.backendOpenaiCompatUrlField.hidden = kind !== "openai-compat";
+  // QNN bundle / QAIRT-lib paths only relevant for the qnn backend.
+  const qnn = kind === "qnn";
+  dom.fields.backendQnnBundleDirField.hidden = !qnn;
+  dom.fields.backendQnnQairtLibDirField.hidden = !qnn;
   // Each API-key fieldset is only relevant for its own backend — fade
   // the others so the user isn't tempted to put a key where it'd be
   // ignored. `hidden` removes the openai-compat fieldset entirely for
@@ -633,6 +643,12 @@ function gather() {
         f.backendOpenaiCompatUrl.value.trim() || "http://localhost:8000",
       api_key_source: apiKeyUpdate,
       openai_compat_api_key_source: ocApiKeyUpdate,
+      // BackendConfigUpdate has no serde(default), so these two QNN path
+      // fields are MANDATORY in the IPC payload — always send them (null
+      // when blank). They're plain Option<PathBuf> (not secrets), so no
+      // Keep/Env dance.
+      qnn_bundle_dir: orNull(f.backendQnnBundleDir.value.trim()),
+      qnn_qairt_lib_dir: orNull(f.backendQnnQairtLibDir.value.trim()),
     },
     classifier: gatherSubsystem("classifier"),
     extractor: gatherSubsystem("extractor"),

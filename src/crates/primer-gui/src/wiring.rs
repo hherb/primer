@@ -145,21 +145,32 @@ async fn build_with_strategy(
         extractor_model: config.extractor.model.clone(),
         comprehension_backend: subsystem_kind(&config.comprehension),
         comprehension_model: config.comprehension.model.clone(),
-        // QNN backend (Phase 1.2 step 1.2.4): the GUI does not yet
-        // expose a "QNN bundle" picker, so these stay `None` here.
-        // Selecting `--backend qnn` from the GUI without surfacing
-        // the bundle path will deliberately error via
-        // `build_qnn_backend`'s "qnn-bundle-dir required" message —
-        // exactly the structural cue that the GUI settings page needs
-        // a follow-up step to land. Tracked in the same Phase 1.2 work.
-        qnn_bundle_dir: None,
-        qnn_qairt_lib_dir: None,
+        // QNN backend (Phase 1.2 step 1.2.4): the bundle / QAIRT-lib
+        // paths come straight from Settings → Inference backend. On a
+        // default (non-`qnn`-feature) GUI build, `build_qnn_backend`'s
+        // `not(feature = "qnn")` arm still returns the "rebuild with
+        // --features qnn" hint regardless of these values, so selecting
+        // qnn surfaces a clear build-time error inline rather than
+        // killing the GUI (mirrors the openai-compat-embedder pattern).
+        qnn_bundle_dir: backend_config.qnn_bundle_dir.clone(),
+        qnn_qairt_lib_dir: backend_config.qnn_qairt_lib_dir.clone(),
     };
 
     // ─── Main backend (locale-independent) ───────────────────────────
     let backend = build_backend(&backend_config.kind, main_model.clone(), &params)
         .await
         .map_err(|e| format!("constructing inference backend: {e}"))?;
+
+    // For QNN the real model id comes from `primer-meta.json` inside the
+    // bundle; rebind `main_model` to `backend.name()` (e.g.
+    // "qnn:Qwen3-4B") so the downstream subsystem identifiers carry the
+    // real model id instead of the "qnn-pending" placeholder. Mirrors
+    // the CLI's post-construction rebind.
+    let main_model = if backend_config.kind == "qnn" {
+        backend.name().to_string()
+    } else {
+        main_model
+    };
 
     // ─── Session store (open BEFORE KB so we can probe the learner's
     //     locale and avoid a second open). Opens under cfg_locale; the
@@ -433,8 +444,16 @@ fn resolve_main_model(kind: &str, model: Option<&str>) -> Result<String, String>
         "stub" => Ok(model
             .map(String::from)
             .unwrap_or_else(|| "stub".to_string())),
+        "qnn" => {
+            // The model id is read from the bundle's `primer-meta.json`
+            // at construction time, so the `model` override is ignored.
+            // Return a placeholder that `build_with_strategy` rebinds to
+            // `backend.name()` once the QNN backend constructs (mirrors
+            // the CLI's "qnn-pending" placeholder).
+            Ok("qnn-pending".to_string())
+        }
         other => Err(format!(
-            "unknown backend kind {other:?}: expected one of stub, cloud, ollama, openai-compat"
+            "unknown backend kind {other:?}: expected one of stub, cloud, ollama, openai-compat, qnn"
         )),
     }
 }
@@ -611,6 +630,39 @@ mod tests {
         assert!(
             err.contains("secret-sauce"),
             "error must name the offending embedder: {err}"
+        );
+    }
+
+    #[test]
+    fn resolve_main_model_qnn_returns_placeholder() {
+        // The qnn model id is read from the bundle at construction, so the
+        // override is ignored and a placeholder is returned (rebound to
+        // `backend.name()` after the backend constructs).
+        assert_eq!(resolve_main_model("qnn", None).unwrap(), "qnn-pending");
+        assert_eq!(
+            resolve_main_model("qnn", Some("ignored-model")).unwrap(),
+            "qnn-pending",
+            "the model override is ignored for qnn"
+        );
+    }
+
+    #[cfg(not(feature = "qnn"))]
+    #[tokio::test]
+    async fn qnn_without_feature_surfaces_build_hint() {
+        // On a default (non-`qnn`-feature) GUI build, selecting the qnn
+        // backend — even with a bundle dir set — must surface the
+        // "rebuild with the qnn cargo feature" hint inline rather than
+        // panicking or silently falling back. This is the "error inline"
+        // contract for the always-show QNN option.
+        let home = TempDir::new().unwrap();
+        let mut cfg = stub_config();
+        cfg.backend.kind = "qnn".to_string();
+        cfg.backend.qnn_bundle_dir = Some("/some/bundle".into());
+        let err = build_active_session(home.path(), &cfg).await.unwrap_err();
+        let lower = err.to_lowercase();
+        assert!(
+            lower.contains("qnn") && lower.contains("feature"),
+            "error must mention qnn and the missing cargo feature: {err}"
         );
     }
 

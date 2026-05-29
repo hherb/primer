@@ -64,10 +64,14 @@ fn validate_locale(pack_id: &str) -> Result<(), String> {
 
 fn validate_backend(kind: &str) -> Result<(), String> {
     match kind {
-        // `qnn` is build-time-gated and not offered through GUI settings.
-        "stub" | "cloud" | "ollama" | "openai-compat" => Ok(()),
+        // `qnn` is structurally valid here; whether the backend can
+        // actually construct (cargo feature present, bundle dir set,
+        // libGenie.so loadable) is a wiring-layer concern that surfaces
+        // its own error inline — mirroring how ollama-without-model is a
+        // wiring check, not a validation one.
+        "stub" | "cloud" | "ollama" | "openai-compat" | "qnn" => Ok(()),
         other => Err(format!(
-            "unknown backend kind {other:?}: expected one of stub, cloud, ollama, openai-compat"
+            "unknown backend kind {other:?}: expected one of stub, cloud, ollama, openai-compat, qnn"
         )),
     }
 }
@@ -155,6 +159,27 @@ mod tests {
         cfg.embedder.kind = "openai-compat".to_string();
         cfg.embedder.model = Some("nomic-embed-text".to_string());
         validate(&cfg).expect("openai-compat is a known embedder kind");
+    }
+
+    #[test]
+    fn qnn_backend_kind_accepted() {
+        // Structural validation accepts qnn regardless of cargo feature
+        // or bundle-dir presence; those are wiring-layer checks that
+        // surface their own errors inline.
+        let mut cfg = GuiConfig::default();
+        cfg.backend.kind = "qnn".to_string();
+        cfg.backend.qnn_bundle_dir = Some("/bundles/qwen3-4b".into());
+        validate(&cfg).expect("qnn is a known backend kind");
+    }
+
+    #[test]
+    fn qnn_backend_kind_accepted_without_bundle_dir() {
+        // A missing bundle dir is NOT a structural error — it's caught at
+        // session-start by build_qnn_backend. Validation only gates the
+        // kind string.
+        let mut cfg = GuiConfig::default();
+        cfg.backend.kind = "qnn".to_string();
+        validate(&cfg).expect("qnn validates even without a bundle dir");
     }
 
     #[test]

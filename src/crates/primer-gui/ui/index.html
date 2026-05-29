@@ -327,6 +327,7 @@
                 <option value="cloud">cloud (Anthropic)</option>
                 <option value="ollama">ollama (local)</option>
                 <option value="openai-compat">openai-compat (oMLX / LM Studio / vLLM)</option>
+                <option value="qnn">qnn (Qualcomm NPU — Android)</option>
               </select>
             </label>
             <label class="field">
@@ -352,6 +353,30 @@
                 id="f-backend-openai-compat-url"
                 placeholder="http://localhost:8000"
               />
+            </label>
+            <label class="field" id="f-backend-qnn-bundle-dir-field">
+              <span>QNN bundle dir</span>
+              <input
+                type="text"
+                id="f-backend-qnn-bundle-dir"
+                placeholder="/path/to/qwen3-4b-bundle"
+              />
+              <small class="hint muted"
+                >Folder with <code>genie_config.json</code>,
+                <code>primer-meta.json</code>, and the context binaries.</small
+              >
+            </label>
+            <label class="field" id="f-backend-qnn-qairt-lib-dir-field">
+              <span>QAIRT lib dir (optional)</span>
+              <input
+                type="text"
+                id="f-backend-qnn-qairt-lib-dir"
+                placeholder="(defaults to &lt;bundle&gt;/../qairt/lib/aarch64-android)"
+              />
+              <small class="hint muted"
+                >Directory containing <code>libGenie.so</code>. Leave blank to
+                use the conventional layout.</small
+              >
             </label>
           </div>
 

@@ -81,6 +81,15 @@ ollama-embedding = ["primer-engine/ollama-embedding"]
 # to primer-engine for the cfg-gated `build_openai_compat_embedder` arm.
 openai-compat-embedding = ["primer-engine/openai-compat-embedding"]
 
+# Qualcomm NPU inference backend (Phase 1.2). Forwards to
+# `primer-engine/qnn` so the `QnnBackend` lands in the GUI's dep graph and
+# `build_qnn_backend`'s real arm constructs. WITHOUT this feature the QNN
+# option is still selectable in Settings (the bundle/QAIRT-lib paths are
+# always-present config fields), but selecting it surfaces the "rebuild
+# with --features qnn" hint inline — mirroring the openai-compat-embedding
+# error-inline pattern. Android target only at runtime.
+qnn = ["primer-engine/qnn"]
+
 # Voice mode — pulls every speech backend feature so the GUI binary can
 # drive the LISTEN → LATENT_THINK → SPEAK → LISTEN state machine end-to-
 # end. Also pulls reqwest for streaming asset downloads (PR 4).
