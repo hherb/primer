@@ -176,8 +176,10 @@ mod unix {
 // `cache_dir()` on windows|linux|macos only, with no catch-all, so on Android the function is cfg'd
 // out entirely and `build.rs:26`'s `use ...::cache_dir` fails to resolve (E0432) when building
 // natively on Termux (host == aarch64-linux-android). Android follows the same XDG layout as Linux:
-// Termux populates `$HOME` and `$XDG_CACHE_HOME`, and `self::unix::home_dir()` already has a
-// dedicated `target_os = "android"` arm, so the Linux logic works unchanged. Drop this patch once
+// Termux populates `$HOME` and `$XDG_CACHE_HOME`. Note `self::unix::home_dir()`'s `target_os =
+// "android"` fallback arm returns `None` (no `getpwuid_r` probe), so on Android `home_dir()` resolves
+// purely via `$HOME` — which Termux sets, so the Linux logic works unchanged. If `$HOME` is unset,
+// `cache_dir()` returns `None` and `ort-sys`'s own build.rs `?`-chains fall back gracefully. Drop this patch once
 // the workspace can move off the rc.10 pin (upstream `main` already defines `cache_dir`
 // unconditionally with an `ORT_CACHE_DIR` override + catch-all).
 #[cfg(any(target_os = "linux", target_os = "android"))]
