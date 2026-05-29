@@ -17,7 +17,7 @@ members = [
     "crates/primer-gui",
     "crates/primer-qnn-sys",
 ]
-exclude = ["vendor/piper-rs", "vendor/silero-vad-rust", "vendor/supertonic-rs"]
+exclude = ["vendor/piper-rs", "vendor/silero-vad-rust", "vendor/supertonic-rs", "vendor/ort-sys"]
 
 [workspace.package]
 version = "0.1.0"
@@ -133,3 +133,12 @@ piper-rs = { path = "vendor/piper-rs" }
 # utils_vad.rs. Drop this patch once is_multiple_of is stabilised upstream
 # AND a silero-vad-rust release picks up the API surface.
 silero-vad-rust = { path = "vendor/silero-vad-rust" }
+# Vendored ort-sys 2.0.0-rc.10 (verbatim) with a one-arm cfg patch in
+# src/internal/dirs.rs adding `target_os = "android"` to `cache_dir()`.
+# Upstream rc.10 gates cache_dir on windows|linux|macos only with no catch-all,
+# so it's cfg'd out on Android and build.rs:26's import fails to resolve (E0432)
+# when building natively on Termux. The Linux XDG_CACHE_HOME -> $HOME/.cache
+# logic works unchanged on Android. Unblocks `--features embedding` (fastembed)
+# on aarch64-linux-android. See issue #157. Drop once the workspace can move off
+# the rc.10 pin (upstream main already defines cache_dir unconditionally).
+ort-sys = { path = "vendor/ort-sys" }
