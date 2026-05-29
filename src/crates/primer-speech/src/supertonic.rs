@@ -79,10 +79,19 @@ use crate::phrase_split::PhraseSplitter;
 const BACKEND_NAME: &str = "supertonic";
 
 /// Denoising-step count passed to the helper. Upstream quality knob,
-/// valid range 5..=12; example default is 8. Trading more steps for
+/// recommended range 5..=12; example default is 8. Trading more steps for
 /// audible quality is a per-device decision deferred to Stage E's A/B
 /// numbers (issue #170); 8 is the conservative middle for now.
 const DEFAULT_TOTAL_STEPS: usize = 8;
+
+/// Lower sanity bound for [`SupertonicTts::with_total_steps`]. `0` steps
+/// would mean no denoising at all (degenerate output), so the floor is 1.
+const MIN_TOTAL_STEPS: usize = 1;
+
+/// Upper sanity bound for [`SupertonicTts::with_total_steps`]. Well above
+/// the recommended 5..=12 quality range so deliberate quality overrides
+/// pass through, but capped so a typo can't burn arbitrary compute.
+const MAX_TOTAL_STEPS: usize = 32;
 
 /// Default ISO-639-1 language tag. The voice loop overrides this via
 /// [`SupertonicTts::with_language`] from `Locale::pack_id()`.
@@ -177,11 +186,18 @@ impl SupertonicTts {
     }
 
     /// Override the denoising step count (default
-    /// [`DEFAULT_TOTAL_STEPS`]). Upstream's valid range is 5..=12;
-    /// values outside that range are clamped to keep ORT from rejecting
-    /// the request.
+    /// [`DEFAULT_TOTAL_STEPS`] = 8). Upstream treats this as a free quality
+    /// knob — more steps trade compute for fidelity — with a *recommended*
+    /// range of 5..=12; the vendored helper neither validates nor rejects
+    /// values outside it, so a developer may legitimately push past 12 for
+    /// quality. The value is clamped to
+    /// [`MIN_TOTAL_STEPS`]..=[`MAX_TOTAL_STEPS`] purely as a sanity guard:
+    /// `0` would mean no denoising at all (degenerate output) and an
+    /// unbounded upper end could waste arbitrary compute on a typo. Values
+    /// inside the guard but outside the recommended range are honoured as
+    /// deliberate overrides, not silently snapped to 5..=12.
     pub fn with_total_steps(mut self, steps: usize) -> Self {
-        self.total_steps = steps.clamp(1, 32);
+        self.total_steps = clamp_total_steps(steps);
         self
     }
 
@@ -237,6 +253,16 @@ fn speed_for(voice: &VoiceProfile) -> f32 {
     } else {
         1.0
     }
+}
+
+/// Clamp a requested denoising-step count to the sanity guard
+/// [`MIN_TOTAL_STEPS`]..=[`MAX_TOTAL_STEPS`]. This is *not* a snap to the
+/// recommended 5..=12 quality range — values in between are honoured as
+/// deliberate overrides; the guard only rules out the degenerate `0` and
+/// runaway upper end. Extracted as a free function so the boundary
+/// behaviour is unit-testable without loading the four ONNX sessions.
+fn clamp_total_steps(steps: usize) -> usize {
+    steps.clamp(MIN_TOTAL_STEPS, MAX_TOTAL_STEPS)
 }
 
 impl Named for SupertonicTts {
@@ -473,6 +499,32 @@ mod tests {
             };
             assert_eq!(speed_for(&v), 1.0);
         }
+    }
+
+    /// `clamp_total_steps` raises the degenerate `0` to the floor and
+    /// caps an absurd request, but leaves both the recommended range and
+    /// deliberate above-recommended overrides untouched (it is NOT a snap
+    /// to 5..=12). Pins the doc claim on [`SupertonicTts::with_total_steps`].
+    #[test]
+    fn clamp_total_steps_guards_boundaries_without_snapping_to_recommended_range() {
+        assert_eq!(
+            clamp_total_steps(0),
+            MIN_TOTAL_STEPS,
+            "0 must rise to floor"
+        );
+        assert_eq!(clamp_total_steps(MIN_TOTAL_STEPS), MIN_TOTAL_STEPS);
+        assert_eq!(clamp_total_steps(8), 8, "default passes through");
+        assert_eq!(
+            clamp_total_steps(20),
+            20,
+            "above-recommended override is honoured, not snapped to 12"
+        );
+        assert_eq!(clamp_total_steps(MAX_TOTAL_STEPS), MAX_TOTAL_STEPS);
+        assert_eq!(
+            clamp_total_steps(1_000),
+            MAX_TOTAL_STEPS,
+            "runaway request capped at ceiling"
+        );
     }
 
     /// Real-model smoke test. Skipped unless both
