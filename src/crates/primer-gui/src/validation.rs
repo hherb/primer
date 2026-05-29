@@ -64,9 +64,10 @@ fn validate_locale(pack_id: &str) -> Result<(), String> {
 
 fn validate_backend(kind: &str) -> Result<(), String> {
     match kind {
-        "stub" | "cloud" | "ollama" => Ok(()),
+        // `qnn` is build-time-gated and not offered through GUI settings.
+        "stub" | "cloud" | "ollama" | "openai-compat" => Ok(()),
         other => Err(format!(
-            "unknown backend kind {other:?}: expected one of stub, cloud, ollama"
+            "unknown backend kind {other:?}: expected one of stub, cloud, ollama, openai-compat"
         )),
     }
 }
@@ -86,9 +87,9 @@ fn validate_subsystem_kind(label: &str, kind: Option<&str>) -> Result<(), String
 
 fn validate_embedder(kind: &str) -> Result<(), String> {
     match kind {
-        "none" | "stub" | "fastembed" | "ollama" => Ok(()),
+        "none" | "stub" | "fastembed" | "ollama" | "openai-compat" => Ok(()),
         other => Err(format!(
-            "unknown embedder backend {other:?}: expected one of none, stub, fastembed, ollama"
+            "unknown embedder backend {other:?}: expected one of none, stub, fastembed, ollama, openai-compat"
         )),
     }
 }
@@ -135,6 +136,25 @@ mod tests {
         cfg.embedder.kind = "secret-sauce".to_string();
         let err = validate(&cfg).unwrap_err();
         assert!(err.contains("secret-sauce"));
+    }
+
+    #[test]
+    fn openai_compat_backend_kind_accepted() {
+        // Structural validation only checks the kind is known; the
+        // model-required check lives in the wiring layer (mirrors how
+        // ollama-without-model is a wiring test, not a validation one).
+        let mut cfg = GuiConfig::default();
+        cfg.backend.kind = "openai-compat".to_string();
+        cfg.backend.model = Some("mlx-community/Qwen3-8B-4bit".to_string());
+        validate(&cfg).expect("openai-compat is a known backend kind");
+    }
+
+    #[test]
+    fn openai_compat_embedder_kind_accepted() {
+        let mut cfg = GuiConfig::default();
+        cfg.embedder.kind = "openai-compat".to_string();
+        cfg.embedder.model = Some("nomic-embed-text".to_string());
+        validate(&cfg).expect("openai-compat is a known embedder kind");
     }
 
     #[test]

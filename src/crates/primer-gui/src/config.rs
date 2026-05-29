@@ -66,13 +66,22 @@ impl Default for LearnerConfig {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct BackendConfig {
-    /// "stub" | "cloud" | "ollama"
+    /// "stub" | "cloud" | "ollama" | "openai-compat"
     pub kind: String,
     /// Model id. None means "use the CLI's per-kind default".
     pub model: Option<String>,
     pub ollama_url: String,
+    /// OpenAI-compatible server URL (used when `kind == "openai-compat"`).
+    /// Mirrors the CLI's `--openai-compat-url` default.
+    pub openai_compat_url: String,
     /// Where to read the API key from when `kind == "cloud"`.
     pub api_key_source: ApiKeySource,
+    /// Where to read the API key from when `kind == "openai-compat"`.
+    /// The `Env` variant reads `OPENAI_COMPAT_API_KEY` (the CLI's
+    /// env-var name); local servers (oMLX, LM Studio, vLLM) ignore it,
+    /// remote providers (Together, Groq) require it. Held under the
+    /// same secret discipline as the cloud key — never crosses IPC.
+    pub openai_compat_api_key_source: ApiKeySource,
 }
 
 impl Default for BackendConfig {
@@ -81,7 +90,9 @@ impl Default for BackendConfig {
             kind: "stub".to_string(),
             model: None,
             ollama_url: "http://localhost:11434".to_string(),
+            openai_compat_url: "http://localhost:8000".to_string(),
             api_key_source: ApiKeySource::default(),
+            openai_compat_api_key_source: ApiKeySource::default(),
         }
     }
 }
@@ -217,10 +228,15 @@ impl Default for SubsystemConfig {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct EmbedderConfig {
-    /// "none" | "stub" | "fastembed" | "ollama"
+    /// "none" | "stub" | "fastembed" | "ollama" | "openai-compat"
     pub kind: String,
     pub model: Option<String>,
     pub ollama_url: Option<String>,
+    /// OpenAI-compatible embedding server URL override (used when
+    /// `kind == "openai-compat"`). `None` falls back to the main
+    /// backend's `openai_compat_url`, mirroring the CLI's
+    /// `--embedder-openai-compat-url` → `--openai-compat-url` fallback.
+    pub openai_compat_url: Option<String>,
 }
 
 impl Default for EmbedderConfig {
@@ -229,6 +245,7 @@ impl Default for EmbedderConfig {
             kind: "none".to_string(),
             model: None,
             ollama_url: None,
+            openai_compat_url: None,
         }
     }
 }
@@ -496,7 +513,9 @@ pub struct BackendConfigView {
     pub kind: String,
     pub model: Option<String>,
     pub ollama_url: String,
+    pub openai_compat_url: String,
     pub api_key_source: ApiKeySourceView,
+    pub openai_compat_api_key_source: ApiKeySourceView,
 }
 
 impl From<&GuiConfig> for GuiConfigView {
@@ -507,7 +526,9 @@ impl From<&GuiConfig> for GuiConfigView {
                 kind: c.backend.kind.clone(),
                 model: c.backend.model.clone(),
                 ollama_url: c.backend.ollama_url.clone(),
+                openai_compat_url: c.backend.openai_compat_url.clone(),
                 api_key_source: (&c.backend.api_key_source).into(),
+                openai_compat_api_key_source: (&c.backend.openai_compat_api_key_source).into(),
             },
             classifier: c.classifier.clone(),
             extractor: c.extractor.clone(),
@@ -548,7 +569,9 @@ pub struct BackendConfigUpdate {
     pub kind: String,
     pub model: Option<String>,
     pub ollama_url: String,
+    pub openai_compat_url: String,
     pub api_key_source: ApiKeyUpdate,
+    pub openai_compat_api_key_source: ApiKeyUpdate,
 }
 
 impl GuiConfigUpdate {
@@ -562,10 +585,15 @@ impl GuiConfigUpdate {
                 kind: self.backend.kind,
                 model: self.backend.model,
                 ollama_url: self.backend.ollama_url,
+                openai_compat_url: self.backend.openai_compat_url,
                 api_key_source: self
                     .backend
                     .api_key_source
                     .resolve(&current.backend.api_key_source),
+                openai_compat_api_key_source: self
+                    .backend
+                    .openai_compat_api_key_source
+                    .resolve(&current.backend.openai_compat_api_key_source),
             },
             classifier: self.classifier,
             extractor: self.extractor,
@@ -740,6 +768,78 @@ mod tests {
     }
 
     #[test]
+    fn view_redacts_inline_openai_compat_key() {
+        // The openai-compat key gets the SAME redaction discipline as the
+        // cloud key — it must never appear in the JSON the frontend sees.
+        let mut cfg = GuiConfig::default();
+        cfg.backend.openai_compat_api_key_source = ApiKeySource::Inline {
+            key: "sk-oai-secret-bbb".to_string(),
+        };
+        let view: GuiConfigView = (&cfg).into();
+        let json = serde_json::to_string(&view).unwrap();
+        assert!(
+            !json.contains("sk-oai-secret-bbb"),
+            "redacted view must not contain the openai-compat key: {json}"
+        );
+        assert_eq!(
+            view.backend.openai_compat_api_key_source,
+            ApiKeySourceView::Inline { has_key: true },
+        );
+    }
+
+    #[test]
+    fn default_openai_compat_url_matches_cli() {
+        let cfg = GuiConfig::default();
+        assert_eq!(cfg.backend.openai_compat_url, "http://localhost:8000");
+        assert_eq!(
+            cfg.backend.openai_compat_api_key_source,
+            ApiKeySource::Env,
+            "openai-compat key defaults to env (OPENAI_COMPAT_API_KEY)"
+        );
+        assert_eq!(cfg.embedder.openai_compat_url, None);
+    }
+
+    #[test]
+    fn update_keep_preserves_existing_openai_compat_key() {
+        // Independent of the cloud key: a `Keep` on the openai-compat
+        // source carries the persisted secret forward untouched.
+        let mut current = GuiConfig::default();
+        current.backend.openai_compat_api_key_source = ApiKeySource::Inline {
+            key: "sk-oai-original".to_string(),
+        };
+        let resolved = ApiKeyUpdate::Keep.resolve(&current.backend.openai_compat_api_key_source);
+        assert_eq!(
+            resolved,
+            ApiKeySource::Inline {
+                key: "sk-oai-original".to_string()
+            }
+        );
+    }
+
+    #[test]
+    fn older_config_without_openai_compat_fields_loads_with_defaults() {
+        // An on-disk config from before openai-compat GUI parity has no
+        // `openai_compat_url` / `openai_compat_api_key_source` keys. serde
+        // defaults must inject them without a migration step.
+        let dir = TempDir::new().unwrap();
+        let path = config_path(dir.path());
+        fs::create_dir_all(path.parent().unwrap()).unwrap();
+        fs::write(
+            &path,
+            r#"{
+                "learner": {"name": "Ada", "age": 7, "locale": "en"},
+                "backend": {"kind": "cloud", "model": null, "ollama_url": "http://localhost:11434", "api_key_source": {"kind": "env"}}
+            }"#,
+        )
+        .unwrap();
+
+        let cfg = load(dir.path()).unwrap();
+        assert_eq!(cfg.backend.kind, "cloud");
+        assert_eq!(cfg.backend.openai_compat_url, "http://localhost:8000");
+        assert_eq!(cfg.backend.openai_compat_api_key_source, ApiKeySource::Env);
+    }
+
+    #[test]
     fn update_keep_preserves_existing_inline_key() {
         let mut current = GuiConfig::default();
         current.backend.api_key_source = ApiKeySource::Inline {
@@ -751,12 +851,14 @@ mod tests {
                 "kind": "cloud",
                 "model": null,
                 "ollama_url": "http://localhost:11434",
-                "api_key_source": {"kind": "keep"}
+                "openai_compat_url": "http://localhost:8000",
+                "api_key_source": {"kind": "keep"},
+                "openai_compat_api_key_source": {"kind": "keep"}
             },
             "classifier": {"match_main": true, "kind": null, "model": null, "timeout_ms": 3000},
             "extractor": {"match_main": true, "kind": null, "model": null, "timeout_ms": 5000},
             "comprehension": {"match_main": true, "kind": null, "model": null, "timeout_ms": 5000},
-            "embedder": {"kind": "none", "model": null, "ollama_url": null},
+            "embedder": {"kind": "none", "model": null, "ollama_url": null, "openai_compat_url": null},
             "vocab": {"max_per_prompt": null},
             "breaks": {"after_mins": 30},
             "persistence": {"session_db": null, "knowledge_db": null, "no_persist": false},
@@ -935,7 +1037,9 @@ mod tests {
             "backend": {
                 "kind": "stub", "model": null,
                 "ollama_url": "http://localhost:11434",
+                "openai_compat_url": "http://localhost:8000",
                 "api_key_source": {"kind": "keep"},
+                "openai_compat_api_key_source": {"kind": "keep"},
             },
             "classifier": {"match_main": true, "kind": null, "model": null, "timeout_ms": 3000},
             "extractor": {"match_main": true, "kind": null, "model": null, "timeout_ms": 5000},

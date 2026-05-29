@@ -76,6 +76,11 @@ embedding = ["primer-engine/embedding"]
 # Lightweight Ollama-backed embedder.
 ollama-embedding = ["primer-engine/ollama-embedding"]
 
+# OpenAI-compatible embedding server (oMLX, LM Studio, vLLM, …). Mirrors
+# primer-cli's flag so the GUI can opt in independently; plumbs through
+# to primer-engine for the cfg-gated `build_openai_compat_embedder` arm.
+openai-compat-embedding = ["primer-engine/openai-compat-embedding"]
+
 # Voice mode — pulls every speech backend feature so the GUI binary can
 # drive the LISTEN → LATENT_THINK → SPEAK → LISTEN state machine end-to-
 # end. Also pulls reqwest for streaming asset downloads (PR 4).

@@ -21,8 +21,8 @@ use primer_core::i18n::Locale;
 use primer_core::storage::{LearnerStore, SessionStore};
 use primer_engine::{
     BackendParams, IN_MEMORY, build_backend, build_classifier, build_comprehension,
-    build_extractor, build_fastembed_embedder, build_ollama_embedder, create_learner_with_id,
-    reconcile_persisted_learner, resolve_session_db_path,
+    build_extractor, build_fastembed_embedder, build_ollama_embedder, build_openai_compat_embedder,
+    create_learner_with_id, reconcile_persisted_learner, resolve_session_db_path,
 };
 use primer_extractor::ExtractorSettings;
 use primer_knowledge::SqliteKnowledgeBase;
@@ -124,15 +124,21 @@ async fn build_with_strategy(
         (ApiKeySource::Env, _) => None,
     };
 
+    // OpenAI-compat key resolves independently of the cloud key. `Env`
+    // reads `OPENAI_COMPAT_API_KEY` (the CLI's env-var name); the same
+    // resolved value feeds both the main backend (when kind ==
+    // "openai-compat") and the openai-compat embedder, mirroring the
+    // CLI's reuse of `--openai-compat-api-key` across both.
+    let openai_compat_api_key = match &backend_config.openai_compat_api_key_source {
+        ApiKeySource::Inline { key } => Some(key.clone()),
+        ApiKeySource::Env => std::env::var("OPENAI_COMPAT_API_KEY").ok(),
+    };
+
     let params = BackendParams {
         api_key,
         ollama_url: backend_config.ollama_url.clone(),
-        // The GUI config does not yet expose openai-compat settings; use
-        // the same defaults the CLI does. A future GUI settings screen can
-        // plumb these through `BackendConfig` when it adds openai-compat
-        // support.
-        openai_compat_url: "http://localhost:8000".to_string(),
-        openai_compat_api_key: None,
+        openai_compat_url: backend_config.openai_compat_url.clone(),
+        openai_compat_api_key: openai_compat_api_key.clone(),
         classifier_backend: subsystem_kind(&config.classifier),
         classifier_model: config.classifier.model.clone(),
         extractor_backend: subsystem_kind(&config.extractor),
@@ -333,7 +339,12 @@ async fn build_with_strategy(
     .map_err(|e| format!("constructing comprehension classifier: {e}"))?;
 
     // ─── Embedder ────────────────────────────────────────────────────
-    let embedder = build_embedder(&config.embedder).await?;
+    let embedder = build_embedder(
+        &config.embedder,
+        &backend_config.openai_compat_url,
+        openai_compat_api_key,
+    )
+    .await?;
 
     // ─── Pedagogy + vocab settings ───────────────────────────────────
     let pedagogy_config = PedagogyConfig {
@@ -415,11 +426,15 @@ fn resolve_main_model(kind: &str, model: Option<&str>) -> Result<String, String>
         "ollama" => model.map(String::from).ok_or_else(|| {
             "ollama backend requires a model name (e.g. \"llama3.2\") in settings".to_string()
         }),
+        "openai-compat" => model.map(String::from).ok_or_else(|| {
+            "openai-compat backend requires a model name (the server's model id) in settings"
+                .to_string()
+        }),
         "stub" => Ok(model
             .map(String::from)
             .unwrap_or_else(|| "stub".to_string())),
         other => Err(format!(
-            "unknown backend kind {other:?}: expected one of stub, cloud, ollama"
+            "unknown backend kind {other:?}: expected one of stub, cloud, ollama, openai-compat"
         )),
     }
 }
@@ -441,6 +456,8 @@ fn subsystem_kind(s: &crate::config::SubsystemConfig) -> Option<String> {
 /// stderr line + exit).
 async fn build_embedder(
     config: &crate::config::EmbedderConfig,
+    main_openai_compat_url: &str,
+    openai_compat_api_key: Option<String>,
 ) -> Result<Option<Arc<dyn primer_core::embedder::Embedder>>, String> {
     match config.kind.as_str() {
         "none" => Ok(None),
@@ -449,8 +466,20 @@ async fn build_embedder(
         "ollama" => {
             build_ollama_embedder(config.ollama_url.as_deref(), config.model.as_deref()).await
         }
+        "openai-compat" => {
+            // The embedder URL falls back to the main backend's
+            // openai-compat URL when no embedder-specific override is set
+            // (mirrors the CLI's `--embedder-openai-compat-url` →
+            // `--openai-compat-url` fallback). The API key is the same
+            // resolved value the main backend uses.
+            let url = config
+                .openai_compat_url
+                .as_deref()
+                .or(Some(main_openai_compat_url));
+            build_openai_compat_embedder(url, config.model.as_deref(), openai_compat_api_key).await
+        }
         other => Err(format!(
-            "unknown embedder backend {other:?}: expected one of none, stub, fastembed, ollama"
+            "unknown embedder backend {other:?}: expected one of none, stub, fastembed, ollama, openai-compat"
         )),
     }
 }
@@ -526,6 +555,50 @@ mod tests {
         assert!(
             err.contains("magic"),
             "error must name the offending backend: {err}"
+        );
+    }
+
+    #[tokio::test]
+    async fn openai_compat_without_model_errors() {
+        let home = TempDir::new().unwrap();
+        let mut cfg = stub_config();
+        cfg.backend.kind = "openai-compat".to_string();
+        cfg.backend.model = None;
+        let err = build_active_session(home.path(), &cfg).await.unwrap_err();
+        assert!(
+            err.to_lowercase().contains("openai-compat") && err.to_lowercase().contains("model"),
+            "error must mention openai-compat and the missing model: {err}"
+        );
+    }
+
+    #[tokio::test]
+    async fn openai_compat_with_model_constructs() {
+        // The openai-compat backend constructs without a network call
+        // (it's just an HTTP client + model id). Selecting it with a
+        // model id and the default localhost:8000 URL must succeed.
+        let home = TempDir::new().unwrap();
+        let mut cfg = stub_config();
+        cfg.backend.kind = "openai-compat".to_string();
+        cfg.backend.model = Some("mlx-community/Qwen3-8B-4bit".to_string());
+        let s = build_active_session(home.path(), &cfg).await.unwrap();
+        assert_eq!(s.backend_name, "openai-compat");
+        assert_eq!(s.main_model, "mlx-community/Qwen3-8B-4bit");
+    }
+
+    #[tokio::test]
+    async fn openai_compat_embedder_without_model_errors() {
+        // Independent of the `openai-compat-embedding` cargo feature: with
+        // no embedder model the build fails (feature-absent → feature
+        // error; feature-present → model-required error). Either way the
+        // GUI surfaces an error instead of silently degrading.
+        let home = TempDir::new().unwrap();
+        let mut cfg = stub_config();
+        cfg.embedder.kind = "openai-compat".to_string();
+        cfg.embedder.model = None;
+        let err = build_active_session(home.path(), &cfg).await.unwrap_err();
+        assert!(
+            err.to_lowercase().contains("openai-compat"),
+            "error must mention the openai-compat embedder: {err}"
         );
     }
 

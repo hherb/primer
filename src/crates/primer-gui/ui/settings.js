@@ -44,6 +44,8 @@ const dom = {
     backendModel: document.getElementById("f-backend-model"),
     backendOllamaUrl: document.getElementById("f-backend-ollama-url"),
     backendOllamaUrlField: document.getElementById("f-backend-ollama-url-field"),
+    backendOpenaiCompatUrl: document.getElementById("f-backend-openai-compat-url"),
+    backendOpenaiCompatUrlField: document.getElementById("f-backend-openai-compat-url-field"),
     apiKeyFieldset: document.getElementById("f-api-key-fieldset"),
     apiKeyEnv: document.getElementById("f-api-key-env"),
     apiKeyInline: document.getElementById("f-api-key-inline"),
@@ -51,10 +53,19 @@ const dom = {
     apiKeyInputLabel: document.getElementById("f-api-key-input-label"),
     apiKeyInput: document.getElementById("f-api-key-input"),
     apiKeyHint: document.getElementById("f-api-key-hint"),
+    ocApiKeyFieldset: document.getElementById("f-openai-compat-api-key-fieldset"),
+    ocApiKeyEnv: document.getElementById("f-openai-compat-api-key-env"),
+    ocApiKeyInline: document.getElementById("f-openai-compat-api-key-inline"),
+    ocApiKeyInputField: document.getElementById("f-openai-compat-api-key-input-field"),
+    ocApiKeyInputLabel: document.getElementById("f-openai-compat-api-key-input-label"),
+    ocApiKeyInput: document.getElementById("f-openai-compat-api-key-input"),
+    ocApiKeyHint: document.getElementById("f-openai-compat-api-key-hint"),
     embedderKind: document.getElementById("f-embedder-kind"),
     embedderModel: document.getElementById("f-embedder-model"),
     embedderOllamaUrl: document.getElementById("f-embedder-ollama-url"),
     embedderOllamaUrlField: document.getElementById("f-embedder-ollama-url-field"),
+    embedderOpenaiCompatUrl: document.getElementById("f-embedder-openai-compat-url"),
+    embedderOpenaiCompatUrlField: document.getElementById("f-embedder-openai-compat-url-field"),
     vocabMax: document.getElementById("f-vocab-max"),
     breaksAfterMins: document.getElementById("f-breaks-after-mins"),
     sessionDb: document.getElementById("f-persistence-session-db"),
@@ -72,6 +83,10 @@ const state = {
   /// reject an empty-string inline-key (no key on disk + empty field
   /// means the user picked Inline but never typed — clearly an error).
   hasInlineKey: false,
+  /// Same `has_key` semantics as `hasInlineKey`, but for the
+  /// openai-compat server key — tracked separately so the cloud and
+  /// openai-compat secrets never cross-contaminate on save.
+  hasOcInlineKey: false,
   /// Set when an open() call is in-flight so a second click while we
   /// wait on `get_settings` doesn't double-open the modal.
   isOpening: false,
@@ -230,9 +245,10 @@ function populate(view) {
   f.backendKind.value = view.backend.kind;
   f.backendModel.value = view.backend.model ?? "";
   f.backendOllamaUrl.value = view.backend.ollama_url;
+  f.backendOpenaiCompatUrl.value = view.backend.openai_compat_url ?? "";
   applyBackendKindReveal(view.backend.kind);
 
-  // API key
+  // API key (cloud)
   state.hasInlineKey =
     view.backend.api_key_source.kind === "inline" &&
     view.backend.api_key_source.has_key === true;
@@ -246,6 +262,17 @@ function populate(view) {
   // session's typed key when re-opening.
   f.apiKeyInput.value = "";
 
+  // API key (openai-compat server)
+  const ocSrc = view.backend.openai_compat_api_key_source ?? { kind: "env" };
+  state.hasOcInlineKey = ocSrc.kind === "inline" && ocSrc.has_key === true;
+  if (ocSrc.kind === "inline") {
+    f.ocApiKeyInline.checked = true;
+  } else {
+    f.ocApiKeyEnv.checked = true;
+  }
+  applyOcApiKeyReveal();
+  f.ocApiKeyInput.value = "";
+
   // Subsystems
   for (const name of SUBSYSTEMS) {
     populateSubsystem(name, view[name]);
@@ -255,6 +282,7 @@ function populate(view) {
   f.embedderKind.value = view.embedder.kind;
   f.embedderModel.value = view.embedder.model ?? "";
   f.embedderOllamaUrl.value = view.embedder.ollama_url ?? "";
+  f.embedderOpenaiCompatUrl.value = view.embedder.openai_compat_url ?? "";
   applyEmbedderKindReveal(view.embedder.kind);
 
   // Vocab & breaks
@@ -408,14 +436,21 @@ function wireBackendKindReveal() {
 function applyBackendKindReveal(kind) {
   // Ollama URL only relevant for the ollama backend.
   dom.fields.backendOllamaUrlField.hidden = kind !== "ollama";
-  // API key fieldset only relevant for cloud — fade it for stub/ollama
-  // so the user isn't tempted to put a key where it'd be ignored.
+  // OpenAI-compat server URL only relevant for that backend.
+  dom.fields.backendOpenaiCompatUrlField.hidden = kind !== "openai-compat";
+  // Each API-key fieldset is only relevant for its own backend — fade
+  // the others so the user isn't tempted to put a key where it'd be
+  // ignored. `hidden` removes the openai-compat fieldset entirely for
+  // non-openai-compat backends (it would otherwise clutter the cloud /
+  // stub / ollama forms); the cloud fieldset keeps its long-standing
+  // disabled-fade behaviour.
   const cloud = kind === "cloud";
   if (cloud) {
     dom.fields.apiKeyFieldset.removeAttribute("disabled");
   } else {
     dom.fields.apiKeyFieldset.setAttribute("disabled", "");
   }
+  dom.fields.ocApiKeyFieldset.hidden = kind !== "openai-compat";
 }
 
 function wireEmbedderKindReveal() {
@@ -426,11 +461,15 @@ function wireEmbedderKindReveal() {
 
 function applyEmbedderKindReveal(kind) {
   dom.fields.embedderOllamaUrlField.hidden = kind !== "ollama";
+  dom.fields.embedderOpenaiCompatUrlField.hidden = kind !== "openai-compat";
 }
 
 function wireApiKeyRadios() {
   for (const radio of [dom.fields.apiKeyEnv, dom.fields.apiKeyInline]) {
     radio.addEventListener("change", applyApiKeyReveal);
+  }
+  for (const radio of [dom.fields.ocApiKeyEnv, dom.fields.ocApiKeyInline]) {
+    radio.addEventListener("change", applyOcApiKeyReveal);
   }
 }
 
@@ -448,6 +487,28 @@ function applyApiKeyReveal() {
       dom.fields.apiKeyInput.placeholder = "sk-ant-…";
       dom.fields.apiKeyHint.textContent =
         "Will be saved to ~/.primer/gui-config.json (file mode 0600).";
+    }
+  }
+}
+
+/// Mirror of [`applyApiKeyReveal`] for the openai-compat server key.
+/// Kept as a sibling rather than parameterising the original so the
+/// long-standing cloud path stays byte-identical and bisects cleanly.
+function applyOcApiKeyReveal() {
+  const inline = dom.fields.ocApiKeyInline.checked;
+  dom.fields.ocApiKeyInputField.hidden = !inline;
+  if (inline) {
+    if (state.hasOcInlineKey) {
+      dom.fields.ocApiKeyInputLabel.textContent =
+        "Replace server key (or leave blank to keep existing)";
+      dom.fields.ocApiKeyInput.placeholder = "(leave blank to keep the existing key)";
+      dom.fields.ocApiKeyHint.textContent =
+        "An inline key is already stored. Leave blank to keep it; fill to overwrite.";
+    } else {
+      dom.fields.ocApiKeyInputLabel.textContent = "Server API key";
+      dom.fields.ocApiKeyInput.placeholder = "(only needed for remote providers)";
+      dom.fields.ocApiKeyHint.textContent =
+        "Optional for local servers (oMLX/LM Studio/vLLM); required for remote providers (Together/Groq). Saved to ~/.primer/gui-config.json (file mode 0600).";
     }
   }
 }
@@ -545,6 +606,15 @@ function gather() {
   }
 
   const apiKeyUpdate = resolveApiKeyUpdate();
+  // Only resolve the openai-compat key from the form when that backend is
+  // active; the fieldset is hidden otherwise, so its (stale) radio state
+  // must not drive the save. `Keep` carries the persisted source forward
+  // untouched and side-steps the half-configured throw on, e.g., a save
+  // made from the cloud backend after toggling away from openai-compat.
+  const ocApiKeyUpdate =
+    f.backendKind.value === "openai-compat"
+      ? resolveOcApiKeyUpdate()
+      : { kind: "keep" };
 
   return {
     learner: {
@@ -556,7 +626,13 @@ function gather() {
       kind: f.backendKind.value,
       model: orNull(f.backendModel.value.trim()),
       ollama_url: f.backendOllamaUrl.value.trim(),
+      // BackendConfigUpdate requires a non-null String here; fall back
+      // to the CLI default when the field was cleared so we never send
+      // an empty URL the wiring layer would choke on.
+      openai_compat_url:
+        f.backendOpenaiCompatUrl.value.trim() || "http://localhost:8000",
       api_key_source: apiKeyUpdate,
+      openai_compat_api_key_source: ocApiKeyUpdate,
     },
     classifier: gatherSubsystem("classifier"),
     extractor: gatherSubsystem("extractor"),
@@ -565,6 +641,7 @@ function gather() {
       kind: f.embedderKind.value,
       model: orNull(f.embedderModel.value.trim()),
       ollama_url: orNull(f.embedderOllamaUrl.value.trim()),
+      openai_compat_url: orNull(f.embedderOpenaiCompatUrl.value.trim()),
     },
     vocab: {
       max_per_prompt: orNullNumber(f.vocabMax.value),
@@ -633,6 +710,25 @@ function resolveApiKeyUpdate() {
   // Env), so the saved config would silently switch back to env.
   throw new Error(
     "Inline API key selected but no key entered. Type a key or pick 'Read from environment variable'.",
+  );
+}
+
+/// Sibling of [`resolveApiKeyUpdate`] for the openai-compat server key.
+/// Same env / inline / keep resolution; the only behavioural difference
+/// is the wording of the half-configured error.
+function resolveOcApiKeyUpdate() {
+  if (dom.fields.ocApiKeyEnv.checked) {
+    return { kind: "env" };
+  }
+  const typed = dom.fields.ocApiKeyInput.value;
+  if (typed.length > 0) {
+    return { kind: "inline", key: typed };
+  }
+  if (state.hasOcInlineKey) {
+    return { kind: "keep" };
+  }
+  throw new Error(
+    "Inline server API key selected but no key entered. Type a key or pick 'Read from environment variable'.",
   );
 }
 
