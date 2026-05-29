@@ -178,6 +178,17 @@ jobs:
         # subsequent runs warm.
         run: cargo check -p primer-speech --features supertonic
 
+      - name: cargo clippy --features supertonic
+        # `cargo check` above guards against build breaks; it does NOT
+        # catch lint rot. PR #175 (Supertonic Stage B) shipped with a
+        # latent clippy warning in `examples/tts_supertonic_hello.rs`
+        # that the `check` step above could never have caught — only
+        # `clippy -- -D warnings` does. `--all-targets` is required so
+        # the example (not just the lib) is linted. Co-locate the
+        # `-D warnings` with the step for the same reason as the default
+        # job's clippy step (closes #95).
+        run: cargo clippy -p primer-speech --features supertonic --all-targets -- -D warnings
+
       - name: cargo check --features fastembed
         # Mirrors the supertonic guard for the embedding path. The
         # workspace pin of `ort = "=2.0.0-rc.10"` is load-bearing for
@@ -350,3 +361,18 @@ jobs:
         # silently breaks NDK linking). NDK env vars are inherited from
         # the earlier "Export NDK toolchain env" step.
         run: cargo build --target aarch64-linux-android -p primer-qnn-sys
+
+      - name: Cross-compile primer-cli --features qnn
+        # Step 1.2.4 wired `--backend qnn` through `primer-cli` behind the
+        # `qnn` cargo feature; steps 1.2.2–1.2.5 added the QnnBackend impl,
+        # the streaming bridge, and the per-backend context budget — all
+        # gated on that feature. The plain `--bin primer` build above does
+        # NOT exercise the `qnn` feature (it's off by default), so the
+        # whole QnnBackend dep graph — including the `Arc<GenieLibrary>`
+        # wrapper, the C-ABI token callback, and the `spawn_blocking` query
+        # path — is invisible to default Android CI. This step cross-compiles
+        # the production binary with the feature on, catching Android-cfg
+        # drift in the QnnBackend ↔ primer-qnn-sys FFI seam before it
+        # surprises a developer building on RedMagic Termux. NDK env vars
+        # are inherited from the earlier "Export NDK toolchain env" step.
+        run: cargo build --target aarch64-linux-android -p primer-cli --features qnn
