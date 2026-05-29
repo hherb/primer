@@ -96,6 +96,10 @@ pub(super) fn subsystems_with_comprehension(
 
 /// Test inference backend that emits a pre-configured sequence of stream items.
 pub(super) struct ScriptedBackend {
+    // Backend `name()`. Defaults to "scripted-test"; the per-backend
+    // context-budget tests override it (e.g. "qnn:test-model") to exercise
+    // `is_small_context_backend` detection through the dialogue manager.
+    name: String,
     // Wrap in Mutex<Option> so we can take ownership in `generate_stream`
     // even though the trait method takes `&self`.
     script: Mutex<Option<Vec<Result<TokenChunk>>>>,
@@ -106,9 +110,17 @@ pub(super) struct ScriptedBackend {
 impl ScriptedBackend {
     pub(super) fn new(items: Vec<Result<TokenChunk>>) -> Self {
         Self {
+            name: "scripted-test".to_string(),
             script: Mutex::new(Some(items)),
             summarize_calls: Mutex::new(0),
         }
+    }
+    /// Override the reported `name()`. Used by the per-backend
+    /// context-budget tests to simulate a small-context backend
+    /// (`"qnn:…"`).
+    pub(super) fn with_name(mut self, name: impl Into<String>) -> Self {
+        self.name = name.into();
+        self
     }
     pub(super) fn summary_call_count(&self) -> u32 {
         *self.summarize_calls.lock().unwrap()
@@ -121,7 +133,7 @@ impl ScriptedBackend {
 #[async_trait]
 impl InferenceBackend for ScriptedBackend {
     fn name(&self) -> &str {
-        "scripted-test"
+        &self.name
     }
     async fn is_available(&self) -> bool {
         true
@@ -153,6 +165,35 @@ pub(super) struct EmptyKnowledge;
 #[async_trait]
 impl KnowledgeBase for EmptyKnowledge {
     async fn retrieve(&self, _query: &str, _params: &RetrievalParams) -> Result<Vec<Passage>> {
+        Ok(vec![])
+    }
+}
+
+// ─── TopKRecordingKnowledge ──────────────────────────────────────────
+
+/// Knowledge base that records the `top_k` of the most recent BM25-only
+/// `retrieve` call so a test can prove the dialogue manager applied the
+/// per-backend KB budget. Returns no passages — only the requested
+/// `top_k` matters here.
+pub(super) struct TopKRecordingKnowledge {
+    last_top_k: Mutex<Option<usize>>,
+}
+
+impl TopKRecordingKnowledge {
+    pub(super) fn new() -> Self {
+        Self {
+            last_top_k: Mutex::new(None),
+        }
+    }
+    pub(super) fn last_top_k(&self) -> Option<usize> {
+        *self.last_top_k.lock().unwrap()
+    }
+}
+
+#[async_trait]
+impl KnowledgeBase for TopKRecordingKnowledge {
+    async fn retrieve(&self, _query: &str, params: &RetrievalParams) -> Result<Vec<Passage>> {
+        *self.last_top_k.lock().unwrap() = Some(params.top_k);
         Ok(vec![])
     }
 }

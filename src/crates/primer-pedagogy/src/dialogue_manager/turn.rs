@@ -171,7 +171,8 @@ impl DialogueManager {
             &knowledge_context,
             &summary,
             &retrieved_older,
-            self.config.context_window_turns,
+            self.config
+                .effective_context_window_turns(self.inference.name()),
             &due_vocab,
             self.config.break_suggest_after_minutes,
         )

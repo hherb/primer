@@ -46,10 +46,11 @@ pub const SMOKE_CHECK_PROMPT: &str = ".";
 
 /// Default suffix prefixed to `model_id` in [`InferenceBackend::name`].
 ///
-/// Kept as a const so downstream consumers (the dialogue manager's
-/// per-backend context-budget logic, step 1.2.5) can pattern-match on
-/// the prefix without hard-coding the string in two places.
-pub const QNN_NAME_PREFIX: &str = "qnn:";
+/// Re-exported from `primer-core` so the producer here and the dialogue
+/// manager's per-backend context-budget logic (step 1.2.5, which lives in
+/// `primer-pedagogy` and cannot depend on this crate) match on one shared
+/// constant rather than two hand-copied literals.
+pub use primer_core::backend::QNN_NAME_PREFIX;
 
 /// Qualcomm NPU inference backend.
 ///

@@ -75,6 +75,29 @@ pub mod break_suggest {
     pub const DEFAULT_INTERVAL_MINUTES: u32 = 30;
 }
 
+/// Pedagogy-engine defaults that aren't specific to one feature module.
+///
+/// The two context-window constants back [`crate::config::PedagogyConfig`]:
+/// the global value is the large-context (cloud) default; the
+/// `_SMALL_CONTEXT` value is used when the active backend is detected as a
+/// small-context (≈4K-token) backend via
+/// [`crate::backend::is_small_context_backend`] (Phase 1.2 step 1.2.5).
+pub mod pedagogy {
+
+    /// Recent-turn window for the global (cloud / large-context) path:
+    /// how many of the most recent conversation turns are sent to the LLM
+    /// as chat messages each turn. Pre-window turns reach the model only
+    /// through the rolling summary and long-term-memory retrieval.
+    pub const DEFAULT_CONTEXT_WINDOW_TURNS: usize = 20;
+
+    /// Recent-turn window for small-context (≈4K-token) backends. A
+    /// 4K-token budget must hold the system prompt, retrieved passages,
+    /// the rolling summary, *and* the recent turns — ~12 turns of
+    /// child+Primer exchange leaves headroom for the rest where the
+    /// 20-turn default would overflow. Phase 1.2 step 1.2.5.
+    pub const DEFAULT_CONTEXT_WINDOW_TURNS_SMALL_CONTEXT: usize = 12;
+}
+
 /// Defaults for hybrid retrieval (BM25 + dense-vector RRF). Used by the
 /// dialogue manager when an `Embedder` is wired; mirror the shape of
 /// [`crate::knowledge::HybridParams`] and feed into it directly.
@@ -115,6 +138,15 @@ pub mod retrieval {
     /// Comfortable for cloud Anthropic; revisit when the local llama.cpp
     /// path lands and the context window gets tighter.
     pub const KB_FINAL_TOP_K: usize = 5;
+
+    /// Fused-passage count handed to the prompt builder when the active
+    /// backend is a small-context (≈4K-token) backend
+    /// ([`crate::backend::is_small_context_backend`]). Three passages keep
+    /// the per-turn retrieval payload small enough to leave context-window
+    /// headroom for the conversation history under a 4K budget; the EN/DE
+    /// retrieval-quality benchmarks still reach 95% loose recall at
+    /// `top_k = 3` (see `KB_FINAL_TOP_K`). Phase 1.2 step 1.2.5.
+    pub const KB_FINAL_TOP_K_SMALL_CONTEXT: usize = 3;
 
     /// Post-fusion score floor for the KB hybrid path. Zero rather than
     /// `f64::NEG_INFINITY` so the fused list stays positive (RRF

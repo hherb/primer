@@ -63,8 +63,24 @@ pub struct KnowledgeConfig {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct PedagogyConfig {
-    /// How many conversation turns to include in the LLM context window.
+    /// How many conversation turns to include in the LLM context window
+    /// for the global (cloud / large-context) path.
     pub context_window_turns: usize,
+    /// Recent-turn window to use when the active backend is a small-context
+    /// (≈4K-token) backend — detected via
+    /// [`crate::backend::is_small_context_backend`] over the backend's
+    /// `name()`. `None` disables the override so every backend uses
+    /// `context_window_turns`. Default
+    /// `Some(DEFAULT_CONTEXT_WINDOW_TURNS_SMALL_CONTEXT)`. Phase 1.2 step
+    /// 1.2.5. Named `_small_context` rather than `_qnn` so a future
+    /// 4K-bound non-Qualcomm backend reuses it without a rename.
+    pub context_window_turns_small_context: Option<usize>,
+    /// Fused-passage count for knowledge-base retrieval when the active
+    /// backend is a small-context backend (same detection as
+    /// `context_window_turns_small_context`). `None` falls back to the
+    /// global `KB_FINAL_TOP_K`. Default
+    /// `Some(KB_FINAL_TOP_K_SMALL_CONTEXT)`. Phase 1.2 step 1.2.5.
+    pub kb_top_k_small_context: Option<usize>,
     /// Minutes between break-suggestion nudges. After this many minutes
     /// of session time (or this many minutes since the last suggestion,
     /// whichever is more recent), the next pedagogical intent is forced
@@ -80,9 +96,106 @@ pub struct PedagogyConfig {
 impl Default for PedagogyConfig {
     fn default() -> Self {
         Self {
-            context_window_turns: 20,
+            context_window_turns: crate::consts::pedagogy::DEFAULT_CONTEXT_WINDOW_TURNS,
+            context_window_turns_small_context: Some(
+                crate::consts::pedagogy::DEFAULT_CONTEXT_WINDOW_TURNS_SMALL_CONTEXT,
+            ),
+            kb_top_k_small_context: Some(crate::consts::retrieval::KB_FINAL_TOP_K_SMALL_CONTEXT),
             break_suggest_after_minutes: crate::consts::break_suggest::DEFAULT_INTERVAL_MINUTES,
             socratic_pressure: 0.5,
         }
+    }
+}
+
+impl PedagogyConfig {
+    /// Effective recent-turn context window for a backend with the given
+    /// `name()`. Small-context backends
+    /// ([`crate::backend::is_small_context_backend`]) use
+    /// `context_window_turns_small_context` when it is set; every other
+    /// backend — and a `None` override — uses the global
+    /// `context_window_turns`.
+    pub fn effective_context_window_turns(&self, backend_name: &str) -> usize {
+        match self.context_window_turns_small_context {
+            Some(n) if crate::backend::is_small_context_backend(backend_name) => n,
+            _ => self.context_window_turns,
+        }
+    }
+
+    /// Effective knowledge-base fused-passage count for a backend with the
+    /// given `name()`. Small-context backends use `kb_top_k_small_context`
+    /// when it is set; every other backend — and a `None` override — uses
+    /// the global [`crate::consts::retrieval::KB_FINAL_TOP_K`].
+    pub fn effective_kb_top_k(&self, backend_name: &str) -> usize {
+        match self.kb_top_k_small_context {
+            Some(k) if crate::backend::is_small_context_backend(backend_name) => k,
+            _ => crate::consts::retrieval::KB_FINAL_TOP_K,
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::backend::QNN_NAME_PREFIX;
+    use crate::consts::pedagogy::{
+        DEFAULT_CONTEXT_WINDOW_TURNS, DEFAULT_CONTEXT_WINDOW_TURNS_SMALL_CONTEXT,
+    };
+    use crate::consts::retrieval::{KB_FINAL_TOP_K, KB_FINAL_TOP_K_SMALL_CONTEXT};
+
+    #[test]
+    fn default_uses_global_window_for_cloud_backend() {
+        let cfg = PedagogyConfig::default();
+        assert_eq!(
+            cfg.effective_context_window_turns("claude-sonnet-4-6"),
+            DEFAULT_CONTEXT_WINDOW_TURNS
+        );
+    }
+
+    #[test]
+    fn default_uses_small_context_window_for_qnn_backend() {
+        let cfg = PedagogyConfig::default();
+        assert_eq!(
+            cfg.effective_context_window_turns(&format!("{QNN_NAME_PREFIX}Qwen3-4B")),
+            DEFAULT_CONTEXT_WINDOW_TURNS_SMALL_CONTEXT
+        );
+    }
+
+    #[test]
+    fn none_override_falls_back_to_global_window_even_for_qnn() {
+        let cfg = PedagogyConfig {
+            context_window_turns_small_context: None,
+            ..PedagogyConfig::default()
+        };
+        assert_eq!(
+            cfg.effective_context_window_turns(&format!("{QNN_NAME_PREFIX}Qwen3-4B")),
+            DEFAULT_CONTEXT_WINDOW_TURNS
+        );
+    }
+
+    #[test]
+    fn default_uses_global_kb_top_k_for_cloud_backend() {
+        let cfg = PedagogyConfig::default();
+        assert_eq!(cfg.effective_kb_top_k("stub"), KB_FINAL_TOP_K);
+    }
+
+    #[test]
+    fn default_uses_small_context_kb_top_k_for_qnn_backend() {
+        let cfg = PedagogyConfig::default();
+        assert_eq!(
+            cfg.effective_kb_top_k(&format!("{QNN_NAME_PREFIX}Qwen3-4B")),
+            KB_FINAL_TOP_K_SMALL_CONTEXT
+        );
+    }
+
+    #[test]
+    fn none_kb_override_falls_back_to_global_even_for_qnn() {
+        let cfg = PedagogyConfig {
+            kb_top_k_small_context: None,
+            ..PedagogyConfig::default()
+        };
+        assert_eq!(
+            cfg.effective_kb_top_k(&format!("{QNN_NAME_PREFIX}Qwen3-4B")),
+            KB_FINAL_TOP_K
+        );
     }
 }

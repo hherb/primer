@@ -178,6 +178,33 @@ async fn resume_session_triggers_summary_refresh_when_above_window() {
 }
 
 #[tokio::test]
+async fn resume_session_uses_small_context_window_for_qnn_backend() {
+    // Step 1.2.5: a small-context backend (name starts with "qnn:") uses
+    // the constrained recent-turn window (12) instead of the global
+    // default (20). The summary boundary lands at `total - window`, so
+    // 25 turns under a window of 12 must summarize through index 13 —
+    // not the index 5 that the 20-turn default would produce.
+    let backend = std::sync::Arc::new(
+        ScriptedBackend::new(vec![Ok(chunk("", true))]).with_name("qnn:test-model"),
+    );
+    let knowledge = std::sync::Arc::new(EmptyKnowledge);
+    let mut dm = DialogueManager::new(
+        test_learner(),
+        backend.clone(),
+        knowledge.clone(),
+        DialogueManagerStores::default(),
+        default_subsystems(),
+        PedagogyConfig::default(),
+    );
+    let loaded = make_test_session_with_turns(25, dm.learner.profile.id);
+    dm.resume_session(loaded).await.unwrap();
+    assert_eq!(
+        dm.session.summary_through_turn_index, 13,
+        "qnn backend should use the 12-turn window: boundary at total(25) - 12 = 13"
+    );
+}
+
+#[tokio::test]
 async fn resume_session_skips_summary_when_inside_first_window() {
     // Sessions that fit inside the active window have nothing to
     // summarize; resume must not waste an inference call.
