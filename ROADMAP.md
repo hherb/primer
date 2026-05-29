@@ -62,7 +62,7 @@ Status key: ✅ done · 🟡 in progress · [ ] not started.
 
 ### 1.2 — Qualcomm NPU (Snapdragon 8 Elite) 🟡
 
-Steps 1.2.1–1.2.5 landed; 1.2.0 (QAIRT install + device validation) and 1.2.6 (bench) remain.
+Steps 1.2.1–1.2.5 landed; 1.2.6's harness is built + host-tested (device numbers pending); 1.2.0 (QAIRT install + device validation) remains.
 
 - [x] `primer-qnn-sys` FFI scaffold (hand-rolled Genie C API + runtime dlopen).
 - [x] `QnnBackend` safe wrapper: trait-abstracted Genie handle, `primer-meta.json` parser, minijinja template, mutex-serialised dialog, ABI smoke check.
@@ -70,7 +70,7 @@ Steps 1.2.1–1.2.5 landed; 1.2.0 (QAIRT install + device validation) and 1.2.6 
 - [x] CLI wiring: `--backend qnn`, `--qnn-bundle-dir`, `--qnn-qairt-lib-dir` (+ env fallbacks).
 - [x] GUI wiring: QNN backend + bundle-dir / QAIRT-lib-dir pickers in Settings (always shown; selecting qnn on a non-`qnn`-feature build surfaces the "rebuild with --features qnn" hint inline). Host-tested; runtime still device-unverified.
 - [x] Per-backend 4K context budget for small-context backends (12-turn window, 3-passage top-K), keyed off `QNN_NAME_PREFIX`.
-- [ ] Benchmark + thermal harness (`examples/qnn_bench.rs`); target 15+ tok/s decode on Qwen3-4B W4A16, TTFT < 3s, peak < 70°C.
+- [x] Benchmark + thermal harness built: `examples/qnn_bench.rs` + 30-prompt `data/bench/socratic_prompts.jsonl` + pure host-tested metrics/thermal/loading modules + Android CI compile guard. Targets (15+ tok/s decode on Qwen3-4B W4A16, TTFT < 3s, peak < 70°C) are encoded as the verdict; **the actual numbers still need a device run** (gated on 1.2.0).
 
 ### 1.3 — Hybrid inference
 
