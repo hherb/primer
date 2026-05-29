@@ -44,6 +44,64 @@ async fn respond_to_streaming_invokes_callback_per_chunk() {
 }
 
 #[tokio::test]
+async fn kb_retrieval_uses_small_context_top_k_for_qnn_backend() {
+    // Step 1.2.5: under a small-context ("qnn:") backend, the BM25-only
+    // KB retrieval must request KB_FINAL_TOP_K_SMALL_CONTEXT passages.
+    use primer_core::consts::retrieval::KB_FINAL_TOP_K_SMALL_CONTEXT;
+    let backend = Arc::new(
+        ScriptedBackend::new(vec![Ok(chunk("ok", false)), Ok(chunk("", true))])
+            .with_name("qnn:test-model"),
+    );
+    let knowledge = Arc::new(TopKRecordingKnowledge::new());
+    let mut dm = DialogueManager::new(
+        test_learner(),
+        backend.clone(),
+        knowledge.clone(),
+        DialogueManagerStores::default(),
+        default_subsystems(),
+        PedagogyConfig::default(),
+    );
+    let _ = dm
+        .respond_to_streaming("why is the sky blue", |_| {})
+        .await
+        .unwrap();
+    assert_eq!(
+        knowledge.last_top_k(),
+        Some(KB_FINAL_TOP_K_SMALL_CONTEXT),
+        "qnn backend should request the small-context KB top-K"
+    );
+}
+
+#[tokio::test]
+async fn kb_retrieval_uses_global_top_k_for_cloud_backend() {
+    // A non-"qnn:" backend keeps the global KB_FINAL_TOP_K, proving the
+    // override is gated on the backend-name detection.
+    use primer_core::consts::retrieval::KB_FINAL_TOP_K;
+    let backend = Arc::new(ScriptedBackend::new(vec![
+        Ok(chunk("ok", false)),
+        Ok(chunk("", true)),
+    ]));
+    let knowledge = Arc::new(TopKRecordingKnowledge::new());
+    let mut dm = DialogueManager::new(
+        test_learner(),
+        backend.clone(),
+        knowledge.clone(),
+        DialogueManagerStores::default(),
+        default_subsystems(),
+        PedagogyConfig::default(),
+    );
+    let _ = dm
+        .respond_to_streaming("why is the sky blue", |_| {})
+        .await
+        .unwrap();
+    assert_eq!(
+        knowledge.last_top_k(),
+        Some(KB_FINAL_TOP_K),
+        "non-qnn backend should keep the global KB top-K"
+    );
+}
+
+#[tokio::test]
 async fn respond_to_streaming_returns_full_accumulated_text() {
     let backend = std::sync::Arc::new(ScriptedBackend::new(vec![
         Ok(chunk("Hel", false)),

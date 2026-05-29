@@ -63,8 +63,34 @@ pub struct KnowledgeConfig {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct PedagogyConfig {
-    /// How many conversation turns to include in the LLM context window.
+    /// How many conversation turns to include in the LLM context window
+    /// for the global (cloud / large-context) path.
     pub context_window_turns: usize,
+    /// Recent-turn window to use when the active backend is a small-context
+    /// (≈4K-token) backend — detected via
+    /// [`crate::backend::is_small_context_backend`] over the backend's
+    /// `name()`. `None` disables the override so every backend uses
+    /// `context_window_turns`. Default
+    /// `Some(DEFAULT_CONTEXT_WINDOW_TURNS_SMALL_CONTEXT)`. Phase 1.2 step
+    /// 1.2.5. Named `_small_context` rather than `_qnn` so a future
+    /// 4K-bound non-Qualcomm backend reuses it without a rename.
+    ///
+    /// `#[serde(default)]` so a config serialized before step 1.2.5 (which
+    /// lacks this field) deserializes to the budget default rather than
+    /// erroring — a bare `Option` default of `None` would silently *disable*
+    /// the small-context budget, so the explicit helper restores `Some(..)`.
+    #[serde(default = "default_context_window_turns_small_context")]
+    pub context_window_turns_small_context: Option<usize>,
+    /// Fused-passage count for knowledge-base retrieval when the active
+    /// backend is a small-context backend (same detection as
+    /// `context_window_turns_small_context`). `None` falls back to the
+    /// global `KB_FINAL_TOP_K`. Default
+    /// `Some(KB_FINAL_TOP_K_SMALL_CONTEXT)`. Phase 1.2 step 1.2.5.
+    ///
+    /// `#[serde(default)]` for the same backward-compatibility reason as
+    /// `context_window_turns_small_context`.
+    #[serde(default = "default_kb_top_k_small_context")]
+    pub kb_top_k_small_context: Option<usize>,
     /// Minutes between break-suggestion nudges. After this many minutes
     /// of session time (or this many minutes since the last suggestion,
     /// whichever is more recent), the next pedagogical intent is forced
@@ -77,12 +103,148 @@ pub struct PedagogyConfig {
     pub socratic_pressure: f32,
 }
 
+/// `#[serde(default)]` helper for `context_window_turns_small_context` — keeps
+/// the deserialized default in lockstep with [`PedagogyConfig::default`].
+fn default_context_window_turns_small_context() -> Option<usize> {
+    Some(crate::consts::pedagogy::DEFAULT_CONTEXT_WINDOW_TURNS_SMALL_CONTEXT)
+}
+
+/// `#[serde(default)]` helper for `kb_top_k_small_context` — keeps the
+/// deserialized default in lockstep with [`PedagogyConfig::default`].
+fn default_kb_top_k_small_context() -> Option<usize> {
+    Some(crate::consts::retrieval::KB_FINAL_TOP_K_SMALL_CONTEXT)
+}
+
 impl Default for PedagogyConfig {
     fn default() -> Self {
         Self {
-            context_window_turns: 20,
+            context_window_turns: crate::consts::pedagogy::DEFAULT_CONTEXT_WINDOW_TURNS,
+            context_window_turns_small_context: default_context_window_turns_small_context(),
+            kb_top_k_small_context: default_kb_top_k_small_context(),
             break_suggest_after_minutes: crate::consts::break_suggest::DEFAULT_INTERVAL_MINUTES,
             socratic_pressure: 0.5,
         }
+    }
+}
+
+impl PedagogyConfig {
+    /// Effective recent-turn context window for a backend with the given
+    /// `name()`. Small-context backends
+    /// ([`crate::backend::is_small_context_backend`]) use
+    /// `context_window_turns_small_context` when it is set; every other
+    /// backend — and a `None` override — uses the global
+    /// `context_window_turns`.
+    pub fn effective_context_window_turns(&self, backend_name: &str) -> usize {
+        match self.context_window_turns_small_context {
+            Some(n) if crate::backend::is_small_context_backend(backend_name) => n,
+            _ => self.context_window_turns,
+        }
+    }
+
+    /// Effective knowledge-base fused-passage count for a backend with the
+    /// given `name()`. Small-context backends use `kb_top_k_small_context`
+    /// when it is set; every other backend — and a `None` override — uses
+    /// the global [`crate::consts::retrieval::KB_FINAL_TOP_K`].
+    pub fn effective_kb_top_k(&self, backend_name: &str) -> usize {
+        match self.kb_top_k_small_context {
+            Some(k) if crate::backend::is_small_context_backend(backend_name) => k,
+            _ => crate::consts::retrieval::KB_FINAL_TOP_K,
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::backend::QNN_NAME_PREFIX;
+    use crate::consts::pedagogy::{
+        DEFAULT_CONTEXT_WINDOW_TURNS, DEFAULT_CONTEXT_WINDOW_TURNS_SMALL_CONTEXT,
+    };
+    use crate::consts::retrieval::{KB_FINAL_TOP_K, KB_FINAL_TOP_K_SMALL_CONTEXT};
+
+    #[test]
+    fn default_uses_global_window_for_cloud_backend() {
+        let cfg = PedagogyConfig::default();
+        assert_eq!(
+            cfg.effective_context_window_turns("claude-sonnet-4-6"),
+            DEFAULT_CONTEXT_WINDOW_TURNS
+        );
+    }
+
+    #[test]
+    fn deserializing_pre_1_2_5_config_restores_small_context_budget() {
+        // A config serialized before step 1.2.5 lacks the two
+        // `*_small_context` fields. `#[serde(default = ..)]` must restore the
+        // budget defaults — NOT `None`, which would silently disable the
+        // small-context budget for qnn backends.
+        let json = r#"{
+            "context_window_turns": 20,
+            "break_suggest_after_minutes": 30,
+            "socratic_pressure": 0.5
+        }"#;
+        let cfg: PedagogyConfig = serde_json::from_str(json).unwrap();
+        assert_eq!(
+            cfg.context_window_turns_small_context,
+            Some(DEFAULT_CONTEXT_WINDOW_TURNS_SMALL_CONTEXT),
+            "missing field must restore the budget default, not None"
+        );
+        assert_eq!(
+            cfg.kb_top_k_small_context,
+            Some(KB_FINAL_TOP_K_SMALL_CONTEXT),
+            "missing field must restore the budget default, not None"
+        );
+        // And the qnn budget actually applies after the round-trip.
+        assert_eq!(
+            cfg.effective_context_window_turns(&format!("{QNN_NAME_PREFIX}Qwen3-4B")),
+            DEFAULT_CONTEXT_WINDOW_TURNS_SMALL_CONTEXT
+        );
+    }
+
+    #[test]
+    fn default_uses_small_context_window_for_qnn_backend() {
+        let cfg = PedagogyConfig::default();
+        assert_eq!(
+            cfg.effective_context_window_turns(&format!("{QNN_NAME_PREFIX}Qwen3-4B")),
+            DEFAULT_CONTEXT_WINDOW_TURNS_SMALL_CONTEXT
+        );
+    }
+
+    #[test]
+    fn none_override_falls_back_to_global_window_even_for_qnn() {
+        let cfg = PedagogyConfig {
+            context_window_turns_small_context: None,
+            ..PedagogyConfig::default()
+        };
+        assert_eq!(
+            cfg.effective_context_window_turns(&format!("{QNN_NAME_PREFIX}Qwen3-4B")),
+            DEFAULT_CONTEXT_WINDOW_TURNS
+        );
+    }
+
+    #[test]
+    fn default_uses_global_kb_top_k_for_cloud_backend() {
+        let cfg = PedagogyConfig::default();
+        assert_eq!(cfg.effective_kb_top_k("stub"), KB_FINAL_TOP_K);
+    }
+
+    #[test]
+    fn default_uses_small_context_kb_top_k_for_qnn_backend() {
+        let cfg = PedagogyConfig::default();
+        assert_eq!(
+            cfg.effective_kb_top_k(&format!("{QNN_NAME_PREFIX}Qwen3-4B")),
+            KB_FINAL_TOP_K_SMALL_CONTEXT
+        );
+    }
+
+    #[test]
+    fn none_kb_override_falls_back_to_global_even_for_qnn() {
+        let cfg = PedagogyConfig {
+            kb_top_k_small_context: None,
+            ..PedagogyConfig::default()
+        };
+        assert_eq!(
+            cfg.effective_kb_top_k(&format!("{QNN_NAME_PREFIX}Qwen3-4B")),
+            KB_FINAL_TOP_K
+        );
     }
 }

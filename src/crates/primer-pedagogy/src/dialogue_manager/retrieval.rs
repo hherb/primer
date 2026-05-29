@@ -12,11 +12,11 @@ use primer_core::knowledge::{HybridParams, Passage, RetrievalParams};
 
 use super::DialogueManager;
 
-fn kb_hybrid_params() -> HybridParams {
+fn kb_hybrid_params(final_top_k: usize) -> HybridParams {
     HybridParams {
         bm25_top_k: r::KB_BM25_TOP_K,
         vector_top_k: r::KB_VECTOR_TOP_K,
-        final_top_k: r::KB_FINAL_TOP_K,
+        final_top_k,
         rrf_k: r::RRF_K,
         min_score: r::KB_MIN_SCORE,
         source_filter: vec![],
@@ -47,8 +47,12 @@ impl DialogueManager {
     /// Otherwise falls back to BM25-only — exactly today's behaviour.
     /// A hybrid retrieval failure is logged and falls back to BM25 too.
     pub(super) async fn retrieve_knowledge(&self, query: &str) -> Vec<Passage> {
+        // Per-backend KB budget: small-context backends ("qnn:…") retrieve
+        // fewer passages so the system prompt fits a 4K-token window
+        // (step 1.2.5). Non-qnn backends keep the global KB_FINAL_TOP_K.
+        let kb_top_k = self.config.effective_kb_top_k(self.inference.name());
         if let Some(ref embedder) = self.embedder {
-            let params = kb_hybrid_params();
+            let params = kb_hybrid_params(kb_top_k);
             match self
                 .knowledge
                 .retrieve_hybrid(query, embedder.as_ref(), &params)
@@ -61,7 +65,7 @@ impl DialogueManager {
             }
         }
         let params = RetrievalParams {
-            top_k: r::KB_FINAL_TOP_K,
+            top_k: kb_top_k,
             min_score: r::KB_BM25_ONLY_MIN_SCORE,
             source_filter: vec![],
         };
@@ -82,7 +86,9 @@ impl DialogueManager {
     /// as "no retrieved turns" — long-term memory is best-effort.
     pub(super) async fn retrieve_long_term_memory(&self, child_input: &str) -> (String, Vec<Turn>) {
         let total = self.session.turns.len();
-        let window = self.config.context_window_turns;
+        let window = self
+            .config
+            .effective_context_window_turns(self.inference.name());
         if total <= window {
             return (String::new(), vec![]);
         }

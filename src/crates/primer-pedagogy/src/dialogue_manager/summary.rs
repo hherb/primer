@@ -24,7 +24,9 @@ impl DialogueManager {
     /// advances. At the default K=20, a summary is built each time 20
     /// new turns have rolled past the boundary.
     pub(super) async fn refresh_summary_if_due(&mut self) {
-        let window = self.config.context_window_turns;
+        let window = self
+            .config
+            .effective_context_window_turns(self.inference.name());
         let total = self.session.turns.len();
         if total <= window {
             return;
@@ -42,7 +44,9 @@ impl DialogueManager {
     /// yet cover. A summary that's already current is preserved
     /// verbatim — there is no value in regenerating identical work.
     pub(super) async fn refresh_summary_if_stale(&mut self) {
-        let window = self.config.context_window_turns;
+        let window = self
+            .config
+            .effective_context_window_turns(self.inference.name());
         let total = self.session.turns.len();
         if total <= window {
             return;

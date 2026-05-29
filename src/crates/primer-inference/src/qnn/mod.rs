@@ -27,7 +27,7 @@ pub mod genie;
 pub mod meta;
 pub mod template;
 
-pub use backend::QnnBackend;
+pub use backend::{QNN_NAME_PREFIX, QnnBackend};
 pub use genie::{GenieCallError, GenieDialog, GenieLibrary};
 pub use meta::{MetaError, PRIMER_META_FILENAME, PrimerMeta};
 pub use template::{ChatTemplate, TemplateError};
