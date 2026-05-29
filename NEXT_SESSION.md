@@ -80,7 +80,7 @@ Then the standing priority order resumes:
 
 Newly surfaced this session:
 
-- **`--all-targets` deviation from the brief's suggested clippy line was intentional.** The brief said `cargo clippy -p primer-speech --features supertonic -- -D warnings`. That form does NOT lint examples — but the rot the guard exists to catch was *in an example*. I added `--all-targets`. Verified clean both locally and on the PR's macOS… (actually Linux `feature-combos`) runner. If a future maintainer wonders why the CI line differs from the handoff suggestion, this is why.
+- **`--all-targets` deviation from the brief's suggested clippy line was intentional.** The brief said `cargo clippy -p primer-speech --features supertonic -- -D warnings`. That form does NOT lint examples — but the rot the guard exists to catch was *in an example*. I added `--all-targets`. Verified clean both locally and on the PR's Linux `feature-combos` runner. If a future maintainer wonders why the CI line differs from the handoff suggestion, this is why.
 - **CI is confirmed to run on `pull_request` events in this repo.** (Noting explicitly because an earlier draft of this brief wrongly suspected otherwise from premature polling — corrected after observing run `26625201672`, a `pull_request`-triggered run, go fully green. Don't repeat that mistake: `gh pr checks <n>` and the run's `event` field are the truth; give the run ~20–30 s to be created before concluding it doesn't exist.)
 
 Carried forward — still applicable:
