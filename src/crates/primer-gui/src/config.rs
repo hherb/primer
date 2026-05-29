@@ -82,6 +82,19 @@ pub struct BackendConfig {
     /// remote providers (Together, Groq) require it. Held under the
     /// same secret discipline as the cloud key — never crosses IPC.
     pub openai_compat_api_key_source: ApiKeySource,
+    /// QNN bundle directory (used when `kind == "qnn"`). Contains
+    /// `genie_config.json`, `primer-meta.json`, and the per-shard
+    /// context binaries. Mirrors the CLI's `--qnn-bundle-dir`. `None`
+    /// here means "unset" — selecting the qnn backend without it errors
+    /// at session-start via `build_qnn_backend`'s "bundle-dir required"
+    /// message. Not a secret, so it passes through the IPC view/update
+    /// DTOs verbatim (unlike the API keys).
+    pub qnn_bundle_dir: Option<PathBuf>,
+    /// QNN QAIRT runtime library directory (containing `libGenie.so`).
+    /// Mirrors the CLI's `--qnn-qairt-lib-dir`. `None` falls back to the
+    /// conventional `<bundle>/../qairt/lib/aarch64-android/` layout via
+    /// `primer_engine::default_qairt_lib_dir`.
+    pub qnn_qairt_lib_dir: Option<PathBuf>,
 }
 
 impl Default for BackendConfig {
@@ -93,6 +106,8 @@ impl Default for BackendConfig {
             openai_compat_url: "http://localhost:8000".to_string(),
             api_key_source: ApiKeySource::default(),
             openai_compat_api_key_source: ApiKeySource::default(),
+            qnn_bundle_dir: None,
+            qnn_qairt_lib_dir: None,
         }
     }
 }
@@ -516,6 +531,9 @@ pub struct BackendConfigView {
     pub openai_compat_url: String,
     pub api_key_source: ApiKeySourceView,
     pub openai_compat_api_key_source: ApiKeySourceView,
+    /// QNN bundle / QAIRT lib paths pass through verbatim — not secrets.
+    pub qnn_bundle_dir: Option<PathBuf>,
+    pub qnn_qairt_lib_dir: Option<PathBuf>,
 }
 
 impl From<&GuiConfig> for GuiConfigView {
@@ -529,6 +547,8 @@ impl From<&GuiConfig> for GuiConfigView {
                 openai_compat_url: c.backend.openai_compat_url.clone(),
                 api_key_source: (&c.backend.api_key_source).into(),
                 openai_compat_api_key_source: (&c.backend.openai_compat_api_key_source).into(),
+                qnn_bundle_dir: c.backend.qnn_bundle_dir.clone(),
+                qnn_qairt_lib_dir: c.backend.qnn_qairt_lib_dir.clone(),
             },
             classifier: c.classifier.clone(),
             extractor: c.extractor.clone(),
@@ -572,6 +592,13 @@ pub struct BackendConfigUpdate {
     pub openai_compat_url: String,
     pub api_key_source: ApiKeyUpdate,
     pub openai_compat_api_key_source: ApiKeyUpdate,
+    /// QNN bundle / QAIRT lib paths. Not secrets, so they cross IPC
+    /// verbatim. Like every other `BackendConfigUpdate` field, these are
+    /// **mandatory** in the `update_settings` payload — the struct has no
+    /// `#[serde(default)]`, so `settings.js::gather()` must always send
+    /// them (as `null` when unset).
+    pub qnn_bundle_dir: Option<PathBuf>,
+    pub qnn_qairt_lib_dir: Option<PathBuf>,
 }
 
 impl GuiConfigUpdate {
@@ -594,6 +621,8 @@ impl GuiConfigUpdate {
                     .backend
                     .openai_compat_api_key_source
                     .resolve(&current.backend.openai_compat_api_key_source),
+                qnn_bundle_dir: self.backend.qnn_bundle_dir,
+                qnn_qairt_lib_dir: self.backend.qnn_qairt_lib_dir,
             },
             classifier: self.classifier,
             extractor: self.extractor,
@@ -800,6 +829,114 @@ mod tests {
     }
 
     #[test]
+    fn default_qnn_paths_are_none() {
+        let cfg = GuiConfig::default();
+        assert_eq!(cfg.backend.qnn_bundle_dir, None);
+        assert_eq!(cfg.backend.qnn_qairt_lib_dir, None);
+    }
+
+    #[test]
+    fn older_config_without_qnn_fields_loads_with_defaults() {
+        // An on-disk config from before the QNN GUI picker has no
+        // `qnn_bundle_dir` / `qnn_qairt_lib_dir` keys. serde defaults must
+        // inject `None` for both without a migration step.
+        let dir = TempDir::new().unwrap();
+        let path = config_path(dir.path());
+        fs::create_dir_all(path.parent().unwrap()).unwrap();
+        fs::write(
+            &path,
+            r#"{
+                "learner": {"name": "Ada", "age": 7, "locale": "en"},
+                "backend": {
+                    "kind": "cloud", "model": null,
+                    "ollama_url": "http://localhost:11434",
+                    "openai_compat_url": "http://localhost:8000",
+                    "api_key_source": {"kind": "env"},
+                    "openai_compat_api_key_source": {"kind": "env"}
+                }
+            }"#,
+        )
+        .unwrap();
+
+        let cfg = load(dir.path()).unwrap();
+        assert_eq!(cfg.backend.kind, "cloud");
+        assert_eq!(cfg.backend.qnn_bundle_dir, None);
+        assert_eq!(cfg.backend.qnn_qairt_lib_dir, None);
+    }
+
+    #[test]
+    fn qnn_paths_round_trip_through_disk() {
+        let dir = TempDir::new().unwrap();
+        let mut cfg = GuiConfig::default();
+        cfg.backend.kind = "qnn".to_string();
+        cfg.backend.qnn_bundle_dir = Some("/bundles/qwen3-4b".into());
+        cfg.backend.qnn_qairt_lib_dir = Some("/qairt/lib/aarch64-android".into());
+
+        save(dir.path(), &cfg).unwrap();
+        let round_trip = load(dir.path()).unwrap();
+        assert_eq!(round_trip, cfg);
+    }
+
+    #[test]
+    fn qnn_paths_pass_through_view_verbatim() {
+        // Unlike API keys, the QNN paths are not secrets — the view must
+        // carry them through unredacted so the settings form can show the
+        // currently-configured paths.
+        let mut cfg = GuiConfig::default();
+        cfg.backend.qnn_bundle_dir = Some("/bundles/qwen3-4b".into());
+        cfg.backend.qnn_qairt_lib_dir = Some("/qairt/lib/aarch64-android".into());
+        let view: GuiConfigView = (&cfg).into();
+        assert_eq!(
+            view.backend.qnn_bundle_dir,
+            Some("/bundles/qwen3-4b".into())
+        );
+        assert_eq!(
+            view.backend.qnn_qairt_lib_dir,
+            Some("/qairt/lib/aarch64-android".into())
+        );
+    }
+
+    #[test]
+    fn qnn_paths_pass_through_update_verbatim() {
+        // The write path carries the QNN paths straight to the resolved
+        // config (no `Keep` semantics — they're not secrets).
+        let current = GuiConfig::default();
+        let update_json = r#"{
+            "learner": {"name": "Ada", "age": 7, "locale": "en"},
+            "backend": {
+                "kind": "qnn",
+                "model": null,
+                "ollama_url": "http://localhost:11434",
+                "openai_compat_url": "http://localhost:8000",
+                "api_key_source": {"kind": "keep"},
+                "openai_compat_api_key_source": {"kind": "keep"},
+                "qnn_bundle_dir": "/bundles/qwen3-4b",
+                "qnn_qairt_lib_dir": "/qairt/lib/aarch64-android"
+            },
+            "classifier": {"match_main": true, "kind": null, "model": null, "timeout_ms": 3000},
+            "extractor": {"match_main": true, "kind": null, "model": null, "timeout_ms": 5000},
+            "comprehension": {"match_main": true, "kind": null, "model": null, "timeout_ms": 5000},
+            "embedder": {"kind": "none", "model": null, "ollama_url": null, "openai_compat_url": null},
+            "vocab": {"max_per_prompt": null},
+            "breaks": {"after_mins": 30},
+            "persistence": {"session_db": null, "knowledge_db": null, "no_persist": false},
+            "ui": {"sidebar_open": true, "last_section": "current_turn"},
+            "speech": {"voice_mode_enabled": false, "disable_auto_download": false, "mic_silence_ms": 600, "overrides": {}}
+        }"#;
+        let update: GuiConfigUpdate = serde_json::from_str(update_json).unwrap();
+        let resolved = update.into_config(&current);
+        assert_eq!(resolved.backend.kind, "qnn");
+        assert_eq!(
+            resolved.backend.qnn_bundle_dir,
+            Some("/bundles/qwen3-4b".into())
+        );
+        assert_eq!(
+            resolved.backend.qnn_qairt_lib_dir,
+            Some("/qairt/lib/aarch64-android".into())
+        );
+    }
+
+    #[test]
     fn update_keep_preserves_existing_openai_compat_key() {
         // Independent of the cloud key: a `Keep` on the openai-compat
         // source carries the persisted secret forward untouched.
@@ -853,7 +990,9 @@ mod tests {
                 "ollama_url": "http://localhost:11434",
                 "openai_compat_url": "http://localhost:8000",
                 "api_key_source": {"kind": "keep"},
-                "openai_compat_api_key_source": {"kind": "keep"}
+                "openai_compat_api_key_source": {"kind": "keep"},
+                "qnn_bundle_dir": null,
+                "qnn_qairt_lib_dir": null
             },
             "classifier": {"match_main": true, "kind": null, "model": null, "timeout_ms": 3000},
             "extractor": {"match_main": true, "kind": null, "model": null, "timeout_ms": 5000},
@@ -1040,6 +1179,8 @@ mod tests {
                 "openai_compat_url": "http://localhost:8000",
                 "api_key_source": {"kind": "keep"},
                 "openai_compat_api_key_source": {"kind": "keep"},
+                "qnn_bundle_dir": null,
+                "qnn_qairt_lib_dir": null,
             },
             "classifier": {"match_main": true, "kind": null, "model": null, "timeout_ms": 3000},
             "extractor": {"match_main": true, "kind": null, "model": null, "timeout_ms": 5000},
