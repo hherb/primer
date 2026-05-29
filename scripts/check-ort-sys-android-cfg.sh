@@ -136,6 +136,13 @@ fi
 # `any(target_os = "android", ...)` but with a different operand order, so it
 # is not matched. If the count is not 1 the patch has been reworded and this
 # guard can no longer build a faithful counterfactual — fail loudly.
+#
+# Note `grep -Fc` counts matching LINES while the awk revert below replaces
+# the FIRST occurrence per line. They agree only because the patched cfg is a
+# single attribute on its own line — the canonical rustfmt'd shape, enforced
+# by the count==1 assertion. Two occurrences on one physical line would read
+# as count 1 yet only the first would revert; that shape can't arise from
+# rustfmt and would trip review long before reaching here.
 subs="$(grep -Fc "${PATCHED_CFG}" "${DIRS_RS}" || true)"
 if [[ "${subs}" -ne 1 ]]; then
 	echo "FAIL: expected exactly 1 patched cfg line, found ${subs}." >&2
