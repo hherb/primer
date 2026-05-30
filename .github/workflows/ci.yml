@@ -123,18 +123,22 @@ jobs:
         run: cargo test --workspace --no-fail-fast
 
   # Non-default feature build drift-guard. The default `cargo test` step
-  # only exercises the default feature stack — non-default features like
-  # `supertonic` and `fastembed` are invisible to that signal, and rotted
-  # silently in PR #127 (broken supertonic build) and PR #150 (broken
-  # macos-native-26 build) before reaching review. This job runs
+  # exercises the default feature stack — which now includes `embedding`
+  # (hybrid retrieval is default-on), so `fastembed` is covered on Linux by
+  # that job. `supertonic` remains non-default and was invisible to default
+  # CI: it rotted silently in PR #127 (broken supertonic build) and PR #150
+  # (broken macos-native-26 build) before reaching review. This job runs
   # `cargo check` against each Linux-buildable non-default feature stack
   # so transitive-dep API drift fails CI on the PR rather than during a
   # developer's later re-verification. Build-only (no `cargo test`) is
   # sufficient: the bug class we are guarding against is "API drift
-  # broke compilation," not runtime regressions. macOS-only features
-  # (`macos-native`, `macos-native-26`) are not covered here — they need
-  # platform-specific runners; see issues #129 and #151 for the broader
-  # matrix proposal.
+  # broke compilation," not runtime regressions. The `fastembed` check
+  # below is now somewhat redundant with the default job on Linux but is
+  # cheap and keeps the embedding stack covered independently of any future
+  # default-feature change; the real new fastembed proof is the macOS step
+  # in `feature-combos-macos`. macOS-only features (`macos-native`,
+  # `macos-native-26`) are not covered here — they need platform-specific
+  # runners; see issues #129 and #151 for the broader matrix proposal.
   feature-combos:
     name: cargo check (non-default features)
     runs-on: ubuntu-latest

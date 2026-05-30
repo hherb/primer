@@ -209,7 +209,7 @@ struct Cli {
     /// in-process deterministic hash embedder (no semantic value, only
     /// useful for testing the hybrid pipeline end-to-end); `fastembed` uses
     /// the BGE-M3 dense embedding model via `fastembed-rs` (~570 MB on first
-    /// run; requires the `embedding` cargo feature); `ollama` uses Ollama's
+    /// run; ships in the default `embedding` cargo feature); `ollama` uses Ollama's
     /// `/api/embeddings` (requires the `ollama-embedding` cargo feature and
     /// Ollama running locally); `openai-compat` uses a `/v1/embeddings`
     /// server (requires the `openai-compat-embedding` cargo feature).
