@@ -37,6 +37,14 @@ pub enum InferenceError {
     #[error("model not found: {model}")]
     ModelNotFound { model: String },
 
+    /// A reasoning-mode model emitted chain-of-thought but no visible answer
+    /// (truncated mid-thought, or a reasoning block followed by empty output).
+    /// Dev-facing `Display` only; the user sees a friendly localized message
+    /// via `crate::i18n::render_inference_error`. Not retryable — the "try
+    /// again" is the child re-asking, not an automatic retry.
+    #[error("model produced reasoning but no visible answer")]
+    ReasoningWithoutAnswer,
+
     /// Catch-all for unmapped conditions. Dev-facing only — the user
     /// never sees the inner string. Goes to `tracing::warn!` instead.
     #[error("{0}")]
@@ -45,9 +53,9 @@ pub enum InferenceError {
 
 impl InferenceError {
     /// Whether the retry helper should attempt to recover this
-    /// condition. `Auth`, `ModelNotFound`, and `Other` are surfaced
-    /// immediately; the rest are transient by definition or by
-    /// observation (network flap).
+    /// condition. `Auth`, `ModelNotFound`, `ReasoningWithoutAnswer`, and
+    /// `Other` are surfaced immediately; the rest are transient by
+    /// definition or by observation (network flap).
     pub fn is_retryable(&self) -> bool {
         matches!(
             self,
@@ -118,6 +126,7 @@ mod inference_error_tests {
         assert!(InferenceError::ServiceUnavailable.is_retryable());
         assert!(InferenceError::NetworkUnavailable.is_retryable());
         assert!(!InferenceError::ModelNotFound { model: "x".into() }.is_retryable());
+        assert!(!InferenceError::ReasoningWithoutAnswer.is_retryable());
         assert!(!InferenceError::Other("anything".into()).is_retryable());
     }
 
@@ -153,6 +162,10 @@ mod inference_error_tests {
                 }
             ),
             "model not found: llama3.2"
+        );
+        assert_eq!(
+            format!("{}", InferenceError::ReasoningWithoutAnswer),
+            "model produced reasoning but no visible answer"
         );
         assert_eq!(format!("{}", InferenceError::Other("raw".into())), "raw");
         assert_eq!(

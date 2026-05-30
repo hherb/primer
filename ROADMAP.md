@@ -37,6 +37,7 @@ Status key: ✅ done · 🟡 in progress · [ ] not started.
 - ✅ Vocabulary spaced repetition: `primer-core::vocab` Leitner-box scheduler; most-overdue concepts injected as a passive prompt section. `--vocab-max-per-prompt`.
 - ✅ Session-time break suggestions: `PedagogicalIntent::SuggestBreak`, engagement-state overrides win, locale-aware `{minutes}`. `--session-break-after-mins`.
 - ✅ `decide_intent()` characterization tests (18); `Encouragement`, `DirectAnswer`/`AnswerThenPivot`, and session-length-aware `Disengaging` routing all reachable via the engagement classifier.
+- ✅ Reasoning-token stripping (`primer-core::reasoning`): stateful streaming filter removes per-model chain-of-thought markers (`<think>…</think>`, Gemma4 `<|channel>…<channel|>`) from `OllamaBackend` + `OpenAiCompatBackend` (and therefore the classifier/extractor/comprehension subsystems) before they reach a child; reasoning-without-answer falls back to a localized "thinking problem, try again" via the i18n boundary. Built-in marker table always-on; CLI `--reasoning-marker <OPEN> <CLOSE>` appends custom pairs. **GUI custom-marker editor deferred** (the GUI already gets default stripping for free; the remaining piece is the Settings textarea + `BackendConfigUpdate` IPC field).
 
 ### 0.4 — Developer experience
 

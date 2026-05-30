@@ -54,6 +54,17 @@ pub struct BackendParams {
     /// `--qnn-qairt-lib-dir` flag with the same default applied when
     /// unset.
     pub qnn_qairt_lib_dir: Option<PathBuf>,
+    /// Extra `(open, close)` reasoning-marker pairs appended to the built-in
+    /// defaults for the Ollama / openai-compat backends. Empty ⇒ defaults
+    /// only. Ignored by every other backend arm.
+    ///
+    /// These markers propagate to any subsystem backend (classifier,
+    /// extractor, comprehension) constructed through the same `params` via
+    /// [`build_backend`]. That is intentional: the built-in defaults SHOULD
+    /// strip reasoning from subsystem responses too (it keeps their JSON
+    /// output clean for parsing), and a user-supplied custom pair applies
+    /// everywhere rather than to the chat backend alone.
+    pub reasoning_markers: Vec<(String, String)>,
 }
 
 /// Conventional default location of the QAIRT runtime libraries
@@ -100,16 +111,17 @@ pub async fn build_backend(
                 model,
             )))
         }
-        "ollama" => Ok(Arc::new(primer_inference::ollama::OllamaBackend::new(
-            params.ollama_url.clone(),
-            model,
-        ))),
+        "ollama" => Ok(Arc::new(
+            primer_inference::ollama::OllamaBackend::new(params.ollama_url.clone(), model)
+                .with_extra_markers(params.reasoning_markers.clone()),
+        )),
         "openai-compat" => Ok(Arc::new(
             primer_inference::openai_compat::OpenAiCompatBackend::new(
                 params.openai_compat_url.clone(),
                 model,
                 params.openai_compat_api_key.clone(),
-            ),
+            )
+            .with_extra_markers(params.reasoning_markers.clone()),
         )),
         "qnn" => build_qnn_backend(params).await,
         other => Err(PrimerError::Inference(
@@ -519,6 +531,7 @@ mod classifier_construction_tests {
             comprehension_model: None,
             qnn_bundle_dir: None,
             qnn_qairt_lib_dir: None,
+            reasoning_markers: Vec::new(),
         }
     }
 
@@ -672,6 +685,7 @@ mod extractor_construction_tests {
             comprehension_model: None,
             qnn_bundle_dir: None,
             qnn_qairt_lib_dir: None,
+            reasoning_markers: Vec::new(),
         }
     }
 
@@ -781,6 +795,7 @@ mod comprehension_construction_tests {
             comprehension_model: comprehension_model.map(String::from),
             qnn_bundle_dir: None,
             qnn_qairt_lib_dir: None,
+            reasoning_markers: Vec::new(),
         }
     }
 
@@ -895,6 +910,7 @@ mod qnn_dispatch_tests {
             comprehension_model: None,
             qnn_bundle_dir: None,
             qnn_qairt_lib_dir: None,
+            reasoning_markers: Vec::new(),
         }
     }
 

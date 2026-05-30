@@ -187,6 +187,8 @@ pub struct OpenAiCompatBackend {
     model: String,
     api_key: Option<String>,
     retry_settings: primer_core::retry::RetrySettings,
+    /// Marker pairs whose enclosed reasoning is stripped from the stream.
+    pub(crate) reasoning_markers: Vec<primer_core::reasoning::ReasoningMarker>,
 }
 
 impl OpenAiCompatBackend {
@@ -197,7 +199,19 @@ impl OpenAiCompatBackend {
             model,
             api_key,
             retry_settings: primer_core::retry::RetrySettings::default(),
+            reasoning_markers: primer_core::reasoning::default_markers(),
         }
+    }
+
+    /// Append custom `(open, close)` reasoning-marker pairs to the built-in
+    /// defaults. Builder style; returns `Self`.
+    pub fn with_extra_markers(mut self, extra: Vec<(String, String)>) -> Self {
+        self.reasoning_markers.extend(
+            extra
+                .into_iter()
+                .map(|(o, c)| primer_core::reasoning::ReasoningMarker::new(o, c)),
+        );
+        self
     }
 }
 
@@ -286,36 +300,55 @@ impl InferenceBackend for OpenAiCompatBackend {
         .await
         .map_err(PrimerError::Inference)?;
 
+        let markers = self.reasoning_markers.clone();
         let (mut tx, rx) = mpsc::unbounded::<Result<TokenChunk>>();
         let mut bytes_stream = response.bytes_stream();
 
         tokio::spawn(async move {
+            use primer_core::reasoning::ReasoningFilter;
             let mut buf = OpenAiSseBuffer::new();
+            let mut filter = ReasoningFilter::new(markers);
+            let mut had_visible = false;
             'outer: loop {
                 match bytes_stream.next().await {
                     Some(Ok(bytes)) => {
                         buf.extend(&bytes);
                         while let Some(data) = buf.pop_data() {
-                            match parse_openai_compat_chunk(&data) {
-                                Ok(Some(chunk)) => {
-                                    let done = chunk.done;
-                                    if tx.send(Ok(chunk)).await.is_err() {
-                                        break 'outer;
-                                    }
-                                    if done {
-                                        break 'outer;
-                                    }
-                                }
-                                Ok(None) => {}
+                            let chunk = match parse_openai_compat_chunk(&data) {
+                                Ok(Some(c)) => c,
+                                Ok(None) => continue,
                                 Err(e) => {
                                     tracing::warn!(
                                         "Skipping unparseable OpenAI-compat SSE line: {e}"
                                     );
+                                    continue;
+                                }
+                            };
+                            match crate::reasoning_stream::process_filtered_chunk(
+                                &mut filter,
+                                chunk,
+                                &mut had_visible,
+                                "openai-compat",
+                            ) {
+                                crate::reasoning_stream::FilterAction::Nothing => {}
+                                crate::reasoning_stream::FilterAction::Forward(r) => {
+                                    if tx.send(r).await.is_err() {
+                                        break 'outer;
+                                    }
+                                }
+                                crate::reasoning_stream::FilterAction::Final(r) => {
+                                    let _ = tx.send(r).await;
+                                    break 'outer;
                                 }
                             }
                         }
                     }
                     Some(Err(e)) => {
+                        // Mid-stream transport error: surface it and stop. We do
+                        // NOT flush the filter here — an error already drops the
+                        // partial turn at the dialogue-manager layer, and flushing
+                        // an unterminated `Inside` block would risk leaking
+                        // reasoning we deliberately suppressed.
                         let _ = tx
                             .send(Err(PrimerError::Inference(
                                 format!("OpenAI-compat byte stream error: {e}").into(),
@@ -323,7 +356,31 @@ impl InferenceBackend for OpenAiCompatBackend {
                             .await;
                         break 'outer;
                     }
-                    None => break 'outer,
+                    None => {
+                        // Upstream closed without a `[DONE]` / finish_reason
+                        // marker (abrupt EOF). A normal stream emits a done chunk,
+                        // hits the `Final` arm, and breaks before reaching here —
+                        // so reaching `None` means we must still flush. Feed a
+                        // synthetic done chunk through the shared helper so a
+                        // held-back visible tail still reaches the child and a
+                        // stream that ended mid-reasoning surfaces
+                        // `ReasoningWithoutAnswer` instead of silently producing
+                        // nothing.
+                        if let crate::reasoning_stream::FilterAction::Final(r) =
+                            crate::reasoning_stream::process_filtered_chunk(
+                                &mut filter,
+                                TokenChunk {
+                                    text: String::new(),
+                                    done: true,
+                                },
+                                &mut had_visible,
+                                "openai-compat",
+                            )
+                        {
+                            let _ = tx.send(r).await;
+                        }
+                        break 'outer;
+                    }
                 }
             }
         });
@@ -652,5 +709,77 @@ mod tests {
         };
         let json = serde_json::to_string(&req).unwrap();
         assert!(json.contains("\"stop\":[\"END\"]"));
+    }
+
+    // -- Reasoning-filter wiring (real shared helper) -----------------------
+
+    mod reasoning_wiring {
+        use super::*;
+        use crate::reasoning_stream::{FilterAction, process_filtered_chunk};
+        use primer_core::reasoning::ReasoningFilter;
+
+        fn drive(backend: &OpenAiCompatBackend, payloads: &[&str]) -> (String, bool) {
+            let mut filter = ReasoningFilter::new(backend.reasoning_markers.clone());
+            let mut had_visible = false;
+            let mut visible = String::new();
+            let mut err = false;
+            for p in payloads {
+                let Some(chunk) = parse_openai_compat_chunk(p).unwrap() else {
+                    continue;
+                };
+                match process_filtered_chunk(&mut filter, chunk, &mut had_visible, "openai-compat")
+                {
+                    FilterAction::Nothing => {}
+                    FilterAction::Forward(r) => visible.push_str(&r.unwrap().text),
+                    FilterAction::Final(r) => {
+                        match r {
+                            Ok(c) => visible.push_str(&c.text),
+                            Err(_) => err = true,
+                        }
+                        break;
+                    }
+                }
+            }
+            (visible, err)
+        }
+
+        fn delta(content: &str) -> String {
+            format!(r#"{{"choices":[{{"delta":{{"content":"{content}"}},"finish_reason":null}}]}}"#)
+        }
+
+        fn stop() -> String {
+            r#"{"choices":[{"delta":{},"finish_reason":"stop"}]}"#.to_string()
+        }
+
+        #[test]
+        fn strips_think_block_end_to_end() {
+            let b = OpenAiCompatBackend::new("http://x".into(), "m".into(), None);
+            let payloads = [delta("<think>plan</think>"), delta("Hi there"), stop()];
+            let refs: Vec<&str> = payloads.iter().map(|s| s.as_str()).collect();
+            let (visible, err) = drive(&b, &refs);
+            assert_eq!(visible, "Hi there");
+            assert!(!err);
+        }
+
+        #[test]
+        fn only_reasoning_yields_error() {
+            let b = OpenAiCompatBackend::new("http://x".into(), "m".into(), None);
+            let payloads = [delta("<think>only thinking"), stop()];
+            let refs: Vec<&str> = payloads.iter().map(|s| s.as_str()).collect();
+            let (visible, err) = drive(&b, &refs);
+            assert_eq!(visible, "");
+            assert!(err);
+        }
+
+        #[test]
+        fn custom_marker_extends_defaults() {
+            let b = OpenAiCompatBackend::new("http://x".into(), "m".into(), None)
+                .with_extra_markers(vec![("[[r]]".into(), "[[/r]]".into())]);
+            let payloads = [delta("a[[r]]hidden[[/r]]b"), stop()];
+            let refs: Vec<&str> = payloads.iter().map(|s| s.as_str()).collect();
+            let (visible, err) = drive(&b, &refs);
+            assert_eq!(visible, "ab");
+            assert!(!err);
+        }
     }
 }

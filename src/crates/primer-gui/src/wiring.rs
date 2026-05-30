@@ -154,6 +154,10 @@ async fn build_with_strategy(
         // killing the GUI (mirrors the openai-compat-embedder pattern).
         qnn_bundle_dir: backend_config.qnn_bundle_dir.clone(),
         qnn_qairt_lib_dir: backend_config.qnn_qairt_lib_dir.clone(),
+        // Reasoning-marker custom-extend is CLI-only for now; the GUI editor
+        // is deferred (ROADMAP 0.3). The GUI still gets default stripping for
+        // free because the backends seed the built-in marker table in `new`.
+        reasoning_markers: Vec::new(),
     };
 
     // ─── Main backend (locale-independent) ───────────────────────────

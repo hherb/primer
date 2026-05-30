@@ -40,6 +40,8 @@ pub struct OllamaBackend {
     base_url: String,
     model: String,
     retry_settings: primer_core::retry::RetrySettings,
+    /// Marker pairs whose enclosed reasoning is stripped from the stream.
+    pub(crate) reasoning_markers: Vec<primer_core::reasoning::ReasoningMarker>,
 }
 
 impl OllamaBackend {
@@ -49,7 +51,19 @@ impl OllamaBackend {
             base_url,
             model,
             retry_settings: primer_core::retry::RetrySettings::default(),
+            reasoning_markers: primer_core::reasoning::default_markers(),
         }
+    }
+
+    /// Append custom `(open, close)` reasoning-marker pairs to the built-in
+    /// defaults. Builder style; returns `Self`.
+    pub fn with_extra_markers(mut self, extra: Vec<(String, String)>) -> Self {
+        self.reasoning_markers.extend(
+            extra
+                .into_iter()
+                .map(|(o, c)| primer_core::reasoning::ReasoningMarker::new(o, c)),
+        );
+        self
     }
 }
 
@@ -203,6 +217,7 @@ impl InferenceBackend for OllamaBackend {
         .await
         .map_err(PrimerError::Inference)?;
 
+        let markers = self.reasoning_markers.clone();
         let (mut tx, rx) = mpsc::unbounded::<Result<TokenChunk>>();
         let mut bytes_stream = response.bytes_stream();
 
@@ -212,7 +227,10 @@ impl InferenceBackend for OllamaBackend {
         // until the process ends — acceptable for the CLI today; revisit
         // with a cancellation token when this backend is held long-lived.
         tokio::spawn(async move {
+            use primer_core::reasoning::ReasoningFilter;
             let mut buf = NdjsonBuffer::new();
+            let mut filter = ReasoningFilter::new(markers);
+            let mut had_visible = false;
             'outer: loop {
                 match bytes_stream.next().await {
                     Some(Ok(bytes)) => {
@@ -221,23 +239,38 @@ impl InferenceBackend for OllamaBackend {
                             if line.trim().is_empty() {
                                 continue;
                             }
-                            match parse_ollama_line(&line) {
-                                Ok(chunk) => {
-                                    let done = chunk.done;
-                                    if tx.send(Ok(chunk)).await.is_err() {
-                                        break 'outer;
-                                    }
-                                    if done {
+                            let chunk = match parse_ollama_line(&line) {
+                                Ok(c) => c,
+                                Err(e) => {
+                                    tracing::warn!("Skipping unparseable Ollama line: {e}");
+                                    continue;
+                                }
+                            };
+                            match crate::reasoning_stream::process_filtered_chunk(
+                                &mut filter,
+                                chunk,
+                                &mut had_visible,
+                                "ollama",
+                            ) {
+                                crate::reasoning_stream::FilterAction::Nothing => {}
+                                crate::reasoning_stream::FilterAction::Forward(r) => {
+                                    if tx.send(r).await.is_err() {
                                         break 'outer;
                                     }
                                 }
-                                Err(e) => {
-                                    tracing::warn!("Skipping unparseable Ollama line: {e}");
+                                crate::reasoning_stream::FilterAction::Final(r) => {
+                                    let _ = tx.send(r).await;
+                                    break 'outer;
                                 }
                             }
                         }
                     }
                     Some(Err(e)) => {
+                        // Mid-stream transport error: surface it and stop. We do
+                        // NOT flush the filter here — an error already drops the
+                        // partial turn at the dialogue-manager layer, and flushing
+                        // an unterminated `Inside` block would risk leaking
+                        // reasoning we deliberately suppressed.
                         let _ = tx
                             .send(Err(PrimerError::Inference(
                                 format!("Ollama byte stream error: {e}").into(),
@@ -245,7 +278,30 @@ impl InferenceBackend for OllamaBackend {
                             .await;
                         break 'outer;
                     }
-                    None => break 'outer,
+                    None => {
+                        // Upstream closed without a `done` marker (abrupt EOF). A
+                        // normal stream sends a done chunk, hits the `Final` arm,
+                        // and breaks before reaching here — so reaching `None`
+                        // means we must still flush. Feed a synthetic done chunk
+                        // through the shared helper so a held-back visible tail
+                        // still reaches the child and a stream that ended
+                        // mid-reasoning surfaces `ReasoningWithoutAnswer` instead
+                        // of silently producing nothing.
+                        if let crate::reasoning_stream::FilterAction::Final(r) =
+                            crate::reasoning_stream::process_filtered_chunk(
+                                &mut filter,
+                                TokenChunk {
+                                    text: String::new(),
+                                    done: true,
+                                },
+                                &mut had_visible,
+                                "ollama",
+                            )
+                        {
+                            let _ = tx.send(r).await;
+                        }
+                        break 'outer;
+                    }
                 }
             }
         });
@@ -372,6 +428,105 @@ mod tests {
                 InferenceError::Other(s) => assert!(s.contains("400") && s.contains("bad payload")),
                 other => panic!("expected Other, got {other:?}"),
             }
+        }
+    }
+
+    mod reasoning_wiring {
+        use super::*;
+
+        /// Drive a sequence of NDJSON lines through the REAL shared filter
+        /// helper, collecting visible text and whether an error chunk was
+        /// emitted.
+        fn drive(backend: &OllamaBackend, lines: &[&str]) -> (String, bool) {
+            use crate::reasoning_stream::{FilterAction, process_filtered_chunk};
+            use primer_core::reasoning::ReasoningFilter;
+            let mut filter = ReasoningFilter::new(backend.reasoning_markers.clone());
+            let mut had_visible = false;
+            let mut visible = String::new();
+            let mut err = false;
+            for line in lines {
+                let chunk = parse_ollama_line(line).unwrap();
+                match process_filtered_chunk(&mut filter, chunk, &mut had_visible, "ollama") {
+                    FilterAction::Nothing => {}
+                    FilterAction::Forward(r) => visible.push_str(&r.unwrap().text),
+                    FilterAction::Final(r) => {
+                        match r {
+                            Ok(c) => visible.push_str(&c.text),
+                            Err(_) => err = true,
+                        }
+                        break;
+                    }
+                }
+            }
+            (visible, err)
+        }
+
+        #[test]
+        fn strips_think_block_end_to_end() {
+            let b = OllamaBackend::new("http://x".into(), "m".into());
+            let lines = [
+                r#"{"message":{"content":"<think>plan</think>"},"done":false}"#,
+                r#"{"message":{"content":"Hi there"},"done":false}"#,
+                r#"{"message":{"content":""},"done":true}"#,
+            ];
+            let (visible, err) = drive(&b, &lines);
+            assert_eq!(visible, "Hi there");
+            assert!(!err);
+        }
+
+        #[test]
+        fn only_reasoning_yields_error() {
+            let b = OllamaBackend::new("http://x".into(), "m".into());
+            let lines = [
+                r#"{"message":{"content":"<think>only thinking"},"done":false}"#,
+                r#"{"message":{"content":""},"done":true}"#,
+            ];
+            let (visible, err) = drive(&b, &lines);
+            assert_eq!(visible, "");
+            assert!(err);
+        }
+
+        #[test]
+        fn custom_marker_extends_defaults() {
+            let b = OllamaBackend::new("http://x".into(), "m".into())
+                .with_extra_markers(vec![("[[r]]".into(), "[[/r]]".into())]);
+            let lines = [
+                r#"{"message":{"content":"a[[r]]hidden[[/r]]b"},"done":false}"#,
+                r#"{"message":{"content":""},"done":true}"#,
+            ];
+            let (visible, err) = drive(&b, &lines);
+            assert_eq!(visible, "ab");
+            assert!(!err);
+        }
+
+        /// Live confirmation that the built-in Gemma4 markers match the real
+        /// stream. Requires `ollama serve` + `ollama pull gemma4:e4b`. Run on
+        /// demand:
+        ///   cargo test -p primer-inference gemma4_live -- --ignored --nocapture
+        #[tokio::test]
+        #[ignore = "requires a running ollama with gemma4:e4b pulled"]
+        async fn gemma4_live_reasoning_is_stripped() {
+            let b = OllamaBackend::new("http://localhost:11434".into(), "gemma4:e4b".into());
+            let prompt = Prompt {
+                system: "You are a helpful tutor. Think first, then answer.".into(),
+                messages: vec![Message {
+                    role: Role::User,
+                    content: "What is 2+2? Explain briefly.".into(),
+                }],
+            };
+            let params = GenerationParams::default();
+            let text = b.generate(&prompt, &params).await.expect("generate");
+            eprintln!("VISIBLE OUTPUT:\n{text}");
+            assert!(
+                !text.contains("<|channel>"),
+                "open channel marker leaked: {text}"
+            );
+            assert!(
+                !text.contains("<channel|>"),
+                "close channel marker leaked: {text}"
+            );
+            assert!(!text.contains("<think>"), "think marker leaked: {text}");
+            assert!(!text.trim().is_empty(), "no visible answer produced");
         }
     }
 }
