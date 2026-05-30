@@ -30,7 +30,9 @@ get split across chunk boundaries. Stripping must be a **stateful streaming filt
    shared filter later for free.)
 2. **Behavior:** reasoning content is **dropped** from the visible/returned text, but
    **captured** and emitted via `tracing::debug!(target: "primer::reasoning", …)` for
-   developer visibility.
+   developer visibility. **If the model produced reasoning but no visible answer**, the
+   child gets a friendly localized "I'm having a thinking problem right now, please try
+   again" message instead of a blank turn (see Component 4).
 3. **Config — built-in marker table, always-on.** Stripping is always active against a
    curated built-in set of `(open, close)` marker pairs in `consts.rs`. There is no flag
    to forget; a non-reasoning model simply never emits these markers, so stripping is a
@@ -72,6 +74,8 @@ pub struct ReasoningFilter {
     buf: String,
     /// Captured reasoning text, drained by the caller for tracing.
     suppressed: String,
+    /// Sticky "ever suppressed any reasoning byte" flag for this stream.
+    did_suppress: bool,
 }
 
 impl ReasoningFilter {
@@ -88,6 +92,10 @@ impl ReasoningFilter {
 
     /// Take the captured reasoning accumulated since the last drain, for logging.
     pub fn drain_suppressed(&mut self) -> String;
+
+    /// True once any reasoning byte has been suppressed this stream.
+    /// Independent of `drain_suppressed` (which only empties the log buffer).
+    pub fn did_suppress(&self) -> bool;
 }
 ```
 
@@ -114,6 +122,10 @@ State `Inside { close }`:
 - `Outside`: the held `buf` is real text that never turned out to be a marker → emit it.
 - `Inside`: the stream ended inside a reasoning block (unbalanced/truncated). **Drop**
   `buf` into `suppressed` and emit nothing. Never leak a partial CoT.
+
+`did_suppress()` is set true the first time any byte is appended to `suppressed`. The
+backend uses it to decide whether the reasoning-without-answer fallback applies
+(Component 4).
 
 ### Safety invariant
 
@@ -155,7 +167,7 @@ pub mod reasoning {
 ```
 
 The Gemma4 markers are taken from the ollama gemma4 model docs (Thinking Mode
-Configuration section). A `#[ignore]`'d live-model wiring test (Component 5) running
+Configuration section). A `#[ignore]`'d live-model wiring test (Component 6) running
 `gemma4:e4b` via ollama empirically confirms the exact bytes; if the real stream diverges
 from the docs, that test surfaces it and the cure is a one-line edit to this table.
 
@@ -170,19 +182,58 @@ Each backend gains a `reasoning_markers: Vec<ReasoningMarker>` field:
 Inside the spawned streaming task (both backends follow the identical fire-and-forget
 `mpsc` pattern today):
 
-1. Construct a `ReasoningFilter::new(self.reasoning_markers.clone())` before the loop.
-2. For each parsed `TokenChunk`, run `chunk.text` through `filter.push(&text)`.
+1. Construct a `ReasoningFilter::new(self.reasoning_markers.clone())` before the loop, and
+   a running `visible_bytes_forwarded: usize = 0` counter.
+2. For each parsed `TokenChunk`, run `chunk.text` through `filter.push(&text)`. Add the
+   returned length to the counter.
 3. Forward a `TokenChunk { text: visible, done }` **only when** `visible` is non-empty
-   **or** `done` is set. On the `done` chunk, first call `filter.finish()` and prepend
-   any flushed text to the final emission.
+   **or** `done` is set.
 4. After each step, `let r = filter.drain_suppressed(); if !r.is_empty() {
    tracing::debug!(target: "primer::reasoning", backend = self.name(), suppressed = %r); }`.
+5. On the `done` chunk, call `filter.finish()` first and include any flushed text in the
+   final emission. Then apply the zero-answer check below.
 
-The `done`-chunk handling must ensure `finish()` output is not lost: emit a final chunk
-carrying `finish()`'s text with `done = true` even if the visible text from the last
-`push` was empty.
+**Reasoning-without-answer check (at done/finish):** if `visible_bytes_forwarded == 0`
+AND `filter.did_suppress()` is true, send
+`Err(PrimerError::Inference(InferenceError::ReasoningWithoutAnswer))` into the channel
+instead of a final `done` chunk (Component 4). Zero visible bytes with *no* suppression is
+a different failure (an empty model response) and is left to existing behavior — this
+fallback fires only when reasoning was the cause.
 
-## Component 4 — config plumbing
+## Component 4 — reasoning-without-answer fallback (i18n)
+
+When a reasoning model thinks but never produces a visible answer (truncated mid-thought,
+or a complete reasoning block followed by empty output), the child must not see a blank
+turn. They get a friendly, localized message inviting them to try again.
+
+**This is user-facing text, so per [[project_multilingual_intent]] it must not be a string
+literal in the backend or in the pure filter.** It routes through the existing single i18n
+boundary instead:
+
+- New locale-neutral variant `InferenceError::ReasoningWithoutAnswer` (no fields) in
+  `primer-core/src/error.rs`. Its `#[error(...)]` (dev-facing `Display`) is a plain
+  English diagnostic; `is_retryable()` returns **false** — it is not a transient HTTP
+  condition, and the "try again" is the child re-asking, not an automatic retry (and
+  mid-stream errors are not auto-retried anyway).
+- A new arm in each of `render_english` / `render_german` / `render_hindi` inside
+  `primer_core::i18n` (each `match` is exhaustive per locale, so the compiler forces all
+  three — no locale can silently fall through). English draft: *"Oops — I'm having a
+  thinking problem right now. Could you ask me that again?"*
+- The backend streaming task emits the variant on the zero-visible-but-suppressed
+  condition (Component 3).
+
+**Why this reuses everything:** a mid-stream error already flows through the established
+graceful-error path — `DialogueManager` drops the partial Primer turn (the child turn
+stays), and the CLI/GUI render the message via `render_inference_error(err, locale)`. No
+new rendering, dropping, or display code is required; only the new variant + its
+translations + the one emit site per backend.
+
+Tests: `render_inference_error(&ReasoningWithoutAnswer, &Locale::{English,German,Hindi})`
+returns a non-empty, locale-appropriate string (Hindi contains Devanagari, matching the
+existing guard tests); `is_retryable()` is false; a backend wiring test that a stream of
+only-reasoning yields the `ReasoningWithoutAnswer` error rather than an empty `done` chunk.
+
+## Component 5 — config plumbing
 
 ### CLI (`primer-cli`)
 
@@ -208,12 +259,15 @@ Mirrors the CLI through the existing settings/IPC machinery:
   `update_settings` IPC payload. `settings.js::gather()` MUST send `reasoning_markers`
   (an empty array when the user has entered nothing) or the save fails to deserialize.
   This is the documented GUI gotcha and the single highest-risk wiring point.
-- Settings UI: a minimal `<textarea>`, one `open⇥close` (tab- or first-whitespace-
-  separated) pair per line, parsed into the array on `gather()`. Empty textarea ⇒ empty
-  array ⇒ defaults only. Deliberately a textarea, not a dynamic add-a-row builder
-  (YAGNI for a power-user escape hatch).
+- Settings UI: a minimal `<textarea>`, one `open<sep>close` pair per line. **Separator is
+  the first run of whitespace on the line** (so a tab or any spaces both work); the open
+  marker is everything before it, the close marker everything after (both trimmed). Lines
+  that are blank or have no whitespace separator are skipped. Markers never contain
+  leading/trailing whitespace, so this is unambiguous. Parsed into the array on
+  `gather()`; empty textarea ⇒ empty array ⇒ defaults only. Deliberately a textarea, not a
+  dynamic add-a-row builder (YAGNI for a power-user escape hatch).
 
-## Component 5 — testing (TDD)
+## Component 6 — testing (TDD)
 
 Pure-filter unit tests (`reasoning.rs`, the bulk of the rigor — written first):
 
@@ -227,15 +281,19 @@ Pure-filter unit tests (`reasoning.rs`, the bulk of the rigor — written first)
 - **false-prefix then real text** (`<thinking out loud>` ≠ `<think>` → emitted);
 - custom-marker append (a non-default pair is stripped);
 - the asymmetric Gemma4 pair `<|channel>…<channel|>` stripped, final answer survives;
-- `drain_suppressed()` returns the captured reasoning and empties on re-drain.
+- `drain_suppressed()` returns the captured reasoning and empties on re-drain;
+- `did_suppress()` is false on a clean passthrough, true after any block.
 
 Backend wiring tests:
 
 - a deterministic in-process test per backend that a `<think>…</think>` block fed through
   the parse+filter path is stripped end-to-end (reuse the existing buffer/parse test
   harness shape; no network);
+- a per-backend test that an only-reasoning stream yields `ReasoningWithoutAnswer`;
 - a `#[ignore]`'d live-model test (`gemma4:e4b` via ollama) that confirms the real Gemma4
   marker bytes match the table — run on demand, not in CI.
+
+i18n tests: as listed in Component 4.
 
 ## Out of scope / YAGNI
 
