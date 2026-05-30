@@ -176,4 +176,29 @@ mod tests {
         assert_eq!(visible, "answer");
         assert!(!err);
     }
+
+    #[test]
+    fn abrupt_eof_flush_emits_held_back_visible_tail() {
+        // Models stream visible text whose trailing bytes look like the start of
+        // an open marker ("<thi" ⊂ "<think>"), so the filter holds them back. If
+        // the stream then ends WITHOUT a `done` chunk (abrupt EOF), the backend's
+        // `None` arm feeds a synthetic `("", true)` through this helper to flush.
+        // That held-back tail must be emitted as real text, not dropped.
+        let (visible, err) = drive(default_markers(), &[("answer<thi", false), ("", true)]);
+        assert_eq!(visible, "answer<thi");
+        assert!(!err);
+    }
+
+    #[test]
+    fn abrupt_eof_flush_surfaces_error_when_only_reasoning_seen() {
+        // Mid-reasoning abrupt EOF: the synthetic flush chunk drops the
+        // unterminated block (no leak) and surfaces ReasoningWithoutAnswer
+        // rather than ending the turn silently.
+        let (visible, err) = drive(
+            default_markers(),
+            &[("<think>still thinking", false), ("", true)],
+        );
+        assert_eq!(visible, "");
+        assert!(err);
+    }
 }

@@ -266,6 +266,11 @@ impl InferenceBackend for OllamaBackend {
                         }
                     }
                     Some(Err(e)) => {
+                        // Mid-stream transport error: surface it and stop. We do
+                        // NOT flush the filter here — an error already drops the
+                        // partial turn at the dialogue-manager layer, and flushing
+                        // an unterminated `Inside` block would risk leaking
+                        // reasoning we deliberately suppressed.
                         let _ = tx
                             .send(Err(PrimerError::Inference(
                                 format!("Ollama byte stream error: {e}").into(),
@@ -273,7 +278,30 @@ impl InferenceBackend for OllamaBackend {
                             .await;
                         break 'outer;
                     }
-                    None => break 'outer,
+                    None => {
+                        // Upstream closed without a `done` marker (abrupt EOF). A
+                        // normal stream sends a done chunk, hits the `Final` arm,
+                        // and breaks before reaching here — so reaching `None`
+                        // means we must still flush. Feed a synthetic done chunk
+                        // through the shared helper so a held-back visible tail
+                        // still reaches the child and a stream that ended
+                        // mid-reasoning surfaces `ReasoningWithoutAnswer` instead
+                        // of silently producing nothing.
+                        if let crate::reasoning_stream::FilterAction::Final(r) =
+                            crate::reasoning_stream::process_filtered_chunk(
+                                &mut filter,
+                                TokenChunk {
+                                    text: String::new(),
+                                    done: true,
+                                },
+                                &mut had_visible,
+                                "ollama",
+                            )
+                        {
+                            let _ = tx.send(r).await;
+                        }
+                        break 'outer;
+                    }
                 }
             }
         });
