@@ -470,5 +470,35 @@ mod tests {
             assert_eq!(visible, "ab");
             assert!(!err);
         }
+
+        /// Live confirmation that the built-in Gemma4 markers match the real
+        /// stream. Requires `ollama serve` + `ollama pull gemma4:e4b`. Run on
+        /// demand:
+        ///   cargo test -p primer-inference gemma4_live -- --ignored --nocapture
+        #[tokio::test]
+        #[ignore = "requires a running ollama with gemma4:e4b pulled"]
+        async fn gemma4_live_reasoning_is_stripped() {
+            let b = OllamaBackend::new("http://localhost:11434".into(), "gemma4:e4b".into());
+            let prompt = Prompt {
+                system: "You are a helpful tutor. Think first, then answer.".into(),
+                messages: vec![Message {
+                    role: Role::User,
+                    content: "What is 2+2? Explain briefly.".into(),
+                }],
+            };
+            let params = GenerationParams::default();
+            let text = b.generate(&prompt, &params).await.expect("generate");
+            eprintln!("VISIBLE OUTPUT:\n{text}");
+            assert!(
+                !text.contains("<|channel>"),
+                "open channel marker leaked: {text}"
+            );
+            assert!(
+                !text.contains("<channel|>"),
+                "close channel marker leaked: {text}"
+            );
+            assert!(!text.contains("<think>"), "think marker leaked: {text}");
+            assert!(!text.trim().is_empty(), "no visible answer produced");
+        }
     }
 }
