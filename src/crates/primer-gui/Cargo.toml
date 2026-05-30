@@ -66,7 +66,11 @@ tempfile.workspace = true
 static_assertions = "1"
 
 [features]
-default = []
+# Hybrid retrieval is default-on, mirroring primer-cli. A fresh
+# `gui-config.json` defaults the embedder to fastembed (see
+# EmbedderConfig::default in config.rs); an existing config keeps whatever
+# the user stored. A `--no-default-features` build drops to BM25-only.
+default = ["embedding"]
 
 # Hybrid retrieval via fastembed-rs (BGE-M3). Mirrors primer-cli's flag
 # so the GUI can opt in independently. Forwards through to primer-engine

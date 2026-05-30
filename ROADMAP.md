@@ -21,7 +21,7 @@ Status key: ✅ done · 🟡 in progress · [ ] not started.
 
 ### 0.2 — Knowledge base bootstrapping
 
-- ✅ Hybrid retrieval (BM25 + dense-vector RRF, `k=60`): `Embedder` trait, `primer-embedding` crate (`StubEmbedder` always built; `FastEmbedBackend`/BGE-M3, `OllamaEmbedder`, `OpenAiCompatEmbedder` behind features). Falls back to BM25-only when no embedder is wired. Opt-in via `--embedder-backend`.
+- ✅ Hybrid retrieval (BM25 + dense-vector RRF, `k=60`): `Embedder` trait, `primer-embedding` crate (`StubEmbedder` always built; `FastEmbedBackend`/BGE-M3, `OllamaEmbedder`, `OpenAiCompatEmbedder` behind features). Falls back to BM25-only when no embedder is wired. Default-on via `--embedder-backend` (feature-aware: `fastembed` on a default build, `none` on `--no-default-features`); the cdn.pyke.io ort-runtime download is proven in CI on Linux + macOS. Android stays BM25-only by guidance (#157).
 - ✅ JSONL ingestion + auto-seed-on-empty + `--reembed` backfill (`primer-kb-load`); discovers all `*.<pack>.jsonl` in the seed dir.
 - ✅ Seed corpus: 56 hand-drafted CC0 EN passages across five clusters; 35-article Simple English Wikipedia layer (CC-BY-SA-3.0) auto-loads alongside.
 - ✅ German Klexikon corpus (CC-BY-SA-4.0), expanded to 66 articles; auto-loads on `--language de`.
