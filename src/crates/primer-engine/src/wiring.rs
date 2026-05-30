@@ -57,6 +57,13 @@ pub struct BackendParams {
     /// Extra `(open, close)` reasoning-marker pairs appended to the built-in
     /// defaults for the Ollama / openai-compat backends. Empty ⇒ defaults
     /// only. Ignored by every other backend arm.
+    ///
+    /// These markers propagate to any subsystem backend (classifier,
+    /// extractor, comprehension) constructed through the same `params` via
+    /// [`build_backend`]. That is intentional: the built-in defaults SHOULD
+    /// strip reasoning from subsystem responses too (it keeps their JSON
+    /// output clean for parsing), and a user-supplied custom pair applies
+    /// everywhere rather than to the chat backend alone.
     pub reasoning_markers: Vec<(String, String)>,
 }
 
