@@ -167,15 +167,16 @@ impl ReasoningFilter {
 
 /// Decide the final (done-chunk) emission for a streaming backend.
 ///
-/// `total_visible` = visible bytes forwarded BEFORE the done chunk.
+/// `had_visible` is whether any visible (non-reasoning) text was forwarded
+/// BEFORE the done chunk.
 /// `tail` = text returned by `filter.finish()` (plus any visible text from the
 /// done chunk's own content). Returns `Some(tail)` to emit as the final
 /// visible done-chunk text (possibly empty, with `done = true`), or `None` to
 /// signal the backend should emit an `InferenceError` "reasoning without
 /// answer" variant (added in a later task) instead — i.e. the model
 /// reasoned but produced no visible answer.
-pub fn finalize_visible(total_visible: usize, tail: &str, did_suppress: bool) -> Option<String> {
-    if total_visible == 0 && tail.is_empty() && did_suppress {
+pub fn finalize_visible(had_visible: bool, tail: &str, did_suppress: bool) -> Option<String> {
+    if !had_visible && tail.is_empty() && did_suppress {
         None
     } else {
         Some(tail.to_string())
@@ -329,14 +330,14 @@ mod tests {
 
     #[test]
     fn finalize_visible_emits_error_only_when_nothing_visible_and_suppressed() {
-        assert_eq!(finalize_visible(0, "", true), None);
-        assert_eq!(finalize_visible(5, "", true), Some(String::new()));
+        assert_eq!(finalize_visible(false, "", true), None);
+        assert_eq!(finalize_visible(true, "", true), Some(String::new()));
         assert_eq!(
-            finalize_visible(0, "answer", true),
+            finalize_visible(false, "answer", true),
             Some("answer".to_string())
         );
         // No suppression: an empty model response is a different failure.
-        assert_eq!(finalize_visible(0, "", false), Some(String::new()));
+        assert_eq!(finalize_visible(false, "", false), Some(String::new()));
     }
 
     #[test]

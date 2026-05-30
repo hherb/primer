@@ -308,7 +308,7 @@ impl InferenceBackend for OpenAiCompatBackend {
             use primer_core::reasoning::ReasoningFilter;
             let mut buf = OpenAiSseBuffer::new();
             let mut filter = ReasoningFilter::new(markers);
-            let mut total_visible: usize = 0;
+            let mut had_visible = false;
             'outer: loop {
                 match bytes_stream.next().await {
                     Some(Ok(bytes)) => {
@@ -327,7 +327,7 @@ impl InferenceBackend for OpenAiCompatBackend {
                             match crate::reasoning_stream::process_filtered_chunk(
                                 &mut filter,
                                 chunk,
-                                &mut total_visible,
+                                &mut had_visible,
                                 "openai-compat",
                             ) {
                                 crate::reasoning_stream::FilterAction::Nothing => {}
@@ -691,14 +691,15 @@ mod tests {
 
         fn drive(backend: &OpenAiCompatBackend, payloads: &[&str]) -> (String, bool) {
             let mut filter = ReasoningFilter::new(backend.reasoning_markers.clone());
-            let mut total = 0usize;
+            let mut had_visible = false;
             let mut visible = String::new();
             let mut err = false;
             for p in payloads {
                 let Some(chunk) = parse_openai_compat_chunk(p).unwrap() else {
                     continue;
                 };
-                match process_filtered_chunk(&mut filter, chunk, &mut total, "openai-compat") {
+                match process_filtered_chunk(&mut filter, chunk, &mut had_visible, "openai-compat")
+                {
                     FilterAction::Nothing => {}
                     FilterAction::Forward(r) => visible.push_str(&r.unwrap().text),
                     FilterAction::Final(r) => {

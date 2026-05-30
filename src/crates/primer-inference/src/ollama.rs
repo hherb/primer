@@ -230,7 +230,7 @@ impl InferenceBackend for OllamaBackend {
             use primer_core::reasoning::ReasoningFilter;
             let mut buf = NdjsonBuffer::new();
             let mut filter = ReasoningFilter::new(markers);
-            let mut total_visible: usize = 0;
+            let mut had_visible = false;
             'outer: loop {
                 match bytes_stream.next().await {
                     Some(Ok(bytes)) => {
@@ -249,7 +249,7 @@ impl InferenceBackend for OllamaBackend {
                             match crate::reasoning_stream::process_filtered_chunk(
                                 &mut filter,
                                 chunk,
-                                &mut total_visible,
+                                &mut had_visible,
                                 "ollama",
                             ) {
                                 crate::reasoning_stream::FilterAction::Nothing => {}
@@ -413,12 +413,12 @@ mod tests {
             use crate::reasoning_stream::{FilterAction, process_filtered_chunk};
             use primer_core::reasoning::ReasoningFilter;
             let mut filter = ReasoningFilter::new(backend.reasoning_markers.clone());
-            let mut total = 0usize;
+            let mut had_visible = false;
             let mut visible = String::new();
             let mut err = false;
             for line in lines {
                 let chunk = parse_ollama_line(line).unwrap();
-                match process_filtered_chunk(&mut filter, chunk, &mut total, "ollama") {
+                match process_filtered_chunk(&mut filter, chunk, &mut had_visible, "ollama") {
                     FilterAction::Nothing => {}
                     FilterAction::Forward(r) => visible.push_str(&r.unwrap().text),
                     FilterAction::Final(r) => {

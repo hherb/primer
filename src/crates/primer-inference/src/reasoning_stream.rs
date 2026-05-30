@@ -25,8 +25,8 @@ pub(crate) enum FilterAction {
 
 /// Run one parsed chunk through the reasoning filter and decide what to emit.
 ///
-/// `total_visible` accumulates the count of visible bytes forwarded so far
-/// across the whole stream; it is consumed only as an "is anything visible?"
+/// `had_visible` is set once any visible (non-reasoning) text has been
+/// forwarded this stream; it is consumed only as an "is anything visible?"
 /// signal by [`finalize_visible`]. `backend` labels the debug log of any
 /// suppressed reasoning.
 ///
@@ -39,15 +39,15 @@ pub(crate) enum FilterAction {
 pub(crate) fn process_filtered_chunk(
     filter: &mut ReasoningFilter,
     chunk: TokenChunk,
-    total_visible: &mut usize,
+    had_visible: &mut bool,
     backend: &'static str,
 ) -> FilterAction {
     if chunk.done {
         let mut visible = filter.push(&chunk.text);
-        *total_visible += visible.len();
+        *had_visible |= !visible.is_empty();
         visible.push_str(&filter.finish());
         log_suppressed(filter, backend);
-        match finalize_visible(*total_visible, &visible, filter.did_suppress()) {
+        match finalize_visible(*had_visible, &visible, filter.did_suppress()) {
             Some(text) => FilterAction::Final(Ok(TokenChunk { text, done: true })),
             None => FilterAction::Final(Err(PrimerError::Inference(
                 InferenceError::ReasoningWithoutAnswer,
@@ -59,7 +59,7 @@ pub(crate) fn process_filtered_chunk(
         if visible.is_empty() {
             FilterAction::Nothing
         } else {
-            *total_visible += visible.len();
+            *had_visible = true;
             FilterAction::Forward(Ok(TokenChunk {
                 text: visible,
                 done: false,
@@ -92,11 +92,12 @@ mod tests {
     /// `process_filtered_chunk` and collect (visible, emitted_error).
     fn drive(markers: Vec<ReasoningMarker>, chunks: &[(&str, bool)]) -> (String, bool) {
         let mut filter = ReasoningFilter::new(markers);
-        let mut total = 0usize;
+        let mut had_visible = false;
         let mut visible = String::new();
         let mut err = false;
         for (text, done) in chunks {
-            match process_filtered_chunk(&mut filter, chunk(text, *done), &mut total, "test") {
+            match process_filtered_chunk(&mut filter, chunk(text, *done), &mut had_visible, "test")
+            {
                 FilterAction::Nothing => {}
                 FilterAction::Forward(r) => visible.push_str(&r.unwrap().text),
                 FilterAction::Final(r) => {
@@ -146,13 +147,17 @@ mod tests {
     #[test]
     fn non_final_empty_filtered_chunk_forwards_nothing() {
         let mut filter = ReasoningFilter::new(default_markers());
-        let mut total = 0usize;
+        let mut had_visible = false;
         // A chunk that is entirely an (incomplete) marker prefix yields no
         // visible text and must not be forwarded.
-        let action =
-            process_filtered_chunk(&mut filter, chunk("<think>", false), &mut total, "test");
+        let action = process_filtered_chunk(
+            &mut filter,
+            chunk("<think>", false),
+            &mut had_visible,
+            "test",
+        );
         assert!(matches!(action, FilterAction::Nothing));
-        assert_eq!(total, 0);
+        assert!(!had_visible);
     }
 
     #[test]
