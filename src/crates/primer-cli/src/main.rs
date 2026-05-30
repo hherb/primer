@@ -1630,13 +1630,17 @@ mod embedder_backend_default_tests {
         assert_eq!(cli.embedder_backend, "none");
     }
 
-    /// An explicit value always overrides the default, both ways.
+    /// An explicit value always overrides the default, regardless of which
+    /// feature build is active. `stub` is used because it is a valid value
+    /// in BOTH build configurations (no cargo feature required) and differs
+    /// from either feature-aware default (`fastembed` / `none`), so the
+    /// assertion proves a real override on every build.
     #[test]
     fn explicit_value_overrides_default() {
         let cli = Cli::try_parse_from([
-            "primer", "--name", "Ada", "--age", "9", "--embedder-backend", "none",
+            "primer", "--name", "Ada", "--age", "9", "--embedder-backend", "stub",
         ])
         .unwrap();
-        assert_eq!(cli.embedder_backend, "none");
+        assert_eq!(cli.embedder_backend, "stub");
     }
 }
