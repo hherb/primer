@@ -708,6 +708,9 @@ async fn async_main() -> anyhow::Result<()> {
         qnn_qairt_lib_dir: cli.qnn_qairt_lib_dir.clone(),
         #[cfg(not(feature = "qnn"))]
         qnn_qairt_lib_dir: None,
+        // Custom reasoning-marker extend is not yet surfaced as a CLI flag;
+        // empty here means built-in default stripping only.
+        reasoning_markers: Vec::new(),
     };
 
     let backend: Arc<dyn InferenceBackend> =
