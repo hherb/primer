@@ -274,6 +274,15 @@ jobs:
         # — all of which differ across the macos-native build.
         run: cargo clippy -p primer-cli --features speech,macos-native --all-targets -- -D warnings
 
+      - name: cargo clippy -p primer-embedding --features fastembed
+        # Proves the cdn.pyke.io ort-runtime download + link works on macOS
+        # — the other half of the Linux proof in the feature-combos job.
+        # `clippy` (like `check`) runs build.rs, which triggers the download.
+        # This is the prerequisite that gated flipping hybrid retrieval
+        # default-on (see
+        # docs/superpowers/specs/2026-05-30-hybrid-retrieval-default-on-design.md).
+        run: cargo clippy -p primer-embedding --features fastembed --all-targets -- -D warnings
+
   # Android cross-compile drift-guard. Catches transitive-dep platform
   # breakage before it surprises a developer in Termux on RedMagic 11.
   # This job does NOT validate runtime behaviour on Android — only that
@@ -368,7 +377,13 @@ jobs:
         # — see docs/superpowers/specs/2026-05-26-redmagic-termux-port-design.md.
         # `cargo build --bin primer` builds only that binary's dep graph,
         # which excludes `primer-gui` (sibling crate, not a dep).
-        run: cargo build --target aarch64-linux-android --bin primer
+        #
+        # `--no-default-features`: hybrid retrieval is default-on for the
+        # host CLI, but the aarch64-linux-android ort-runtime download from
+        # cdn.pyke.io is device-unverified (issue #157). The Android product
+        # ships BM25-only by guidance (`--embedder-backend none`), so the
+        # cross-compile guard builds without the `embedding` feature.
+        run: cargo build --target aarch64-linux-android --no-default-features --bin primer
 
       - name: Cross-compile primer-qnn-sys
         # The Phase 1.2 Genie/QNN FFI crate is `target_os = "android"`-gated
@@ -394,7 +409,12 @@ jobs:
         # drift in the QnnBackend ↔ primer-qnn-sys FFI seam before it
         # surprises a developer building on RedMagic Termux. NDK env vars
         # are inherited from the earlier "Export NDK toolchain env" step.
-        run: cargo build --target aarch64-linux-android -p primer-cli --features qnn
+        #
+        # `--no-default-features --features qnn`: `--features` is additive to
+        # defaults, so without `--no-default-features` this would also pull
+        # the default `embedding` feature → the device-unverified android ort
+        # download (issue #157). Keep the qnn guard BM25-only.
+        run: cargo build --target aarch64-linux-android --no-default-features -p primer-cli --features qnn
 
       - name: Cross-compile qnn_bench example
         # Phase 1.2 step 1.2.6's device benchmark lives in
