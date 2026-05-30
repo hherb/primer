@@ -3,6 +3,7 @@
 **Date:** 2026-05-30
 **Status:** approved, pre-implementation
 **Scope:** strip per-model chain-of-thought ("reasoning") markers from `OllamaBackend` and `OpenAiCompatBackend` streamed output so they never reach a child.
+**This session:** Components 1–4 (pure filter, marker table, backend wiring, i18n fallback) + the CLI custom-marker flag (Component 5 / CLI). The GUI custom-marker editor (Component 5 / GUI) is **deferred to ROADMAP Phase 0.3** — the GUI already gets default stripping for free.
 
 ## Problem
 
@@ -246,9 +247,15 @@ only-reasoning yields the `ReasoningWithoutAnswer` error rather than an empty `d
 - `build_backend`'s `"ollama"` and `"openai-compat"` arms call
   `.with_extra_markers(params.reasoning_markers.clone())` on the constructed backend.
 
-### GUI (`primer-gui`)
+### GUI (`primer-gui`) — DEFERRED to ROADMAP, not this session
 
-Mirrors the CLI through the existing settings/IPC machinery:
+**This session ships Components 1–4 + the CLI plumbing above only.** The GUI inherits the
+*default* stripping for free (it constructs the same Ollama / openai-compat backends), so
+the safety win lands everywhere immediately. Only the GUI *custom-marker editor* is
+deferred — a power-user escape hatch whose plumbing (DTO + IPC + `gather()` + a Settings
+textarea) is disproportionate to its value for this PR. Tracked on ROADMAP under Phase 0.3.
+
+When implemented later, it mirrors the CLI through the existing settings/IPC machinery:
 
 - New `reasoning_markers: Vec<ReasoningMarkerDto>` field (`{ open: String, close: String }`)
   on the backend config struct, the `BackendConfigView` read DTO, and the
