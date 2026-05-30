@@ -201,16 +201,26 @@ struct Cli {
     )]
     session_break_after_mins: u32,
 
-    /// Embedder backend for hybrid retrieval. `none` (the default)
-    /// disables hybrid retrieval and uses BM25-only — the same behaviour
-    /// as before this flag existed; `stub` uses the in-process
-    /// deterministic hash embedder (no semantic value, only useful for
-    /// testing the hybrid pipeline end-to-end); `fastembed` uses the
-    /// BGE-M3 dense embedding model via `fastembed-rs` (~570 MB on first
-    /// run; requires the `embedding` cargo feature); `ollama` uses
-    /// Ollama's `/api/embeddings` (requires the `ollama-embedding`
-    /// cargo feature and Ollama running locally).
-    #[arg(long, value_name = "BACKEND", default_value = "none")]
+    /// Embedder backend for hybrid retrieval. Defaults to `fastembed` on a
+    /// build with the `embedding` cargo feature (the default build) and to
+    /// `none` on a `--no-default-features` build — so a flagless run does
+    /// the right thing for whatever was compiled in and never hard-fails.
+    /// `none` disables hybrid retrieval and uses BM25-only; `stub` uses the
+    /// in-process deterministic hash embedder (no semantic value, only
+    /// useful for testing the hybrid pipeline end-to-end); `fastembed` uses
+    /// the BGE-M3 dense embedding model via `fastembed-rs` (~570 MB on first
+    /// run; requires the `embedding` cargo feature); `ollama` uses Ollama's
+    /// `/api/embeddings` (requires the `ollama-embedding` cargo feature and
+    /// Ollama running locally); `openai-compat` uses a `/v1/embeddings`
+    /// server (requires the `openai-compat-embedding` cargo feature).
+    #[cfg_attr(
+        feature = "embedding",
+        arg(long, value_name = "BACKEND", default_value = "fastembed")
+    )]
+    #[cfg_attr(
+        not(feature = "embedding"),
+        arg(long, value_name = "BACKEND", default_value = "none")
+    )]
     embedder_backend: String,
 
     /// Model name for the embedder. With `--embedder-backend fastembed`,
@@ -1594,5 +1604,39 @@ mod break_suggest_flag_tests {
             "0",
         ]);
         assert!(result.is_err(), "0 should be rejected by the value parser");
+    }
+}
+
+#[cfg(test)]
+mod embedder_backend_default_tests {
+    use super::*;
+    use clap::Parser;
+
+    /// On a build with the `embedding` feature (the default), a flagless
+    /// invocation defaults to hybrid retrieval via fastembed.
+    #[cfg(feature = "embedding")]
+    #[test]
+    fn default_is_fastembed_with_embedding_feature() {
+        let cli = Cli::try_parse_from(["primer", "--name", "Ada", "--age", "9"]).unwrap();
+        assert_eq!(cli.embedder_backend, "fastembed");
+    }
+
+    /// On a `--no-default-features` build (embedding off), the default
+    /// stays BM25-only so the binary never hard-fails on a flagless run.
+    #[cfg(not(feature = "embedding"))]
+    #[test]
+    fn default_is_none_without_embedding_feature() {
+        let cli = Cli::try_parse_from(["primer", "--name", "Ada", "--age", "9"]).unwrap();
+        assert_eq!(cli.embedder_backend, "none");
+    }
+
+    /// An explicit value always overrides the default, both ways.
+    #[test]
+    fn explicit_value_overrides_default() {
+        let cli = Cli::try_parse_from([
+            "primer", "--name", "Ada", "--age", "9", "--embedder-backend", "none",
+        ])
+        .unwrap();
+        assert_eq!(cli.embedder_backend, "none");
     }
 }
