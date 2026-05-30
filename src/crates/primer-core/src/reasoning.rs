@@ -171,8 +171,9 @@ impl ReasoningFilter {
 /// `tail` = text returned by `filter.finish()` (plus any visible text from the
 /// done chunk's own content). Returns `Some(tail)` to emit as the final
 /// visible done-chunk text (possibly empty, with `done = true`), or `None` to
-/// signal the backend should emit `InferenceError::ReasoningWithoutAnswer`
-/// instead — i.e. the model reasoned but produced no visible answer.
+/// signal the backend should emit an `InferenceError` "reasoning without
+/// answer" variant (added in a later task) instead — i.e. the model
+/// reasoned but produced no visible answer.
 pub fn finalize_visible(total_visible: usize, tail: &str, did_suppress: bool) -> Option<String> {
     if total_visible == 0 && tail.is_empty() && did_suppress {
         None
@@ -336,5 +337,24 @@ mod tests {
         );
         // No suppression: an empty model response is a different failure.
         assert_eq!(finalize_visible(0, "", false), Some(String::new()));
+    }
+
+    #[test]
+    fn unicode_content_around_marker_passes_through() {
+        // 'ö' is 2 bytes in UTF-8; ensure slicing near it doesn't panic.
+        assert_eq!(
+            run(think(), &["Schön <think>geheim</think> gut"]),
+            "Schön  gut"
+        );
+    }
+
+    #[test]
+    fn split_chunks_with_multi_byte_char_are_safe() {
+        // 'ä' = 2 bytes; a chunk boundary adjacent to it must not panic and
+        // the marker that follows must still be stripped.
+        assert_eq!(
+            run(think(), &["a\u{00e4}", "b<think>x</think>c"]),
+            "a\u{00e4}bc"
+        );
     }
 }
