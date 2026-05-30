@@ -26,6 +26,7 @@ pub mod inference;
 pub mod knowledge;
 pub mod learner;
 pub mod llm_util;
+pub mod reasoning;
 pub mod retry;
 pub mod rrf;
 pub mod session_timing;
