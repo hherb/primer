@@ -39,11 +39,17 @@ anyhow.workspace = true
 ringbuf.workspace = true
 
 [features]
-default = []
+# Hybrid retrieval is default-on (BM25 + dense-vector RRF via BGE-M3).
+# The cdn.pyke.io ort-runtime download is proven in CI on Linux (the
+# default `cargo test` job now builds embedding) and macOS (the
+# feature-combos-macos job's fastembed step). A `--no-default-features`
+# build drops to BM25-only and the runtime default tracks that via the
+# `cfg_attr` on `--embedder-backend` in main.rs. Android stays BM25-only
+# by guidance (the cross-compile guard pins `--no-default-features`; see
+# CLAUDE.md / issue #157).
+default = ["embedding"]
 
 # Hybrid retrieval via the fastembed-rs (BGE-M3) backend.
-# Default-off pending CI validation of the cdn.pyke.io ort-runtime
-# download path; flip to `default = ["embedding"]` once that's proven.
 # `embedding` and `speech` build cleanly together because both paths
 # resolve to ort = "=2.0.0-rc.10" (fastembed pinned to =5.7.0 here,
 # which is the last line that targets rc.10). See primer-embedding's
