@@ -108,14 +108,21 @@ pub fn percentile_duration(samples: &[Duration], p: f64) -> Option<Duration> {
 pub struct BenchReport {
     /// Number of prompt runs aggregated.
     pub runs: usize,
+    /// Runs excluded from the decode mean/min because they decoded no tokens
+    /// after the first (rate `0.0` — an early stop, not sustained
+    /// throughput). Surfaced so a run dominated by short completions is
+    /// visible rather than silently dragging the verdict to fail.
+    pub degenerate_runs: usize,
     /// Median (p50) time-to-first-token.
     pub ttft_p50: Duration,
     /// Tail (p95) time-to-first-token — the figure the verdict gates on.
     pub ttft_p95: Duration,
-    /// Mean decode rate across all runs.
+    /// Mean decode rate across the non-degenerate runs.
     pub decode_mean_tokens_per_sec: f64,
-    /// Slowest single-run decode rate — the "sustained" figure the verdict
-    /// gates on.
+    /// Slowest non-degenerate single-run decode rate — the "sustained"
+    /// figure the verdict gates on. Runs that decoded ≤ 1 token (rate `0.0`)
+    /// are excluded; see [`Self::degenerate_runs`]. Falls back to `0.0` when
+    /// *every* run was degenerate (nothing decoded → the decode gate fails).
     pub decode_min_tokens_per_sec: f64,
     /// Peak temperature across the run, or `None` if no thermal samples
     /// were captured (e.g. a host dry-run with no sysfs thermal nodes).
@@ -133,16 +140,31 @@ impl BenchReport {
             return None;
         }
         let ttfts: Vec<Duration> = measurements.iter().map(|m| m.ttft).collect();
-        let rates: Vec<f64> = measurements
+
+        // Exclude degenerate runs (rate 0.0 — decoded ≤ 1 token, so an early
+        // stop rather than a sustained stream) from both aggregates. A single
+        // short completion must not be allowed to define "sustained" and fail
+        // the whole run; the excluded count is reported separately.
+        let scored_rates: Vec<f64> = measurements
             .iter()
             .map(PromptMeasurement::decode_tokens_per_sec)
+            .filter(|&r| r > 0.0)
             .collect();
+        let degenerate_runs = measurements.len() - scored_rates.len();
 
-        let mean = rates.iter().sum::<f64>() / rates.len() as f64;
-        let min = rates.iter().copied().fold(f64::INFINITY, f64::min);
+        // When every run was degenerate, there is no sustained throughput to
+        // report: 0.0 correctly fails the decode gate.
+        let (mean, min) = if scored_rates.is_empty() {
+            (0.0, 0.0)
+        } else {
+            let mean = scored_rates.iter().sum::<f64>() / scored_rates.len() as f64;
+            let min = scored_rates.iter().copied().fold(f64::INFINITY, f64::min);
+            (mean, min)
+        };
 
         Some(Self {
             runs: measurements.len(),
+            degenerate_runs,
             // Safe to unwrap: the slice is non-empty (guarded above).
             ttft_p50: percentile_duration(&ttfts, PERCENTILE_P50).unwrap(),
             ttft_p95: percentile_duration(&ttfts, PERCENTILE_P95).unwrap(),
@@ -158,7 +180,8 @@ impl BenchReport {
 pub struct Verdict {
     /// Sustained decode rate met the floor.
     pub decode_pass: bool,
-    /// p95 TTFT stayed under the ceiling.
+    /// p95 TTFT stayed strictly under the ceiling (Phase 1.2 target is
+    /// `< 3 s`, so exactly 3 s fails).
     pub ttft_pass: bool,
     /// Peak temperature stayed under the ceiling (vacuously true when no
     /// thermal data was captured — a host dry-run can't fail thermal).
@@ -177,12 +200,14 @@ impl Verdict {
 /// The decode gate uses the **minimum** (sustained) rate and the TTFT gate
 /// uses the **p95** tail — both deliberately conservative, so a run that
 /// passes the verdict passes for the worst representative prompt, not just
-/// on average. Absent thermal data passes the thermal gate vacuously; on a
-/// real device the sampler always produces readings.
+/// on average. The decode (`≥`) and thermal (`≤`) boundaries are inclusive;
+/// the TTFT boundary is **exclusive** (`< 3 s`), each matching the operator
+/// in its Phase 1.2 target. Absent thermal data passes the thermal gate
+/// vacuously; on a real device the sampler always produces readings.
 pub fn evaluate(report: &BenchReport, targets: &BenchTargets) -> Verdict {
     Verdict {
         decode_pass: report.decode_min_tokens_per_sec >= targets.min_decode_tokens_per_sec,
-        ttft_pass: report.ttft_p95 <= targets.max_ttft,
+        ttft_pass: report.ttft_p95 < targets.max_ttft,
         thermal_pass: match report.peak_temp_celsius {
             Some(t) => t <= targets.max_peak_temp_celsius,
             None => true,
@@ -278,6 +303,7 @@ mod tests {
         ];
         let report = BenchReport::from_measurements(&measurements, Some(62.0)).unwrap();
         assert_eq!(report.runs, 3);
+        assert_eq!(report.degenerate_runs, 0);
         // Mean of 15, 30, 10 = 18.333…
         assert!((report.decode_mean_tokens_per_sec - (55.0 / 3.0)).abs() < EPS);
         assert!((report.decode_min_tokens_per_sec - 10.0).abs() < EPS);
@@ -289,9 +315,42 @@ mod tests {
     }
 
     #[test]
+    fn report_excludes_degenerate_runs_from_min() {
+        // The middle run decoded only its first token (0 after-first tokens),
+        // so its rate is 0.0 and must not define the sustained minimum.
+        let measurements = vec![
+            measurement("a", 1000, 40, 2000),      // 20 tok/s
+            measurement("degenerate", 1000, 0, 0), // 0 tok/s — excluded
+            measurement("c", 1000, 36, 2000),      // 18 tok/s (slowest scored)
+        ];
+        let report = BenchReport::from_measurements(&measurements, None).unwrap();
+        assert_eq!(report.runs, 3);
+        assert_eq!(report.degenerate_runs, 1);
+        // Min is the slowest *scored* run, not the degenerate 0.0.
+        assert!((report.decode_min_tokens_per_sec - 18.0).abs() < EPS);
+        // Mean averages only the two scored runs: (20 + 18) / 2 = 19.
+        assert!((report.decode_mean_tokens_per_sec - 19.0).abs() < EPS);
+        // With the degenerate run excluded, the run clears the floor.
+        assert!(evaluate(&report, &BenchTargets::default()).decode_pass);
+    }
+
+    #[test]
+    fn report_all_degenerate_yields_zero_and_fails_decode() {
+        let measurements = vec![measurement("a", 1000, 0, 0), measurement("b", 1200, 0, 0)];
+        let report = BenchReport::from_measurements(&measurements, Some(50.0)).unwrap();
+        assert_eq!(report.runs, 2);
+        assert_eq!(report.degenerate_runs, 2);
+        assert_eq!(report.decode_min_tokens_per_sec, 0.0);
+        assert_eq!(report.decode_mean_tokens_per_sec, 0.0);
+        // Nothing decoded a sustained stream → the decode gate fails.
+        assert!(!evaluate(&report, &BenchTargets::default()).decode_pass);
+    }
+
+    #[test]
     fn verdict_passes_when_all_criteria_met() {
         let report = BenchReport {
             runs: 5,
+            degenerate_runs: 0,
             ttft_p50: Duration::from_millis(1200),
             ttft_p95: Duration::from_millis(2500),
             decode_mean_tokens_per_sec: 22.0,
@@ -312,6 +371,7 @@ mod tests {
         // Sustained decode below floor.
         let slow = BenchReport {
             runs: 1,
+            degenerate_runs: 0,
             ttft_p50: Duration::from_millis(500),
             ttft_p95: Duration::from_millis(500),
             decode_mean_tokens_per_sec: 14.0,
@@ -351,6 +411,7 @@ mod tests {
     fn verdict_thermal_passes_vacuously_without_samples() {
         let report = BenchReport {
             runs: 1,
+            degenerate_runs: 0,
             ttft_p50: Duration::from_millis(500),
             ttft_p95: Duration::from_millis(500),
             decode_mean_tokens_per_sec: 20.0,
@@ -363,17 +424,43 @@ mod tests {
     }
 
     #[test]
-    fn target_at_exact_boundary_passes() {
-        // Boundaries are inclusive: exactly 15 tok/s, exactly 3s, exactly 70°C all pass.
+    fn decode_and_thermal_boundaries_are_inclusive() {
+        // ≥ 15 tok/s and ≤ 70 °C: exactly at target passes.
         let report = BenchReport {
             runs: 1,
-            ttft_p50: TARGET_MAX_TTFT,
-            ttft_p95: TARGET_MAX_TTFT,
+            degenerate_runs: 0,
+            ttft_p50: Duration::from_millis(500),
+            ttft_p95: Duration::from_millis(500),
             decode_mean_tokens_per_sec: TARGET_MIN_DECODE_TOKENS_PER_SEC,
             decode_min_tokens_per_sec: TARGET_MIN_DECODE_TOKENS_PER_SEC,
             peak_temp_celsius: Some(TARGET_MAX_PEAK_TEMP_CELSIUS),
         };
         let v = evaluate(&report, &BenchTargets::default());
+        assert!(v.decode_pass);
+        assert!(v.thermal_pass);
         assert!(v.all_pass());
+    }
+
+    #[test]
+    fn ttft_boundary_is_exclusive() {
+        // The TTFT target is strict (`< 3 s`): exactly 3 s fails, just under
+        // passes — unlike the inclusive decode/thermal gates.
+        let targets = BenchTargets::default();
+        let at_ceiling = BenchReport {
+            runs: 1,
+            degenerate_runs: 0,
+            ttft_p50: TARGET_MAX_TTFT,
+            ttft_p95: TARGET_MAX_TTFT,
+            decode_mean_tokens_per_sec: 20.0,
+            decode_min_tokens_per_sec: 20.0,
+            peak_temp_celsius: Some(50.0),
+        };
+        assert!(!evaluate(&at_ceiling, &targets).ttft_pass);
+
+        let just_under = BenchReport {
+            ttft_p95: TARGET_MAX_TTFT - Duration::from_millis(1),
+            ..at_ceiling
+        };
+        assert!(evaluate(&just_under, &targets).ttft_pass);
     }
 }

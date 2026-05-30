@@ -7,7 +7,11 @@
 //! example reads those files on a timer; everything that turns the raw
 //! bytes into a number, a CSV row, or a peak reading lives here as a pure
 //! function so it can be unit-tested on any host — the device-only part is
-//! the file read in [`super`]'s example, not the maths.
+//! the timer that drives [`read_thermal_zones`] in [`super`]'s example, not
+//! the directory walk or the maths.
+
+use std::fmt::Write as _;
+use std::path::Path;
 
 /// Divisor turning a `/sys/class/thermal` millidegree reading into degrees
 /// Celsius. The sysfs `temp` node reports thousandths of a degree.
@@ -61,14 +65,53 @@ pub const THERMAL_CSV_HEADER: &str = "elapsed_secs,zone,temp_celsius";
 /// — enough to distinguish 2-second sample cadence and sub-degree thermal
 /// drift without flooding the file with float noise.
 pub fn thermal_csv(samples: &[ThermalSample]) -> String {
-    let mut out = String::with_capacity(THERMAL_CSV_HEADER.len() + samples.len() * 24);
+    let mut out = String::with_capacity(THERMAL_CSV_HEADER.len() + samples.len() * 32);
     out.push_str(THERMAL_CSV_HEADER);
     out.push('\n');
     for s in samples {
-        out.push_str(&format!(
-            "{:.3},{},{:.3}\n",
+        // Infallible: writing to a String never errors.
+        let _ = writeln!(
+            out,
+            "{:.3},{},{:.3}",
             s.elapsed_secs, s.zone, s.temp_celsius
-        ));
+        );
+    }
+    out
+}
+
+/// Read every `thermal_zone*/temp` node under `base` into samples stamped
+/// with `elapsed_secs`. Silently skips unreadable or non-numeric nodes — a
+/// flaky single zone must never abort the benchmark. Returns empty on a host
+/// with no sysfs thermal tree (e.g. macOS), which the verdict treats as a
+/// vacuous thermal pass.
+///
+/// Pure relative to its `base` argument — the only I/O is reading under the
+/// directory it's handed. The example points it at [`super::THERMAL_SYSFS_DIR`]
+/// on-device; the tests point it at a temporary directory mimicking the
+/// sysfs layout, so the zone-prefix filter and skip-on-garbage paths are
+/// host-covered.
+pub fn read_thermal_zones(base: &Path, elapsed_secs: f64) -> Vec<ThermalSample> {
+    let Ok(entries) = std::fs::read_dir(base) else {
+        return Vec::new();
+    };
+    let mut out = Vec::new();
+    for entry in entries.flatten() {
+        let name = entry.file_name();
+        let zone = name.to_string_lossy();
+        if !zone.starts_with(super::THERMAL_ZONE_PREFIX) {
+            continue;
+        }
+        let temp_path = entry.path().join(super::THERMAL_TEMP_FILE);
+        let Ok(raw) = std::fs::read_to_string(&temp_path) else {
+            continue;
+        };
+        if let Some(temp_celsius) = parse_thermal_millidegrees(&raw) {
+            out.push(ThermalSample {
+                elapsed_secs,
+                zone: zone.into_owned(),
+                temp_celsius,
+            });
+        }
     }
     out
 }
@@ -90,6 +133,14 @@ pub fn peak_temp_celsius(samples: &[ThermalSample]) -> Option<f64> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use tempfile::tempdir;
+
+    /// Create `<base>/<dir>/temp` containing `contents`.
+    fn write_zone(base: &Path, dir: &str, contents: &str) {
+        let zone = base.join(dir);
+        std::fs::create_dir_all(&zone).unwrap();
+        std::fs::write(zone.join("temp"), contents).unwrap();
+    }
 
     #[test]
     fn parses_millidegrees_with_trailing_newline() {
@@ -183,5 +234,54 @@ mod tests {
             },
         ];
         assert_eq!(peak_temp_celsius(&samples), Some(50.0));
+    }
+
+    #[test]
+    fn read_zones_returns_empty_for_missing_base() {
+        assert!(read_thermal_zones(Path::new("/no/such/sysfs/tree"), 1.0).is_empty());
+    }
+
+    #[test]
+    fn read_zones_collects_each_thermal_zone() {
+        let dir = tempdir().unwrap();
+        write_zone(dir.path(), "thermal_zone0", "48000\n");
+        write_zone(dir.path(), "thermal_zone1", "52500");
+
+        let mut samples = read_thermal_zones(dir.path(), 3.5);
+        // read_dir order is unspecified; sort for a stable assertion.
+        samples.sort_by(|a, b| a.zone.cmp(&b.zone));
+        assert_eq!(samples.len(), 2);
+        assert_eq!(samples[0].zone, "thermal_zone0");
+        assert_eq!(samples[0].temp_celsius, 48.0);
+        assert_eq!(samples[0].elapsed_secs, 3.5);
+        assert_eq!(samples[1].zone, "thermal_zone1");
+        assert_eq!(samples[1].temp_celsius, 52.5);
+    }
+
+    #[test]
+    fn read_zones_ignores_non_zone_dirs() {
+        let dir = tempdir().unwrap();
+        write_zone(dir.path(), "thermal_zone0", "40000");
+        // A sibling directory that is not a thermal zone must be skipped.
+        write_zone(dir.path(), "cooling_device0", "12345");
+
+        let samples = read_thermal_zones(dir.path(), 0.0);
+        assert_eq!(samples.len(), 1);
+        assert_eq!(samples[0].zone, "thermal_zone0");
+    }
+
+    #[test]
+    fn read_zones_skips_garbage_and_missing_temp_nodes() {
+        let dir = tempdir().unwrap();
+        write_zone(dir.path(), "thermal_zone0", "55000");
+        write_zone(dir.path(), "thermal_zone1", "N/A"); // non-numeric → skipped
+        // A zone directory with no `temp` node at all → skipped.
+        std::fs::create_dir_all(dir.path().join("thermal_zone2")).unwrap();
+
+        let mut samples = read_thermal_zones(dir.path(), 0.0);
+        samples.sort_by(|a, b| a.zone.cmp(&b.zone));
+        assert_eq!(samples.len(), 1);
+        assert_eq!(samples[0].zone, "thermal_zone0");
+        assert_eq!(samples[0].temp_celsius, 55.0);
     }
 }

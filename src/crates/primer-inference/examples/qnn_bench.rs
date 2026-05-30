@@ -36,8 +36,8 @@ use primer_inference::QnnBackend;
 use primer_inference::qnn::bench::{
     BENCH_MAX_TOKENS, BenchReport, BenchTargets, DEFAULT_BENCH_SYSTEM_PROMPT,
     DEFAULT_DURATION_SECS, DEFAULT_PROMPTS_PATH, PromptMeasurement, THERMAL_SAMPLE_INTERVAL,
-    THERMAL_SYSFS_DIR, THERMAL_TEMP_FILE, THERMAL_ZONE_PREFIX, ThermalSample, evaluate,
-    load_bench_prompts, parse_thermal_millidegrees, peak_temp_celsius, thermal_csv,
+    THERMAL_SYSFS_DIR, ThermalSample, Verdict, evaluate, load_bench_prompts, peak_temp_celsius,
+    read_thermal_zones, thermal_csv,
 };
 use tokio::sync::oneshot;
 
@@ -209,8 +209,9 @@ async fn run() -> Result<bool, Box<dyn std::error::Error>> {
         }
     };
     let targets = args.targets();
-    print_report(&report, &targets);
-    Ok(evaluate(&report, &targets).all_pass())
+    let verdict = evaluate(&report, &targets);
+    print_report(&report, &targets, &verdict);
+    Ok(verdict.all_pass())
 }
 
 /// Measure one prompt: TTFT (issue → first non-empty chunk) and decode
@@ -279,42 +280,13 @@ async fn thermal_sampler(started: Instant, mut stop: oneshot::Receiver<()>) -> V
     samples
 }
 
-/// Read every `thermal_zone*/temp` node under `base` into samples stamped
-/// with `elapsed_secs`. Silently skips unreadable or non-numeric nodes —
-/// a flaky single zone must never abort the benchmark. Returns empty on a
-/// host with no sysfs thermal tree (e.g. macOS), which the verdict treats
-/// as a vacuous thermal pass.
-fn read_thermal_zones(base: &Path, elapsed_secs: f64) -> Vec<ThermalSample> {
-    let Ok(entries) = std::fs::read_dir(base) else {
-        return Vec::new();
-    };
-    let mut out = Vec::new();
-    for entry in entries.flatten() {
-        let name = entry.file_name();
-        let zone = name.to_string_lossy();
-        if !zone.starts_with(THERMAL_ZONE_PREFIX) {
-            continue;
-        }
-        let temp_path = entry.path().join(THERMAL_TEMP_FILE);
-        let Ok(raw) = std::fs::read_to_string(&temp_path) else {
-            continue;
-        };
-        if let Some(temp_celsius) = parse_thermal_millidegrees(&raw) {
-            out.push(ThermalSample {
-                elapsed_secs,
-                zone: zone.into_owned(),
-                temp_celsius,
-            });
-        }
-    }
-    out
-}
-
 /// Print the aggregate report and the pass/fail line per criterion.
-fn print_report(report: &BenchReport, targets: &BenchTargets) {
-    let verdict = evaluate(report, targets);
+fn print_report(report: &BenchReport, targets: &BenchTargets, verdict: &Verdict) {
     let pf = |ok: bool| if ok { "PASS" } else { "FAIL" };
-    println!("\n=== QNN benchmark report ({} runs) ===", report.runs);
+    println!(
+        "\n=== QNN benchmark report ({} runs, {} degenerate) ===",
+        report.runs, report.degenerate_runs
+    );
     println!(
         "TTFT  p50={:.0}ms  p95={:.0}ms   (target p95 < {:.0}ms)  [{}]",
         report.ttft_p50.as_secs_f64() * 1000.0,

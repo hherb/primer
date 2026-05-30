@@ -28,7 +28,9 @@ pub use prompts::{
     BenchPrompt, BenchPromptError, DEFAULT_BENCH_SYSTEM_PROMPT, load_bench_prompts,
     parse_bench_prompts,
 };
-pub use thermal::{ThermalSample, parse_thermal_millidegrees, peak_temp_celsius, thermal_csv};
+pub use thermal::{
+    ThermalSample, parse_thermal_millidegrees, peak_temp_celsius, read_thermal_zones, thermal_csv,
+};
 
 /// Default wall-clock duration the benchmark loops prompts for, in seconds.
 /// 15 minutes is long enough to drive the SoC into a steady thermal state
