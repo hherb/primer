@@ -1638,7 +1638,13 @@ mod embedder_backend_default_tests {
     #[test]
     fn explicit_value_overrides_default() {
         let cli = Cli::try_parse_from([
-            "primer", "--name", "Ada", "--age", "9", "--embedder-backend", "stub",
+            "primer",
+            "--name",
+            "Ada",
+            "--age",
+            "9",
+            "--embedder-backend",
+            "stub",
         ])
         .unwrap();
         assert_eq!(cli.embedder_backend, "stub");
