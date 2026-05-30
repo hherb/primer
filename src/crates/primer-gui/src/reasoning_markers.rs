@@ -29,6 +29,11 @@ pub fn parse_reasoning_markers(text: &str) -> Vec<(String, String)> {
             // line has no whitespace at all (open only) → drop it.
             let (open, close) = line.split_once(char::is_whitespace)?;
             let close = close.trim();
+            // `open` cannot be empty today (the line is trimmed before the
+            // split, so the first segment is non-empty), but we keep the
+            // check as a deliberate defensive guard so this stays correct if
+            // the trim/split order is ever changed. `close` can be empty when
+            // the line is e.g. "<a>   " — drop those.
             if open.is_empty() || close.is_empty() {
                 return None;
             }
@@ -49,7 +54,7 @@ mod tests {
 
     #[test]
     fn empty_input_is_empty() {
-        assert_eq!(parse_reasoning_markers(""), Vec::<(String, String)>::new());
+        assert_eq!(parse_reasoning_markers(""), pairs(&[]));
     }
 
     #[test]
@@ -94,19 +99,13 @@ mod tests {
 
     #[test]
     fn open_only_line_is_dropped() {
-        assert_eq!(
-            parse_reasoning_markers("<a>"),
-            Vec::<(String, String)>::new()
-        );
+        assert_eq!(parse_reasoning_markers("<a>"), pairs(&[]));
     }
 
     #[test]
     fn open_with_trailing_whitespace_only_is_dropped() {
         // After trimming, the line is just "<a>" with no whitespace → no close.
-        assert_eq!(
-            parse_reasoning_markers("<a>    "),
-            Vec::<(String, String)>::new()
-        );
+        assert_eq!(parse_reasoning_markers("<a>    "), pairs(&[]));
     }
 
     #[test]
@@ -122,6 +121,17 @@ mod tests {
         assert_eq!(
             parse_reasoning_markers("<a> </a> tail"),
             pairs(&[("<a>", "</a> tail")])
+        );
+    }
+
+    #[test]
+    fn duplicate_pairs_pass_through() {
+        // No deduplication — the downstream `with_extra_markers` contract
+        // accepts duplicates; pinning this prevents a future "optimization"
+        // from silently dropping repeats.
+        assert_eq!(
+            parse_reasoning_markers("<a> </a>\n<a> </a>"),
+            pairs(&[("<a>", "</a>"), ("<a>", "</a>")])
         );
     }
 }
