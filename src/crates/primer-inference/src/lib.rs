@@ -18,6 +18,7 @@
 pub mod cloud;
 pub mod ollama;
 pub mod openai_compat;
+mod reasoning_stream;
 pub mod stub;
 
 #[cfg(feature = "qnn")]

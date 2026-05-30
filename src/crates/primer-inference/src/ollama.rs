@@ -143,14 +143,6 @@ fn parse_ollama_line(line: &str) -> Result<TokenChunk> {
     })
 }
 
-/// Drain any captured reasoning from the filter and emit it at debug level.
-fn log_suppressed(filter: &mut primer_core::reasoning::ReasoningFilter) {
-    let r = filter.drain_suppressed();
-    if !r.is_empty() {
-        tracing::debug!(target: "primer::reasoning", backend = "ollama", suppressed = %r);
-    }
-}
-
 #[async_trait]
 impl InferenceBackend for OllamaBackend {
     fn name(&self) -> &str {
@@ -235,7 +227,7 @@ impl InferenceBackend for OllamaBackend {
         // until the process ends — acceptable for the CLI today; revisit
         // with a cancellation token when this backend is held long-lived.
         tokio::spawn(async move {
-            use primer_core::reasoning::{ReasoningFilter, finalize_visible};
+            use primer_core::reasoning::ReasoningFilter;
             let mut buf = NdjsonBuffer::new();
             let mut filter = ReasoningFilter::new(markers);
             let mut total_visible: usize = 0;
@@ -254,44 +246,21 @@ impl InferenceBackend for OllamaBackend {
                                     continue;
                                 }
                             };
-                            if chunk.done {
-                                // Final chunk: push its own content, then flush.
-                                let mut visible = filter.push(&chunk.text);
-                                total_visible += visible.len();
-                                visible.push_str(&filter.finish());
-                                log_suppressed(&mut filter);
-                                match finalize_visible(
-                                    total_visible,
-                                    &visible,
-                                    filter.did_suppress(),
-                                ) {
-                                    Some(text) => {
-                                        let _ = tx.send(Ok(TokenChunk { text, done: true })).await;
-                                    }
-                                    None => {
-                                        let _ = tx
-                                            .send(Err(PrimerError::Inference(
-                                                primer_core::error::InferenceError::ReasoningWithoutAnswer,
-                                            )))
-                                            .await;
-                                    }
-                                }
-                                break 'outer;
-                            } else {
-                                let visible = filter.push(&chunk.text);
-                                log_suppressed(&mut filter);
-                                if !visible.is_empty() {
-                                    total_visible += visible.len();
-                                    if tx
-                                        .send(Ok(TokenChunk {
-                                            text: visible,
-                                            done: false,
-                                        }))
-                                        .await
-                                        .is_err()
-                                    {
+                            match crate::reasoning_stream::process_filtered_chunk(
+                                &mut filter,
+                                chunk,
+                                &mut total_visible,
+                                "ollama",
+                            ) {
+                                crate::reasoning_stream::FilterAction::Nothing => {}
+                                crate::reasoning_stream::FilterAction::Forward(r) => {
+                                    if tx.send(r).await.is_err() {
                                         break 'outer;
                                     }
+                                }
+                                crate::reasoning_stream::FilterAction::Final(r) => {
+                                    let _ = tx.send(r).await;
+                                    break 'outer;
                                 }
                             }
                         }
@@ -436,31 +405,32 @@ mod tests {
 
     mod reasoning_wiring {
         use super::*;
-        use primer_core::reasoning::{ReasoningFilter, finalize_visible};
 
-        /// Helper mirroring the generate_stream loop's per-chunk handling:
-        /// parse NDJSON lines, filter their content, return (visible, error?).
+        /// Drive a sequence of NDJSON lines through the REAL shared filter
+        /// helper, collecting visible text and whether an error chunk was
+        /// emitted.
         fn drive(backend: &OllamaBackend, lines: &[&str]) -> (String, bool) {
+            use crate::reasoning_stream::{FilterAction, process_filtered_chunk};
+            use primer_core::reasoning::ReasoningFilter;
             let mut filter = ReasoningFilter::new(backend.reasoning_markers.clone());
+            let mut total = 0usize;
             let mut visible = String::new();
-            let mut total: usize = 0;
-            let mut tail = String::new();
+            let mut err = false;
             for line in lines {
                 let chunk = parse_ollama_line(line).unwrap();
-                if chunk.done {
-                    let v = filter.push(&chunk.text);
-                    total += v.len();
-                    visible.push_str(&v);
-                    tail = format!("{v}{}", filter.finish());
-                    break;
-                } else {
-                    let v = filter.push(&chunk.text);
-                    total += v.len();
-                    visible.push_str(&v);
+                match process_filtered_chunk(&mut filter, chunk, &mut total, "ollama") {
+                    FilterAction::Nothing => {}
+                    FilterAction::Forward(r) => visible.push_str(&r.unwrap().text),
+                    FilterAction::Final(r) => {
+                        match r {
+                            Ok(c) => visible.push_str(&c.text),
+                            Err(_) => err = true,
+                        }
+                        break;
+                    }
                 }
             }
-            let emit_error = finalize_visible(total, &tail, filter.did_suppress()).is_none();
-            (visible, emit_error)
+            (visible, err)
         }
 
         #[test]
