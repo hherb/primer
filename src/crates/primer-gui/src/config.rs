@@ -257,9 +257,11 @@ pub struct EmbedderConfig {
 /// The default embedder kind tracks what is compiled in: a build with the
 /// `embedding` feature (the default) defaults to hybrid retrieval via
 /// fastembed; a `--no-default-features` build stays BM25-only so the GUI
-/// never refuses to start. `#[serde(default)]` on the config means an
-/// existing `gui-config.json` that explicitly stored `"none"` keeps it —
-/// only a fresh config picks up this default.
+/// never refuses to start. Because the config struct is `#[serde(default)]`,
+/// this default is only consulted when the `kind` field is ABSENT from
+/// `gui-config.json` (e.g. a config written by an older build); a config
+/// that stores an explicit `kind` — including `"none"` — keeps that value
+/// verbatim, so flipping the default never overrides a user's saved choice.
 #[cfg(feature = "embedding")]
 fn default_embedder_kind() -> &'static str {
     "fastembed"
