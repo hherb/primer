@@ -175,6 +175,13 @@ struct Cli {
     #[arg(long)]
     comprehension_model: Option<String>,
 
+    /// Append a custom reasoning-marker pair to strip from model output.
+    /// Repeatable: `--reasoning-marker '<think>' '</think>'`. The built-in
+    /// defaults (`<think>…</think>`, Gemma4 `<|channel>…<channel|>`) always
+    /// apply; this only adds more. Applies to ollama / openai-compat backends.
+    #[arg(long, num_args = 2, value_names = ["OPEN", "CLOSE"], action = clap::ArgAction::Append)]
+    reasoning_marker: Vec<String>,
+
     /// Maximum time to block awaiting the previous turn's
     /// extractor → comprehension chain before the next intent decision.
     /// Combined with `--extractor-timeout-ms` this caps the total
@@ -539,6 +546,18 @@ fn npu_serialisation_warning(
     None
 }
 
+/// Pair clap's flat `--reasoning-marker OPEN CLOSE` values (a `Vec` of length
+/// `2 × N`) into `(open, close)` tuples. A trailing unpaired value is dropped
+/// (clap's `num_args = 2` makes that impossible in practice, but be defensive).
+fn pair_reasoning_markers(flat: Vec<String>) -> Vec<(String, String)> {
+    let mut it = flat.into_iter();
+    let mut out = Vec::new();
+    while let (Some(open), Some(close)) = (it.next(), it.next()) {
+        out.push((open, close));
+    }
+    out
+}
+
 fn main() -> anyhow::Result<()> {
     // Load env files. Project-local `.env` first (searches cwd and ancestors),
     // then a user-global `~/.primer_env` for secrets that should live outside
@@ -708,9 +727,7 @@ async fn async_main() -> anyhow::Result<()> {
         qnn_qairt_lib_dir: cli.qnn_qairt_lib_dir.clone(),
         #[cfg(not(feature = "qnn"))]
         qnn_qairt_lib_dir: None,
-        // Custom reasoning-marker extend is not yet surfaced as a CLI flag;
-        // empty here means built-in default stripping only.
-        reasoning_markers: Vec::new(),
+        reasoning_markers: pair_reasoning_markers(cli.reasoning_marker.clone()),
     };
 
     let backend: Arc<dyn InferenceBackend> =
@@ -1607,6 +1624,47 @@ mod break_suggest_flag_tests {
             "0",
         ]);
         assert!(result.is_err(), "0 should be rejected by the value parser");
+    }
+}
+
+#[cfg(test)]
+mod reasoning_marker_tests {
+    use super::pair_reasoning_markers;
+
+    #[test]
+    fn pairs_flat_args_into_tuples() {
+        let flat = vec![
+            "<a>".to_string(),
+            "</a>".to_string(),
+            "<b>".to_string(),
+            "</b>".to_string(),
+        ];
+        assert_eq!(
+            pair_reasoning_markers(flat),
+            vec![
+                ("<a>".to_string(), "</a>".to_string()),
+                ("<b>".to_string(), "</b>".to_string()),
+            ]
+        );
+    }
+
+    #[test]
+    fn empty_is_empty() {
+        assert_eq!(
+            pair_reasoning_markers(vec![]),
+            Vec::<(String, String)>::new()
+        );
+    }
+
+    #[test]
+    fn odd_trailing_value_is_dropped() {
+        // clap's num_args=2 makes odd counts impossible in practice, but the
+        // helper must not panic if handed one.
+        let flat = vec!["<a>".to_string(), "</a>".to_string(), "<stray>".to_string()];
+        assert_eq!(
+            pair_reasoning_markers(flat),
+            vec![("<a>".to_string(), "</a>".to_string())]
+        );
     }
 }
 
