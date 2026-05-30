@@ -178,7 +178,8 @@ struct Cli {
     /// Append a custom reasoning-marker pair to strip from model output.
     /// Repeatable: `--reasoning-marker '<think>' '</think>'`. The built-in
     /// defaults (`<think>…</think>`, Gemma4 `<|channel>…<channel|>`) always
-    /// apply; this only adds more. Applies to ollama / openai-compat backends.
+    /// apply; this only adds more. Markers are matched as literal text, not
+    /// regex. Applies to ollama / openai-compat backends.
     #[arg(long, num_args = 2, value_names = ["OPEN", "CLOSE"], action = clap::ArgAction::Append)]
     reasoning_marker: Vec<String>,
 
@@ -1629,7 +1630,9 @@ mod break_suggest_flag_tests {
 
 #[cfg(test)]
 mod reasoning_marker_tests {
+    use super::Cli;
     use super::pair_reasoning_markers;
+    use clap::Parser;
 
     #[test]
     fn pairs_flat_args_into_tuples() {
@@ -1665,6 +1668,33 @@ mod reasoning_marker_tests {
             pair_reasoning_markers(flat),
             vec![("<a>".to_string(), "</a>".to_string())]
         );
+    }
+
+    #[test]
+    fn cli_parses_repeated_reasoning_marker_flags_into_pairs() {
+        // Two repeated occurrences → a flat Vec of 4, paired into 2 tuples.
+        let cli = Cli::parse_from([
+            "primer",
+            "--reasoning-marker",
+            "<a>",
+            "</a>",
+            "--reasoning-marker",
+            "<b>",
+            "</b>",
+        ]);
+        assert_eq!(
+            pair_reasoning_markers(cli.reasoning_marker),
+            vec![
+                ("<a>".to_string(), "</a>".to_string()),
+                ("<b>".to_string(), "</b>".to_string()),
+            ]
+        );
+    }
+
+    #[test]
+    fn cli_without_reasoning_marker_flag_is_empty() {
+        let cli = Cli::parse_from(["primer"]);
+        assert!(pair_reasoning_markers(cli.reasoning_marker).is_empty());
     }
 }
 
