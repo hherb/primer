@@ -254,10 +254,26 @@ pub struct EmbedderConfig {
     pub openai_compat_url: Option<String>,
 }
 
+/// The default embedder kind tracks what is compiled in: a build with the
+/// `embedding` feature (the default) defaults to hybrid retrieval via
+/// fastembed; a `--no-default-features` build stays BM25-only so the GUI
+/// never refuses to start. `#[serde(default)]` on the config means an
+/// existing `gui-config.json` that explicitly stored `"none"` keeps it —
+/// only a fresh config picks up this default.
+#[cfg(feature = "embedding")]
+fn default_embedder_kind() -> &'static str {
+    "fastembed"
+}
+
+#[cfg(not(feature = "embedding"))]
+fn default_embedder_kind() -> &'static str {
+    "none"
+}
+
 impl Default for EmbedderConfig {
     fn default() -> Self {
         Self {
-            kind: "none".to_string(),
+            kind: default_embedder_kind().to_string(),
             model: None,
             ollama_url: None,
             openai_compat_url: None,
@@ -754,6 +770,18 @@ mod tests {
         assert_eq!(cfg.backend, BackendConfig::default());
         assert_eq!(cfg.embedder, EmbedderConfig::default());
         assert_eq!(cfg.ui, UiConfig::default());
+    }
+
+    #[cfg(feature = "embedding")]
+    #[test]
+    fn embedder_default_is_fastembed_with_feature() {
+        assert_eq!(EmbedderConfig::default().kind, "fastembed");
+    }
+
+    #[cfg(not(feature = "embedding"))]
+    #[test]
+    fn embedder_default_is_none_without_feature() {
+        assert_eq!(EmbedderConfig::default().kind, "none");
     }
 
     // ─── View / Update DTO tests ─────────────────────────────────────
