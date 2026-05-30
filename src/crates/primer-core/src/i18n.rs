@@ -156,6 +156,9 @@ fn render_english(err: &InferenceError) -> String {
         ModelNotFound { model } => {
             format!("Model '{model}' is not available. For Ollama, run `ollama pull {model}`.")
         }
+        ReasoningWithoutAnswer => {
+            "Oops — I'm having a thinking problem right now. Could you ask me that again?".into()
+        }
         Other(_) => {
             "Something unexpected went wrong. Please try again. (See logs for details.)".into()
         }
@@ -198,6 +201,11 @@ fn render_german(err: &InferenceError) -> String {
         ModelNotFound { model } => {
             format!("Modell '{model}' ist nicht verfügbar. Für Ollama führe `ollama pull {model}` aus.")
         }
+        ReasoningWithoutAnswer => {
+            "Hoppla — ich komme gerade beim Nachdenken durcheinander. Kannst du mich das \
+             noch einmal fragen?"
+                .into()
+        }
         Other(_) => "Etwas Unerwartetes ist schiefgelaufen. Bitte versuche es erneut. (Details in den Logs.)".into(),
     }
 }
@@ -231,6 +239,9 @@ fn render_hindi(err: &InferenceError) -> String {
         NetworkUnavailable => "सेवा तक पहुँचा नहीं जा सका। कृपया अपना नेटवर्क कनेक्शन जाँचो।".into(),
         ModelNotFound { model } => {
             format!("मॉडल '{model}' उपलब्ध नहीं है। Ollama के लिए `ollama pull {model}` चलाओ।")
+        }
+        ReasoningWithoutAnswer => {
+            "अरे — मुझे अभी सोचने में थोड़ी दिक्कत हो रही है। क्या तुम मुझसे यह दोबारा पूछ सकते हो?".into()
         }
         Other(_) => "कुछ अप्रत्याशित हुआ। कृपया फिर से कोशिश करो। (विवरण लॉग में हैं।)".into(),
     }
@@ -309,6 +320,28 @@ mod tests {
         assert!(
             !s.contains("RAW_DEV_STRING_FOO"),
             "Other's inner string must not reach users; got: {s}"
+        );
+    }
+
+    #[test]
+    fn reasoning_without_answer_is_not_retryable() {
+        assert!(!InferenceError::ReasoningWithoutAnswer.is_retryable());
+    }
+
+    #[test]
+    fn reasoning_without_answer_renders_nonempty_per_locale() {
+        for &l in &[Locale::English, Locale::German, Locale::Hindi] {
+            let s = render_inference_error(&InferenceError::ReasoningWithoutAnswer, &l);
+            assert!(!s.trim().is_empty(), "empty render for {l:?}");
+        }
+    }
+
+    #[test]
+    fn reasoning_without_answer_hindi_has_devanagari() {
+        let s = render_inference_error(&InferenceError::ReasoningWithoutAnswer, &Locale::Hindi);
+        assert!(
+            s.chars().any(|c| ('\u{0900}'..='\u{097F}').contains(&c)),
+            "expected Devanagari, got: {s}"
         );
     }
 
