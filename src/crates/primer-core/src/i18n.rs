@@ -411,6 +411,7 @@ mod tests {
             InferenceError::ModelNotFound {
                 model: "llama3.2".into(),
             },
+            InferenceError::ReasoningWithoutAnswer,
             InferenceError::Other("RAW_DEV_STRING".into()),
         ];
         for err in cases {

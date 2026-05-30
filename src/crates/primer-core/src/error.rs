@@ -53,9 +53,9 @@ pub enum InferenceError {
 
 impl InferenceError {
     /// Whether the retry helper should attempt to recover this
-    /// condition. `Auth`, `ModelNotFound`, and `Other` are surfaced
-    /// immediately; the rest are transient by definition or by
-    /// observation (network flap).
+    /// condition. `Auth`, `ModelNotFound`, `ReasoningWithoutAnswer`, and
+    /// `Other` are surfaced immediately; the rest are transient by
+    /// definition or by observation (network flap).
     pub fn is_retryable(&self) -> bool {
         matches!(
             self,
@@ -126,6 +126,7 @@ mod inference_error_tests {
         assert!(InferenceError::ServiceUnavailable.is_retryable());
         assert!(InferenceError::NetworkUnavailable.is_retryable());
         assert!(!InferenceError::ModelNotFound { model: "x".into() }.is_retryable());
+        assert!(!InferenceError::ReasoningWithoutAnswer.is_retryable());
         assert!(!InferenceError::Other("anything".into()).is_retryable());
     }
 
@@ -161,6 +162,10 @@ mod inference_error_tests {
                 }
             ),
             "model not found: llama3.2"
+        );
+        assert_eq!(
+            format!("{}", InferenceError::ReasoningWithoutAnswer),
+            "model produced reasoning but no visible answer"
         );
         assert_eq!(format!("{}", InferenceError::Other("raw".into())), "raw");
         assert_eq!(
