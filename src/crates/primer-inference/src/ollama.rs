@@ -40,6 +40,8 @@ pub struct OllamaBackend {
     base_url: String,
     model: String,
     retry_settings: primer_core::retry::RetrySettings,
+    /// Marker pairs whose enclosed reasoning is stripped from the stream.
+    pub(crate) reasoning_markers: Vec<primer_core::reasoning::ReasoningMarker>,
 }
 
 impl OllamaBackend {
@@ -49,7 +51,19 @@ impl OllamaBackend {
             base_url,
             model,
             retry_settings: primer_core::retry::RetrySettings::default(),
+            reasoning_markers: primer_core::reasoning::default_markers(),
         }
+    }
+
+    /// Append custom `(open, close)` reasoning-marker pairs to the built-in
+    /// defaults. Builder style; returns `Self`.
+    pub fn with_extra_markers(mut self, extra: Vec<(String, String)>) -> Self {
+        self.reasoning_markers.extend(
+            extra
+                .into_iter()
+                .map(|(o, c)| primer_core::reasoning::ReasoningMarker::new(o, c)),
+        );
+        self
     }
 }
 
@@ -129,6 +143,14 @@ fn parse_ollama_line(line: &str) -> Result<TokenChunk> {
     })
 }
 
+/// Drain any captured reasoning from the filter and emit it at debug level.
+fn log_suppressed(filter: &mut primer_core::reasoning::ReasoningFilter) {
+    let r = filter.drain_suppressed();
+    if !r.is_empty() {
+        tracing::debug!(target: "primer::reasoning", backend = "ollama", suppressed = %r);
+    }
+}
+
 #[async_trait]
 impl InferenceBackend for OllamaBackend {
     fn name(&self) -> &str {
@@ -203,6 +225,7 @@ impl InferenceBackend for OllamaBackend {
         .await
         .map_err(PrimerError::Inference)?;
 
+        let markers = self.reasoning_markers.clone();
         let (mut tx, rx) = mpsc::unbounded::<Result<TokenChunk>>();
         let mut bytes_stream = response.bytes_stream();
 
@@ -212,7 +235,10 @@ impl InferenceBackend for OllamaBackend {
         // until the process ends — acceptable for the CLI today; revisit
         // with a cancellation token when this backend is held long-lived.
         tokio::spawn(async move {
+            use primer_core::reasoning::{ReasoningFilter, finalize_visible};
             let mut buf = NdjsonBuffer::new();
+            let mut filter = ReasoningFilter::new(markers);
+            let mut total_visible: usize = 0;
             'outer: loop {
                 match bytes_stream.next().await {
                     Some(Ok(bytes)) => {
@@ -221,18 +247,51 @@ impl InferenceBackend for OllamaBackend {
                             if line.trim().is_empty() {
                                 continue;
                             }
-                            match parse_ollama_line(&line) {
-                                Ok(chunk) => {
-                                    let done = chunk.done;
-                                    if tx.send(Ok(chunk)).await.is_err() {
-                                        break 'outer;
-                                    }
-                                    if done {
-                                        break 'outer;
-                                    }
-                                }
+                            let chunk = match parse_ollama_line(&line) {
+                                Ok(c) => c,
                                 Err(e) => {
                                     tracing::warn!("Skipping unparseable Ollama line: {e}");
+                                    continue;
+                                }
+                            };
+                            if chunk.done {
+                                // Final chunk: push its own content, then flush.
+                                let mut visible = filter.push(&chunk.text);
+                                total_visible += visible.len();
+                                visible.push_str(&filter.finish());
+                                log_suppressed(&mut filter);
+                                match finalize_visible(
+                                    total_visible,
+                                    &visible,
+                                    filter.did_suppress(),
+                                ) {
+                                    Some(text) => {
+                                        let _ = tx.send(Ok(TokenChunk { text, done: true })).await;
+                                    }
+                                    None => {
+                                        let _ = tx
+                                            .send(Err(PrimerError::Inference(
+                                                primer_core::error::InferenceError::ReasoningWithoutAnswer,
+                                            )))
+                                            .await;
+                                    }
+                                }
+                                break 'outer;
+                            } else {
+                                let visible = filter.push(&chunk.text);
+                                log_suppressed(&mut filter);
+                                if !visible.is_empty() {
+                                    total_visible += visible.len();
+                                    if tx
+                                        .send(Ok(TokenChunk {
+                                            text: visible,
+                                            done: false,
+                                        }))
+                                        .await
+                                        .is_err()
+                                    {
+                                        break 'outer;
+                                    }
                                 }
                             }
                         }
@@ -372,6 +431,74 @@ mod tests {
                 InferenceError::Other(s) => assert!(s.contains("400") && s.contains("bad payload")),
                 other => panic!("expected Other, got {other:?}"),
             }
+        }
+    }
+
+    mod reasoning_wiring {
+        use super::*;
+        use primer_core::reasoning::{ReasoningFilter, finalize_visible};
+
+        /// Helper mirroring the generate_stream loop's per-chunk handling:
+        /// parse NDJSON lines, filter their content, return (visible, error?).
+        fn drive(backend: &OllamaBackend, lines: &[&str]) -> (String, bool) {
+            let mut filter = ReasoningFilter::new(backend.reasoning_markers.clone());
+            let mut visible = String::new();
+            let mut total: usize = 0;
+            let mut tail = String::new();
+            for line in lines {
+                let chunk = parse_ollama_line(line).unwrap();
+                if chunk.done {
+                    let v = filter.push(&chunk.text);
+                    total += v.len();
+                    visible.push_str(&v);
+                    tail = format!("{v}{}", filter.finish());
+                    break;
+                } else {
+                    let v = filter.push(&chunk.text);
+                    total += v.len();
+                    visible.push_str(&v);
+                }
+            }
+            let emit_error = finalize_visible(total, &tail, filter.did_suppress()).is_none();
+            (visible, emit_error)
+        }
+
+        #[test]
+        fn strips_think_block_end_to_end() {
+            let b = OllamaBackend::new("http://x".into(), "m".into());
+            let lines = [
+                r#"{"message":{"content":"<think>plan</think>"},"done":false}"#,
+                r#"{"message":{"content":"Hi there"},"done":false}"#,
+                r#"{"message":{"content":""},"done":true}"#,
+            ];
+            let (visible, err) = drive(&b, &lines);
+            assert_eq!(visible, "Hi there");
+            assert!(!err);
+        }
+
+        #[test]
+        fn only_reasoning_yields_error() {
+            let b = OllamaBackend::new("http://x".into(), "m".into());
+            let lines = [
+                r#"{"message":{"content":"<think>only thinking"},"done":false}"#,
+                r#"{"message":{"content":""},"done":true}"#,
+            ];
+            let (visible, err) = drive(&b, &lines);
+            assert_eq!(visible, "");
+            assert!(err);
+        }
+
+        #[test]
+        fn custom_marker_extends_defaults() {
+            let b = OllamaBackend::new("http://x".into(), "m".into())
+                .with_extra_markers(vec![("[[r]]".into(), "[[/r]]".into())]);
+            let lines = [
+                r#"{"message":{"content":"a[[r]]hidden[[/r]]b"},"done":false}"#,
+                r#"{"message":{"content":""},"done":true}"#,
+            ];
+            let (visible, err) = drive(&b, &lines);
+            assert_eq!(visible, "ab");
+            assert!(!err);
         }
     }
 }
