@@ -320,6 +320,7 @@ Follow-up GitHub issue tracking this: [#157](https://github.com/hherb/primer/iss
 | `cargo test --workspace` (default features)   | 🟡 runs; full pass tally not captured this session |
 | Cloud REPL (`--backend cloud`)                | ✅ works; recommended Phase 0 setup        |
 | On-device Ollama REPL (`--backend ollama`)    | 🟡 functional but ⚠️ **too slow for conversational use at 4B Q4 on CPU** |
+| NPU REPL (`--backend qnn`, `--features qnn`)  | 🟡 wired + host-tested; device-unverified (needs QAIRT + a Genie bundle) — see benchmark section below |
 | Session persistence (`~/.primer/<slug>.db`)   | ✅ works                                   |
 | `--resume <uuid>` flow                        | ✅ works (mind the `--name` gotcha)        |
 | Auto-seeded knowledge base (91 passages)      | ✅ works                                   |
@@ -345,3 +346,37 @@ to Phase 1.1 (`LlamaCppBackend`): a CPU-targeted llama.cpp path on
 Snapdragon CPU will not be conversational either. The Phase 1.1 work
 is still valuable as a portable fallback, but the standalone-phone
 product story flows through Phase 1.2.
+
+## Run the QNN benchmark (Phase 1.2)
+
+The `qnn_bench` example is the **device throughput + thermal test** for the
+NPU backend. It loops a corpus of Socratic dialogue-continuation prompts
+for a fixed wall-clock window, measures time-to-first-token and
+steady-state decode rate per prompt, samples `/sys/class/thermal` every two
+seconds, and prints a pass/fail verdict against the Phase 1.2 acceptance
+targets: **sustained decode ≥ 15 tok/s, TTFT < 3 s, peak ≤ 70 °C**.
+
+Prereqs: a QAIRT SDK install (`libGenie.so` + dependencies) and a
+pre-compiled Genie bundle (e.g. Qwen3-4B from AI Hub). The QAIRT install
+and bundle-fetch steps are in the [QNN validation runbook](qnn-validation-runbook.md).
+
+```bash
+cd ~/primer/src
+~/.cargo/bin/cargo run --release --example qnn_bench --features qnn -- \
+    --bundle-dir ~/primer-bundles/qwen3-4b \
+    --duration-secs 900 \
+    --thermal-out ~/storage/shared/primer-thermal.csv
+```
+
+Flags: `--bundle-dir` (required), `--qairt-lib-dir` (defaults to
+`<bundle>/../qairt/lib/aarch64-android/`), `--prompts` (defaults to the
+shipped `data/bench/socratic_prompts.jsonl`), `--duration-secs`,
+`--thermal-out` (CSV path; omit to skip), and `--min-decode-tps` /
+`--max-ttft-ms` / `--max-peak-temp-c` to relax the targets when probing a
+smaller model. The process **exits non-zero if any target fails**, so it
+can gate a device-side script. `/tmp` is not writable under Termux — write
+the CSV under `~/storage/shared/` or `$TMPDIR`.
+
+The pure aggregation logic (percentiles, pass/fail, thermal parsing) is
+host-tested via `cargo test -p primer-inference --features qnn`; only the
+backend round-trip and the sysfs reads are device-only.

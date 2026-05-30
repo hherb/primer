@@ -1,0 +1,30 @@
+{"label":"sun-shine","turns":[{"role":"user","content":"how does the sun shine"}]}
+{"label":"sun-shine-react","turns":[{"role":"user","content":"how does the sun shine"},{"role":"assistant","content":"The Sun shines because deep in its core, tiny bits of hydrogen squash together and release light and heat. What do you think it would feel like to stand near something that hot?"},{"role":"user","content":"super super hot! but how do the bits squash together"}]}
+{"label":"moon-phases","turns":[{"role":"user","content":"why does the moon change shape"}]}
+{"label":"day-night-react","turns":[{"role":"user","content":"why is it day and night"},{"role":"assistant","content":"It is because the Earth spins around like a slow top, so one side faces the Sun while the other is in shadow. If you were standing on the Earth, would you feel it spinning?"},{"role":"user","content":"no i dont feel anything! so how do we know it spins"}]}
+{"label":"star-made-of","turns":[{"role":"user","content":"what is a star made of"}]}
+{"label":"stars-twinkle","turns":[{"role":"user","content":"why do stars twinkle but planets do not"}]}
+{"label":"heart-pump","turns":[{"role":"user","content":"how does the heart pump blood"}]}
+{"label":"heart-thump-react","turns":[{"role":"user","content":"why does my heart go thump thump"},{"role":"assistant","content":"That thump is your heart squeezing to push blood all around your body, a bit like a hand squeezing a water balloon. Where do you think the blood goes after it leaves your heart?"},{"role":"user","content":"maybe to my arms and legs? does it come back again"}]}
+{"label":"why-breathe","turns":[{"role":"user","content":"why do we breathe"}]}
+{"label":"brain-do","turns":[{"role":"user","content":"what does the brain do"}]}
+{"label":"digestion-react","turns":[{"role":"user","content":"how does food get digested"},{"role":"assistant","content":"Your body breaks food into tiny pieces, starting in your mouth and then in your tummy, so it can soak up the good parts. What do you think your teeth are doing to start that job?"},{"role":"user","content":"chewing it up small! then what happens in my tummy"}]}
+{"label":"tummy-growl","turns":[{"role":"user","content":"what makes my tummy growl when I am hungry"}]}
+{"label":"magnets-work","turns":[{"role":"user","content":"how do magnets work"}]}
+{"label":"electricity-react","turns":[{"role":"user","content":"what is electricity"},{"role":"assistant","content":"Electricity is the flow of tiny particles called electrons moving through wires, a bit like water flowing through a pipe. What kinds of things in your home need electricity to work?"},{"role":"user","content":"the lights and the tv! how does it get into the wires"}]}
+{"label":"battery-store","turns":[{"role":"user","content":"how does a battery store energy"}]}
+{"label":"lever-work","turns":[{"role":"user","content":"how does a lever work"}]}
+{"label":"sound-make","turns":[{"role":"user","content":"what makes sound"}]}
+{"label":"mirror-react","turns":[{"role":"user","content":"how does a mirror work"},{"role":"assistant","content":"A mirror has a smooth shiny surface that bounces light straight back to your eyes, so you see a reflection. What happens if the surface is bumpy instead of smooth?"},{"role":"user","content":"maybe the picture gets all wobbly? why does smooth make it clear"}]}
+{"label":"plants-food","turns":[{"role":"user","content":"how do plants make food"}]}
+{"label":"seeds-sprout-react","turns":[{"role":"user","content":"how do seeds sprout germinate"},{"role":"assistant","content":"A seed wakes up when it gets water and warmth, then pushes out a tiny root and shoot. What do you think the little root is looking for under the soil?"},{"role":"user","content":"water? and maybe food in the dirt"}]}
+{"label":"food-chain","turns":[{"role":"user","content":"what is a food chain"}]}
+{"label":"cells-what","turns":[{"role":"user","content":"what are cells"}]}
+{"label":"birds-fly","turns":[{"role":"user","content":"how do birds fly"}]}
+{"label":"dinosaurs-react","turns":[{"role":"user","content":"what happened to the dinosaurs"},{"role":"assistant","content":"Many scientists think a huge space rock hit the Earth and changed the weather so much that the dinosaurs could not survive. What do you think happened to the plants the dinosaurs ate?"},{"role":"user","content":"maybe they died too? so the dinosaurs had no food"}]}
+{"label":"rain-fall","turns":[{"role":"user","content":"what makes rain fall from clouds"}]}
+{"label":"snowflakes-react","turns":[{"role":"user","content":"how do snowflakes form six arms"},{"role":"assistant","content":"Snowflakes grow as water freezes into ice crystals, and the way water molecules lock together makes six sides. Have you ever noticed if any two snowflakes look exactly the same?"},{"role":"user","content":"no they all look different! why is that"}]}
+{"label":"wind-blow","turns":[{"role":"user","content":"what causes wind to blow"}]}
+{"label":"thunder-lightning","turns":[{"role":"user","content":"why does lightning make thunder"}]}
+{"label":"volcanoes-erupt","turns":[{"role":"user","content":"how do volcanoes erupt magma"}]}
+{"label":"sky-blue-react","turns":[{"role":"user","content":"why is the sky blue and not green"},{"role":"assistant","content":"Sunlight is made of many colours, and the air scatters the blue light around more than the others, so the sky looks blue. What colour does the sky turn when the Sun is setting?"},{"role":"user","content":"orange and pink! why does it change then"}]}

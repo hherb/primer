@@ -395,3 +395,15 @@ jobs:
         # surprises a developer building on RedMagic Termux. NDK env vars
         # are inherited from the earlier "Export NDK toolchain env" step.
         run: cargo build --target aarch64-linux-android -p primer-cli --features qnn
+
+      - name: Cross-compile qnn_bench example
+        # Phase 1.2 step 1.2.6's device benchmark lives in
+        # `primer-inference/examples/qnn_bench.rs` (required-features = qnn).
+        # The `primer-cli --features qnn` build above pulls in the bench
+        # *module* (it's part of the qnn lib surface), but NOT the example
+        # binary — examples are only built on demand. This step builds it
+        # for Android so the harness's tokio/clap/futures orchestration
+        # keeps compiling on the target it actually runs on (the RedMagic
+        # 11 Pro via Termux). NDK env vars are inherited from the earlier
+        # "Export NDK toolchain env" step.
+        run: cargo build --target aarch64-linux-android -p primer-inference --features qnn --example qnn_bench

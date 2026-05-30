@@ -34,6 +34,15 @@ minijinja = { workspace = true, optional = true }
 [dev-dependencies]
 chrono.workspace = true
 tempfile.workspace = true
+clap.workspace = true
 
 # llama.cpp bindings — uncomment when integrating:
 # llama-cpp-2 = "0.1"
+
+# QNN throughput + thermal benchmark (Phase 1.2 step 1.2.6). Device test;
+# requires the `qnn` feature so `QnnBackend` is in the dep graph. Declaring
+# `required-features` keeps a default `cargo build --examples` from trying
+# to compile it without the feature.
+[[example]]
+name = "qnn_bench"
+required-features = ["qnn"]

@@ -23,6 +23,7 @@
 //! callback bridge lands in step 1.2.3.
 
 pub mod backend;
+pub mod bench;
 pub mod genie;
 pub mod meta;
 pub mod template;
