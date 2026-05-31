@@ -95,6 +95,14 @@ pub struct BackendConfig {
     /// conventional `<bundle>/../qairt/lib/aarch64-android/` layout via
     /// `primer_engine::default_qairt_lib_dir`.
     pub qnn_qairt_lib_dir: Option<PathBuf>,
+    /// Raw "reasoning markers" textarea text from Settings: one
+    /// `open<whitespace>close` pair per line. Parsed into `(open, close)`
+    /// pairs by `crate::reasoning_markers::parse_reasoning_markers` at
+    /// session-wiring time and appended to the built-in defaults for the
+    /// ollama / openai-compat backends. Empty ⇒ defaults only. Stored
+    /// verbatim so the textarea round-trips losslessly. Not a secret —
+    /// crosses the IPC View/Update DTOs unredacted.
+    pub reasoning_markers: String,
 }
 
 impl Default for BackendConfig {
@@ -108,6 +116,7 @@ impl Default for BackendConfig {
             openai_compat_api_key_source: ApiKeySource::default(),
             qnn_bundle_dir: None,
             qnn_qairt_lib_dir: None,
+            reasoning_markers: String::new(),
         }
     }
 }
@@ -552,6 +561,9 @@ pub struct BackendConfigView {
     /// QNN bundle / QAIRT lib paths pass through verbatim — not secrets.
     pub qnn_bundle_dir: Option<PathBuf>,
     pub qnn_qairt_lib_dir: Option<PathBuf>,
+    /// Raw reasoning-markers textarea text — passes through verbatim
+    /// (not a secret), so the settings form can re-show it.
+    pub reasoning_markers: String,
 }
 
 impl From<&GuiConfig> for GuiConfigView {
@@ -567,6 +579,7 @@ impl From<&GuiConfig> for GuiConfigView {
                 openai_compat_api_key_source: (&c.backend.openai_compat_api_key_source).into(),
                 qnn_bundle_dir: c.backend.qnn_bundle_dir.clone(),
                 qnn_qairt_lib_dir: c.backend.qnn_qairt_lib_dir.clone(),
+                reasoning_markers: c.backend.reasoning_markers.clone(),
             },
             classifier: c.classifier.clone(),
             extractor: c.extractor.clone(),
@@ -617,6 +630,12 @@ pub struct BackendConfigUpdate {
     /// them (as `null` when unset).
     pub qnn_bundle_dir: Option<PathBuf>,
     pub qnn_qairt_lib_dir: Option<PathBuf>,
+    /// Raw reasoning-markers textarea text. Like every other
+    /// `BackendConfigUpdate` field, this is **mandatory** in the
+    /// `update_settings` payload (the struct has no `#[serde(default)]`),
+    /// so `settings.js::gather()` must always send it (empty string when
+    /// the textarea is blank). Not a secret — no Keep/Env dance.
+    pub reasoning_markers: String,
 }
 
 impl GuiConfigUpdate {
@@ -641,6 +660,7 @@ impl GuiConfigUpdate {
                     .resolve(&current.backend.openai_compat_api_key_source),
                 qnn_bundle_dir: self.backend.qnn_bundle_dir,
                 qnn_qairt_lib_dir: self.backend.qnn_qairt_lib_dir,
+                reasoning_markers: self.backend.reasoning_markers,
             },
             classifier: self.classifier,
             extractor: self.extractor,
@@ -940,6 +960,7 @@ mod tests {
                 "openai_compat_url": "http://localhost:8000",
                 "api_key_source": {"kind": "keep"},
                 "openai_compat_api_key_source": {"kind": "keep"},
+                "reasoning_markers": "",
                 "qnn_bundle_dir": "/bundles/qwen3-4b",
                 "qnn_qairt_lib_dir": "/qairt/lib/aarch64-android"
             },
@@ -964,6 +985,65 @@ mod tests {
             resolved.backend.qnn_qairt_lib_dir,
             Some("/qairt/lib/aarch64-android".into())
         );
+    }
+
+    #[test]
+    fn default_reasoning_markers_is_empty() {
+        let cfg = GuiConfig::default();
+        assert_eq!(cfg.backend.reasoning_markers, "");
+    }
+
+    #[test]
+    fn reasoning_markers_round_trip_through_disk() {
+        let dir = TempDir::new().unwrap();
+        let mut cfg = GuiConfig::default();
+        cfg.backend.kind = "ollama".to_string();
+        cfg.backend.reasoning_markers = "[[r]] [[/r]]\n<x> </x>".to_string();
+
+        save(dir.path(), &cfg).unwrap();
+        let round_trip = load(dir.path()).unwrap();
+        assert_eq!(round_trip, cfg);
+    }
+
+    #[test]
+    fn reasoning_markers_pass_through_view_verbatim() {
+        // Not a secret — the view must carry the raw textarea text through
+        // unredacted so the settings form can re-show what the user typed.
+        let mut cfg = GuiConfig::default();
+        cfg.backend.reasoning_markers = "[[r]] [[/r]]".to_string();
+        let view: GuiConfigView = (&cfg).into();
+        assert_eq!(view.backend.reasoning_markers, "[[r]] [[/r]]");
+    }
+
+    #[test]
+    fn reasoning_markers_pass_through_update_verbatim() {
+        let current = GuiConfig::default();
+        let update_json = r#"{
+            "learner": {"name": "Ada", "age": 7, "locale": "en"},
+            "backend": {
+                "kind": "ollama",
+                "model": null,
+                "ollama_url": "http://localhost:11434",
+                "openai_compat_url": "http://localhost:8000",
+                "api_key_source": {"kind": "keep"},
+                "openai_compat_api_key_source": {"kind": "keep"},
+                "reasoning_markers": "[[r]] [[/r]]",
+                "qnn_bundle_dir": null,
+                "qnn_qairt_lib_dir": null
+            },
+            "classifier": {"match_main": true, "kind": null, "model": null, "timeout_ms": 3000},
+            "extractor": {"match_main": true, "kind": null, "model": null, "timeout_ms": 5000},
+            "comprehension": {"match_main": true, "kind": null, "model": null, "timeout_ms": 5000},
+            "embedder": {"kind": "none", "model": null, "ollama_url": null, "openai_compat_url": null},
+            "vocab": {"max_per_prompt": null},
+            "breaks": {"after_mins": 30},
+            "persistence": {"session_db": null, "knowledge_db": null, "no_persist": false},
+            "ui": {"sidebar_open": true, "last_section": "current_turn"},
+            "speech": {"voice_mode_enabled": false, "disable_auto_download": false, "mic_silence_ms": 600, "overrides": {}}
+        }"#;
+        let update: GuiConfigUpdate = serde_json::from_str(update_json).unwrap();
+        let resolved = update.into_config(&current);
+        assert_eq!(resolved.backend.reasoning_markers, "[[r]] [[/r]]");
     }
 
     #[test]
@@ -1021,6 +1101,7 @@ mod tests {
                 "openai_compat_url": "http://localhost:8000",
                 "api_key_source": {"kind": "keep"},
                 "openai_compat_api_key_source": {"kind": "keep"},
+                "reasoning_markers": "",
                 "qnn_bundle_dir": null,
                 "qnn_qairt_lib_dir": null
             },
@@ -1209,6 +1290,7 @@ mod tests {
                 "openai_compat_url": "http://localhost:8000",
                 "api_key_source": {"kind": "keep"},
                 "openai_compat_api_key_source": {"kind": "keep"},
+                "reasoning_markers": "",
                 "qnn_bundle_dir": null,
                 "qnn_qairt_lib_dir": null,
             },
