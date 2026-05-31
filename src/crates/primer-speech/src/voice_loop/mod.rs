@@ -26,16 +26,11 @@ pub mod state_machine;
 #[cfg(feature = "cpal")]
 pub mod backends_common;
 
-/// Whisper + piper backend builder — gated on the full
-/// `silero + whisper + piper + cpal` set because the function body uses
-/// all four. Shares `LocalBackends` / `ChannelStt` with the macOS
-/// builders via [`backends_common`].
-#[cfg(all(
-    feature = "silero",
-    feature = "whisper",
-    feature = "piper",
-    feature = "cpal"
-))]
+/// Whisper STT backend builder — gated on `silero + whisper + cpal`.
+/// The TTS is injected by the caller (Piper / Supertonic / …), so this
+/// module no longer needs the `piper` feature. Shares `LocalBackends` /
+/// `ChannelStt` with the macOS builders via [`backends_common`].
+#[cfg(all(feature = "silero", feature = "whisper", feature = "cpal"))]
 pub mod backends;
 
 /// macOS-native backend builder (SFSpeechRecognizer + Silero VAD). One
@@ -67,12 +62,7 @@ pub use state_machine::{
 #[cfg(feature = "cpal")]
 pub use backends_common::{ChannelStt, LocalBackends};
 
-#[cfg(all(
-    feature = "silero",
-    feature = "whisper",
-    feature = "piper",
-    feature = "cpal"
-))]
+#[cfg(all(feature = "silero", feature = "whisper", feature = "cpal"))]
 pub use backends::build_local_backends;
 
 #[cfg(all(
