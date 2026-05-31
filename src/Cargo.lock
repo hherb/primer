@@ -3615,6 +3615,7 @@ dependencies = [
  "primer-core",
  "ringbuf",
  "rubato",
+ "serde",
  "serde_json",
  "silero-vad-rust",
  "supertonic-tts",
