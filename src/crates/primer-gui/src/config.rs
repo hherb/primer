@@ -359,6 +359,29 @@ pub enum SpeechBackend {
     MacosNative,
 }
 
+/// STT half of the voice stack (GUI-owned mirror of
+/// `primer_speech::voice_loop::SttBackend`; converted at the speech-gated
+/// wiring boundary in `voice/backends.rs`). Defined locally because
+/// `config.rs` is always compiled but `primer-speech` is an optional dep.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "kebab-case")]
+pub enum SttBackend {
+    #[default]
+    Whisper,
+    MacosNative,
+}
+
+/// TTS half of the voice stack (GUI-owned mirror of
+/// `primer_speech::voice_loop::TtsBackend`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "kebab-case")]
+pub enum TtsBackend {
+    #[default]
+    Piper,
+    Supertonic,
+    MacosNative,
+}
+
 /// Voice-mode settings.
 ///
 /// `voice_mode_enabled` is the sticky toggle (per device, not per
@@ -370,12 +393,17 @@ pub enum SpeechBackend {
 pub struct SpeechSettings {
     pub voice_mode_enabled: bool,
     pub disable_auto_download: bool,
-    /// Which backend stack to use for voice mode. Defaults to
-    /// `whisper-piper`. Set to `macos-native` (requires building with
-    /// `--features primer-gui/macos-native`) to use
-    /// SFSpeechRecognizer + AVSpeechSynthesizer instead.
+    /// STT half of the voice stack. Defaults to `whisper`.
     #[serde(default)]
-    pub backend: SpeechBackend,
+    pub stt_backend: SttBackend,
+    /// TTS half of the voice stack. Defaults to `piper`.
+    #[serde(default)]
+    pub tts_backend: TtsBackend,
+    /// Pre-Stage-C coupled selector (#189). Deserialized only so an older
+    /// `gui-config.json` that stored `backend` migrates via
+    /// [`SpeechSettings::resolve_backends`]; never written back out.
+    #[serde(default, skip_serializing)]
+    pub backend: Option<SpeechBackend>,
     /// Milliseconds of post-end-of-speech silence the VAD waits before
     /// firing SpeechEnd. Default reads from
     /// `primer_core::consts::speech::DEFAULT_MIC_SILENCE_MS`.
@@ -399,11 +427,35 @@ impl Default for SpeechSettings {
         Self {
             voice_mode_enabled: false,
             disable_auto_download: false,
-            backend: SpeechBackend::default(),
+            stt_backend: SttBackend::default(),
+            tts_backend: TtsBackend::default(),
+            backend: None,
             mic_silence_ms: primer_core::consts::speech::DEFAULT_MIC_SILENCE_MS,
             download_timeout_secs: default_download_timeout_secs(),
             overrides: std::collections::BTreeMap::new(),
         }
+    }
+}
+
+impl SpeechSettings {
+    /// The effective `(stt, tts)` choice. Applies the one-time legacy
+    /// `backend` migration: when the new fields are still at their defaults
+    /// AND a legacy `backend` value is present, map the old coupled stack to
+    /// the two halves. Otherwise the new fields win.
+    pub fn resolve_backends(&self) -> (SttBackend, TtsBackend) {
+        if let Some(legacy) = self.backend {
+            if self.stt_backend == SttBackend::default()
+                && self.tts_backend == TtsBackend::default()
+            {
+                return match legacy {
+                    SpeechBackend::WhisperPiper => (SttBackend::Whisper, TtsBackend::Piper),
+                    SpeechBackend::MacosNative => {
+                        (SttBackend::MacosNative, TtsBackend::MacosNative)
+                    }
+                };
+            }
+        }
+        (self.stt_backend, self.tts_backend)
     }
 }
 
@@ -417,6 +469,8 @@ pub struct SpeechLocaleOverride {
     pub piper_config_path: Option<PathBuf>,
     pub whisper_model_path: Option<PathBuf>,
     pub voice_id: Option<String>,
+    pub supertonic_onnx_dir: Option<PathBuf>,
+    pub supertonic_voice_style_path: Option<PathBuf>,
 }
 
 /// Errors load/save can produce. Distinguished from a missing file
@@ -1246,6 +1300,7 @@ mod tests {
                 piper_config_path: Some("/tmp/de.onnx.json".into()),
                 whisper_model_path: None,
                 voice_id: Some("de_DE-thorsten-medium".to_string()),
+                ..SpeechLocaleOverride::default()
             },
         );
 
@@ -1356,7 +1411,7 @@ mod tests {
         }"#;
         let update: GuiConfigUpdate = serde_json::from_str(update_json).unwrap();
         let resolved = update.into_config(&current);
-        assert_eq!(resolved.speech.backend, SpeechBackend::MacosNative);
+        assert_eq!(resolved.speech.backend, Some(SpeechBackend::MacosNative));
         assert_eq!(resolved.speech.download_timeout_secs, 3600);
     }
 
@@ -1404,11 +1459,78 @@ mod tests {
         let update: GuiConfigUpdate = serde_json::from_str(update_json).unwrap();
         let resolved = update.into_config(&current);
         // backend still round-trips even with the sibling key dropped
-        assert_eq!(resolved.speech.backend, SpeechBackend::MacosNative);
+        assert_eq!(resolved.speech.backend, Some(SpeechBackend::MacosNative));
         assert_eq!(
             resolved.speech.download_timeout_secs,
             primer_core::consts::speech::DEFAULT_DOWNLOAD_TIMEOUT_SECS,
             "missing download_timeout_secs resolves to the consts default",
+        );
+    }
+
+    #[test]
+    fn legacy_backend_macos_native_migrates_to_both_native_halves() {
+        let json = r#"{ "backend": "macos-native" }"#;
+        let speech: SpeechSettings = serde_json::from_str(json).unwrap();
+        assert_eq!(
+            speech.resolve_backends(),
+            (SttBackend::MacosNative, TtsBackend::MacosNative)
+        );
+    }
+
+    #[test]
+    fn legacy_backend_whisper_piper_migrates_to_whisper_piper() {
+        let json = r#"{ "backend": "whisper-piper" }"#;
+        let speech: SpeechSettings = serde_json::from_str(json).unwrap();
+        assert_eq!(
+            speech.resolve_backends(),
+            (SttBackend::Whisper, TtsBackend::Piper)
+        );
+    }
+
+    #[test]
+    fn new_fields_take_precedence_over_legacy_backend() {
+        let json = r#"{ "backend": "whisper-piper", "stt_backend": "whisper", "tts_backend": "supertonic" }"#;
+        let speech: SpeechSettings = serde_json::from_str(json).unwrap();
+        assert_eq!(
+            speech.resolve_backends(),
+            (SttBackend::Whisper, TtsBackend::Supertonic)
+        );
+    }
+
+    #[test]
+    fn no_legacy_no_new_resolves_to_defaults() {
+        let speech = SpeechSettings::default();
+        assert_eq!(
+            speech.resolve_backends(),
+            (SttBackend::Whisper, TtsBackend::Piper)
+        );
+    }
+
+    #[test]
+    fn legacy_backend_is_not_reserialized() {
+        // skip_serializing means a migrated config doesn't keep writing `backend`.
+        let mut speech = SpeechSettings::default();
+        speech.backend = Some(SpeechBackend::MacosNative);
+        let json = serde_json::to_string(&speech).unwrap();
+        assert!(
+            !json.contains("\"backend\""),
+            "legacy backend must not be serialized: {json}"
+        );
+    }
+
+    #[test]
+    fn supertonic_override_paths_round_trip() {
+        let ov = SpeechLocaleOverride {
+            supertonic_onnx_dir: Some("/sup/onnx".into()),
+            supertonic_voice_style_path: Some("/sup/F1.json".into()),
+            ..SpeechLocaleOverride::default()
+        };
+        let json = serde_json::to_string(&ov).unwrap();
+        let back: SpeechLocaleOverride = serde_json::from_str(&json).unwrap();
+        assert_eq!(back.supertonic_onnx_dir, ov.supertonic_onnx_dir);
+        assert_eq!(
+            back.supertonic_voice_style_path,
+            ov.supertonic_voice_style_path
         );
     }
 }
