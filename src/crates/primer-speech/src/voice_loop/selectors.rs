@@ -5,6 +5,11 @@
 //! independently — see
 //! `docs/superpowers/specs/2026-05-31-supertonic-stage-c-decoupled-speech-design.md`.
 
+use std::path::PathBuf;
+use std::sync::Arc;
+
+use primer_core::error::{PrimerError, Result};
+use primer_core::speech::{StreamingTextToSpeech, VoiceProfile};
 use serde::{Deserialize, Serialize};
 
 /// Which speech-to-text builder skeleton the voice loop runs.
@@ -31,6 +36,139 @@ pub enum TtsBackend {
     Supertonic,
     /// Apple AVSpeechSynthesizer (macOS-only).
     MacosNative,
+}
+
+/// Neutral asset bundle for [`build_tts`]. Each backend reads only the
+/// fields it needs; the others are ignored. Keeps `build_tts` free of any
+/// CLI- or GUI-specific asset type so both callers share one path.
+#[derive(Debug, Clone, Default)]
+pub struct TtsAssets {
+    /// Piper voice ONNX file.
+    pub piper_onnx: Option<PathBuf>,
+    /// Piper voice JSON sidecar.
+    pub piper_config: Option<PathBuf>,
+    /// Supertonic `onnx/` asset directory.
+    pub supertonic_onnx_dir: Option<PathBuf>,
+    /// Supertonic voice-style JSON (e.g. `voice_styles/F1.json`).
+    pub supertonic_voice_style: Option<PathBuf>,
+    /// Locale used by the macOS-native voice and by Supertonic's synthesis
+    /// language.
+    pub locale: primer_core::i18n::Locale,
+}
+
+/// Construct the chosen TTS synthesiser and the matching `VoiceProfile`.
+///
+/// Feature-gated per arm. A choice whose backend was not compiled into
+/// this binary returns a `PrimerError::Speech` naming the cargo feature to
+/// rebuild with — deliberately distinct from a generic load failure so the
+/// user knows the fix is build-time, not a bad path.
+pub fn build_tts(
+    choice: TtsBackend,
+    assets: &TtsAssets,
+) -> Result<(Arc<dyn StreamingTextToSpeech>, VoiceProfile)> {
+    match choice {
+        TtsBackend::Piper => build_piper_tts(assets),
+        TtsBackend::Supertonic => build_supertonic_tts(assets),
+        TtsBackend::MacosNative => build_macos_native_tts(assets),
+    }
+}
+
+#[cfg(feature = "piper")]
+fn build_piper_tts(
+    assets: &TtsAssets,
+) -> Result<(Arc<dyn StreamingTextToSpeech>, VoiceProfile)> {
+    let onnx = assets
+        .piper_onnx
+        .as_ref()
+        .ok_or_else(|| PrimerError::Speech("piper TTS requires a voice ONNX path".to_string()))?;
+    let config = assets
+        .piper_config
+        .as_ref()
+        .ok_or_else(|| PrimerError::Speech("piper TTS requires a voice config path".to_string()))?;
+    let tts = crate::PiperTts::new(onnx, config)?;
+    let model_id = onnx
+        .file_stem()
+        .and_then(|s| s.to_str())
+        .unwrap_or("piper-voice")
+        .to_string();
+    let voice = VoiceProfile {
+        model_id,
+        rate: 0.9,
+        ..VoiceProfile::default()
+    };
+    Ok((Arc::new(tts), voice))
+}
+
+#[cfg(not(feature = "piper"))]
+fn build_piper_tts(
+    _assets: &TtsAssets,
+) -> Result<(Arc<dyn StreamingTextToSpeech>, VoiceProfile)> {
+    Err(PrimerError::Speech(
+        "piper TTS selected but this binary was built without the `piper` feature; \
+         rebuild with --features piper"
+            .to_string(),
+    ))
+}
+
+#[cfg(feature = "supertonic")]
+fn build_supertonic_tts(
+    assets: &TtsAssets,
+) -> Result<(Arc<dyn StreamingTextToSpeech>, VoiceProfile)> {
+    let dir = assets.supertonic_onnx_dir.as_ref().ok_or_else(|| {
+        PrimerError::Speech("supertonic TTS requires a model directory".to_string())
+    })?;
+    let style = assets.supertonic_voice_style.as_ref().ok_or_else(|| {
+        PrimerError::Speech("supertonic TTS requires a voice-style path".to_string())
+    })?;
+    let tts = crate::SupertonicTts::new(dir, style)?.with_language(assets.locale.pack_id());
+    let model_id = style
+        .file_stem()
+        .and_then(|s| s.to_str())
+        .map(|s| format!("supertonic-{s}"))
+        .unwrap_or_else(|| "supertonic-voice".to_string());
+    let voice = VoiceProfile {
+        model_id,
+        rate: 0.9,
+        ..VoiceProfile::default()
+    };
+    Ok((Arc::new(tts), voice))
+}
+
+#[cfg(not(feature = "supertonic"))]
+fn build_supertonic_tts(
+    _assets: &TtsAssets,
+) -> Result<(Arc<dyn StreamingTextToSpeech>, VoiceProfile)> {
+    Err(PrimerError::Speech(
+        "supertonic TTS selected but this binary was built without the `supertonic` feature; \
+         rebuild with --features supertonic"
+            .to_string(),
+    ))
+}
+
+#[cfg(all(
+    target_os = "macos",
+    any(feature = "macos-native", feature = "macos-native-26")
+))]
+fn build_macos_native_tts(
+    assets: &TtsAssets,
+) -> Result<(Arc<dyn StreamingTextToSpeech>, VoiceProfile)> {
+    let tts = crate::macos::MacosTextToSpeech::new(assets.locale.bcp47())?;
+    // AVSpeech selects its own voice from the locale; VoiceProfile is ignored.
+    Ok((Arc::new(tts), VoiceProfile::default()))
+}
+
+#[cfg(not(all(
+    target_os = "macos",
+    any(feature = "macos-native", feature = "macos-native-26")
+)))]
+fn build_macos_native_tts(
+    _assets: &TtsAssets,
+) -> Result<(Arc<dyn StreamingTextToSpeech>, VoiceProfile)> {
+    Err(PrimerError::Speech(
+        "macOS-native TTS selected but this binary was built without the `macos-native` feature; \
+         rebuild with --features macos-native"
+            .to_string(),
+    ))
 }
 
 #[cfg(test)]
@@ -71,5 +209,19 @@ mod tests {
     fn defaults_are_whisper_and_piper() {
         assert_eq!(SttBackend::default(), SttBackend::Whisper);
         assert_eq!(TtsBackend::default(), TtsBackend::Piper);
+    }
+
+    #[test]
+    fn build_tts_supertonic_without_feature_errors_with_rebuild_hint() {
+        // The `supertonic` feature is off on the default test build, so this
+        // exercises the not(feature) arm regardless of the assets passed.
+        // `Arc<dyn StreamingTextToSpeech>` isn't `Debug`, so the `Ok` side
+        // can't go through `unwrap_err()` — match the error out directly.
+        let s = match build_tts(TtsBackend::Supertonic, &TtsAssets::default()) {
+            Ok(_) => panic!("expected an error when the supertonic feature is off"),
+            Err(e) => format!("{e}"),
+        };
+        assert!(s.contains("supertonic"), "hint must name the feature: {s}");
+        assert!(s.contains("--features"), "hint must say rebuild: {s}");
     }
 }
