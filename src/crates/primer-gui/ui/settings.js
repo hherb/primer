@@ -50,6 +50,10 @@ const dom = {
     backendQnnBundleDirField: document.getElementById("f-backend-qnn-bundle-dir-field"),
     backendQnnQairtLibDir: document.getElementById("f-backend-qnn-qairt-lib-dir"),
     backendQnnQairtLibDirField: document.getElementById("f-backend-qnn-qairt-lib-dir-field"),
+    backendReasoningMarkers: document.getElementById("f-backend-reasoning-markers"),
+    backendReasoningMarkersField: document.getElementById(
+      "f-backend-reasoning-markers-field",
+    ),
     apiKeyFieldset: document.getElementById("f-api-key-fieldset"),
     apiKeyEnv: document.getElementById("f-api-key-env"),
     apiKeyInline: document.getElementById("f-api-key-inline"),
@@ -269,6 +273,7 @@ function populate(view) {
   f.backendOpenaiCompatUrl.value = view.backend.openai_compat_url ?? "";
   f.backendQnnBundleDir.value = view.backend.qnn_bundle_dir ?? "";
   f.backendQnnQairtLibDir.value = view.backend.qnn_qairt_lib_dir ?? "";
+  f.backendReasoningMarkers.value = view.backend.reasoning_markers ?? "";
   applyBackendKindReveal(view.backend.kind);
 
   // API key (cloud)
@@ -479,6 +484,10 @@ function applyBackendKindReveal(kind) {
   const qnn = kind === "qnn";
   dom.fields.backendQnnBundleDirField.hidden = !qnn;
   dom.fields.backendQnnQairtLibDirField.hidden = !qnn;
+  // Reasoning markers only apply to the ollama / openai-compat backends
+  // (stub/cloud/qnn ignore them).
+  dom.fields.backendReasoningMarkersField.hidden =
+    kind !== "ollama" && kind !== "openai-compat";
   // Each API-key fieldset is only relevant for its own backend — fade
   // the others so the user isn't tempted to put a key where it'd be
   // ignored. `hidden` removes the openai-compat fieldset entirely for
@@ -680,6 +689,10 @@ function gather() {
       // Keep/Env dance.
       qnn_bundle_dir: orNull(f.backendQnnBundleDir.value.trim()),
       qnn_qairt_lib_dir: orNull(f.backendQnnQairtLibDir.value.trim()),
+      // Raw textarea text — also mandatory (no serde default). Sent
+      // verbatim (no trim) so the stored text round-trips exactly; the
+      // Rust parser handles all whitespace. Empty string when blank.
+      reasoning_markers: f.backendReasoningMarkers.value,
     },
     classifier: gatherSubsystem("classifier"),
     extractor: gatherSubsystem("extractor"),

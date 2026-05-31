@@ -154,10 +154,13 @@ async fn build_with_strategy(
         // killing the GUI (mirrors the openai-compat-embedder pattern).
         qnn_bundle_dir: backend_config.qnn_bundle_dir.clone(),
         qnn_qairt_lib_dir: backend_config.qnn_qairt_lib_dir.clone(),
-        // Reasoning-marker custom-extend is CLI-only for now; the GUI editor
-        // is deferred (ROADMAP 0.3). The GUI still gets default stripping for
-        // free because the backends seed the built-in marker table in `new`.
-        reasoning_markers: Vec::new(),
+        // Custom reasoning markers from Settings → Inference backend.
+        // Parsed from the raw textarea text into `(open, close)` pairs and
+        // appended to the built-in defaults by the ollama / openai-compat
+        // backends. Empty string ⇒ empty Vec ⇒ defaults only.
+        reasoning_markers: crate::reasoning_markers::parse_reasoning_markers(
+            &backend_config.reasoning_markers,
+        ),
     };
 
     // ─── Main backend (locale-independent) ───────────────────────────
