@@ -478,6 +478,18 @@ pub async fn macos_native_speech_available() -> Result<bool, String> {
     )))
 }
 
+/// Whether this binary was compiled with the `supertonic` feature. The
+/// settings modal uses this to enable/disable the "Supertonic" option in
+/// the TTS-backend dropdown: selecting it on a build without the feature
+/// would fail at session start with a "rebuild with --features supertonic"
+/// error (see `voice_loop::build_tts`), so the option is shown-but-disabled
+/// with a hint instead. Mirrors `macos_native_speech_available` — a pure
+/// compile-time flag, no session state.
+#[tauri::command]
+pub async fn supertonic_tts_available() -> Result<bool, String> {
+    Ok(cfg!(feature = "supertonic"))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -565,6 +577,19 @@ mod tests {
                 .await
                 .expect("command never errors"),
             expected
+        );
+    }
+
+    /// The Supertonic TTS capability reflects the compiled feature set
+    /// exactly. Holds on a default build (false) and a `--features
+    /// supertonic` build (true).
+    #[tokio::test]
+    async fn supertonic_tts_available_matches_cfg() {
+        assert_eq!(
+            supertonic_tts_available()
+                .await
+                .expect("command never errors"),
+            cfg!(feature = "supertonic")
         );
     }
 
