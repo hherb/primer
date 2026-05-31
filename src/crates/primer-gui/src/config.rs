@@ -442,6 +442,15 @@ impl SpeechSettings {
     /// `backend` migration: when the new fields are still at their defaults
     /// AND a legacy `backend` value is present, map the old coupled stack to
     /// the two halves. Otherwise the new fields win.
+    ///
+    /// "At default" can't distinguish "explicitly chose `whisper`/`piper`"
+    /// from "never set," so a config carrying BOTH a legacy `backend` and
+    /// new fields pinned to their defaults would migrate to the legacy
+    /// stack. That state can't arise from the real save path — old configs
+    /// never have the new keys (so migration is correct), and saved configs
+    /// never have the legacy key (gather drops it; `backend` is
+    /// `skip_serializing`). It is reachable only by hand-editing
+    /// `gui-config.json`, where the legacy-wins behaviour is acceptable.
     pub fn resolve_backends(&self) -> (SttBackend, TtsBackend) {
         if let Some(legacy) = self.backend {
             if self.stt_backend == SttBackend::default()

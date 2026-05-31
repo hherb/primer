@@ -202,6 +202,14 @@ pub async fn build_voice_backends(
     }
 }
 
+// `build_macos_native_stt` has three mutually-exclusive cfg arms below:
+// the macOS-26 (SpeechAnalyzer) arm, the macOS-13+ (SFSpeechRecognizer)
+// arm, and the fallback error arm. The two native arms each carry a
+// `not(feature = "the other")` guard so they can never both compile — but
+// that guard is belt-and-suspenders: the `compile_error!` XOR in
+// `primer-speech/src/lib.rs` already forbids enabling `macos-native` and
+// `macos-native-26` together. Exactly one arm is selected for any build.
+
 // macOS 26 STT builder arm (SpeechAnalyzer).
 #[cfg(all(
     target_os = "macos",
