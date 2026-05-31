@@ -1525,14 +1525,19 @@ mod tests {
         let view: GuiConfigView = (&cfg).into();
         assert_eq!(view.speech.stt_backend, SttBackend::MacosNative);
         assert_eq!(view.speech.tts_backend, TtsBackend::MacosNative);
-        assert_eq!(view.speech.backend, None, "legacy field cleared in the view");
+        assert_eq!(
+            view.speech.backend, None,
+            "legacy field cleared in the view"
+        );
     }
 
     #[test]
     fn legacy_backend_is_not_reserialized() {
         // skip_serializing means a migrated config doesn't keep writing `backend`.
-        let mut speech = SpeechSettings::default();
-        speech.backend = Some(SpeechBackend::MacosNative);
+        let speech = SpeechSettings {
+            backend: Some(SpeechBackend::MacosNative),
+            ..SpeechSettings::default()
+        };
         let json = serde_json::to_string(&speech).unwrap();
         assert!(
             !json.contains("\"backend\""),

@@ -74,9 +74,7 @@ pub fn build_tts(
 }
 
 #[cfg(feature = "piper")]
-fn build_piper_tts(
-    assets: &TtsAssets,
-) -> Result<(Arc<dyn StreamingTextToSpeech>, VoiceProfile)> {
+fn build_piper_tts(assets: &TtsAssets) -> Result<(Arc<dyn StreamingTextToSpeech>, VoiceProfile)> {
     let onnx = assets
         .piper_onnx
         .as_ref()
@@ -100,9 +98,7 @@ fn build_piper_tts(
 }
 
 #[cfg(not(feature = "piper"))]
-fn build_piper_tts(
-    _assets: &TtsAssets,
-) -> Result<(Arc<dyn StreamingTextToSpeech>, VoiceProfile)> {
+fn build_piper_tts(_assets: &TtsAssets) -> Result<(Arc<dyn StreamingTextToSpeech>, VoiceProfile)> {
     Err(PrimerError::Speech(
         "piper TTS selected but this binary was built without the `piper` feature; \
          rebuild with --features piper"
@@ -188,7 +184,12 @@ pub async fn build_voice_backends(
     match stt {
         SttBackend::Whisper => {
             crate::voice_loop::build_local_backends(
-                tts, voice, whisper_model, locale, mic_silence_ms, verbose,
+                tts,
+                voice,
+                whisper_model,
+                locale,
+                mic_silence_ms,
+                verbose,
             )
             .await
         }
@@ -215,7 +216,11 @@ async fn build_macos_native_stt(
     verbose: bool,
 ) -> Result<crate::voice_loop::LocalBackends> {
     crate::voice_loop::build_local_backends_macos_native_26(
-        tts, voice, locale, mic_silence_ms, verbose,
+        tts,
+        voice,
+        locale,
+        mic_silence_ms,
+        verbose,
     )
     .await
 }
@@ -237,7 +242,11 @@ async fn build_macos_native_stt(
     verbose: bool,
 ) -> Result<crate::voice_loop::LocalBackends> {
     crate::voice_loop::build_local_backends_macos_native(
-        tts, voice, locale, mic_silence_ms, verbose,
+        tts,
+        voice,
+        locale,
+        mic_silence_ms,
+        verbose,
     )
     .await
 }
@@ -245,8 +254,16 @@ async fn build_macos_native_stt(
 // Fallback arm: no macOS-native STT compiled in — selecting it is a
 // build-time error with the rebuild hint (mirrors build_tts's pattern).
 #[cfg(all(
-    not(all(target_os = "macos", feature = "macos-native-26", not(feature = "macos-native"))),
-    not(all(target_os = "macos", feature = "macos-native", not(feature = "macos-native-26"))),
+    not(all(
+        target_os = "macos",
+        feature = "macos-native-26",
+        not(feature = "macos-native")
+    )),
+    not(all(
+        target_os = "macos",
+        feature = "macos-native",
+        not(feature = "macos-native-26")
+    )),
     feature = "silero",
     feature = "whisper",
     feature = "cpal"

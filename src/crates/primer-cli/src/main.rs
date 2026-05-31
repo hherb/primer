@@ -445,7 +445,10 @@ fn parse_mic_silence_ms(s: &str) -> std::result::Result<u32, String> {
 /// is compiled separately).
 #[cfg(all(
     feature = "speech",
-    not(all(target_os = "macos", any(feature = "macos-native", feature = "macos-native-26")))
+    not(all(
+        target_os = "macos",
+        any(feature = "macos-native", feature = "macos-native-26")
+    ))
 ))]
 #[derive(Debug, Clone, Copy, PartialEq, Eq, clap::ValueEnum)]
 #[clap(rename_all = "kebab-case")]
@@ -456,7 +459,10 @@ enum TtsChoice {
 
 #[cfg(all(
     feature = "speech",
-    not(all(target_os = "macos", any(feature = "macos-native", feature = "macos-native-26")))
+    not(all(
+        target_os = "macos",
+        any(feature = "macos-native", feature = "macos-native-26")
+    ))
 ))]
 impl From<TtsChoice> for primer_speech::voice_loop::TtsBackend {
     fn from(c: TtsChoice) -> Self {
@@ -1536,7 +1542,10 @@ mod tests {
         // flags must NOT be required (regression guard for the
         // required_if_eq_all gating).
         let res = Cli::try_parse_from(["primer"]);
-        assert!(res.is_ok(), "plain REPL must parse with no speech flags: {res:?}");
+        assert!(
+            res.is_ok(),
+            "plain REPL must parse with no speech flags: {res:?}"
+        );
     }
 
     #[cfg(all(

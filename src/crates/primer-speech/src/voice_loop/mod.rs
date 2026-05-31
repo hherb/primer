@@ -53,7 +53,7 @@ pub mod backends_macos_native_26;
 pub(crate) mod macos26_audio_buffer;
 
 pub use observer::{ExitReason, LoopObserver, TurnCompletePayload, VoiceState};
-pub use selectors::{SttBackend, TtsBackend, TtsAssets, build_tts};
+pub use selectors::{SttBackend, TtsAssets, TtsBackend, build_tts};
 pub use state_machine::{
     DrainHook, LoopBackends, LoopConfig, LoopHandle, Responder, VAD_EVENT_CHANNEL_CAPACITY,
     VoiceLoopError, run_loop, run_loop_borrowed,
