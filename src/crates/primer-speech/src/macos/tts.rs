@@ -394,8 +394,25 @@ fn synthesize_streaming_background(
         let synth: Retained<AVSpeechSynthesizer> = unsafe { AVSpeechSynthesizer::new() };
 
         let tx_cb = tx.clone();
+        // Keep the synthesizer alive for the whole synthesis by moving a
+        // retained clone into the PCM-callback block. `writeUtterance` is
+        // async — it only QUEUES synthesis and returns immediately — so the
+        // local `synth` would otherwise be released the instant this
+        // work-item closure returns, cancelling synthesis before a single
+        // buffer callback fires (observed in the GUI background path:
+        // `event_count=0`, no PCM callbacks, 30 s drain timeout). The block
+        // is Block_retained by AVSpeechSynthesizer until the utterance
+        // completes (EOS), so the clone — and thus the synthesizer — lives
+        // exactly until synthesis finishes, then is released on the main
+        // queue when AVFoundation drops the block. This is the lifetime the
+        // main-thread path gets for free by keeping `synth` in function
+        // scope across the drain loop.
+        let synth_keepalive = synth.clone();
         type CbBlock = block2::Block<dyn Fn(NonNull<AVAudioBuffer>)>;
         let cb = block2::RcBlock::new(move |buf_ptr: NonNull<AVAudioBuffer>| {
+            // `synth_keepalive` is captured solely to extend the
+            // synthesizer's lifetime to match the block's; it is not used.
+            let _ = &synth_keepalive;
             stream_pcm_callback(buf_ptr, &tx_cb);
         });
 
@@ -405,31 +422,27 @@ fn synthesize_streaming_background(
         unsafe { synth.writeUtterance_toBufferCallback(&utterance, block_ptr) };
 
         // ── Drop order at end of scope ──────────────────────────────────
-        // `cb` drops here; AVSpeechSynthesizer's Block_retain keeps it
-        // alive for any further callbacks. The closure's clone of `tx`
-        // stays alive through Block_retain too; when the closure drops
-        // after EOS, the sender drops and any later `recv` would return
-        // `Disconnected` (which the caller below ignores after seeing
-        // PhraseEnd).
+        // `cb`, the local `synth`, and `utterance` all drop here when the
+        // work-item returns. Crucially, the synthesizer is NOT deallocated
+        // at this point: `synth_keepalive` (a retained clone captured by
+        // `cb`) holds a strong reference, and AVSpeechSynthesizer
+        // Block_retains `cb` until the utterance finishes (EOS). So the
+        // synthesizer survives precisely until synthesis completes, then is
+        // released on the main queue when AVFoundation drops the block.
+        // The closure's clone of `tx` rides along inside `cb` the same way;
+        // when the block is finally released after EOS the sender drops and
+        // any later `recv` returns `Disconnected` (ignored after PhraseEnd).
         //
-        // SAFETY-CRITICAL on macOS 13–15 (verified): `synth`
-        // (Retained<AVSpeechSynthesizer>) and `utterance` (moved out of
-        // the captured `StreamCtx`) both drop
-        // here, even though PCM callbacks may still fire asynchronously
-        // on the main queue afterward. This is load-bearing on
-        // AVSpeechSynthesizer self-retaining internally while utterances
-        // are in flight — Apple's headers don't make this explicit, but
-        // the Stage-A code shipped with the same shape (synth scoped to
-        // the dispatched work-item body) and observed no crashes during
-        // voice-loop testing on macOS 13.x–15.x. If a future macOS release
-        // changes this and we see UAF crashes after the work-item returns,
-        // the fix is to move `synth` ownership into a struct retained by
-        // the PCM-callback closure (alongside `tx_cb`) so it stays alive
-        // until AVSpeechSynthesizer releases the block. Do NOT try to
-        // extend `synth`'s lifetime by holding an Arc here; the dispatched
-        // work item is one-shot with no place to park it. Audit tag: grep
-        // for `SAFETY-CRITICAL on macOS` when bumping the supported macOS
-        // floor.
+        // This replaces the prior "synth self-retains while utterances are
+        // in flight" assumption, which was FALSE for at least the Enhanced
+        // en-US voice on macOS (synth dropped here → synthesis cancelled →
+        // zero buffer callbacks). The block-capture keepalive is the fix the
+        // earlier SAFETY-CRITICAL note anticipated. Leak analysis: the
+        // synth↔block cycle is broken when AVSpeechSynthesizer releases the
+        // block at EOS; an utterance that errors without ever emitting EOS
+        // would leak one synthesizer, an acceptable bound versus the
+        // alternative of no audio at all. Audit tag: grep for
+        // `SAFETY-CRITICAL on macOS` when bumping the supported macOS floor.
     });
 
     // ── Drain loop ────────────────────────────────────────────────────
