@@ -642,6 +642,25 @@
           </p>
           <div id="speech-settings-fields">
             <div class="settings-grid">
+              <label class="field field-full">
+                <span>Speech backend</span>
+                <select id="f-speech-backend">
+                  <option value="whisper-piper">
+                    Whisper + Piper (cross-platform)
+                  </option>
+                  <option value="macos-native">
+                    macOS Native (Apple speech)
+                  </option>
+                </select>
+              </label>
+              <p
+                class="hint muted field-full"
+                id="f-speech-backend-unavailable-hint"
+                hidden
+              >
+                macOS Native needs a build with
+                <code>--features primer-gui/macos-native</code>.
+              </p>
               <label class="field">
                 <span>Mic silence (ms)</span>
                 <input
