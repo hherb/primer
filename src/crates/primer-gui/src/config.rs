@@ -1334,7 +1334,8 @@ mod tests {
                 "api_key_source": {"kind": "keep"},
                 "openai_compat_api_key_source": {"kind": "keep"},
                 "qnn_bundle_dir": null,
-                "qnn_qairt_lib_dir": null
+                "qnn_qairt_lib_dir": null,
+                "reasoning_markers": ""
             },
             "classifier": {"match_main": true, "kind": null, "model": null, "timeout_ms": 3000},
             "extractor": {"match_main": true, "kind": null, "model": null, "timeout_ms": 5000},
@@ -1381,7 +1382,8 @@ mod tests {
                 "api_key_source": {"kind": "keep"},
                 "openai_compat_api_key_source": {"kind": "keep"},
                 "qnn_bundle_dir": null,
-                "qnn_qairt_lib_dir": null
+                "qnn_qairt_lib_dir": null,
+                "reasoning_markers": ""
             },
             "classifier": {"match_main": true, "kind": null, "model": null, "timeout_ms": 3000},
             "extractor": {"match_main": true, "kind": null, "model": null, "timeout_ms": 5000},
