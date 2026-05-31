@@ -463,6 +463,21 @@ pub async fn voice_mode_available() -> Result<bool, String> {
     Ok(cfg!(feature = "speech"))
 }
 
+/// Whether this binary was compiled with a macOS-native speech stack
+/// (`macos-native` or `macos-native-26`). The settings modal uses this
+/// to enable/disable the "macOS Native" speech-backend option: selecting
+/// it on a build without the feature would silently fall through to
+/// whisper/piper (see `voice::backends::build_loop_backends`), so the
+/// option is shown-but-disabled with a hint instead. Mirrors
+/// `voice_mode_available` — a pure compile-time flag, no session state.
+#[tauri::command]
+pub async fn macos_native_speech_available() -> Result<bool, String> {
+    Ok(cfg!(all(
+        target_os = "macos",
+        any(feature = "macos-native", feature = "macos-native-26"),
+    )))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -533,6 +548,24 @@ mod tests {
     async fn voice_mode_available_matches_cfg_feature_speech() {
         let result = voice_mode_available().await.expect("command never errors");
         assert_eq!(result, cfg!(feature = "speech"));
+    }
+
+    /// The macOS-native speech capability reflects the compiled feature
+    /// set exactly. Written against the same `cfg!` expression as the
+    /// command so it holds on both a default build (false) and a
+    /// `--features macos-native` build (true on macOS).
+    #[tokio::test]
+    async fn macos_native_speech_available_matches_cfg() {
+        let expected = cfg!(all(
+            target_os = "macos",
+            any(feature = "macos-native", feature = "macos-native-26"),
+        ));
+        assert_eq!(
+            macos_native_speech_available()
+                .await
+                .expect("command never errors"),
+            expected
+        );
     }
 
     /// Pin the `StartVoiceModeError` tag format. The frontend branches on

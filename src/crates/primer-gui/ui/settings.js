@@ -82,6 +82,10 @@ const dom = {
     speechMicSilenceMs: document.getElementById("f-speech-mic-silence-ms"),
     speechDisableAutoDownload: document.getElementById("f-speech-disable-auto-download"),
     speechOverrides: document.getElementById("f-speech-overrides"),
+    speechBackend: document.getElementById("f-speech-backend"),
+    speechBackendUnavailableHint: document.getElementById(
+      "f-speech-backend-unavailable-hint",
+    ),
   },
 };
 
@@ -115,6 +119,16 @@ const state = {
   /// button in PR 3+), so we round-trip it verbatim — never reset it
   /// to false when the user saves the speech settings form.
   lastVoiceModeEnabled: false,
+  /// Snapshot of `speech.download_timeout_secs` from the most recent
+  /// `get_settings`. The modal doesn't expose a visible input for it, so
+  /// gather() round-trips this verbatim — never reset it to the serde
+  /// default when the user saves the speech form.
+  lastDownloadTimeoutSecs: null,
+  /// Whether this binary was compiled with a macOS-native speech stack,
+  /// from the `macos_native_speech_available` command. Drives whether the
+  /// "macOS Native" backend option is selectable. Re-fetched on each open
+  /// (it's a compile-time constant, so the IPC cost is trivial).
+  macosNativeAvailable: false,
   /// `[{id, label}]` returned by the `list_locales` Tauri command. Cached
   /// across `open()` calls so we don't re-invoke on every modal open.
   /// `null` until the first successful fetch; the fetch shares the same
@@ -150,12 +164,15 @@ async function open({ onSessionRestarted } = {}) {
       state.localeChoices === null
         ? invoke("list_locales")
         : Promise.resolve(state.localeChoices);
-    const [view, sessionInfo, locales] = await Promise.all([
-      invoke("get_settings"),
-      invoke("current_session_info").catch(() => null),
-      localesPromise,
-    ]);
+    const [view, sessionInfo, locales, macosNativeAvailable] =
+      await Promise.all([
+        invoke("get_settings"),
+        invoke("current_session_info").catch(() => null),
+        localesPromise,
+        invoke("macos_native_speech_available").catch(() => false),
+      ]);
     state.localeChoices = locales;
+    state.macosNativeAvailable = macosNativeAvailable === true;
     populateLocaleChoices();
     populate(view);
     dom.activeHint.hidden = sessionInfo === null;
@@ -311,8 +328,22 @@ function populate(view) {
 
   // Speech
   state.lastVoiceModeEnabled = view.speech?.voice_mode_enabled === true;
+  state.lastDownloadTimeoutSecs = view.speech?.download_timeout_secs ?? null;
   f.speechMicSilenceMs.value = view.speech?.mic_silence_ms ?? 600;
   f.speechDisableAutoDownload.checked = view.speech?.disable_auto_download === true;
+  // Set the value first; the macOS-native option may be disabled just
+  // below, but the browser permits a disabled option to remain the
+  // selected value — so a persisted "macos-native" choice stays visible
+  // even on a build that can't use it (show-but-disable).
+  f.speechBackend.value = view.speech?.backend ?? "whisper-piper";
+  // Gate the macOS-native option behind the compiled feature. Selecting
+  // it on a build without the feature silently falls through to
+  // whisper/piper, so show-but-disable with a hint instead of hiding it.
+  const macosOption = f.speechBackend.querySelector(
+    'option[value="macos-native"]',
+  );
+  if (macosOption) macosOption.disabled = !state.macosNativeAvailable;
+  f.speechBackendUnavailableHint.hidden = state.macosNativeAvailable;
   populateSpeechOverrides(view.speech?.overrides ?? {});
 
   // Voice-mode status badge — read-only hint so the user understands
@@ -698,7 +729,12 @@ function gather() {
       // never silently switches voice mode off.
       voice_mode_enabled: state.lastVoiceModeEnabled,
       disable_auto_download: dom.fields.speechDisableAutoDownload.checked,
+      backend: dom.fields.speechBackend.value,
       mic_silence_ms: parseIntOrZero(dom.fields.speechMicSilenceMs.value) || 600,
+      // No visible input — round-trip the persisted value so saving never
+      // resets it to the serde default. `?? undefined` lets serde apply its
+      // default only on the (defensive) never-populated path.
+      download_timeout_secs: state.lastDownloadTimeoutSecs ?? undefined,
       overrides: gatherSpeechOverrides(),
     },
   };
