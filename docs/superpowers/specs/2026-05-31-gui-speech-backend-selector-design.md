@@ -57,31 +57,25 @@ The UI toggle is therefore also the fix for this silent-reset bug.
 ### 1. Capability flag — new Tauri command
 
 A macOS-native speech stack exists only when compiled with `macos-native` **or**
-`macos-native-26`. Expose this to the frontend via a dedicated command (mirrors the
-`list_locales` precedent; keeps `GuiConfigView` a pure projection of config rather
-than mixing in compile-time facts):
+`macos-native-26`. Expose this with a plain-bool command that mirrors the existing
+`voice_mode_available()` capability command (same file, same shape — keeps
+`GuiConfigView` a pure projection of config rather than mixing in compile-time
+facts):
 
 ```rust
-// crates/primer-gui/src/commands/speech.rs (new file) or alongside list_locales
-
-#[derive(serde::Serialize, Debug, PartialEq, Eq)]
-pub struct SpeechCapabilities {
-    pub macos_native_available: bool,
-}
+// crates/primer-gui/src/commands/voice.rs — next to voice_mode_available()
 
 #[tauri::command]
-pub async fn speech_capabilities() -> Result<SpeechCapabilities, String> {
-    Ok(SpeechCapabilities {
-        macos_native_available: cfg!(all(
-            target_os = "macos",
-            any(feature = "macos-native", feature = "macos-native-26"),
-        )),
-    })
+pub async fn macos_native_speech_available() -> Result<bool, String> {
+    Ok(cfg!(all(
+        target_os = "macos",
+        any(feature = "macos-native", feature = "macos-native-26"),
+    )))
 }
 ```
 
-Register in `lib.rs`'s `invoke_handler!`. The frontend fetches it in the same
-`Promise.all` batch as `get_settings` / `list_locales`.
+Register in `commands/mod.rs::register`'s `generate_handler!`. The frontend fetches
+it in the same `Promise.all` batch as `get_settings` / `list_locales`.
 
 ### 2. HTML — `index.html`, inside `#speech-settings-fields`
 
@@ -133,8 +127,9 @@ Next start_voice_mode reads cfg.speech.backend → build_loop_backends picks nat
 
 ## Testing
 
-- **Rust:** unit test that `speech_capabilities()` returns the value matching the
-  current build's cfg (i.e. on a default `cargo test` build it is `false`; the
+- **Rust:** unit test that `macos_native_speech_available()` returns the value
+  matching the current build's cfg (i.e. on a default `cargo test` build it is
+  `false`; the
   assertion is written against the same `cfg!(...)` expression so it holds on both
   build flavors). Plus a test pinning that a `GuiConfigUpdate` JSON carrying
   `"backend":"macos-native"` survives `into_config` (guards the IPC round-trip; the
