@@ -561,7 +561,9 @@ mod tests {
             any(feature = "macos-native", feature = "macos-native-26"),
         ));
         assert_eq!(
-            macos_native_speech_available().await.unwrap(),
+            macos_native_speech_available()
+                .await
+                .expect("command never errors"),
             expected
         );
     }
