@@ -643,7 +643,15 @@ impl From<&GuiConfig> for GuiConfigView {
             breaks: c.breaks.clone(),
             persistence: c.persistence.clone(),
             ui: c.ui.clone(),
-            speech: c.speech.clone(),
+            speech: {
+                let (stt, tts) = c.speech.resolve_backends();
+                SpeechSettings {
+                    stt_backend: stt,
+                    tts_backend: tts,
+                    backend: None,
+                    ..c.speech.clone()
+                }
+            },
         }
     }
 }
@@ -1504,6 +1512,20 @@ mod tests {
             speech.resolve_backends(),
             (SttBackend::Whisper, TtsBackend::Piper)
         );
+    }
+
+    #[test]
+    fn view_resolves_legacy_backend_into_stt_tts() {
+        // A config carrying only the legacy macos-native backend must surface
+        // as macos-native on BOTH halves through the View (so the settings
+        // modal shows the user's real choice, not the default).
+        let mut cfg = GuiConfig::default();
+        cfg.speech.backend = Some(SpeechBackend::MacosNative);
+        // new fields still at defaults → migration applies
+        let view: GuiConfigView = (&cfg).into();
+        assert_eq!(view.speech.stt_backend, SttBackend::MacosNative);
+        assert_eq!(view.speech.tts_backend, TtsBackend::MacosNative);
+        assert_eq!(view.speech.backend, None, "legacy field cleared in the view");
     }
 
     #[test]

@@ -82,9 +82,13 @@ const dom = {
     speechMicSilenceMs: document.getElementById("f-speech-mic-silence-ms"),
     speechDisableAutoDownload: document.getElementById("f-speech-disable-auto-download"),
     speechOverrides: document.getElementById("f-speech-overrides"),
-    speechBackend: document.getElementById("f-speech-backend"),
-    speechBackendUnavailableHint: document.getElementById(
-      "f-speech-backend-unavailable-hint",
+    speechSttBackend: document.getElementById("f-speech-stt-backend"),
+    speechTtsBackend: document.getElementById("f-speech-tts-backend"),
+    speechMacosNativeUnavailableHint: document.getElementById(
+      "f-speech-macos-native-unavailable-hint",
+    ),
+    speechSupertonicUnavailableHint: document.getElementById(
+      "f-speech-supertonic-unavailable-hint",
     ),
   },
 };
@@ -129,6 +133,10 @@ const state = {
   /// "macOS Native" backend option is selectable. Re-fetched on each open
   /// (it's a compile-time constant, so the IPC cost is trivial).
   macosNativeAvailable: false,
+  /// Whether this binary was compiled with the Supertonic TTS stack, from
+  /// the `supertonic_tts_available` command. Drives whether the "Supertonic"
+  /// TTS option is selectable. Re-fetched on each open (compile-time const).
+  supertonicAvailable: false,
   /// `[{id, label}]` returned by the `list_locales` Tauri command. Cached
   /// across `open()` calls so we don't re-invoke on every modal open.
   /// `null` until the first successful fetch; the fetch shares the same
@@ -164,15 +172,17 @@ async function open({ onSessionRestarted } = {}) {
       state.localeChoices === null
         ? invoke("list_locales")
         : Promise.resolve(state.localeChoices);
-    const [view, sessionInfo, locales, macosNativeAvailable] =
+    const [view, sessionInfo, locales, macosNativeAvailable, supertonicAvailable] =
       await Promise.all([
         invoke("get_settings"),
         invoke("current_session_info").catch(() => null),
         localesPromise,
         invoke("macos_native_speech_available").catch(() => false),
+        invoke("supertonic_tts_available").catch(() => false),
       ]);
     state.localeChoices = locales;
     state.macosNativeAvailable = macosNativeAvailable === true;
+    state.supertonicAvailable = supertonicAvailable === true;
     populateLocaleChoices();
     populate(view);
     dom.activeHint.hidden = sessionInfo === null;
@@ -331,19 +341,21 @@ function populate(view) {
   state.lastDownloadTimeoutSecs = view.speech?.download_timeout_secs ?? null;
   f.speechMicSilenceMs.value = view.speech?.mic_silence_ms ?? 600;
   f.speechDisableAutoDownload.checked = view.speech?.disable_auto_download === true;
-  // Set the value first; the macOS-native option may be disabled just
-  // below, but the browser permits a disabled option to remain the
-  // selected value — so a persisted "macos-native" choice stays visible
-  // even on a build that can't use it (show-but-disable).
-  f.speechBackend.value = view.speech?.backend ?? "whisper-piper";
-  // Gate the macOS-native option behind the compiled feature. Selecting
-  // it on a build without the feature silently falls through to
-  // whisper/piper, so show-but-disable with a hint instead of hiding it.
-  const macosOption = f.speechBackend.querySelector(
-    'option[value="macos-native"]',
-  );
-  if (macosOption) macosOption.disabled = !state.macosNativeAvailable;
-  f.speechBackendUnavailableHint.hidden = state.macosNativeAvailable;
+  // STT/TTS are decoupled. Set values first; an option may be disabled
+  // just below but the browser keeps a disabled option as the selected
+  // value (show-but-disable for a persisted choice the build can't run).
+  f.speechSttBackend.value = view.speech?.stt_backend ?? "whisper";
+  f.speechTtsBackend.value = view.speech?.tts_backend ?? "piper";
+  // Gate macOS-native (STT + TTS options) behind the compiled feature.
+  const sttMacosOption = f.speechSttBackend.querySelector('option[value="macos-native"]');
+  if (sttMacosOption) sttMacosOption.disabled = !state.macosNativeAvailable;
+  const ttsMacosOption = f.speechTtsBackend.querySelector('option[value="macos-native"]');
+  if (ttsMacosOption) ttsMacosOption.disabled = !state.macosNativeAvailable;
+  f.speechMacosNativeUnavailableHint.hidden = state.macosNativeAvailable;
+  // Gate Supertonic behind its feature.
+  const supertonicOption = f.speechTtsBackend.querySelector('option[value="supertonic"]');
+  if (supertonicOption) supertonicOption.disabled = !state.supertonicAvailable;
+  f.speechSupertonicUnavailableHint.hidden = state.supertonicAvailable;
   populateSpeechOverrides(view.speech?.overrides ?? {});
 
   // Voice-mode status badge — read-only hint so the user understands
@@ -393,6 +405,14 @@ function populateSpeechOverrides(overrides) {
         <span>Whisper model path</span>
         <input type="text" data-field="whisper_model_path" placeholder="(default cache location)" value="${ov.whisper_model_path ?? ""}" />
       </label>
+      <label class="field field-full">
+        <span>Supertonic onnx/ dir</span>
+        <input type="text" data-field="supertonic_onnx_dir" placeholder="(set for Supertonic TTS)" value="${ov.supertonic_onnx_dir ?? ""}" />
+      </label>
+      <label class="field field-full">
+        <span>Supertonic voice-style .json</span>
+        <input type="text" data-field="supertonic_voice_style_path" placeholder="(set for Supertonic TTS)" value="${ov.supertonic_voice_style_path ?? ""}" />
+      </label>
     `;
     container.appendChild(card);
   }
@@ -407,13 +427,17 @@ function gatherSpeechOverrides() {
     const piperOnnx = card.querySelector('[data-field="piper_onnx_path"]').value.trim();
     const piperConfig = card.querySelector('[data-field="piper_config_path"]').value.trim();
     const whisper = card.querySelector('[data-field="whisper_model_path"]').value.trim();
+    const supertonicDir = card.querySelector('[data-field="supertonic_onnx_dir"]').value.trim();
+    const supertonicStyle = card.querySelector('[data-field="supertonic_voice_style_path"]').value.trim();
     // Only include locale in overrides if at least one field is non-empty.
-    if (voiceId || piperOnnx || piperConfig || whisper) {
+    if (voiceId || piperOnnx || piperConfig || whisper || supertonicDir || supertonicStyle) {
       overrides[locale] = {
         voice_id: voiceId || null,
         piper_onnx_path: piperOnnx || null,
         piper_config_path: piperConfig || null,
         whisper_model_path: whisper || null,
+        supertonic_onnx_dir: supertonicDir || null,
+        supertonic_voice_style_path: supertonicStyle || null,
       };
     }
   }
@@ -729,7 +753,10 @@ function gather() {
       // never silently switches voice mode off.
       voice_mode_enabled: state.lastVoiceModeEnabled,
       disable_auto_download: dom.fields.speechDisableAutoDownload.checked,
-      backend: dom.fields.speechBackend.value,
+      // STT/TTS are decoupled (legacy `backend` is skip-serialized and the
+      // new fields win), so we never send a `backend` key.
+      stt_backend: dom.fields.speechSttBackend.value,
+      tts_backend: dom.fields.speechTtsBackend.value,
       mic_silence_ms: parseIntOrZero(dom.fields.speechMicSilenceMs.value) || 600,
       // No visible input — round-trip the persisted value so saving never
       // resets it to the serde default. `?? undefined` lets serde apply its
