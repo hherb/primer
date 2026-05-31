@@ -104,7 +104,7 @@ Steps 1.2.1–1.2.5 landed; 1.2.6's harness is built + host-tested (device numbe
 
 - [x] macOS-native backend (`--features macos-native`): `SFSpeechRecognizer` on-device STT + streaming `AVSpeechSynthesizer` TTS; Silero VAD; en-US + de-DE.
 - [x] macOS 26 backend (`--features macos-native-26`): `SpeechAnalyzer`/`SpeechTranscriber`/`SpeechDetector` via a Swift sidecar; ~100× faster to first partial than Whisper. Mutually exclusive with `macos-native`.
-- [x] Supertonic TTS (`--features supertonic`): `TextToSpeech` + `StreamingTextToSpeech` impl for A/B; not yet on a default code path (Stage C wiring pending).
+- [x] Supertonic TTS (`--features supertonic`): `TextToSpeech` + `StreamingTextToSpeech` impl; #170 v2/v3 spike passed (Piper-class CPU RTF, 32 languages incl. Hindi/Japanese). **Stage C done** — STT and TTS decoupled (the three voice-loop builders take an injected TTS via `build_tts`/`build_voice_backends`); CLI `--tts piper|supertonic`; GUI separate STT/TTS dropdowns with feature-gated disabling. Asset auto-download (Stage D) + in-loop A/B numbers (Stage E) + Hindi preview→stable (Stage F) still ahead.
 
 **Phase 2 exit criteria:** a child can have the Phase 0 conversation entirely by voice.
 

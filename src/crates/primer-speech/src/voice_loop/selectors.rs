@@ -335,4 +335,38 @@ mod tests {
         assert!(s.contains("supertonic"), "hint must name the feature: {s}");
         assert!(s.contains("--features"), "hint must say rebuild: {s}");
     }
+
+    /// Real-asset builder smoke for the Supertonic arm: `build_tts` loads the
+    /// four ONNX sessions and returns a voice whose `model_id` is the
+    /// `supertonic-<style-stem>` form. Skipped unless both
+    /// `$SUPERTONIC_TEST_ONNX_DIR` and `$SUPERTONIC_TEST_VOICE_STYLE` are set
+    /// (the ~400 MB bundle isn't in CI). Only one set is a misconfiguration
+    /// and panics so the running developer notices. Run with
+    /// `--features supertonic ... -- --ignored`.
+    #[cfg(feature = "supertonic")]
+    #[test]
+    #[ignore]
+    fn build_tts_supertonic_with_assets_returns_supertonic_voice() {
+        let (dir, style) = match (
+            std::env::var("SUPERTONIC_TEST_ONNX_DIR").ok(),
+            std::env::var("SUPERTONIC_TEST_VOICE_STYLE").ok(),
+        ) {
+            (Some(d), Some(s)) => (d, s),
+            (None, None) => return,
+            _ => panic!(
+                "SUPERTONIC_TEST_ONNX_DIR and SUPERTONIC_TEST_VOICE_STYLE must be set together"
+            ),
+        };
+        let assets = TtsAssets {
+            supertonic_onnx_dir: Some(dir.into()),
+            supertonic_voice_style: Some(style.into()),
+            ..TtsAssets::default()
+        };
+        let (_tts, voice) = build_tts(TtsBackend::Supertonic, &assets).expect("build supertonic");
+        assert!(
+            voice.model_id.starts_with("supertonic-"),
+            "voice id must carry the supertonic- prefix, got {:?}",
+            voice.model_id
+        );
+    }
 }

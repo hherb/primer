@@ -159,7 +159,7 @@ Apple-platform alternatives sit behind two mutually-exclusive cargo features:
 - **`macos-native`** — `SFSpeechRecognizer` for STT (with `requiresOnDeviceRecognition = true`; never falls back to network) and `AVSpeechSynthesizer.writeUtterance:toBufferCallback:` for phrase-by-phrase streaming TTS via `PhraseSplitter`. Silero stays as the VAD on this path because macOS-26-only `SpeechDetector` would break the macOS 13 floor. en-US + de-DE only — Hindi is deferred until Apple ships on-device `hi-IN`. PCM chunks stream into the speaker ringbuf as `AVSpeechSynthesizer` emits them, so audio begins playing while later phrases are still being synthesised. (PRs #95, #112, #122, #123.)
 - **`macos-native-26`** — landed (PR #134, 2026-05-23). Replaces Whisper + Silero + ONNX runtime with `SpeechAnalyzer` + `SpeechTranscriber` + `SpeechDetector` via a Swift sidecar bridged through `swift-bridge`. Motivated by an empirical latency probe (PR #131): SpeechAnalyzer is ~100× faster to first partial (~30 ms vs ~3.8 s) and ~2× faster to final (~800 ms vs ~1.8 s) than Whisper `ggml-small.en` on macOS 26.5. Mutually exclusive with `macos-native` at compile time. en-US + de-DE only; Hindi `hi-IN` errors loudly at construction (not on-device for `SpeechTranscriber` yet).
 
-A vendored **Supertonic TTS** backend (PRs #127, #128) is also available behind a `supertonic` feature for A/B evaluation. As of PR #175 it implements the `TextToSpeech` + `StreamingTextToSpeech` traits (`SupertonicTts`, one voice per instance like `PiperTts`, 44.1 kHz native output, streaming via `PhraseSplitter`), so it can stand in for Piper in a voice loop — but it is still gated behind the `supertonic` feature and not wired onto any default code path (Stage C voice-loop wiring is pending the #170 v2/v3 ONNX-compat spike).
+A vendored **Supertonic TTS** backend (PRs #127, #128) is selectable behind a `supertonic` feature. As of PR #175 it implements the `TextToSpeech` + `StreamingTextToSpeech` traits (`SupertonicTts`, one voice per instance like `PiperTts`, 44.1 kHz native output, streaming via `PhraseSplitter`); the #170 v2/v3 ONNX-compat spike passed (Piper-class CPU RTF, 32 languages incl. Hindi/Japanese). **Stage C wires it into the voice loop with STT and TTS fully decoupled:** the three voice-loop builders take an injected `Arc<dyn StreamingTextToSpeech>` so the synthesiser is a runtime choice independent of the STT. Pick it on the CLI with `--tts supertonic --supertonic-dir <onnx-dir> --supertonic-voice-style <voice_styles/F1.json>` (over Whisper STT — the Hindi/Japanese path Piper and AVSpeech can't provide), or in the GUI via Settings → Speech, which now offers **separate STT (Whisper / macOS Native) and TTS (Piper / Supertonic / macOS Native) dropdowns**, each disabled with a rebuild hint when its feature isn't compiled in. Supertonic asset paths are supplied manually for now (per-locale fields in Settings, or the CLI flags); consent-gated auto-download is the next stage. Build with `--features supertonic` on either binary.
 
 Two pure helper modules (`vad_debounce`, `phrase_split`) carry the streaming state machines so they can be unit-tested without any backend dep. The `--speech` flag in `primer-cli` is gated by a top-level `speech` feature that pulls all four. See the [Voice mode](#voice-mode-experimental-poc) section below for setup.
 
@@ -348,6 +348,14 @@ Voice-mode flags (only when built with `--features primer-cli/speech`):
 --voice <id>                    VoiceProfile.model_id; must match the file stem of
                                 --voice-onnx (default: en_GB-alba-medium). Not
                                 present on the macOS-native build.
+--tts <piper|supertonic>        Voice-mode TTS backend (default: piper). On the
+                                whisper+piper build only. supertonic needs
+                                --features supertonic at build time plus
+                                --supertonic-dir and --supertonic-voice-style.
+--supertonic-dir <dir>          Supertonic onnx/ asset directory. Required when
+                                --tts supertonic.
+--supertonic-voice-style <file> Supertonic voice-style JSON (e.g.
+                                voice_styles/F1.json). Required when --tts supertonic.
 --mic-silence-ms <ms>           Override Silero's min_silence_ms (default: 600,
                                 bounded to [50, 5000]). Used on both speech builds —
                                 Silero remains the VAD on macOS-native too.
