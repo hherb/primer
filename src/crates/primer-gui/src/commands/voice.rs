@@ -119,12 +119,15 @@ pub async fn start_voice_mode(
         .await
         .map_err(StartVoiceModeError::from)?;
 
-    // 4. Resolve voice assets for the active locale.
+    // 4. Resolve voice assets for the active locale, gated on the
+    //    decoupled (stt, tts) choice.
     let locale = Locale::from_pack_id(&cfg.learner.locale).unwrap_or_default();
-    let assets = crate::voice::assets::resolve_voice_assets(&state.home, &cfg.speech, &locale)
-        .map_err(|missing| StartVoiceModeError::AssetMissing {
-            entries: missing.entries,
-        })?;
+    let (stt, tts) = cfg.speech.resolve_backends();
+    let assets =
+        crate::voice::assets::resolve_voice_assets(&state.home, &cfg.speech, &locale, stt, tts)
+            .map_err(|missing| StartVoiceModeError::AssetMissing {
+                entries: missing.entries,
+            })?;
 
     // 5. Build the local backends (cpal mic + speaker, VAD, STT, TTS,
     //    audio thread, on_audio, drain hook). Lives in primer-speech;
@@ -133,7 +136,8 @@ pub async fn start_voice_mode(
         &assets,
         locale,
         cfg.speech.mic_silence_ms,
-        cfg.speech.backend,
+        stt,
+        tts,
     )
     .await
     .map_err(|e| StartVoiceModeError::from(format!("backend init: {e}")))?;
