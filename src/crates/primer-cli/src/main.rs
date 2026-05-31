@@ -1587,6 +1587,39 @@ mod tests {
         );
     }
 
+    /// Runtime backstop: even if the `tts_assets` ArgGroup is satisfied by the
+    /// wrong assets (clap can't express the per-tts split — it only knows
+    /// "≥1 asset"), `validate_speech_assets` rejects a Supertonic session with
+    /// no supertonic dir, naming the missing flag. Uses the test binary's own
+    /// path as the (always-existing) whisper stand-in so validation gets past
+    /// the whisper check and reaches the Supertonic arm.
+    #[cfg(all(
+        feature = "speech",
+        not(all(
+            target_os = "macos",
+            any(feature = "macos-native", feature = "macos-native-26")
+        ))
+    ))]
+    #[test]
+    fn validate_rejects_supertonic_without_dir() {
+        let existing = std::env::current_exe().expect("test binary path exists");
+        let err = validate_speech_assets(
+            &existing,
+            primer_speech::voice_loop::TtsBackend::Supertonic,
+            None,
+            None,
+            None, // supertonic_dir missing
+            None,
+            "ignored-voice-id",
+        )
+        .expect_err("supertonic with no dir must fail validation");
+        let msg = format!("{err}");
+        assert!(
+            msg.contains("supertonic-dir"),
+            "error must name the missing flag: {msg}"
+        );
+    }
+
     #[cfg(all(
         feature = "speech",
         not(all(

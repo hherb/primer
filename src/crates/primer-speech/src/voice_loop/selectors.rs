@@ -149,7 +149,10 @@ fn build_macos_native_tts(
     assets: &TtsAssets,
 ) -> Result<(Arc<dyn StreamingTextToSpeech>, VoiceProfile)> {
     let tts = crate::macos::MacosTextToSpeech::new(assets.locale.bcp47())?;
-    // AVSpeech selects its own voice from the locale; VoiceProfile is ignored.
+    // AVSpeech selects its own voice from the locale and never reads
+    // `VoiceProfile` (neither rate nor model_id — see `macos/tts.rs`), so the
+    // default is correct here. The pre-Stage-C builders set `rate: 0.9`, but
+    // that was always a no-op on this backend; don't "restore" it.
     Ok((Arc::new(tts), VoiceProfile::default()))
 }
 
