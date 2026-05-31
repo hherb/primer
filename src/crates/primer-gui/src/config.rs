@@ -1267,13 +1267,13 @@ mod tests {
                 "disable_auto_download": false,
                 "backend": "macos-native",
                 "mic_silence_ms": 600,
-                "download_timeout_secs": 1800,
+                "download_timeout_secs": 3600,
                 "overrides": {}
             }
         }"#;
         let update: GuiConfigUpdate = serde_json::from_str(update_json).unwrap();
         let resolved = update.into_config(&current);
         assert_eq!(resolved.speech.backend, SpeechBackend::MacosNative);
-        assert_eq!(resolved.speech.download_timeout_secs, 1800);
+        assert_eq!(resolved.speech.download_timeout_secs, 3600);
     }
 }
