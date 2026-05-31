@@ -122,7 +122,8 @@ const state = {
   lastDownloadTimeoutSecs: null,
   /// Whether this binary was compiled with a macOS-native speech stack,
   /// from the `macos_native_speech_available` command. Drives whether the
-  /// "macOS Native" backend option is selectable. Cached across opens.
+  /// "macOS Native" backend option is selectable. Re-fetched on each open
+  /// (it's a compile-time constant, so the IPC cost is trivial).
   macosNativeAvailable: false,
   /// `[{id, label}]` returned by the `list_locales` Tauri command. Cached
   /// across `open()` calls so we don't re-invoke on every modal open.
@@ -325,6 +326,10 @@ function populate(view) {
   state.lastDownloadTimeoutSecs = view.speech?.download_timeout_secs ?? null;
   f.speechMicSilenceMs.value = view.speech?.mic_silence_ms ?? 600;
   f.speechDisableAutoDownload.checked = view.speech?.disable_auto_download === true;
+  // Set the value first; the macOS-native option may be disabled just
+  // below, but the browser permits a disabled option to remain the
+  // selected value — so a persisted "macos-native" choice stays visible
+  // even on a build that can't use it (show-but-disable).
   f.speechBackend.value = view.speech?.backend ?? "whisper-piper";
   // Gate the macOS-native option behind the compiled feature. Selecting
   // it on a build without the feature silently falls through to
