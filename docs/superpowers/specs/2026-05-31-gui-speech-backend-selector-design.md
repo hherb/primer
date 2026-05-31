@@ -145,6 +145,11 @@ Next start_voice_mode reads cfg.speech.backend → build_loop_backends picks nat
   variant, so the dropdown stays two-valued regardless of which native feature is
   built.
 - A user on a non-feature build who somehow has `backend: macos-native` in their
-  config (e.g. copied a config across machines) will see the disabled option
-  reflect the stored value but be unable to keep it once they Save — acceptable;
-  the disabled-with-hint state explains why.
+  config (e.g. copied a config across machines) sees the disabled option reflect
+  the stored value, and that value **persists across Save** (`gather()` reads
+  `f.speechBackend.value`, which returns the disabled selection, and
+  `update_settings` does not reject it). This is benign: `build_loop_backends`
+  falls through to whisper/piper at runtime regardless, and the disabled-with-hint
+  state explains why the choice has no effect. We deliberately do not coerce the
+  value back to `whisper-piper` on Save — persisting the user's stated intent is
+  the more predictable behavior, and the runtime fallthrough makes it safe.
