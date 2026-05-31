@@ -1233,4 +1233,47 @@ mod tests {
         assert!(resolved.speech.voice_mode_enabled);
         assert_eq!(resolved.speech.mic_silence_ms, 800);
     }
+
+    /// A settings update carrying `speech.backend = macos-native` must
+    /// survive `into_config` unchanged. This is the invariant the
+    /// frontend relies on once gather() round-trips the field — if a
+    /// future refactor drops `speech.backend` from `GuiConfigUpdate` or
+    /// `into_config`, the GUI toggle silently reverts to whisper-piper.
+    #[test]
+    fn update_preserves_macos_native_speech_backend() {
+        let current = GuiConfig::default();
+        let update_json = r#"{
+            "learner": {"name": "Bo", "age": 7, "locale": "en"},
+            "backend": {
+                "kind": "stub",
+                "model": null,
+                "ollama_url": "http://localhost:11434",
+                "openai_compat_url": "http://localhost:8000",
+                "api_key_source": {"kind": "keep"},
+                "openai_compat_api_key_source": {"kind": "keep"},
+                "qnn_bundle_dir": null,
+                "qnn_qairt_lib_dir": null
+            },
+            "classifier": {"match_main": true, "kind": null, "model": null, "timeout_ms": 3000},
+            "extractor": {"match_main": true, "kind": null, "model": null, "timeout_ms": 5000},
+            "comprehension": {"match_main": true, "kind": null, "model": null, "timeout_ms": 5000},
+            "embedder": {"kind": "none", "model": null, "ollama_url": null, "openai_compat_url": null},
+            "vocab": {"max_per_prompt": null},
+            "breaks": {"after_mins": 30},
+            "persistence": {"session_db": null, "knowledge_db": null, "no_persist": false},
+            "ui": {"sidebar_open": true, "last_section": "current_turn"},
+            "speech": {
+                "voice_mode_enabled": false,
+                "disable_auto_download": false,
+                "backend": "macos-native",
+                "mic_silence_ms": 600,
+                "download_timeout_secs": 1800,
+                "overrides": {}
+            }
+        }"#;
+        let update: GuiConfigUpdate = serde_json::from_str(update_json).unwrap();
+        let resolved = update.into_config(&current);
+        assert_eq!(resolved.speech.backend, SpeechBackend::MacosNative);
+        assert_eq!(resolved.speech.download_timeout_secs, 1800);
+    }
 }
