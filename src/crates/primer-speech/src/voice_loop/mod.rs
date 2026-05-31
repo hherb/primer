@@ -65,6 +65,9 @@ pub use backends_common::{ChannelStt, LocalBackends};
 #[cfg(all(feature = "silero", feature = "whisper", feature = "cpal"))]
 pub use backends::build_local_backends;
 
+#[cfg(all(feature = "silero", feature = "whisper", feature = "cpal"))]
+pub use selectors::build_voice_backends;
+
 #[cfg(all(
     target_os = "macos",
     feature = "cpal",

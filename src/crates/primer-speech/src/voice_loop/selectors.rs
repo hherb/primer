@@ -171,6 +171,100 @@ fn build_macos_native_tts(
     ))
 }
 
+/// Dispatch to the STT builder selected by `stt`, injecting the already-
+/// constructed `tts` + `voice`. Centralises the per-STT cfg-gated dispatch
+/// the CLI and GUI would otherwise each duplicate.
+#[cfg(all(feature = "silero", feature = "whisper", feature = "cpal"))]
+#[allow(clippy::too_many_arguments)]
+pub async fn build_voice_backends(
+    stt: SttBackend,
+    tts: Arc<dyn StreamingTextToSpeech>,
+    voice: VoiceProfile,
+    whisper_model: &std::path::Path,
+    locale: primer_core::i18n::Locale,
+    mic_silence_ms: u32,
+    verbose: bool,
+) -> Result<crate::voice_loop::LocalBackends> {
+    match stt {
+        SttBackend::Whisper => {
+            crate::voice_loop::build_local_backends(
+                tts, voice, whisper_model, locale, mic_silence_ms, verbose,
+            )
+            .await
+        }
+        SttBackend::MacosNative => {
+            build_macos_native_stt(tts, voice, locale, mic_silence_ms, verbose).await
+        }
+    }
+}
+
+// macOS 26 STT builder arm (SpeechAnalyzer).
+#[cfg(all(
+    target_os = "macos",
+    feature = "macos-native-26",
+    not(feature = "macos-native"),
+    feature = "silero",
+    feature = "whisper",
+    feature = "cpal"
+))]
+async fn build_macos_native_stt(
+    tts: Arc<dyn StreamingTextToSpeech>,
+    voice: VoiceProfile,
+    locale: primer_core::i18n::Locale,
+    mic_silence_ms: u32,
+    verbose: bool,
+) -> Result<crate::voice_loop::LocalBackends> {
+    crate::voice_loop::build_local_backends_macos_native_26(
+        tts, voice, locale, mic_silence_ms, verbose,
+    )
+    .await
+}
+
+// macOS 13+ STT builder arm (SFSpeechRecognizer).
+#[cfg(all(
+    target_os = "macos",
+    feature = "macos-native",
+    not(feature = "macos-native-26"),
+    feature = "silero",
+    feature = "whisper",
+    feature = "cpal"
+))]
+async fn build_macos_native_stt(
+    tts: Arc<dyn StreamingTextToSpeech>,
+    voice: VoiceProfile,
+    locale: primer_core::i18n::Locale,
+    mic_silence_ms: u32,
+    verbose: bool,
+) -> Result<crate::voice_loop::LocalBackends> {
+    crate::voice_loop::build_local_backends_macos_native(
+        tts, voice, locale, mic_silence_ms, verbose,
+    )
+    .await
+}
+
+// Fallback arm: no macOS-native STT compiled in — selecting it is a
+// build-time error with the rebuild hint (mirrors build_tts's pattern).
+#[cfg(all(
+    not(all(target_os = "macos", feature = "macos-native-26", not(feature = "macos-native"))),
+    not(all(target_os = "macos", feature = "macos-native", not(feature = "macos-native-26"))),
+    feature = "silero",
+    feature = "whisper",
+    feature = "cpal"
+))]
+async fn build_macos_native_stt(
+    _tts: Arc<dyn StreamingTextToSpeech>,
+    _voice: VoiceProfile,
+    _locale: primer_core::i18n::Locale,
+    _mic_silence_ms: u32,
+    _verbose: bool,
+) -> Result<crate::voice_loop::LocalBackends> {
+    Err(PrimerError::Speech(
+        "macOS-native STT selected but this binary was built without the `macos-native` feature; \
+         rebuild with --features macos-native"
+            .to_string(),
+    ))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
