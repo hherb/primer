@@ -1,9 +1,10 @@
-//! Local backend builder for the voice loop (whisper + piper).
+//! Local backend builder for the voice loop (whisper STT).
 //!
 //! Constructs the cpal mic + speaker, silero VAD, whisper streaming STT,
-//! piper TTS, the audio capture thread (which owns the VAD + whisper
-//! streaming session), and the `on_audio` closure + drain hook the loop
-//! consumes.
+//! the audio capture thread (which owns the VAD + whisper streaming
+//! session), and the `on_audio` closure + drain hook the loop consumes.
+//! The TTS is injected by the caller (Piper / Supertonic / …), so this
+//! builder owns only the Whisper STT side.
 //!
 //! Lifted from `primer-cli/src/speech_loop/mod.rs::run` in PR 4 of the
 //! GUI voice-mode work so the CLI and GUI share one builder.
@@ -14,7 +15,7 @@
 //! [`super::backends_common`] so the macOS-native builders in
 //! [`super::backends_macos_native`] and
 //! [`super::backends_macos_native_26`] can share them without
-//! inheriting the whisper/piper dependency this module pulls in.
+//! inheriting the whisper dependency this module pulls in.
 //!
 //! Lifecycle: callers receive a [`LocalBackends`] struct that holds the
 //! audio resources (mic stream, speaker stream, audio thread handle).
@@ -22,12 +23,7 @@
 //! returns and then call [`LocalBackends::shutdown`] to drain the audio
 //! thread cleanly.
 
-#![cfg(all(
-    feature = "silero",
-    feature = "whisper",
-    feature = "piper",
-    feature = "cpal"
-))]
+#![cfg(all(feature = "silero", feature = "whisper", feature = "cpal"))]
 
 use std::path::Path;
 use std::sync::Arc;
@@ -42,7 +38,7 @@ use crate::voice_loop::backends_common::{
     ChannelStt, LocalBackends, MicPipeline, SpeakerPipeline, make_drain_hook, make_on_audio,
 };
 use crate::voice_loop::{LoopBackends, VAD_EVENT_CHANNEL_CAPACITY};
-use crate::{PiperTts, Resampler, SileroVad, SileroVadParams, WhisperStt};
+use crate::{Resampler, SileroVad, SileroVadParams, WhisperStt};
 
 /// Body of the audio capture thread.
 ///
@@ -191,8 +187,12 @@ fn run_audio_thread(
 }
 
 /// Construct every local backend the voice loop needs: cpal mic + speaker,
-/// silero VAD, whisper STT, piper TTS, audio capture thread, plus the
-/// `on_audio` closure and drain hook.
+/// silero VAD, whisper STT, audio capture thread, plus the `on_audio`
+/// closure and drain hook.
+///
+/// The TTS is **injected** by the caller (Piper / Supertonic / …) as
+/// `tts` + its matching `voice` profile, so STT and TTS are orthogonal —
+/// this builder owns only the Whisper STT side.
 ///
 /// `mic_silence_ms` configures the Silero VAD's `min_silence_ms` parameter
 /// (how long after speech ends before firing `SpeechEnd`).
@@ -204,10 +204,9 @@ fn run_audio_thread(
 /// `verbose` only controls a couple of stderr lines about mic/speaker
 /// open rates; flip to false from the GUI.
 pub async fn build_local_backends(
-    piper_onnx: &Path,
-    piper_config: &Path,
+    tts: Arc<dyn StreamingTextToSpeech>,
+    voice: VoiceProfile,
     whisper_model: &Path,
-    voice_id: &str,
     locale: primer_core::i18n::Locale,
     mic_silence_ms: u32,
     verbose: bool,
@@ -230,8 +229,7 @@ pub async fn build_local_backends(
     // accepts; pinned in `whisper::tests::pack_id_is_iso_639_1_for_whisper`.
     let whisper = Arc::new(WhisperStt::new(whisper_model)?.with_language(locale.pack_id()));
 
-    // ── Build TTS (piper) ────────────────────────────────────────
-    let tts: Arc<dyn StreamingTextToSpeech> = Arc::new(PiperTts::new(piper_onnx, piper_config)?);
+    // ── TTS is injected by the caller (Piper / Supertonic / …) ──
     let tts_sample_rate = tts.sample_rate();
 
     // ── Open mic + input resampler (target: VAD/whisper at 16 kHz) ─
@@ -277,11 +275,6 @@ pub async fn build_local_backends(
 
     // ── Build LoopBackends (single-locale; the ChannelStt adapter
     //    reads transcripts from the audio thread). ────────────────
-    let voice = VoiceProfile {
-        model_id: voice_id.to_string(),
-        rate: 0.9,
-        ..VoiceProfile::default()
-    };
     let backends = LoopBackends::single_locale(
         Arc::new(ChannelStt {
             rx: Arc::new(std::sync::Mutex::new(transcript_rx)),

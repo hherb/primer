@@ -27,6 +27,12 @@ pub struct ResolvedAssets {
     pub piper_config: PathBuf,
     pub whisper_model: PathBuf,
     pub voice_id: String,
+    /// Supertonic `onnx/` dir from the per-locale override; `None` when the
+    /// user hasn't set one (Stage C has no Supertonic auto-download —
+    /// `build_tts` then errors clearly at session start).
+    pub supertonic_onnx_dir: Option<PathBuf>,
+    /// Supertonic voice-style JSON from the per-locale override; `None` when unset.
+    pub supertonic_voice_style: Option<PathBuf>,
 }
 
 /// One or more required model files are missing on disk; the user must
@@ -47,6 +53,8 @@ pub fn resolve_voice_assets(
     home: &std::path::Path,
     speech: &SpeechSettings,
     locale: &Locale,
+    stt: crate::config::SttBackend,
+    tts: crate::config::TtsBackend,
 ) -> Result<ResolvedAssets, AssetMissing> {
     let default = voice_default_for(locale);
     let override_entry = speech.overrides.get(locale.pack_id());
@@ -54,12 +62,23 @@ pub fn resolve_voice_assets(
     let (piper_onnx, piper_config, whisper_model, voice_id) =
         compute_paths(home, locale, default, override_entry);
 
+    // Supertonic paths come straight from the per-locale override; Stage C
+    // has no Supertonic download URL, so an absent path is NOT gated here —
+    // `build_tts` surfaces it clearly at session start.
+    let supertonic_onnx_dir = override_entry.and_then(|o| o.supertonic_onnx_dir.clone());
+    let supertonic_voice_style = override_entry.and_then(|o| o.supertonic_voice_style_path.clone());
+
+    // Decoupled gating: each asset is required only when the resolved
+    // (stt, tts) choice actually consumes it. Whisper is gated iff STT is
+    // Whisper; Piper files are gated iff TTS is Piper. macOS-native STT/TTS
+    // and Supertonic TTS gate nothing here.
+    //
     // Every shipping locale today uses a Whisper `small` variant; if a
     // locale upgrades to `medium`/`large` replace the
     // `APPROX_WHISPER_SMALL_MB` references below with a per-id lookup
     // keyed on `d.whisper_model_id`.
     let mut missing = Vec::new();
-    if !piper_onnx.exists() {
+    if tts == crate::config::TtsBackend::Piper && !piper_onnx.exists() {
         missing.push(MissingAsset {
             kind: kind::PIPER_ONNX.into(),
             path: piper_onnx.clone(),
@@ -73,7 +92,7 @@ pub fn resolve_voice_assets(
             }),
         });
     }
-    if !piper_config.exists() {
+    if tts == crate::config::TtsBackend::Piper && !piper_config.exists() {
         missing.push(MissingAsset {
             kind: kind::PIPER_CONFIG.into(),
             path: piper_config.clone(),
@@ -81,7 +100,7 @@ pub fn resolve_voice_assets(
             approx_size_mb: Some(APPROX_PIPER_CONFIG_MB),
         });
     }
-    if !whisper_model.exists() {
+    if stt == crate::config::SttBackend::Whisper && !whisper_model.exists() {
         missing.push(MissingAsset {
             kind: kind::WHISPER_MODEL.into(),
             path: whisper_model.clone(),
@@ -96,6 +115,8 @@ pub fn resolve_voice_assets(
             piper_config,
             whisper_model,
             voice_id,
+            supertonic_onnx_dir,
+            supertonic_voice_style,
         })
     } else {
         Err(AssetMissing {
@@ -134,7 +155,8 @@ pub fn resolve_requested_kinds(
     if requested_kinds.len() > MAX_REQUESTED_KINDS {
         return Vec::new();
     }
-    let missing = match resolve_voice_assets(home, speech, locale) {
+    let (stt, tts) = speech.resolve_backends();
+    let missing = match resolve_voice_assets(home, speech, locale, stt, tts) {
         Ok(_) => return Vec::new(),
         Err(am) => am.entries,
     };
@@ -186,7 +208,14 @@ mod tests {
     fn missing_all_three_assets_returns_three_entries() {
         let home = TempDir::new().unwrap();
         let speech = SpeechSettings::default();
-        let err = resolve_voice_assets(home.path(), &speech, &Locale::English).unwrap_err();
+        let err = resolve_voice_assets(
+            home.path(),
+            &speech,
+            &Locale::English,
+            crate::config::SttBackend::Whisper,
+            crate::config::TtsBackend::Piper,
+        )
+        .unwrap_err();
         assert_eq!(
             err.entries.len(),
             3,
@@ -212,7 +241,14 @@ mod tests {
         std::fs::write(whisper_dir.join("ggml-small.en.bin"), b"").unwrap();
 
         let speech = SpeechSettings::default();
-        let ok = resolve_voice_assets(home.path(), &speech, &Locale::English).unwrap();
+        let ok = resolve_voice_assets(
+            home.path(),
+            &speech,
+            &Locale::English,
+            crate::config::SttBackend::Whisper,
+            crate::config::TtsBackend::Piper,
+        )
+        .unwrap();
         assert!(ok.piper_onnx.ends_with("en_GB-alba-medium.onnx"));
         assert_eq!(ok.voice_id, "en_GB-alba-medium");
     }
@@ -231,17 +267,66 @@ mod tests {
                 piper_config_path: None,
                 whisper_model_path: None,
                 voice_id: Some("my_voice".to_string()),
+                supertonic_onnx_dir: None,
+                supertonic_voice_style_path: None,
             },
         );
 
         // Piper config & Whisper still missing; the resolver returns
         // AssetMissing but the piper_onnx entry should NOT be in the
         // missing list because the override-pointed path exists.
-        let err = resolve_voice_assets(home.path(), &speech, &Locale::English).unwrap_err();
+        let err = resolve_voice_assets(
+            home.path(),
+            &speech,
+            &Locale::English,
+            crate::config::SttBackend::Whisper,
+            crate::config::TtsBackend::Piper,
+        )
+        .unwrap_err();
         let kinds: Vec<&str> = err.entries.iter().map(|e| e.kind.as_str()).collect();
         assert!(!kinds.contains(&"piper_onnx"));
         assert!(kinds.contains(&"piper_config"));
         assert!(kinds.contains(&"whisper_model"));
+    }
+
+    /// Decoupling: a Supertonic-TTS session must NOT demand Piper files.
+    /// Only whisper (for STT) is gated. With whisper present and Piper
+    /// absent, the resolve succeeds and the Supertonic override paths flow
+    /// through into the returned `ResolvedAssets`.
+    #[test]
+    fn supertonic_tts_does_not_gate_piper_files() {
+        let home = TempDir::new().unwrap();
+        let whisper_dir = home.path().join(".cache/primer/models/whisper");
+        std::fs::create_dir_all(&whisper_dir).unwrap();
+        std::fs::write(whisper_dir.join("ggml-small.en.bin"), b"").unwrap();
+
+        let sup_onnx_dir = home.path().join("supertonic/onnx");
+        let sup_style = home.path().join("supertonic/F1.json");
+
+        let mut speech = SpeechSettings::default();
+        speech.tts_backend = crate::config::TtsBackend::Supertonic;
+        speech.overrides.insert(
+            "en".to_string(),
+            crate::config::SpeechLocaleOverride {
+                piper_onnx_path: None,
+                piper_config_path: None,
+                whisper_model_path: None,
+                voice_id: None,
+                supertonic_onnx_dir: Some(sup_onnx_dir.clone()),
+                supertonic_voice_style_path: Some(sup_style.clone()),
+            },
+        );
+
+        let ok = resolve_voice_assets(
+            home.path(),
+            &speech,
+            &Locale::English,
+            crate::config::SttBackend::Whisper,
+            crate::config::TtsBackend::Supertonic,
+        )
+        .expect("Supertonic TTS must not require Piper files");
+        assert_eq!(ok.supertonic_onnx_dir, Some(sup_onnx_dir));
+        assert_eq!(ok.supertonic_voice_style, Some(sup_style));
     }
 
     #[test]

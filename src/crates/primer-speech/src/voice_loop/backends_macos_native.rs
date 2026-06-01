@@ -179,13 +179,16 @@ fn run_audio_thread_stt(
 
 /// Construct every local backend the voice loop needs using macOS-native
 /// speech backends: cpal mic + speaker, silero VAD, `MacosSpeechToText`
-/// (SFSpeechRecognizer, on-device), `MacosTextToSpeech` (AVSpeechSynthesizer),
-/// audio capture thread, plus the `on_audio` closure and drain hook.
+/// (SFSpeechRecognizer, on-device), audio capture thread, plus the
+/// `on_audio` closure and drain hook. The TTS backend (`tts`) and
+/// `voice` profile are injected by the caller, so STT (native) and TTS
+/// are decoupled — the builder no longer constructs `MacosTextToSpeech`
+/// itself.
 ///
-/// Same `LocalBackends` shape as `build_local_backends`; only the STT/TTS
-/// `Arc`s differ. Silero VAD and the cpal mic/speaker construction are
-/// unchanged. Callers choose which builder to invoke based on compile-time
-/// feature flags and, optionally, a runtime config selector.
+/// Same `LocalBackends` shape as `build_local_backends`; only the STT
+/// `Arc` and VAD differ. Silero VAD and the cpal mic/speaker construction
+/// are unchanged. Callers choose which builder to invoke based on
+/// compile-time feature flags and, optionally, a runtime config selector.
 ///
 /// `mic_silence_ms` configures the Silero VAD's `min_silence_ms` parameter
 /// (how long after speech ends before firing `SpeechEnd`).
@@ -193,11 +196,13 @@ fn run_audio_thread_stt(
 /// `verbose` only controls a couple of stderr lines about mic/speaker
 /// open rates; flip to false from the GUI.
 pub async fn build_local_backends_macos_native(
+    tts: Arc<dyn StreamingTextToSpeech>,
+    voice: VoiceProfile,
     locale: primer_core::i18n::Locale,
     mic_silence_ms: u32,
     verbose: bool,
 ) -> Result<LocalBackends> {
-    use crate::macos::{MacosSpeechToText, MacosTextToSpeech};
+    use crate::macos::MacosSpeechToText;
 
     let bcp47 = locale.bcp47();
 
@@ -212,8 +217,7 @@ pub async fn build_local_backends_macos_native(
     let stt: Arc<dyn StreamingSpeechToText + Send + Sync> =
         Arc::new(MacosSpeechToText::new(bcp47)?);
 
-    // ── Build TTS (macOS native, locale-resolved voice) ──────────
-    let tts: Arc<dyn StreamingTextToSpeech> = Arc::new(MacosTextToSpeech::new(bcp47)?);
+    // ── TTS sample rate (TTS injected by the caller) ─────────────
     let tts_sample_rate = tts.sample_rate();
 
     // ── Open mic + input resampler (target: Silero/STT at 16 kHz) ─
@@ -259,15 +263,9 @@ pub async fn build_local_backends_macos_native(
 
     // ── Build LoopBackends (single-locale; ChannelStt adapter reads
     //    transcripts from the audio thread). ──────────────────────
-    // For the macOS-native path there is no piper model-id; the
-    // VoiceProfile.model_id field is set to the bcp47 tag as a
-    // human-readable identifier. MacosTextToSpeech ignores the
-    // VoiceProfile and selects the voice from its own locale.
-    let voice = VoiceProfile {
-        model_id: bcp47.to_string(),
-        rate: 0.9,
-        ..VoiceProfile::default()
-    };
+    // The `voice` profile is supplied by the caller. For the
+    // macOS-native path there is no piper model-id; MacosTextToSpeech
+    // ignores the VoiceProfile and selects the voice from its own locale.
     let backends = LoopBackends::single_locale(
         Arc::new(ChannelStt {
             rx: Arc::new(std::sync::Mutex::new(transcript_rx)),

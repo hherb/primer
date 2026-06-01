@@ -45,6 +45,27 @@ use uuid::Uuid;
 
 #[derive(Parser, Debug)]
 #[command(name = "primer", about = "The Primer — a Socratic learning companion")]
+// On the portable speech build `--speech` requires at least one TTS asset
+// (via the `tts_assets` group below) in addition to `--whisper-model`.
+// clap's `required_if_eq` is blind to default values, so the per-tts split
+// can't be expressed at parse time when `--tts` defaults to piper; instead
+// the group enforces "≥1 asset under --speech" and `validate_speech_assets`
+// checks the chosen set is complete at runtime.
+#[cfg_attr(
+    all(
+        feature = "speech",
+        not(all(
+            target_os = "macos",
+            any(feature = "macos-native", feature = "macos-native-26")
+        ))
+    ),
+    command(group(
+        clap::ArgGroup::new("tts_assets")
+            .args(["voice_onnx", "voice_config", "supertonic_dir", "supertonic_voice_style"])
+            .multiple(true)
+            .required(false)
+    ))
+)]
 struct Cli {
     /// Inference backend: "stub", "cloud", "ollama", "openai-compat",
     /// or "qnn" (the last requires `--features qnn` at build time and
@@ -273,7 +294,7 @@ struct Cli {
             target_os = "macos",
             any(feature = "macos-native", feature = "macos-native-26")
         )),
-        arg(long, requires_all = ["whisper_model", "voice_onnx", "voice_config"])
+        arg(long, requires_all = ["whisper_model", "tts_assets"])
     )]
     #[cfg_attr(
         all(
@@ -322,6 +343,44 @@ struct Cli {
     ))]
     #[arg(long, value_name = "PATH")]
     voice_config: Option<PathBuf>,
+
+    /// TTS backend for voice mode: `piper` (default) or `supertonic`.
+    /// `supertonic` needs `--features supertonic` at build time plus the
+    /// `--supertonic-dir` + `--supertonic-voice-style` asset flags.
+    #[cfg(all(
+        feature = "speech",
+        not(all(
+            target_os = "macos",
+            any(feature = "macos-native", feature = "macos-native-26")
+        ))
+    ))]
+    #[arg(long, value_enum, default_value_t = TtsChoice::Piper)]
+    tts: TtsChoice,
+
+    /// Supertonic `onnx/` asset directory (the dir holding
+    /// duration_predictor.onnx, text_encoder.onnx, etc.). Required when
+    /// `--tts supertonic`.
+    #[cfg(all(
+        feature = "speech",
+        not(all(
+            target_os = "macos",
+            any(feature = "macos-native", feature = "macos-native-26")
+        ))
+    ))]
+    #[arg(long, value_name = "DIR")]
+    supertonic_dir: Option<PathBuf>,
+
+    /// Supertonic voice-style JSON, e.g. voice_styles/F1.json. Required
+    /// when `--tts supertonic`.
+    #[cfg(all(
+        feature = "speech",
+        not(all(
+            target_os = "macos",
+            any(feature = "macos-native", feature = "macos-native-26")
+        ))
+    ))]
+    #[arg(long, value_name = "FILE")]
+    supertonic_voice_style: Option<PathBuf>,
 
     /// Voice id used as the VoiceProfile.model_id. Must match the file
     /// stem of --voice-onnx (Piper rejects mismatches at session open).
@@ -381,6 +440,39 @@ fn parse_mic_silence_ms(s: &str) -> std::result::Result<u32, String> {
     Ok(n)
 }
 
+/// CLI value for `--tts`. Mirrors `primer_speech::voice_loop::TtsBackend`
+/// minus the macOS-native arm (D2: the CLI native build keeps AVSpeech and
+/// is compiled separately).
+#[cfg(all(
+    feature = "speech",
+    not(all(
+        target_os = "macos",
+        any(feature = "macos-native", feature = "macos-native-26")
+    ))
+))]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, clap::ValueEnum)]
+#[clap(rename_all = "kebab-case")]
+enum TtsChoice {
+    Piper,
+    Supertonic,
+}
+
+#[cfg(all(
+    feature = "speech",
+    not(all(
+        target_os = "macos",
+        any(feature = "macos-native", feature = "macos-native-26")
+    ))
+))]
+impl From<TtsChoice> for primer_speech::voice_loop::TtsBackend {
+    fn from(c: TtsChoice) -> Self {
+        match c {
+            TtsChoice::Piper => Self::Piper,
+            TtsChoice::Supertonic => Self::Supertonic,
+        }
+    }
+}
+
 #[cfg(all(
     feature = "speech",
     not(all(
@@ -390,10 +482,15 @@ fn parse_mic_silence_ms(s: &str) -> std::result::Result<u32, String> {
 ))]
 fn validate_speech_assets(
     whisper_model: &Path,
-    voice_onnx: &Path,
-    voice_config: &Path,
+    tts: primer_speech::voice_loop::TtsBackend,
+    voice_onnx: Option<&Path>,
+    voice_config: Option<&Path>,
+    supertonic_dir: Option<&Path>,
+    supertonic_voice_style: Option<&Path>,
     voice_id: &str,
 ) -> primer_core::error::Result<()> {
+    use primer_speech::voice_loop::TtsBackend;
+
     if !whisper_model.exists() {
         return Err(PrimerError::Speech(format!(
             "whisper model not found at {}.\n\
@@ -402,33 +499,86 @@ fn validate_speech_assets(
             whisper_model.display()
         )));
     }
-    if !voice_onnx.exists() {
-        return Err(PrimerError::Speech(format!(
-            "voice ONNX not found at {}.\n\
-             Download a Piper voice from https://huggingface.co/rhasspy/piper-voices \
-             and pass --voice-onnx.",
-            voice_onnx.display()
-        )));
-    }
-    if !voice_config.exists() {
-        return Err(PrimerError::Speech(format!(
-            "voice config not found at {}.\n\
-             Pass --voice-config alongside --voice-onnx (the .onnx and .onnx.json files \
-             ship together).",
-            voice_config.display()
-        )));
-    }
-    let stem = voice_onnx
-        .file_stem()
-        .and_then(|s| s.to_str())
-        .unwrap_or("");
-    if stem != voice_id {
-        tracing::warn!(
-            voice_id,
-            onnx_stem = stem,
-            "--voice id does not match --voice-onnx file stem; \
-             Piper will reject the session at open time"
-        );
+
+    match tts {
+        TtsBackend::Piper => {
+            let voice_onnx = voice_onnx.ok_or_else(|| {
+                PrimerError::Speech(
+                    "piper TTS requires --voice-onnx (clap should enforce this with --speech)"
+                        .to_string(),
+                )
+            })?;
+            let voice_config = voice_config.ok_or_else(|| {
+                PrimerError::Speech(
+                    "piper TTS requires --voice-config (clap should enforce this with --speech)"
+                        .to_string(),
+                )
+            })?;
+            if !voice_onnx.exists() {
+                return Err(PrimerError::Speech(format!(
+                    "voice ONNX not found at {}.\n\
+                     Download a Piper voice from https://huggingface.co/rhasspy/piper-voices \
+                     and pass --voice-onnx.",
+                    voice_onnx.display()
+                )));
+            }
+            if !voice_config.exists() {
+                return Err(PrimerError::Speech(format!(
+                    "voice config not found at {}.\n\
+                     Pass --voice-config alongside --voice-onnx (the .onnx and .onnx.json files \
+                     ship together).",
+                    voice_config.display()
+                )));
+            }
+            let stem = voice_onnx
+                .file_stem()
+                .and_then(|s| s.to_str())
+                .unwrap_or("");
+            if stem != voice_id {
+                tracing::warn!(
+                    voice_id,
+                    onnx_stem = stem,
+                    "--voice id does not match --voice-onnx file stem; \
+                     Piper will reject the session at open time"
+                );
+            }
+        }
+        TtsBackend::Supertonic => {
+            let dir = supertonic_dir.ok_or_else(|| {
+                PrimerError::Speech(
+                    "supertonic TTS requires --supertonic-dir (clap should enforce this \
+                     with --speech)"
+                        .to_string(),
+                )
+            })?;
+            let style = supertonic_voice_style.ok_or_else(|| {
+                PrimerError::Speech(
+                    "supertonic TTS requires --supertonic-voice-style (clap should enforce \
+                     this with --speech)"
+                        .to_string(),
+                )
+            })?;
+            if !dir.exists() {
+                return Err(PrimerError::Speech(format!(
+                    "supertonic model dir not found at {}.\n\
+                     Download from https://huggingface.co/Supertone/supertonic-3 and pass \
+                     --supertonic-dir.",
+                    dir.display()
+                )));
+            }
+            if !style.exists() {
+                return Err(PrimerError::Speech(format!(
+                    "supertonic voice-style not found at {}.\n\
+                     Pass --supertonic-voice-style (e.g. voice_styles/F1.json from the \
+                     Supertone/supertonic-3 release).",
+                    style.display()
+                )));
+            }
+        }
+        TtsBackend::MacosNative => {
+            // Unreachable on the portable build (the CLI's TtsChoice has no
+            // MacosNative arm), but matched exhaustively.
+        }
     }
     Ok(())
 }
@@ -1129,15 +1279,28 @@ async fn async_main() -> anyhow::Result<()> {
             any(feature = "macos-native", feature = "macos-native-26")
         )))]
         let cfg = {
-            let whisper_model = cli.whisper_model.as_ref().expect("clap requires_all");
-            let voice_onnx = cli.voice_onnx.as_ref().expect("clap requires_all");
-            let voice_config = cli.voice_config.as_ref().expect("clap requires_all");
-            validate_speech_assets(whisper_model, voice_onnx, voice_config, &cli.voice)?;
+            let whisper_model = cli
+                .whisper_model
+                .as_ref()
+                .expect("clap requires whisper_model with --speech");
+            let tts: primer_speech::voice_loop::TtsBackend = cli.tts.into();
+            validate_speech_assets(
+                whisper_model,
+                tts,
+                cli.voice_onnx.as_deref(),
+                cli.voice_config.as_deref(),
+                cli.supertonic_dir.as_deref(),
+                cli.supertonic_voice_style.as_deref(),
+                &cli.voice,
+            )?;
             speech_loop::SpeechLoopConfig {
                 whisper_model: whisper_model.clone(),
-                voice_onnx: voice_onnx.clone(),
-                voice_config: voice_config.clone(),
+                voice_onnx: cli.voice_onnx.clone(),
+                voice_config: cli.voice_config.clone(),
                 voice_id: cli.voice.clone(),
+                tts,
+                supertonic_dir: cli.supertonic_dir.clone(),
+                supertonic_voice_style: cli.supertonic_voice_style.clone(),
                 mic_silence_ms: cli.mic_silence_ms,
                 verbose: cli.verbose,
                 locale: cli_locale,
@@ -1362,6 +1525,145 @@ mod tests {
             "expected clap to reject --speech without whisper/piper flags on \
              non-macos-native builds; got: {result:?}"
         );
+    }
+
+    // ─── --tts piper|supertonic conditional requirements (issue #170) ────
+
+    #[cfg(all(
+        feature = "speech",
+        not(all(
+            target_os = "macos",
+            any(feature = "macos-native", feature = "macos-native-26")
+        ))
+    ))]
+    #[test]
+    fn plain_repl_without_speech_parses_without_voice_assets() {
+        // The default --tts is piper, but with no --speech the voice asset
+        // flags must NOT be required (regression guard for the
+        // required_if_eq_all gating).
+        let res = Cli::try_parse_from(["primer"]);
+        assert!(
+            res.is_ok(),
+            "plain REPL must parse with no speech flags: {res:?}"
+        );
+    }
+
+    #[cfg(all(
+        feature = "speech",
+        not(all(
+            target_os = "macos",
+            any(feature = "macos-native", feature = "macos-native-26")
+        ))
+    ))]
+    #[test]
+    fn speech_piper_default_requires_piper_assets() {
+        let res = Cli::try_parse_from(["primer", "--speech", "--whisper-model", "/m.bin"]);
+        assert!(
+            res.is_err(),
+            "--speech with default --tts piper still needs --voice-onnx/--voice-config"
+        );
+    }
+
+    #[cfg(all(
+        feature = "speech",
+        not(all(
+            target_os = "macos",
+            any(feature = "macos-native", feature = "macos-native-26")
+        ))
+    ))]
+    #[test]
+    fn speech_supertonic_requires_supertonic_assets() {
+        let res = Cli::try_parse_from([
+            "primer",
+            "--speech",
+            "--whisper-model",
+            "/m.bin",
+            "--tts",
+            "supertonic",
+        ]);
+        assert!(
+            res.is_err(),
+            "--tts supertonic needs --supertonic-dir/--supertonic-voice-style"
+        );
+    }
+
+    /// Runtime backstop: even if the `tts_assets` ArgGroup is satisfied by the
+    /// wrong assets (clap can't express the per-tts split — it only knows
+    /// "≥1 asset"), `validate_speech_assets` rejects a Supertonic session with
+    /// no supertonic dir, naming the missing flag. Uses the test binary's own
+    /// path as the (always-existing) whisper stand-in so validation gets past
+    /// the whisper check and reaches the Supertonic arm.
+    #[cfg(all(
+        feature = "speech",
+        not(all(
+            target_os = "macos",
+            any(feature = "macos-native", feature = "macos-native-26")
+        ))
+    ))]
+    #[test]
+    fn validate_rejects_supertonic_without_dir() {
+        let existing = std::env::current_exe().expect("test binary path exists");
+        let err = validate_speech_assets(
+            &existing,
+            primer_speech::voice_loop::TtsBackend::Supertonic,
+            None,
+            None,
+            None, // supertonic_dir missing
+            None,
+            "ignored-voice-id",
+        )
+        .expect_err("supertonic with no dir must fail validation");
+        let msg = format!("{err}");
+        assert!(
+            msg.contains("supertonic-dir"),
+            "error must name the missing flag: {msg}"
+        );
+    }
+
+    #[cfg(all(
+        feature = "speech",
+        not(all(
+            target_os = "macos",
+            any(feature = "macos-native", feature = "macos-native-26")
+        ))
+    ))]
+    #[test]
+    fn speech_supertonic_parses_with_assets() {
+        let res = Cli::try_parse_from([
+            "primer",
+            "--speech",
+            "--whisper-model",
+            "/m.bin",
+            "--tts",
+            "supertonic",
+            "--supertonic-dir",
+            "/sup/onnx",
+            "--supertonic-voice-style",
+            "/sup/voice_styles/F1.json",
+        ]);
+        assert!(res.is_ok(), "supertonic with assets should parse: {res:?}");
+    }
+
+    #[cfg(all(
+        feature = "speech",
+        not(all(
+            target_os = "macos",
+            any(feature = "macos-native", feature = "macos-native-26")
+        ))
+    ))]
+    #[test]
+    fn speech_piper_parses_with_assets() {
+        let res = Cli::try_parse_from([
+            "primer",
+            "--speech",
+            "--whisper-model",
+            "/m.bin",
+            "--voice-onnx",
+            "/v.onnx",
+            "--voice-config",
+            "/v.onnx.json",
+        ]);
+        assert!(res.is_ok(), "piper with assets should parse: {res:?}");
     }
 
     #[test]

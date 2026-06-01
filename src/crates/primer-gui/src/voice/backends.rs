@@ -1,93 +1,65 @@
 //! Voice-loop backend construction for the GUI.
 //!
-//! Thin wrapper around `primer_speech::voice_loop::build_local_backends`.
-//! Kept as a GUI-side shim so that the call site in
-//! `commands::voice::start_voice_mode` doesn't have to import the
-//! lifted module path directly — easier to swap or wrap later if the
-//! GUI ever needs to inject its own audio strategy.
+//! Thin wrapper around the decoupled `primer_speech::voice_loop` builders
+//! (`build_tts` + `build_voice_backends`). Kept as a GUI-side shim so the
+//! call site in `commands::voice::start_voice_mode` doesn't have to import
+//! the lifted module paths directly, and so the GUI's `(stt, tts)` config
+//! enums are converted to the `primer-speech` ones in exactly one place.
 
-use crate::config::SpeechBackend;
+use crate::config::{SttBackend, TtsBackend};
 use crate::voice::assets::ResolvedAssets;
 
-/// Build every local voice-loop backend (cpal mic + speaker, silero VAD,
-/// whisper STT, piper TTS, audio capture thread, `on_audio` closure,
-/// drain hook). The caller drains the returned `LocalBackends` into
-/// `run_loop` and stashes the post-loop handle so `shutdown()` can run
-/// when voice mode ends.
+/// Build every local voice-loop backend, picking the STT skeleton and TTS
+/// synthesiser from the decoupled `(stt, tts)` config choice. STT dispatch
+/// (whisper / macOS-native) happens inside
+/// `primer_speech::voice_loop::build_voice_backends`; the TTS is built here
+/// via `build_tts` and injected.
 ///
-/// When `backend` is [`SpeechBackend::MacosNative`] **and** this binary
-/// was compiled with `--features primer-gui/macos-native` on macOS, the
-/// Apple-native SFSpeechRecognizer + AVSpeechSynthesizer stack is used
-/// instead of whisper/piper. On all other combinations the function falls
-/// through to the whisper/piper path unconditionally.
+/// The caller drains the returned `LocalBackends` into `run_loop` and
+/// stashes the post-loop handle so `shutdown()` can run when voice mode
+/// ends.
 pub async fn build_loop_backends(
     assets: &ResolvedAssets,
     locale: primer_core::i18n::Locale,
     mic_silence_ms: u32,
-    backend: SpeechBackend,
+    stt: SttBackend,
+    tts: TtsBackend,
 ) -> Result<primer_speech::voice_loop::LocalBackends, String> {
-    // ── macOS 26 native branch ──────────────────────────────────────
-    // Most-specific arm first. Both compile-time cfg AND runtime config
-    // must select it. `not(feature = "macos-native")` is belt-and-
-    // suspenders — the compile_error in lib.rs already prevents both
-    // features being active simultaneously, but the explicit guard makes
-    // the intent visible to readers.
-    #[cfg(all(
-        target_os = "macos",
-        feature = "macos-native-26",
-        not(feature = "macos-native"),
-    ))]
-    {
-        if matches!(backend, SpeechBackend::MacosNative) {
-            return primer_speech::voice_loop::build_local_backends_macos_native_26(
-                locale,
-                mic_silence_ms,
-                // The GUI logs via tracing, never stderr.
-                false,
-            )
-            .await
-            .map_err(|e| e.to_string());
-        }
+    use primer_speech::voice_loop::{TtsAssets, build_tts, build_voice_backends};
+
+    let ps_stt = match stt {
+        SttBackend::Whisper => primer_speech::voice_loop::SttBackend::Whisper,
+        SttBackend::MacosNative => primer_speech::voice_loop::SttBackend::MacosNative,
+    };
+    let ps_tts = match tts {
+        TtsBackend::Piper => primer_speech::voice_loop::TtsBackend::Piper,
+        TtsBackend::Supertonic => primer_speech::voice_loop::TtsBackend::Supertonic,
+        TtsBackend::MacosNative => primer_speech::voice_loop::TtsBackend::MacosNative,
+    };
+
+    let tts_assets = TtsAssets {
+        piper_onnx: Some(assets.piper_onnx.clone()),
+        piper_config: Some(assets.piper_config.clone()),
+        supertonic_onnx_dir: assets.supertonic_onnx_dir.clone(),
+        supertonic_voice_style: assets.supertonic_voice_style.clone(),
+        locale,
+    };
+
+    let (tts_arc, mut voice) = build_tts(ps_tts, &tts_assets).map_err(|e| e.to_string())?;
+    // Honour the resolved Piper voice id (its model_id must match the .onnx
+    // stem). Supertonic / macOS-native derive or ignore the id.
+    if matches!(ps_tts, primer_speech::voice_loop::TtsBackend::Piper) {
+        voice.model_id = assets.voice_id.clone();
     }
 
-    // ── macOS-native branch (older macOS, SFSpeechRecognizer + AVSpeechSynthesizer) ──
-    // Both the compile-time cfg AND the runtime config must select it.
-    // This lets an evaluator flip A/B via gui-config.json without
-    // rebuilding, while non-macOS / non-feature builds get the
-    // whisper-piper path at zero cost.
-    #[cfg(all(
-        target_os = "macos",
-        feature = "macos-native",
-        not(feature = "macos-native-26"),
-    ))]
-    {
-        if matches!(backend, SpeechBackend::MacosNative) {
-            return primer_speech::voice_loop::build_local_backends_macos_native(
-                locale,
-                mic_silence_ms,
-                // The GUI logs via tracing, never stderr.
-                false,
-            )
-            .await
-            .map_err(|e| e.to_string());
-        }
-    }
-
-    // ── Whisper/Piper fallthrough ────────────────────────────────────
-    // Reached for:
-    //   - non-macOS builds,
-    //   - macOS builds without `macos-native` feature, OR
-    //   - macOS+macos-native builds where config selects whisper-piper.
-    let _ = backend; // suppress unused-variable warning on non-macOS builds
-    primer_speech::voice_loop::build_local_backends(
-        &assets.piper_onnx,
-        &assets.piper_config,
+    build_voice_backends(
+        ps_stt,
+        tts_arc,
+        voice,
         &assets.whisper_model,
-        &assets.voice_id,
         locale,
         mic_silence_ms,
-        // The GUI logs via tracing, never stderr — keep build_local_backends
-        // quiet about device-open rates.
+        // The GUI logs via tracing, never stderr.
         false,
     )
     .await

@@ -78,6 +78,12 @@ speech = [
     "primer-speech/voice-loop",
 ]
 
+# Supertonic 3 TTS as a voice-mode `--tts supertonic` choice. Additive to
+# `speech` (forwards to primer-speech/supertonic). Opt-in because it pulls
+# the vendored supertonic-rs crate + ort ONNX-runtime download. Hindi /
+# Japanese unlock — see issue #170.
+supertonic = ["speech", "primer-speech/supertonic"]
+
 # macOS-native speech backends (SFSpeechRecognizer + AVSpeechSynthesizer).
 # Combine with `speech` for an Apple-native voice loop. No effect on
 # non-macOS builds (the underlying primer-speech feature is a no-op there).

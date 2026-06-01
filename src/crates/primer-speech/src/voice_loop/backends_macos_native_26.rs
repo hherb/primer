@@ -30,8 +30,10 @@ use crate::voice_loop::backends_common::{
 use crate::voice_loop::{LoopBackends, VAD_EVENT_CHANNEL_CAPACITY};
 
 /// Build a [`LocalBackends`] using macOS 26's SpeechAnalyzer for STT and
-/// derived VAD events, with AVSpeechSynthesizer for TTS (reused from the
-/// `macos-native` path's `MacosTextToSpeech`). Sibling of
+/// derived VAD events. The TTS backend (`tts`) and `voice` profile are
+/// injected by the caller (production wires AVSpeechSynthesizer via
+/// `MacosTextToSpeech`), so STT (native) and TTS are decoupled — this
+/// builder no longer constructs `MacosTextToSpeech` itself. Sibling of
 /// [`super::backends_macos_native::build_local_backends_macos_native`] —
 /// same signature, same return type; the audio thread's STT/VAD pipeline
 /// is what differs.
@@ -46,11 +48,12 @@ use crate::voice_loop::{LoopBackends, VAD_EVENT_CHANNEL_CAPACITY};
 /// is kept for signature parity with the sibling builder; the leading
 /// underscore tells the compiler the unused-variable is deliberate.
 pub async fn build_local_backends_macos_native_26(
+    tts: Arc<dyn StreamingTextToSpeech>,
+    voice: VoiceProfile,
     locale: primer_core::i18n::Locale,
     _mic_silence_ms: u32,
     verbose: bool,
 ) -> Result<LocalBackends> {
-    use crate::macos::MacosTextToSpeech;
     use crate::macos26::analyzer::{TextMessage, run_consumer_loop};
     use crate::macos26::audio_session;
     use crate::macos26::bridge::ffi as macos26_ffi;
@@ -68,8 +71,7 @@ pub async fn build_local_backends_macos_native_26(
     // bridge.rs comment — swift-bridge 0.1.x can't express Result here).
     let pipeline = macos26_ffi::create(bcp47.clone()).await;
 
-    // ── TTS (reused AVSpeechSynthesizer from macos-native) ──────
-    let tts: Arc<dyn StreamingTextToSpeech> = Arc::new(MacosTextToSpeech::new(&bcp47)?);
+    // ── TTS sample rate (TTS injected by the caller) ─────────────
     let tts_sample_rate = tts.sample_rate();
 
     // ── Open mic + input resampler ───────────────────────────────
@@ -179,17 +181,9 @@ pub async fn build_local_backends_macos_native_26(
         .map_err(|e| PrimerError::Speech(format!("spawn audio thread: {e}")))?;
 
     // ── Build LoopBackends ───────────────────────────────────────
-    // VoiceProfile.model_id is set to the bcp47 tag as a human-readable
-    // identifier. MacosTextToSpeech ignores VoiceProfile and selects the
-    // voice from its own locale — same as the sibling.
-    // Move `bcp47` into VoiceProfile.model_id — last use, no further
-    // borrow needed (TTS construction above and the create() call
-    // already cloned what they needed).
-    let voice = VoiceProfile {
-        model_id: bcp47,
-        rate: 0.9,
-        ..VoiceProfile::default()
-    };
+    // The `voice` profile is supplied by the caller. MacosTextToSpeech
+    // ignores VoiceProfile and selects the voice from its own locale —
+    // same as the sibling.
     let backends = LoopBackends::single_locale(
         Arc::new(ChannelStt {
             rx: Arc::new(std::sync::Mutex::new(transcript_rx)),

@@ -45,17 +45,35 @@ pub struct SpeechLoopConfig {
         target_os = "macos",
         any(feature = "macos-native", feature = "macos-native-26")
     )))]
-    pub voice_onnx: PathBuf,
+    pub voice_onnx: Option<PathBuf>,
     #[cfg(not(all(
         target_os = "macos",
         any(feature = "macos-native", feature = "macos-native-26")
     )))]
-    pub voice_config: PathBuf,
+    pub voice_config: Option<PathBuf>,
     #[cfg(not(all(
         target_os = "macos",
         any(feature = "macos-native", feature = "macos-native-26")
     )))]
     pub voice_id: String,
+    /// Which synthesiser to inject for voice mode (`piper` or `supertonic`).
+    #[cfg(not(all(
+        target_os = "macos",
+        any(feature = "macos-native", feature = "macos-native-26")
+    )))]
+    pub tts: primer_speech::voice_loop::TtsBackend,
+    /// Supertonic `onnx/` asset directory (None unless `--tts supertonic`).
+    #[cfg(not(all(
+        target_os = "macos",
+        any(feature = "macos-native", feature = "macos-native-26")
+    )))]
+    pub supertonic_dir: Option<PathBuf>,
+    /// Supertonic voice-style JSON (None unless `--tts supertonic`).
+    #[cfg(not(all(
+        target_os = "macos",
+        any(feature = "macos-native", feature = "macos-native-26")
+    )))]
+    pub supertonic_voice_style: Option<PathBuf>,
     pub mic_silence_ms: u32,
     pub verbose: bool,
     /// Active locale for TTS dispatch. Today's CLI binds this to the
@@ -75,40 +93,90 @@ pub struct SpeechLoopConfig {
 /// directly so no Arc<Mutex<>> is needed here).
 #[cfg(feature = "speech")]
 pub async fn run(cfg: SpeechLoopConfig, dialogue: &mut DialogueManager) -> Result<()> {
+    // macOS-native (26) build keeps AVSpeech (D2): construct the native TTS
+    // via build_tts and call the native builder directly (SpeechLoopConfig
+    // has no whisper_model field on this build, so we can't route through
+    // build_voice_backends which always takes a whisper path).
     #[cfg(all(target_os = "macos", feature = "macos-native-26"))]
-    let mut local = primer_speech::voice_loop::build_local_backends_macos_native_26(
-        cfg.locale,
-        cfg.mic_silence_ms,
-        cfg.verbose,
-    )
-    .await?;
+    let mut local = {
+        use primer_speech::voice_loop::{TtsAssets, TtsBackend, build_tts};
+        let (tts, voice) = build_tts(
+            TtsBackend::MacosNative,
+            &TtsAssets {
+                locale: cfg.locale,
+                ..Default::default()
+            },
+        )?;
+        primer_speech::voice_loop::build_local_backends_macos_native_26(
+            tts,
+            voice,
+            cfg.locale,
+            cfg.mic_silence_ms,
+            cfg.verbose,
+        )
+        .await?
+    };
 
     #[cfg(all(
         target_os = "macos",
         feature = "macos-native",
         not(feature = "macos-native-26"),
     ))]
-    let mut local = primer_speech::voice_loop::build_local_backends_macos_native(
-        cfg.locale,
-        cfg.mic_silence_ms,
-        cfg.verbose,
-    )
-    .await?;
+    let mut local = {
+        use primer_speech::voice_loop::{TtsAssets, TtsBackend, build_tts};
+        let (tts, voice) = build_tts(
+            TtsBackend::MacosNative,
+            &TtsAssets {
+                locale: cfg.locale,
+                ..Default::default()
+            },
+        )?;
+        primer_speech::voice_loop::build_local_backends_macos_native(
+            tts,
+            voice,
+            cfg.locale,
+            cfg.mic_silence_ms,
+            cfg.verbose,
+        )
+        .await?
+    };
 
+    // Portable build: Whisper STT + the chosen TTS (piper or supertonic),
+    // injected via the decoupled build_tts / build_voice_backends helpers.
     #[cfg(not(any(
         all(target_os = "macos", feature = "macos-native-26"),
         all(target_os = "macos", feature = "macos-native"),
     )))]
-    let mut local = primer_speech::voice_loop::build_local_backends(
-        cfg.voice_onnx.as_path(),
-        cfg.voice_config.as_path(),
-        cfg.whisper_model.as_path(),
-        cfg.voice_id.as_str(),
-        cfg.locale,
-        cfg.mic_silence_ms,
-        cfg.verbose,
-    )
-    .await?;
+    let mut local = {
+        use primer_speech::voice_loop::{
+            SttBackend, TtsAssets, TtsBackend, build_tts, build_voice_backends,
+        };
+        let assets = TtsAssets {
+            piper_onnx: cfg.voice_onnx.clone(),
+            piper_config: cfg.voice_config.clone(),
+            supertonic_onnx_dir: cfg.supertonic_dir.clone(),
+            supertonic_voice_style: cfg.supertonic_voice_style.clone(),
+            locale: cfg.locale,
+        };
+        let (tts, mut voice) = build_tts(cfg.tts, &assets)?;
+        // Honour an explicit --voice id for Piper (its model_id must match
+        // the .onnx stem; build_tts already derives it from the path, but
+        // the CLI flag is the user's explicit override). Supertonic derives
+        // its own model_id and ignores --voice.
+        if matches!(cfg.tts, TtsBackend::Piper) {
+            voice.model_id = cfg.voice_id.clone();
+        }
+        build_voice_backends(
+            SttBackend::Whisper,
+            tts,
+            voice,
+            cfg.whisper_model.as_path(),
+            cfg.locale,
+            cfg.mic_silence_ms,
+            cfg.verbose,
+        )
+        .await?
+    };
 
     // Wire DialogueManager via the borrowed-Responder adapter.
     let responder: Box<dyn primer_speech::voice_loop::Responder + '_> =

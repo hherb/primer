@@ -657,20 +657,28 @@
           </p>
           <div id="speech-settings-fields">
             <div class="settings-grid">
-              <label class="field field-full">
-                <span>Speech backend</span>
-                <select id="f-speech-backend">
-                  <option value="whisper-piper">Whisper + Piper (cross-platform)</option>
-                  <option value="macos-native">macOS Native (Apple speech)</option>
+              <label class="field">
+                <span>Speech-to-text</span>
+                <select id="f-speech-stt-backend">
+                  <option value="whisper">Whisper (cross-platform)</option>
+                  <option value="macos-native">macOS Native (Apple)</option>
                 </select>
               </label>
-              <p
-                class="hint muted field-full"
-                id="f-speech-backend-unavailable-hint"
-                hidden
-              >
+              <label class="field">
+                <span>Text-to-speech</span>
+                <select id="f-speech-tts-backend">
+                  <option value="piper">Piper (cross-platform)</option>
+                  <option value="supertonic">Supertonic (multilingual; Hindi/Japanese)</option>
+                  <option value="macos-native">macOS Native (Apple)</option>
+                </select>
+              </label>
+              <p class="hint muted field-full" id="f-speech-macos-native-unavailable-hint" hidden>
                 macOS Native needs a build with
                 <code>--features primer-gui/macos-native</code>.
+              </p>
+              <p class="hint muted field-full" id="f-speech-supertonic-unavailable-hint" hidden>
+                Supertonic needs a build with
+                <code>--features primer-gui/supertonic</code>.
               </p>
               <label class="field">
                 <span>Mic silence (ms)</span>

@@ -12,6 +12,10 @@ tokio.workspace = true
 tracing.workspace = true
 thiserror.workspace = true
 uuid.workspace = true
+# serde (derive) — unconditional because voice_loop/selectors.rs (always
+# compiled, never feature-gated) derives Serialize/Deserialize on the
+# SttBackend/TtsBackend selector enums.
+serde = { workspace = true, features = ["derive"] }
 
 # Silero VAD — bundled ONNX weights, opt-in via the `silero` feature so the
 # ort/ndarray dep tree only compiles for users who want VAD.
@@ -84,6 +88,9 @@ hound = "3"
 clap = { workspace = true }
 # Temp files used by the piper_config unit tests (under --features piper).
 tempfile = "3"
+# serde_json for the always-compiled selectors.rs test module (the
+# production dep above is optional + feature-gated to piper).
+serde_json = { workspace = true }
 
 [features]
 default = []

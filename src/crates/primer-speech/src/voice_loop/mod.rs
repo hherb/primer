@@ -14,6 +14,10 @@
 //! the full design.
 
 pub mod observer;
+/// Runtime STT/TTS backend selector enums (pure data; never feature-gated).
+/// Single source of truth for the decoupled voice-loop wiring — the CLI uses
+/// them directly and the GUI mirrors them in its own config layer.
+pub mod selectors;
 pub mod state_machine;
 
 /// Shared [`LocalBackends`] / [`ChannelStt`] types — gated only on `cpal`
@@ -22,16 +26,11 @@ pub mod state_machine;
 #[cfg(feature = "cpal")]
 pub mod backends_common;
 
-/// Whisper + piper backend builder — gated on the full
-/// `silero + whisper + piper + cpal` set because the function body uses
-/// all four. Shares `LocalBackends` / `ChannelStt` with the macOS
-/// builders via [`backends_common`].
-#[cfg(all(
-    feature = "silero",
-    feature = "whisper",
-    feature = "piper",
-    feature = "cpal"
-))]
+/// Whisper STT backend builder — gated on `silero + whisper + cpal`.
+/// The TTS is injected by the caller (Piper / Supertonic / …), so this
+/// module no longer needs the `piper` feature. Shares `LocalBackends` /
+/// `ChannelStt` with the macOS builders via [`backends_common`].
+#[cfg(all(feature = "silero", feature = "whisper", feature = "cpal"))]
 pub mod backends;
 
 /// macOS-native backend builder (SFSpeechRecognizer + Silero VAD). One
@@ -54,6 +53,7 @@ pub mod backends_macos_native_26;
 pub(crate) mod macos26_audio_buffer;
 
 pub use observer::{ExitReason, LoopObserver, TurnCompletePayload, VoiceState};
+pub use selectors::{SttBackend, TtsAssets, TtsBackend, build_tts};
 pub use state_machine::{
     DrainHook, LoopBackends, LoopConfig, LoopHandle, Responder, VAD_EVENT_CHANNEL_CAPACITY,
     VoiceLoopError, run_loop, run_loop_borrowed,
@@ -62,13 +62,11 @@ pub use state_machine::{
 #[cfg(feature = "cpal")]
 pub use backends_common::{ChannelStt, LocalBackends};
 
-#[cfg(all(
-    feature = "silero",
-    feature = "whisper",
-    feature = "piper",
-    feature = "cpal"
-))]
+#[cfg(all(feature = "silero", feature = "whisper", feature = "cpal"))]
 pub use backends::build_local_backends;
+
+#[cfg(all(feature = "silero", feature = "whisper", feature = "cpal"))]
+pub use selectors::build_voice_backends;
 
 #[cfg(all(
     target_os = "macos",

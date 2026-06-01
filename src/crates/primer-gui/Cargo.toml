@@ -108,6 +108,10 @@ speech = [
     "dep:futures",
 ]
 
+# Supertonic 3 TTS as a Settings → Speech TTS choice. Additive to `speech`
+# (forwards to primer-speech/supertonic). Hindi / Japanese unlock — #170.
+supertonic = ["speech", "primer-speech/supertonic"]
+
 # macOS-native speech backends (SFSpeechRecognizer + AVSpeechSynthesizer).
 # Combine with `speech` for an Apple-native voice loop. No effect on
 # non-macOS builds. See docs/macos_native_speech.md.

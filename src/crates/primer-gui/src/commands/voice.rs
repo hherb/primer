@@ -119,12 +119,15 @@ pub async fn start_voice_mode(
         .await
         .map_err(StartVoiceModeError::from)?;
 
-    // 4. Resolve voice assets for the active locale.
+    // 4. Resolve voice assets for the active locale, gated on the
+    //    decoupled (stt, tts) choice.
     let locale = Locale::from_pack_id(&cfg.learner.locale).unwrap_or_default();
-    let assets = crate::voice::assets::resolve_voice_assets(&state.home, &cfg.speech, &locale)
-        .map_err(|missing| StartVoiceModeError::AssetMissing {
-            entries: missing.entries,
-        })?;
+    let (stt, tts) = cfg.speech.resolve_backends();
+    let assets =
+        crate::voice::assets::resolve_voice_assets(&state.home, &cfg.speech, &locale, stt, tts)
+            .map_err(|missing| StartVoiceModeError::AssetMissing {
+                entries: missing.entries,
+            })?;
 
     // 5. Build the local backends (cpal mic + speaker, VAD, STT, TTS,
     //    audio thread, on_audio, drain hook). Lives in primer-speech;
@@ -133,7 +136,8 @@ pub async fn start_voice_mode(
         &assets,
         locale,
         cfg.speech.mic_silence_ms,
-        cfg.speech.backend,
+        stt,
+        tts,
     )
     .await
     .map_err(|e| StartVoiceModeError::from(format!("backend init: {e}")))?;
@@ -478,6 +482,18 @@ pub async fn macos_native_speech_available() -> Result<bool, String> {
     )))
 }
 
+/// Whether this binary was compiled with the `supertonic` feature. The
+/// settings modal uses this to enable/disable the "Supertonic" option in
+/// the TTS-backend dropdown: selecting it on a build without the feature
+/// would fail at session start with a "rebuild with --features supertonic"
+/// error (see `voice_loop::build_tts`), so the option is shown-but-disabled
+/// with a hint instead. Mirrors `macos_native_speech_available` — a pure
+/// compile-time flag, no session state.
+#[tauri::command]
+pub async fn supertonic_tts_available() -> Result<bool, String> {
+    Ok(cfg!(feature = "supertonic"))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -565,6 +581,19 @@ mod tests {
                 .await
                 .expect("command never errors"),
             expected
+        );
+    }
+
+    /// The Supertonic TTS capability reflects the compiled feature set
+    /// exactly. Holds on a default build (false) and a `--features
+    /// supertonic` build (true).
+    #[tokio::test]
+    async fn supertonic_tts_available_matches_cfg() {
+        assert_eq!(
+            supertonic_tts_available()
+                .await
+                .expect("command never errors"),
+            cfg!(feature = "supertonic")
         );
     }
 
