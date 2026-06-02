@@ -51,6 +51,12 @@ pub enum StartVoiceModeError {
     NotBuilt,
     /// One or more required model files are missing on disk.
     AssetMissing { entries: Vec<MissingAsset> },
+    /// One or more required model files are missing AND
+    /// `disable_auto_download` is set, so no download is offered. The
+    /// frontend renders an informational banner (no Download button)
+    /// listing the missing `kind`s and pointing the user at
+    /// Settings → Speech.
+    AutoDownloadDisabled { entries: Vec<MissingAsset> },
     /// Any other error — message is dev-facing; the frontend renders
     /// a generic banner and does not surface the inner string to the user.
     Other { message: String },
@@ -83,6 +89,27 @@ pub struct MissingAsset {
 impl From<String> for StartVoiceModeError {
     fn from(message: String) -> Self {
         Self::Other { message }
+    }
+}
+
+/// Map a resolver `AssetMissing` to the right `start_voice_mode` error,
+/// honouring the `disable_auto_download` setting. Pure so the gate is
+/// unit-testable without the Tauri command. When auto-download is on, the
+/// frontend shows the consent modal (`AssetMissing`); when off, it shows an
+/// informational banner with no Download button (`AutoDownloadDisabled`).
+#[cfg(feature = "speech")]
+pub fn missing_to_error(
+    disable_auto_download: bool,
+    missing: crate::voice::assets::AssetMissing,
+) -> StartVoiceModeError {
+    if disable_auto_download {
+        StartVoiceModeError::AutoDownloadDisabled {
+            entries: missing.entries,
+        }
+    } else {
+        StartVoiceModeError::AssetMissing {
+            entries: missing.entries,
+        }
     }
 }
 
@@ -136,9 +163,7 @@ pub async fn start_voice_mode(
     let (stt, tts) = cfg.speech.resolve_backends();
     let assets =
         crate::voice::assets::resolve_voice_assets(&state.home, &cfg.speech, &locale, stt, tts)
-            .map_err(|missing| StartVoiceModeError::AssetMissing {
-                entries: missing.entries,
-            })?;
+            .map_err(|missing| missing_to_error(cfg.speech.disable_auto_download, missing))?;
 
     // 5. Build the local backends (cpal mic + speaker, VAD, STT, TTS,
     //    audio thread, on_audio, drain hook). Lives in primer-speech;
@@ -648,6 +673,52 @@ mod tests {
         let json = serde_json::to_value(&err).unwrap();
         assert_eq!(json["kind"], "other");
         assert_eq!(json["message"], "test message");
+    }
+
+    #[cfg(feature = "speech")]
+    #[test]
+    fn missing_to_error_offers_download_when_auto_download_enabled() {
+        let missing = crate::voice::assets::AssetMissing {
+            entries: vec![MissingAsset {
+                kind: kind::SUPERTONIC_VOCODER.into(),
+                path: std::path::PathBuf::from("/x/vocoder.onnx"),
+                suggested_url: Some("https://example/vocoder.onnx".into()),
+                approx_size_mb: Some(97),
+            }],
+            locale: "en".into(),
+            approx_total_mb: 97,
+        };
+        let err = missing_to_error(false, missing);
+        match err {
+            StartVoiceModeError::AssetMissing { entries } => assert_eq!(entries.len(), 1),
+            other => panic!("expected AssetMissing, got {other:?}"),
+        }
+    }
+
+    #[cfg(feature = "speech")]
+    #[test]
+    fn missing_to_error_blocks_download_when_disabled() {
+        let missing = crate::voice::assets::AssetMissing {
+            entries: vec![MissingAsset {
+                kind: kind::SUPERTONIC_VOCODER.into(),
+                path: std::path::PathBuf::from("/x/vocoder.onnx"),
+                suggested_url: Some("https://example/vocoder.onnx".into()),
+                approx_size_mb: Some(97),
+            }],
+            locale: "en".into(),
+            approx_total_mb: 97,
+        };
+        let err = missing_to_error(true, missing);
+        match err {
+            StartVoiceModeError::AutoDownloadDisabled { entries } => {
+                assert_eq!(
+                    entries.len(),
+                    1,
+                    "entries carried for the informational banner"
+                );
+            }
+            other => panic!("expected AutoDownloadDisabled, got {other:?}"),
+        }
     }
 
     // ─── Issue #102 polished follow-up: preserve sticky toggle ──────
