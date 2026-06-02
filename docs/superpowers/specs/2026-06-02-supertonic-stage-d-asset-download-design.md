@@ -106,11 +106,21 @@ Add an arm gated on `tts == TtsBackend::Supertonic`:
 
 ### Frontend
 
-**No change.** The consent modal renders entries generically and echoes back only `kind` strings; the 7 Supertonic rows render with their raw kind labels (same convention as `piper_onnx`).
+The consent modal itself needs **no change** for Supertonic — it renders entries generically and echoes back only `kind` strings, so the 7 Supertonic rows render with their raw kind labels (same convention as `piper_onnx`). The only frontend addition is the `auto_download_disabled` branch described in the `disable_auto_download` section above.
 
-### `disable_auto_download`
+### `disable_auto_download` — wire the gate (backend-agnostic)
 
-Supertonic missing-assets route through the **same** `AssetMissing` → consent path as Piper/Whisper. The existing `disable_auto_download` gate (traced during implementation) therefore covers Supertonic with no new logic. Confirm parity; do not introduce a parallel gate.
+**Finding during design:** `disable_auto_download` is currently a **no-op for every backend**. It is stored in `gui-config.json`, surfaced as a Settings checkbox and a config-View field, but nothing in the start-voice-mode / consent path reads it — `voice.js` shows the consent modal on `asset_missing` unconditionally (Piper/Whisper included). So there is no existing gate for Supertonic to inherit.
+
+**Decision (approved):** wire the gate now, backend-agnostically, as part of Stage D — it satisfies the brief's "disable_auto_download still respected" acceptance literally and fixes the gap for Piper/Whisper at the same time.
+
+Implementation:
+- Add a pure helper `missing_to_error(disable_auto_download: bool, missing: AssetMissing) -> StartVoiceModeError` in `commands/voice.rs` so the branch is unit-testable without the Tauri command. When `disable_auto_download` is `false` it returns `AssetMissing { entries }` (today's behaviour); when `true` it returns a new `StartVoiceModeError::AutoDownloadDisabled { entries }`.
+- `start_voice_mode` step 4 routes the resolver's `Err` through `missing_to_error(cfg.speech.disable_auto_download, missing)` instead of constructing `AssetMissing` directly.
+- New variant `StartVoiceModeError::AutoDownloadDisabled { entries: Vec<MissingAsset> }` (`#[serde(tag = "kind")]` → frontend kind `"auto_download_disabled"`).
+- Frontend (`voice.js`): add a branch for `err.kind === "auto_download_disabled"` that shows an informational banner ("Voice models aren't downloaded and automatic download is off — add paths in Settings → Speech") listing the missing `kind`s, with **no** Download button. (This is the one small frontend change; the consent-modal path for the normal `asset_missing` case is unchanged.)
+
+This applies equally to Piper, Whisper, and Supertonic because the gate sits at the single `resolve_voice_assets`-`Err` site that all three flow through.
 
 ## Testing (TDD)
 
@@ -123,13 +133,15 @@ Supertonic missing-assets route through the **same** `AssetMissing` → consent 
   - partial presence (e.g. only vocoder present) → `Err` with the remaining 6 entries only.
 - **`resolve_requested_kinds`** (`primer-gui`): given `["supertonic_vocoder", "supertonic_voice_style"]` against an empty cache, returns exactly those two `MissingAsset`s with server-resolved path+url; an unknown kind is dropped.
 - Existing Piper/Whisper resolution tests must stay green (the new arm is additive, gated on `tts == Supertonic`).
+- **`missing_to_error` pure helper** (`primer-gui` `commands/voice.rs`): `disable_auto_download = false` → `AssetMissing` variant; `= true` → `AutoDownloadDisabled` variant; both carry the same `entries`.
 
 ## Files touched
 
 - `primer-speech/src/locale_defaults.rs` — `SupertonicAsset` struct + `SUPERTONIC_ASSETS` const + `supertonic_assets()` + drift-guard tests.
 - `primer-gui/src/voice/assets.rs` — `kind` constants, `supertonic_paths` helper, `resolve_voice_assets` Supertonic arm, `ResolvedAssets` supertonic fields (if not already present from Stage C), tests.
-- `primer-gui/src/commands/voice.rs` — `kind::SUPERTONIC_*` constants (reconcile with the `compute_paths` that lives here), tests.
-- `primer-gui/src/voice/download.rs` — only if parent-dir creation needs to be made explicit for the `onnx/` subdir (likely already covered).
+- `primer-gui/src/commands/voice.rs` — `kind::SUPERTONIC_*` constants; new `AutoDownloadDisabled` error variant; `missing_to_error` pure helper; route `start_voice_mode` step 4 through it; tests.
+- `primer-gui/ui/voice.js` — `auto_download_disabled` branch (informational banner, no Download button).
+- `primer-gui/src/voice/download.rs` — no change expected; parent-dir creation for the `onnx/` subdir is already covered by `tokio::fs::create_dir_all(parent)` in `stream_to_path`.
 - Docs at session end: `README.md`, `ROADMAP.md`, `CLAUDE.md` (Stage D shipped), `NEXT_SESSION.md` + handoff.
 
 ## Risks / open items
