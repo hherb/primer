@@ -74,7 +74,8 @@ pub enum StartVoiceModeError {
 #[derive(Serialize, Clone, Debug)]
 pub struct MissingAsset {
     /// Asset type identifier. Stable strings: `"piper_onnx"`,
-    /// `"piper_config"`, `"whisper_model"`.
+    /// `"piper_config"`, `"whisper_model"`, and the seven `"supertonic_*"`
+    /// bundle kinds (see `primer_speech::locale_defaults::SUPERTONIC_ASSETS`).
     pub kind: String,
     /// Absolute path where the asset was expected.
     pub path: std::path::PathBuf,

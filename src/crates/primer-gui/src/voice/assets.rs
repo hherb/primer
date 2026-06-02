@@ -47,6 +47,10 @@ pub struct ResolvedAssets {
 pub struct AssetMissing {
     pub entries: Vec<MissingAsset>,
     pub locale: String,
+    /// Sum of `entries`' sizes. Computed for in-crate parity/tests only —
+    /// it is NOT carried across the IPC (`StartVoiceModeError::AssetMissing`
+    /// serialises just `entries`), and the frontend recomputes its own total
+    /// by summing each entry's `approx_size_mb`.
     pub approx_total_mb: u32,
 }
 
