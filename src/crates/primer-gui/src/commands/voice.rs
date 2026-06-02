@@ -26,6 +26,17 @@ pub mod kind {
     pub const PIPER_ONNX: &str = "piper_onnx";
     pub const PIPER_CONFIG: &str = "piper_config";
     pub const WHISPER_MODEL: &str = "whisper_model";
+
+    // Supertonic 3 bundle — one `kind` per file (6 in onnx/ + 1 voice style).
+    // The string values MUST equal the `kind` fields in
+    // `primer_speech::locale_defaults::SUPERTONIC_ASSETS`.
+    pub const SUPERTONIC_VECTOR_ESTIMATOR: &str = "supertonic_vector_estimator";
+    pub const SUPERTONIC_VOCODER: &str = "supertonic_vocoder";
+    pub const SUPERTONIC_TEXT_ENCODER: &str = "supertonic_text_encoder";
+    pub const SUPERTONIC_DURATION_PREDICTOR: &str = "supertonic_duration_predictor";
+    pub const SUPERTONIC_TTS_CONFIG: &str = "supertonic_tts_config";
+    pub const SUPERTONIC_UNICODE_INDEXER: &str = "supertonic_unicode_indexer";
+    pub const SUPERTONIC_VOICE_STYLE: &str = "supertonic_voice_style";
 }
 
 /// Structured error returned by `start_voice_mode`.
@@ -512,6 +523,26 @@ mod tests {
         let json = serde_json::to_value(&m).unwrap();
         assert_eq!(json["kind"], "whisper_model");
         assert_eq!(json["approx_size_mb"], 470);
+    }
+
+    #[cfg(feature = "speech")]
+    #[test]
+    fn supertonic_kind_constants_match_the_asset_table() {
+        use primer_speech::locale_defaults::supertonic_assets;
+        let table_kinds: std::collections::BTreeSet<&str> =
+            supertonic_assets().iter().map(|a| a.kind).collect();
+        let const_kinds: std::collections::BTreeSet<&str> = [
+            kind::SUPERTONIC_VECTOR_ESTIMATOR,
+            kind::SUPERTONIC_VOCODER,
+            kind::SUPERTONIC_TEXT_ENCODER,
+            kind::SUPERTONIC_DURATION_PREDICTOR,
+            kind::SUPERTONIC_TTS_CONFIG,
+            kind::SUPERTONIC_UNICODE_INDEXER,
+            kind::SUPERTONIC_VOICE_STYLE,
+        ]
+        .into_iter()
+        .collect();
+        assert_eq!(const_kinds, table_kinds);
     }
 
     // Trust-boundary invariant: `MissingAsset` must NEVER implement
