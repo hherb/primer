@@ -81,6 +81,13 @@
     } catch (err) {
       if (err && err.kind === "asset_missing") {
         await showConsentModal(err.entries);
+      } else if (err && err.kind === "auto_download_disabled") {
+        const names = (err.entries || []).map((e) => e.kind).join(", ");
+        showError(
+          "Voice models aren't downloaded and automatic download is off. " +
+            "Add the model paths in Settings → Speech, or re-enable " +
+            "automatic download." + (names ? " Missing: " + names : ""),
+        );
       } else if (err && err.kind === "not_built") {
         showError("Voice mode is not built into this binary.");
       } else {
@@ -335,6 +342,14 @@
     } catch (err) {
       if (err && err.kind === "asset_missing") {
         await showConsentModal(err.entries);
+      } else if (err && err.kind === "auto_download_disabled") {
+        const names = (err.entries || []).map((e) => e.kind).join(", ");
+        showError(
+          `${contextLabel}: Voice models aren't downloaded and automatic ` +
+            "download is off. Add the model paths in Settings → Speech, or " +
+            "re-enable automatic download." +
+            (names ? " Missing: " + names : ""),
+        );
       } else if (err && err.kind === "not_built") {
         // Silent — toggle is already disabled.
       } else {
