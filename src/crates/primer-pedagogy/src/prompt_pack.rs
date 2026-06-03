@@ -24,6 +24,12 @@
 //! failure rather than a silent malformed prompt at runtime. The same
 //! treatment applies to missing-intent and meta-inconsistency errors —
 //! every pack-shape problem is a single error variant.
+//!
+//! Literal braces (issue #20): `{{` / `}}` are the escape for a literal
+//! `{` / `}`, like Rust `format!`. They are skipped by the scanner and
+//! unescaped at render time, so a translator can write `{{Beispiel}}` in
+//! narrative text without tripping the placeholder validator. A single
+//! `{Beispiel}` is still a placeholder attempt and is rejected.
 
 use std::collections::{BTreeMap, HashSet};
 use std::sync::{Arc, Mutex, OnceLock};
@@ -437,7 +443,7 @@ impl TomlPromptPack {
             for (i, variant) in ALL_INTENTS.iter().enumerate() {
                 let key = intent_key(*variant);
                 match staged.get(key) {
-                    Some(v) => arr[i] = v.clone(),
+                    Some(v) => arr[i] = unescape_braces(v),
                     None => {
                         return Err(PrimerError::Config(format!(
                             "prompt pack: missing intent '{key}'"
@@ -448,28 +454,43 @@ impl TomlPromptPack {
             arr
         };
 
+        // Verbatim fields (everything except the three `*_template` fields)
+        // are unescaped at load time so `{{`/`}}` become literal braces in
+        // the strings consumers read by reference (issue #20). The templated
+        // fields stay raw — they are unescaped during `render_template` at
+        // call time, which also performs placeholder substitution.
         Ok(Self {
             locale,
             base_template: raw.system_prompt.base,
-            language_guidance: raw.language_guidance,
+            language_guidance: LanguageGuidanceBands {
+                ages_0_6: unescape_braces(&raw.language_guidance.ages_0_6),
+                ages_7_9: unescape_braces(&raw.language_guidance.ages_7_9),
+                ages_10_12: unescape_braces(&raw.language_guidance.ages_10_12),
+                ages_13_plus: unescape_braces(&raw.language_guidance.ages_13_plus),
+            },
             intents,
-            engagement_frustrated: raw.engagement.frustrated,
-            engagement_disengaging: raw.engagement.disengaging,
+            engagement_frustrated: unescape_braces(&raw.engagement.frustrated),
+            engagement_disengaging: unescape_braces(&raw.engagement.disengaging),
             knowledge_intro_template: raw.sections.knowledge_intro,
-            summary_intro: raw.sections.summary_intro,
-            retrieved_intro: raw.sections.retrieved_intro,
-            vocab_review_intro: raw.sections.vocab_review_intro,
+            summary_intro: unescape_braces(&raw.sections.summary_intro),
+            retrieved_intro: unescape_braces(&raw.sections.retrieved_intro),
+            vocab_review_intro: unescape_braces(&raw.sections.vocab_review_intro),
             break_suggestion_intro_template: raw.sections.break_suggestion_intro,
-            child_label: raw.labels.child,
-            primer_label: raw.labels.primer,
-            factual_prefixes: raw.question_detection.factual_prefixes,
+            child_label: unescape_braces(&raw.labels.child),
+            primer_label: unescape_braces(&raw.labels.primer),
+            factual_prefixes: raw
+                .question_detection
+                .factual_prefixes
+                .iter()
+                .map(|p| unescape_braces(p))
+                .collect(),
             voice_state_labels: VoiceStateLabels {
-                listen_label: raw.voice_state.listen_label,
-                listen_hint: raw.voice_state.listen_hint,
-                thinking_label: raw.voice_state.thinking_label,
-                thinking_hint: raw.voice_state.thinking_hint,
-                speak_label: raw.voice_state.speak_label,
-                speak_hint: raw.voice_state.speak_hint,
+                listen_label: unescape_braces(&raw.voice_state.listen_label),
+                listen_hint: unescape_braces(&raw.voice_state.listen_hint),
+                thinking_label: unescape_braces(&raw.voice_state.thinking_label),
+                thinking_hint: unescape_braces(&raw.voice_state.thinking_hint),
+                speak_label: unescape_braces(&raw.voice_state.speak_label),
+                speak_hint: unescape_braces(&raw.voice_state.speak_hint),
             },
             status,
         })
@@ -491,16 +512,18 @@ impl PromptPack for TomlPromptPack {
     }
 
     fn render_base(&self, name: &str, age: u8) -> String {
-        // Order matters: substitute `{language_guidance}` first because
-        // the band text might (in principle) contain `{age}` (none of
-        // the English bands do today, but this keeps semantics stable
-        // if a future pack adds one).
+        // Single-pass render (issue #20): substitutes `{name}`/`{age}`/
+        // `{language_guidance}` and unescapes `{{`/`}}`. The band text is
+        // validated placeholder-free (empty allowlist), so it carries no
+        // `{age}` to re-substitute — single-pass is equivalent to the old
+        // sequential `replace` chain for every shipping pack while also
+        // honouring brace escapes the chain could not.
         let lg = self.language_guidance(age);
         let age_str = age.to_string();
-        self.base_template
-            .replace("{language_guidance}", lg)
-            .replace("{name}", name)
-            .replace("{age}", &age_str)
+        render_template(
+            &self.base_template,
+            &[("language_guidance", lg), ("name", name), ("age", &age_str)],
+        )
     }
 
     fn intent_instruction(&self, intent: PedagogicalIntent) -> &str {
@@ -518,8 +541,7 @@ impl PromptPack for TomlPromptPack {
     }
 
     fn knowledge_intro(&self, age: u8) -> String {
-        self.knowledge_intro_template
-            .replace("{age}", &age.to_string())
+        render_template(&self.knowledge_intro_template, &[("age", &age.to_string())])
     }
 
     fn summary_intro(&self) -> &str {
@@ -532,8 +554,10 @@ impl PromptPack for TomlPromptPack {
         &self.vocab_review_intro
     }
     fn break_suggestion_intro(&self, minutes: u32) -> String {
-        self.break_suggestion_intro_template
-            .replace("{minutes}", &minutes.to_string())
+        render_template(
+            &self.break_suggestion_intro_template,
+            &[("minutes", &minutes.to_string())],
+        )
     }
     fn child_label(&self) -> &str {
         &self.child_label
@@ -698,11 +722,22 @@ fn parse_intent_key(s: &str) -> Option<PedagogicalIntent> {
 /// char, then ASCII alphanumeric or `_`. Anything else inside `{...}`
 /// (e.g. `{Hello, world}`) is left alone — translators can use brace
 /// characters in narrative text without false positives.
+///
+/// `{{` / `}}` are the escape for a literal `{` / `}` (issue #20): a
+/// doubled open-brace is skipped here and unescaped at render time by
+/// [`render_template`], so narrative like `{{Beispiel}}` is never flagged.
+/// A single `{Beispiel}` is still treated as a placeholder attempt and
+/// rejected — translators must double-up to get a literal.
 fn validate_placeholders(field: &str, content: &str, allowed: &[&str]) -> Result<()> {
     let bytes = content.as_bytes();
     let mut i = 0;
     while i < bytes.len() {
         if bytes[i] == b'{' {
+            // Escaped literal `{{` — not a placeholder delimiter.
+            if bytes.get(i + 1) == Some(&b'{') {
+                i += 2;
+                continue;
+            }
             let start = i + 1;
             let mut end = start;
             while end < bytes.len() && bytes[end] != b'}' {
@@ -735,6 +770,79 @@ fn is_placeholder_ident(s: &str) -> bool {
         return false;
     }
     chars.all(|c| c.is_ascii_alphanumeric() || c == '_')
+}
+
+/// Render `template`, substituting `{key}` for the matching `vars` value
+/// and treating `{{` / `}}` as literal `{` / `}` (the issue-#20
+/// brace-escape, familiar from Rust `format!`).
+///
+/// A single left-to-right pass — substituted values are emitted as-is and
+/// never re-scanned, so `{{name}}` always renders as the literal `{name}`
+/// even when `name` is a known var. A naive `str::replace` chain cannot do
+/// this: `{{name}}` contains the substring `{name}`, which `replace` would
+/// wrongly interpolate.
+///
+/// A `{...}` whose contents match no var is emitted verbatim (e.g.
+/// narrative `{Hello, world}` that survives [`validate_placeholders`]).
+/// Unterminated `{` and lone `}` are emitted verbatim rather than erroring
+/// — validation already runs at load time, so the renderer is lenient.
+fn render_template(template: &str, vars: &[(&str, &str)]) -> String {
+    let bytes = template.as_bytes();
+    let mut out = String::with_capacity(template.len());
+    let mut i = 0;
+    while i < bytes.len() {
+        match bytes[i] {
+            b'{' => {
+                if bytes.get(i + 1) == Some(&b'{') {
+                    out.push('{');
+                    i += 2;
+                    continue;
+                }
+                let start = i + 1;
+                let mut end = start;
+                while end < bytes.len() && bytes[end] != b'}' {
+                    end += 1;
+                }
+                if end >= bytes.len() {
+                    // Unterminated `{` — emit the remainder verbatim.
+                    out.push_str(&template[i..]);
+                    break;
+                }
+                let key = &template[start..end];
+                match vars.iter().find(|(k, _)| *k == key) {
+                    Some((_, val)) => out.push_str(val),
+                    None => out.push_str(&template[i..=end]),
+                }
+                i = end + 1;
+            }
+            b'}' => {
+                // `}}` is a literal `}`; a lone `}` is emitted as-is.
+                if bytes.get(i + 1) == Some(&b'}') {
+                    i += 1;
+                }
+                out.push('}');
+                i += 1;
+            }
+            _ => {
+                // Copy the run of non-brace bytes in one go. Braces are
+                // ASCII, so the run boundaries are always char boundaries.
+                let run_start = i;
+                while i < bytes.len() && bytes[i] != b'{' && bytes[i] != b'}' {
+                    i += 1;
+                }
+                out.push_str(&template[run_start..i]);
+            }
+        }
+    }
+    out
+}
+
+/// Unescape `{{` / `}}` to literal braces in a field that carries no
+/// interpolated placeholders (validated with an empty allowlist). Defined
+/// in terms of [`render_template`] with no vars so the escape rule is
+/// identical everywhere.
+fn unescape_braces(s: &str) -> String {
+    render_template(s, &[])
 }
 
 #[cfg(test)]
@@ -1087,6 +1195,113 @@ speak_hint = "x"
         assert!(s.contains("nme"), "got: {s}");
     }
 
+    // ─── Brace-escape: render_template (single-pass) ────────────────────────
+    // `{{` / `}}` render as literal `{` / `}`; `{key}` substitutes a known
+    // var; an unknown `{...}` is emitted verbatim. See issue #20.
+
+    #[test]
+    fn render_template_substitutes_known_key() {
+        assert_eq!(
+            render_template("Hi {name}!", &[("name", "Binti")]),
+            "Hi Binti!"
+        );
+    }
+
+    #[test]
+    fn render_template_leaves_unknown_token_verbatim() {
+        // No matching var (the verbatim-field case): emit the token as-is.
+        assert_eq!(render_template("a {x} b", &[]), "a {x} b");
+    }
+
+    #[test]
+    fn render_template_unescapes_doubled_braces() {
+        assert_eq!(render_template("a {{b}} c", &[]), "a {b} c");
+    }
+
+    #[test]
+    fn render_template_does_not_substitute_escaped_placeholder_name() {
+        // `{{name}}` is a literal `{name}`, NOT an interpolation — even when
+        // `name` is a known var. This is the bug the naive replace-chain had.
+        assert_eq!(render_template("{{name}}", &[("name", "Binti")]), "{name}");
+    }
+
+    #[test]
+    fn render_template_handles_escape_around_real_placeholder() {
+        // `{{{name}}}` == literal `{` + `{name}` + literal `}` == `{Binti}`.
+        assert_eq!(
+            render_template("{{{name}}}", &[("name", "Binti")]),
+            "{Binti}"
+        );
+    }
+
+    #[test]
+    fn render_template_leaves_non_ident_braces_verbatim() {
+        // `{Hello, world}` is not an identifier; it survives validation and
+        // must render verbatim.
+        assert_eq!(
+            render_template("see {Hello, world}", &[]),
+            "see {Hello, world}"
+        );
+    }
+
+    #[test]
+    fn render_template_emits_unterminated_open_brace_verbatim() {
+        assert_eq!(render_template("a {b", &[]), "a {b");
+    }
+
+    #[test]
+    fn render_template_emits_lone_close_brace_verbatim() {
+        assert_eq!(render_template("a } b", &[]), "a } b");
+    }
+
+    #[test]
+    fn render_template_preserves_utf8_runs() {
+        assert_eq!(
+            render_template("Tschüß {name} 世界", &[("name", "Lieschen")]),
+            "Tschüß Lieschen 世界"
+        );
+    }
+
+    #[test]
+    fn render_template_substitutes_multiple_keys() {
+        assert_eq!(
+            render_template("{a}-{b}-{a}", &[("a", "X"), ("b", "Y")]),
+            "X-Y-X"
+        );
+    }
+
+    #[test]
+    fn unescape_braces_is_render_template_with_no_vars() {
+        assert_eq!(unescape_braces("use {{braces}} here"), "use {braces} here");
+        assert_eq!(unescape_braces("no braces"), "no braces");
+    }
+
+    // ─── Brace-escape: validate_placeholders ────────────────────────────────
+
+    #[test]
+    fn validate_accepts_escaped_braces_as_literal() {
+        // `{{Beispiel}}` is a translator-authored literal, not a placeholder.
+        assert!(validate_placeholders("f", "see {{Beispiel}} here", &[]).is_ok());
+    }
+
+    #[test]
+    fn validate_still_rejects_single_brace_unknown_placeholder() {
+        // Single-brace narrative still errors — translators must double-up.
+        assert!(validate_placeholders("f", "see {Beispiel} here", &[]).is_err());
+    }
+
+    #[test]
+    fn validate_accepts_bare_doubled_open_brace() {
+        assert!(validate_placeholders("f", "a {{ b", &[]).is_ok());
+    }
+
+    #[test]
+    fn validate_rejects_real_placeholder_adjacent_to_escape() {
+        // The escape is skipped, but the genuine `{nme}` typo is still caught.
+        let err = validate_placeholders("base", "{{x}} {nme}", &["name"]).unwrap_err();
+        assert!(format!("{err}").contains("nme"), "got: {err}");
+    }
+
     #[test]
     fn missing_intent_variant_returns_err() {
         // Build a pack body that omits one intent key.
@@ -1145,6 +1360,96 @@ speak_hint = "x"
             out.push_str(&format!("{} = \"x\"\n", intent_key(i)));
         }
         out
+    }
+
+    /// Build a structurally-valid English pack body with caller-supplied
+    /// `system_prompt.base` and `sections.summary_intro` values. Uses
+    /// `.replace()` (not `format!`) so brace characters in `base` /
+    /// `summary_intro` pass through literally — `format!` would treat `{{`
+    /// as its own escape and corrupt the very syntax under test.
+    fn pack_body_with_base_and_summary(base: &str, summary_intro: &str) -> String {
+        let template = r#"
+[meta]
+language = "en"
+language_name = "English"
+bcp47 = "en-US"
+
+[system_prompt]
+base = "__BASE__"
+
+[language_guidance]
+ages_0_6 = ""
+ages_7_9 = ""
+ages_10_12 = ""
+ages_13_plus = ""
+
+[intent]
+__INTENTS__
+
+[engagement]
+frustrated = ""
+disengaging = ""
+
+[sections]
+knowledge_intro = ""
+summary_intro = "__SUMMARY__"
+retrieved_intro = ""
+vocab_review_intro = ""
+break_suggestion_intro = ""
+
+[labels]
+child = "Child"
+primer = "Primer"
+
+[question_detection]
+factual_prefixes = []
+
+[voice_state]
+listen_label = "x"
+listen_hint = "x"
+thinking_label = "x"
+thinking_hint = "x"
+speak_label = "x"
+speak_hint = "x"
+"#;
+        template
+            .replace("__INTENTS__", &all_intents_zeroed_toml())
+            .replace("__BASE__", base)
+            .replace("__SUMMARY__", summary_intro)
+    }
+
+    #[test]
+    fn escaped_braces_in_verbatim_field_render_as_literal() {
+        // A translator writes `{{focus}}` in narrative; the loaded pack
+        // exposes a literal `{focus}`, not the doubled form.
+        let body = pack_body_with_base_and_summary("x", "Type {{focus}} to begin");
+        let pack = TomlPromptPack::from_toml_str(Locale::English, &body)
+            .expect("escaped braces in summary_intro should load");
+        assert_eq!(pack.summary_intro(), "Type {focus} to begin");
+    }
+
+    #[test]
+    fn escaped_braces_in_base_template_render_as_literal() {
+        // Escapes in the (templated) base survive alongside real placeholders.
+        let body = pack_body_with_base_and_summary("Hi {name}, e.g. {{ratio}} here", "y");
+        let pack = TomlPromptPack::from_toml_str(Locale::English, &body)
+            .expect("escaped braces in base should load");
+        let rendered = pack.render_base("Binti", 8);
+        assert!(rendered.contains("Hi Binti"), "got: {rendered}");
+        assert!(rendered.contains("{ratio}"), "got: {rendered}");
+        assert!(!rendered.contains("{{ratio}}"), "got: {rendered}");
+    }
+
+    #[test]
+    fn single_brace_narrative_in_verbatim_field_still_errors() {
+        // Single braces remain a placeholder attempt and fail loudly.
+        let body = pack_body_with_base_and_summary("x", "Type {focus} to begin");
+        let err = TomlPromptPack::from_toml_str(Locale::English, &body)
+            .err()
+            .expect("single-brace narrative should error");
+        let s = format!("{err}");
+        assert!(s.contains("summary_intro"), "got: {s}");
+        assert!(s.contains("focus"), "got: {s}");
     }
 
     /// Build a minimal but structurally-valid pack body with overridable

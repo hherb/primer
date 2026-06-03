@@ -183,6 +183,7 @@ Both fields stay short. The label fits one line; the hint is a soft reassurance 
 The pack loader rejects:
 
 - **Unknown placeholder tokens.** A `{name}` in a field where only `{age}` is allowed → load-time error with field name and offending token.
+  - **Literal braces — double them up.** To put a literal `{` or `}` in narrative text (e.g. you want the prompt to literally read `{Beispiel}`), write `{{Beispiel}}` — `{{` and `}}` render as a single `{` / `}`, exactly like Rust/Python format strings. A *single* `{Beispiel}` is still treated as a placeholder attempt and rejected, so this is the escape hatch when you genuinely need braces. Applies to every field, including the verbatim ones with no allowed placeholders.
 - **Missing intent keys.** Every `PedagogicalIntent` variant must have a TOML key — see § The eight sections above for the canonical list.
 - **`[meta]` drift.** `meta.language`, `meta.language_name`, `meta.bcp47` must equal `Locale::*.pack_id() / name() / bcp47()` exactly. If you change one in the TOML you must change all three (and the Rust enum, if relevant).
 - **Empty `[voice_state]` field.** All six fields must be non-empty.
