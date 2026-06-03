@@ -1271,6 +1271,15 @@ speak_hint = "x"
     }
 
     #[test]
+    fn render_template_substitutes_then_emits_trailing_lone_close_brace() {
+        // `{name}}` is lenient-parsed as `{name}` (a substituted placeholder)
+        // followed by a lone `}` emitted verbatim — NOT as `{name` + `}}`.
+        // No shipping pack relies on this, but pin it so a future renderer
+        // refactor can't silently change the edge behaviour.
+        assert_eq!(render_template("{name}}", &[("name", "Binti")]), "Binti}");
+    }
+
+    #[test]
     fn unescape_braces_is_render_template_with_no_vars() {
         assert_eq!(unescape_braces("use {{braces}} here"), "use {braces} here");
         assert_eq!(unescape_braces("no braces"), "no braces");
