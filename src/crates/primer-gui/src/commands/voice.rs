@@ -423,6 +423,10 @@ pub async fn download_voice_assets(
     use primer_core::i18n::Locale;
     let cfg = state.config.lock().await.clone();
     let locale = Locale::from_pack_id(&cfg.learner.locale).unwrap_or_default();
+    // `disable_auto_download` is intentionally NOT re-checked here: the gate
+    // sits at the single `start_voice_mode` resolver-Err site, and reaching
+    // this command means the consent modal already rendered — which only
+    // happens when the flag is off. See `missing_to_error`.
     let to_download =
         crate::voice::assets::resolve_requested_kinds(&state.home, &cfg.speech, &locale, &kinds);
     for asset in &to_download {

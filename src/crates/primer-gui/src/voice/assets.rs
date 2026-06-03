@@ -17,11 +17,12 @@ use primer_speech::locale_defaults::{
 };
 
 /// Maximum number of `kinds` the IPC will accept in a single
-/// `download_voice_assets` call. The legitimate set has exactly three
-/// entries; this cap is belt-and-suspenders insurance against a buggy or
-/// hostile webview submitting a giant payload that would burn memory in
-/// the filter loop. Anything above this bound is treated as
-/// "nothing to download" — safe in both directions.
+/// `download_voice_assets` call. The legitimate set is at most eight
+/// (a Whisper model plus the seven-file Supertonic bundle); this cap is
+/// belt-and-suspenders insurance against a buggy or hostile webview
+/// submitting a giant payload that would burn memory in the filter loop.
+/// Anything above this bound is treated as "nothing to download" — safe
+/// in both directions.
 pub const MAX_REQUESTED_KINDS: usize = 16;
 
 /// Resolved paths for one voice mode session.
@@ -219,7 +220,8 @@ pub fn resolve_requested_kinds(
     requested_kinds: &[String],
 ) -> Vec<MissingAsset> {
     // Cap the request size so a buggy webview submitting a million-entry
-    // list cannot blow up the filter. The legitimate set has 3 entries;
+    // list cannot blow up the filter. The legitimate set is at most eight
+    // entries (Whisper + the seven-file Supertonic bundle);
     // [`MAX_REQUESTED_KINDS`] is comfortably above that.
     if requested_kinds.len() > MAX_REQUESTED_KINDS {
         return Vec::new();
