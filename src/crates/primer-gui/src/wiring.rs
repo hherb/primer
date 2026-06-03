@@ -22,7 +22,7 @@ use primer_core::storage::{LearnerStore, SessionStore};
 use primer_engine::{
     BackendParams, IN_MEMORY, build_backend, build_classifier, build_comprehension,
     build_extractor, build_fastembed_embedder, build_ollama_embedder, build_openai_compat_embedder,
-    create_learner_with_id, reconcile_persisted_learner, resolve_session_db_path,
+    create_learner_with_id, parse_languages, reconcile_persisted_learner, resolve_session_db_path,
 };
 use primer_extractor::ExtractorSettings;
 use primer_knowledge::SqliteKnowledgeBase;
@@ -280,8 +280,16 @@ async fn build_with_strategy(
                     Uuid::new_v4()
                 }
             };
-            let fresh =
-                create_learner_with_id(id, &learner_config.name, learner_config.age, cfg_locale);
+            // The GUI has no `--languages` field yet (out of scope for the
+            // CLI-titled issue #21); pass the locale-derived default so the
+            // preference list matches the historical behaviour exactly.
+            let fresh = create_learner_with_id(
+                id,
+                &learner_config.name,
+                learner_config.age,
+                cfg_locale,
+                parse_languages(None, cfg_locale),
+            );
             if let Err(e) = session_store_inner.save_learner(&fresh).await {
                 tracing::warn!("save_learner on session-start failed: {e}");
             }

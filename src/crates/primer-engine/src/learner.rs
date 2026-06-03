@@ -77,15 +77,61 @@ pub fn verify_resume_locale_match(
     ))
 }
 
+/// Parse the `--languages` CSV into an ordered, de-duplicated
+/// preference list of ISO 639-1 codes.
+///
+/// This is the open-vocabulary preference list (`LearnerProfile.languages`),
+/// kept distinct from the closed-enum bound `locale` that actually drives
+/// prompt-pack / speech / knowledge-base dispatch. Nothing in the engine
+/// reads `languages` yet — it is documentation-as-data persisted with the
+/// learner — so values are NOT validated against the closed `Locale` set;
+/// any code the child's family supplies is accepted.
+///
+/// Rules (a single left-to-right pass):
+/// - split on `,`, trim each token, lowercase (ISO 639-1 convention),
+///   drop empty tokens, and de-duplicate preserving first-occurrence order.
+/// - `None`, empty, or all-separator input falls back to the bound
+///   `locale`'s pack id, so a flagless run keeps the historical
+///   single-language behaviour.
+///
+/// The list is used verbatim — the bound `locale` is NOT force-prepended,
+/// so `--language de --languages en` yields `["en"]`. Engine dispatch keys
+/// off `locale`, so this divergence is harmless and honours explicit intent.
+pub fn parse_languages(csv: Option<&str>, locale: Locale) -> Vec<String> {
+    let mut out: Vec<String> = Vec::new();
+    if let Some(raw) = csv {
+        for token in raw.split(',') {
+            let code = token.trim().to_lowercase();
+            if code.is_empty() || out.contains(&code) {
+                continue;
+            }
+            out.push(code);
+        }
+    }
+    if out.is_empty() {
+        out.push(locale.pack_id().to_string());
+    }
+    out
+}
+
 /// Construct a fresh `LearnerModel` with the given identity. Used at
-/// session-start when no persisted learner row exists yet.
-pub fn create_learner_with_id(id: Uuid, name: &str, age: u8, locale: Locale) -> LearnerModel {
+/// session-start when no persisted learner row exists yet. `languages`
+/// is the parsed preference list (see [`parse_languages`]); pass
+/// `parse_languages(None, locale)` to keep the historical
+/// locale-derived default.
+pub fn create_learner_with_id(
+    id: Uuid,
+    name: &str,
+    age: u8,
+    locale: Locale,
+    languages: Vec<String>,
+) -> LearnerModel {
     LearnerModel {
         profile: LearnerProfile {
             id,
             name: name.to_string(),
             age,
-            languages: vec![locale.pack_id().to_string()],
+            languages,
             locale,
             created_at: Utc::now(),
             last_active: Utc::now(),
@@ -155,8 +201,13 @@ mod tests {
         );
         let original_id = Uuid::new_v4();
         let original_created = Utc::now() - chrono::Duration::days(365);
-        let mut original =
-            create_learner_with_id(original_id, "Binti", 8, primer_core::i18n::Locale::English);
+        let mut original = create_learner_with_id(
+            original_id,
+            "Binti",
+            8,
+            primer_core::i18n::Locale::English,
+            parse_languages(None, primer_core::i18n::Locale::English),
+        );
         original.profile.created_at = original_created;
         store.save_learner(&original).await.unwrap();
 
@@ -198,6 +249,7 @@ mod tests {
             "Binti",
             8,
             primer_core::i18n::Locale::English,
+            parse_languages(None, primer_core::i18n::Locale::English),
         );
         store.save_learner(&original).await.unwrap();
 
@@ -222,11 +274,111 @@ mod tests {
         // The non-mismatch path: same name should be a pure age/last_active
         // refresh with no warn (covered by absence of stderr in this test).
         let original_id = Uuid::new_v4();
-        let original =
-            create_learner_with_id(original_id, "Binti", 8, primer_core::i18n::Locale::English);
+        let original = create_learner_with_id(
+            original_id,
+            "Binti",
+            8,
+            primer_core::i18n::Locale::English,
+            parse_languages(None, primer_core::i18n::Locale::English),
+        );
         let result = reconcile_persisted_learner(original, "Binti", 9);
         assert_eq!(result.profile.name, "Binti");
         assert_eq!(result.profile.id, original_id);
         assert_eq!(result.profile.age, 9);
+    }
+
+    // ─── parse_languages ────────────────────────────────────────────
+
+    #[test]
+    fn parse_languages_none_defaults_to_locale_pack_id() {
+        assert_eq!(
+            parse_languages(None, Locale::English),
+            vec!["en".to_string()]
+        );
+        assert_eq!(
+            parse_languages(None, Locale::German),
+            vec!["de".to_string()]
+        );
+    }
+
+    #[test]
+    fn parse_languages_splits_csv_preserving_order() {
+        assert_eq!(
+            parse_languages(Some("en,es"), Locale::English),
+            vec!["en".to_string(), "es".to_string()]
+        );
+    }
+
+    #[test]
+    fn parse_languages_uses_list_verbatim_not_forcing_locale() {
+        // --language de --languages en → ["en"], NOT ["de", "en"].
+        // Engine dispatch keys off `locale`, so divergence is harmless and
+        // we honour the explicit preference list exactly.
+        assert_eq!(
+            parse_languages(Some("en"), Locale::German),
+            vec!["en".to_string()]
+        );
+    }
+
+    #[test]
+    fn parse_languages_trims_whitespace_around_each_code() {
+        assert_eq!(
+            parse_languages(Some("  en , es "), Locale::English),
+            vec!["en".to_string(), "es".to_string()]
+        );
+    }
+
+    #[test]
+    fn parse_languages_lowercases_codes() {
+        assert_eq!(
+            parse_languages(Some("EN,Es"), Locale::English),
+            vec!["en".to_string(), "es".to_string()]
+        );
+    }
+
+    #[test]
+    fn parse_languages_dedups_preserving_first_occurrence() {
+        assert_eq!(
+            parse_languages(Some("en,en,es,en"), Locale::English),
+            vec!["en".to_string(), "es".to_string()]
+        );
+    }
+
+    #[test]
+    fn parse_languages_empty_input_falls_back_to_locale() {
+        assert_eq!(
+            parse_languages(Some(""), Locale::English),
+            vec!["en".to_string()]
+        );
+        assert_eq!(
+            parse_languages(Some("   "), Locale::German),
+            vec!["de".to_string()]
+        );
+    }
+
+    #[test]
+    fn parse_languages_all_separators_falls_back_to_locale() {
+        // Nothing survives cleaning → fall back rather than yield an empty list.
+        assert_eq!(
+            parse_languages(Some(",, ,"), Locale::German),
+            vec!["de".to_string()]
+        );
+    }
+
+    #[test]
+    fn create_learner_with_id_stores_provided_languages() {
+        let learner = create_learner_with_id(
+            Uuid::new_v4(),
+            "Binti",
+            8,
+            Locale::German,
+            vec!["de".to_string(), "en".to_string()],
+        );
+        assert_eq!(
+            learner.profile.languages,
+            vec!["de".to_string(), "en".to_string()]
+        );
+        // Locale is still the bound dispatch key, independent of the list.
+        assert_eq!(learner.profile.locale, Locale::German);
     }
 }
