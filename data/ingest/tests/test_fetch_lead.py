@@ -133,6 +133,69 @@ def test_fetch_lead_disambiguation_page_raises_may_refer_to():
         fetch_lead("Saturn", http_client=client, source=SIMPLE_ENGLISH)
 
 
+def test_fetch_lead_prose_may_refer_to_in_body_is_not_disambiguation():
+    # Regression for issue #41: a genuine article whose lead merely
+    # *contains* "may refer to" later in a sentence (not as the
+    # lead-opening "<title> may refer to:") must NOT be rejected as a
+    # disambiguation page. The pre-fix rule searched the whole 300-char
+    # head and falsely flagged this article; the lead-anchored rule
+    # only matches the marker right after the title-as-subject, so this
+    # passes through. "Reference (computer science)" is the regression
+    # fixture title the issue asks to keep unblocked across edits.
+    lead = (
+        "In computer science, a reference is a value that may refer to "
+        "data stored elsewhere in memory, such as a variable or an object."
+    )
+    payload = {
+        "query": {
+            "pages": {
+                "333": {
+                    "title": "Reference (computer science)",
+                    "extract": lead,
+                    "fullurl": (
+                        "https://simple.wikipedia.org/wiki/"
+                        "Reference_(computer_science)"
+                    ),
+                }
+            }
+        }
+    }
+    client = FakeHttpClient({"Reference (computer science)": payload})
+    result = fetch_lead(
+        "Reference (computer science)",
+        http_client=client,
+        source=SIMPLE_ENGLISH,
+    )
+    assert result["title"] == "Reference (computer science)"
+    assert "may refer to" in result["lead_text"]
+
+
+def test_fetch_lead_explicit_disambiguation_marker_still_raises_in_body():
+    # The explicit self-declaration marker ("is a disambiguation") is
+    # deliberately NOT lead-anchored — it only ever appears on a
+    # disambiguation page, so matching it anywhere in the head stays
+    # correct and guards against a false negative. Pins the two-category
+    # split introduced for issue #41.
+    payload = {
+        "query": {
+            "pages": {
+                "444": {
+                    "title": "Mercury",
+                    "extract": (
+                        "Mercury is the name of several different things. "
+                        "This article is a disambiguation page listing the "
+                        "planet, the element, and the Roman god."
+                    ),
+                    "fullurl": "https://simple.wikipedia.org/wiki/Mercury",
+                }
+            }
+        }
+    }
+    client = FakeHttpClient({"Mercury": payload})
+    with pytest.raises(RuntimeError, match="disambiguation page"):
+        fetch_lead("Mercury", http_client=client, source=SIMPLE_ENGLISH)
+
+
 def test_fetch_leads_rejects_oversized_batch():
     # Single-batch contract: caller is responsible for chunking. The API
     # would silently truncate a 21-title query, so we surface the bug
@@ -394,3 +457,23 @@ def test_fetch_lead_klexikon_disambiguation_steht_fuer_raises():
     client = KlexikonFakeHttpClient({"Saturn": payload})
     with pytest.raises(RuntimeError, match="disambiguation page"):
         fetch_lead("Saturn", http_client=client, source=KLEXIKON)
+
+
+def test_fetch_lead_klexikon_prose_steht_fuer_in_body_is_not_disambiguation():
+    # Regression for issue #41 (German side): "steht für" is also a
+    # common prose construction ("X steht für Y" = "X stands for Y"),
+    # not only a disambiguation marker. An article whose lead uses it
+    # mid-sentence — not as the lead-opening "<title> steht für:" —
+    # must pass through. The lead-anchored rule only flags the marker
+    # right after the title-as-subject.
+    payload = _klexikon_parse_payload(
+        title="Ampel",
+        wikitext=(
+            "Eine Ampel regelt den Verkehr an Kreuzungen. "
+            "Die Farbe Rot steht für Halt und die Farbe Grün für Fahren."
+        ),
+    )
+    client = KlexikonFakeHttpClient({"Ampel": payload})
+    result = fetch_lead("Ampel", http_client=client, source=KLEXIKON)
+    assert result["title"] == "Ampel"
+    assert "steht für" in result["lead_text"]
