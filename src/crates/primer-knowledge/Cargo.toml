@@ -16,3 +16,6 @@ serde.workspace = true
 [dev-dependencies]
 primer-embedding = { path = "../primer-embedding" }
 tempfile.workspace = true
+# Used only by the `#[ignore]`'d bulk-insert benchmark to time a raw
+# `format!` + `execute` baseline against the crate's `prepare_cached` path.
+rusqlite.workspace = true
