@@ -35,7 +35,7 @@ use primer_core::storage::{LearnerStore, SessionStore};
 use primer_engine::{
     BackendParams, IN_MEMORY, build_backend, build_classifier, build_comprehension,
     build_extractor, build_fastembed_embedder, build_ollama_embedder, build_openai_compat_embedder,
-    create_learner_with_id, reconcile_persisted_learner, resolve_session_db_path,
+    create_learner_with_id, parse_languages, reconcile_persisted_learner, resolve_session_db_path,
     should_show_first_run_banner, verify_resume_locale_match,
 };
 use primer_extractor::{ConceptExtractor, ExtractorSettings};
@@ -115,6 +115,18 @@ struct Cli {
     /// child does not re-specify their locale each session.
     #[arg(long, default_value = "en")]
     language: String,
+
+    /// Preferred content languages, comma-separated ISO 639-1 codes
+    /// ordered by preference (e.g. `--languages de,en`). Open-vocabulary
+    /// preference list persisted with the learner, distinct from the bound
+    /// `--language` locale: the locale drives prompt-pack / speech /
+    /// knowledge dispatch, while this list is documentation-as-data for a
+    /// future content-language-hinting feature. When omitted, defaults to
+    /// just the `--language` locale (the historical single-language
+    /// behaviour). Used verbatim — the locale is not force-prepended, so
+    /// `--language de --languages en` stores `["en"]`.
+    #[arg(long, value_name = "CSV")]
+    languages: Option<String>,
 
     /// Path to knowledge base SQLite file.
     /// If omitted, uses an in-memory database.
@@ -1063,7 +1075,8 @@ async fn async_main() -> anyhow::Result<()> {
                     Uuid::new_v4()
                 }
             };
-            let fresh = create_learner_with_id(id, &cli.name, cli.age, cli_locale);
+            let languages = parse_languages(cli.languages.as_deref(), cli_locale);
+            let fresh = create_learner_with_id(id, &cli.name, cli.age, cli_locale, languages);
             if let Err(e) = session_store.save_learner(&fresh).await {
                 tracing::warn!("save_learner on startup failed: {e}");
             }
