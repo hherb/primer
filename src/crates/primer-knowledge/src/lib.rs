@@ -44,20 +44,99 @@ use std::sync::Mutex;
 /// holding one float-vector per passage for hybrid retrieval.
 pub const USER_VERSION: i32 = 3;
 
+/// Precomputed, locale-qualified SQL for every per-row / per-query hot
+/// path. Built once per `SqliteKnowledgeBase` (in `open_for_locale`) so
+/// that the bootstrap-ingest loop pays neither a `format!` allocation nor
+/// an FTS5/SQL re-parse per row: each statement string is stable, so
+/// `Connection::prepare_cached` resolves it to a cached `sqlite3_stmt`
+/// after the first call (a hash lookup, not a parse).
+///
+/// This is the single source of truth for the hot-path SQL — keep the
+/// schema-creation SQL (`create_per_locale_tables` etc.) out of here; that
+/// runs once at open and reads more clearly inline next to the migration
+/// logic it belongs to.
+struct LocaleSql {
+    /// Content-table row insert; binds `id`, `source`, `text` as `?1..?3`.
+    insert_content: String,
+    /// FTS5 index row insert; binds `rowid` as `?4` and `id`/`source`/`text`
+    /// as `?1..?3` (the order `insert_passage_inner` passes them).
+    insert_fts: String,
+    /// Per-passage embedding insert; binds `content_rowid`, `model_id`,
+    /// `vec` as `?1..?3`. Hot during the embedded bulk-ingest path.
+    insert_embedding: String,
+    /// Embedding backfill upsert (the `--reembed` per-row path); binds
+    /// `content_rowid`, `model_id`, `vec` as `?1..?3`.
+    upsert_embedding: String,
+    /// Resolve a content rowid from a passage id (`?1`); the per-row lookup
+    /// inside `upsert_embedding`.
+    select_rowid_by_id: String,
+    /// BM25 retrieval; binds the sanitized phrase as `?1` and the limit as
+    /// `?2`.
+    retrieve: String,
+    /// Vector-leg k-NN scan join; binds the embedder model name as `?1`.
+    knn_scan: String,
+}
+
+impl LocaleSql {
+    /// Build every hot-path statement for one locale pack id. Pure: the
+    /// only input is the pack id (a `Locale::pack_id()` projection of a
+    /// closed enum, never user input), so the interpolated table names are
+    /// safe and deterministic.
+    fn new(pack: &str) -> Self {
+        let content_table = format!("passages_{pack}_content");
+        let passages_table = format!("passages_{pack}");
+        let embeddings_table = format!("embeddings_{pack}");
+        Self {
+            insert_content: format!(
+                "INSERT INTO {content_table}(id, source, text) VALUES (?1, ?2, ?3)"
+            ),
+            insert_fts: format!(
+                "INSERT INTO {passages_table}(rowid, id, source, text) VALUES (?4, ?1, ?2, ?3)"
+            ),
+            insert_embedding: format!(
+                "INSERT INTO {embeddings_table}(content_rowid, model_id, vec) VALUES (?1, ?2, ?3)"
+            ),
+            upsert_embedding: format!(
+                "INSERT INTO {embeddings_table}(content_rowid, model_id, vec) VALUES (?1, ?2, ?3)
+                 ON CONFLICT(content_rowid) DO UPDATE SET
+                    model_id = excluded.model_id,
+                    vec      = excluded.vec"
+            ),
+            select_rowid_by_id: format!("SELECT rowid FROM {content_table} WHERE id = ?1"),
+            retrieve: format!(
+                "SELECT id, source, text, rank
+                 FROM {passages_table}
+                 WHERE {passages_table} MATCH ?1
+                 ORDER BY rank
+                 LIMIT ?2"
+            ),
+            knn_scan: format!(
+                "SELECT c.id, c.source, c.text, e.vec
+                 FROM {embeddings_table} e
+                 JOIN {content_table} c ON c.rowid = e.content_rowid
+                 JOIN embedding_models m ON m.id = e.model_id
+                 WHERE m.name = ?1"
+            ),
+        }
+    }
+}
+
 /// SQLite FTS5-backed knowledge base, scoped to one `Locale`.
 pub struct SqliteKnowledgeBase {
     conn: Mutex<Connection>,
     locale: Locale,
-    /// `passages_<pack_id>` — the FTS5 virtual table name. Cached at
-    /// `open_for_locale` so the per-call `format!` allocation in the
-    /// insert/retrieve hot paths is gone.
-    passages_table: String,
-    /// `passages_<pack_id>_content` — the external-content storage
-    /// table name. Same caching rationale as `passages_table`.
+    /// `passages_<pack_id>_content` — the external-content storage table
+    /// name. Cached at `open_for_locale` for the one-shot diagnostic
+    /// queries (`passage_count`, `list_passage_ids`,
+    /// `passages_missing_embedding`) that build their SQL inline; the
+    /// per-row hot paths use [`LocaleSql`] instead.
     content_table: String,
-    /// `embeddings_<pack_id>` — the schema-v3 vector storage table.
-    /// Same caching rationale as `passages_table`.
+    /// `embeddings_<pack_id>` — the schema-v3 vector storage table. Same
+    /// one-shot-diagnostic rationale as `content_table`.
     embeddings_table: String,
+    /// Precomputed hot-path SQL, fed to `prepare_cached` so bulk ingest
+    /// re-parses nothing per row. See [`LocaleSql`].
+    sql: LocaleSql,
 }
 
 impl SqliteKnowledgeBase {
@@ -86,9 +165,9 @@ impl SqliteKnowledgeBase {
         Ok(Self {
             conn: Mutex::new(conn),
             locale,
-            passages_table: format!("passages_{pack}"),
             content_table: format!("passages_{pack}_content"),
             embeddings_table: format!("embeddings_{pack}"),
+            sql: LocaleSql::new(pack),
         })
     }
 
@@ -133,41 +212,31 @@ impl SqliteKnowledgeBase {
     /// Insert a passage into the knowledge base.
     pub fn insert_passage(&self, id: &str, source: &str, text: &str) -> Result<()> {
         let conn = self.conn.lock().unwrap();
-        Self::insert_passage_inner(
-            &conn,
-            &self.content_table,
-            &self.passages_table,
-            id,
-            source,
-            text,
-        )?;
+        Self::insert_passage_inner(&conn, &self.sql, id, source, text)?;
         Ok(())
     }
 
+    /// Core two-statement insert (content row + FTS index row), shared by
+    /// the plain and embedded insert paths. Takes `&LocaleSql` rather than
+    /// `&self` so it can run against either a `Connection` or a
+    /// `Transaction` (both expose `prepare_cached`). The cached statements
+    /// are what make the bootstrap-ingest loop cheap per row.
     fn insert_passage_inner(
         conn: &Connection,
-        content_table: &str,
-        passages_table: &str,
+        sql: &LocaleSql,
         id: &str,
         source: &str,
         text: &str,
     ) -> Result<i64> {
-        conn.execute(
-            &format!("INSERT INTO {content_table}(id, source, text) VALUES (?1, ?2, ?3)"),
-            rusqlite::params![id, source, text],
-        )
-        .map_err(|e| PrimerError::Knowledge(format!("Insert failed: {e}")))?;
+        conn.prepare_cached(&sql.insert_content)
+            .and_then(|mut s| s.execute(rusqlite::params![id, source, text]))
+            .map_err(|e| PrimerError::Knowledge(format!("Insert failed: {e}")))?;
 
         let rowid = conn.last_insert_rowid();
 
-        conn.execute(
-            &format!(
-                "INSERT INTO {passages_table}(rowid, id, source, text) \
-                 VALUES (?4, ?1, ?2, ?3)"
-            ),
-            rusqlite::params![id, source, text, rowid],
-        )
-        .map_err(|e| PrimerError::Knowledge(format!("FTS insert failed: {e}")))?;
+        conn.prepare_cached(&sql.insert_fts)
+            .and_then(|mut s| s.execute(rusqlite::params![id, source, text, rowid]))
+            .map_err(|e| PrimerError::Knowledge(format!("FTS insert failed: {e}")))?;
 
         Ok(rowid)
     }
@@ -224,23 +293,15 @@ impl SqliteKnowledgeBase {
         }
         let conn = self.conn.lock().unwrap();
         let model_row = upsert_embedding_model(&conn, model_id, dim)?;
-        let content_table = &self.content_table;
-        let passages_table = &self.passages_table;
-        let embeddings_table = &self.embeddings_table;
 
         let tx = conn
             .unchecked_transaction()
             .map_err(|e| PrimerError::Knowledge(format!("begin insert tx: {e}")))?;
-        let rowid =
-            Self::insert_passage_inner(&tx, content_table, passages_table, id, source, text)?;
+        let rowid = Self::insert_passage_inner(&tx, &self.sql, id, source, text)?;
         let blob = vec_to_blob(vec);
-        tx.execute(
-            &format!(
-                "INSERT INTO {embeddings_table}(content_rowid, model_id, vec) VALUES (?1, ?2, ?3)"
-            ),
-            rusqlite::params![rowid, model_row, blob],
-        )
-        .map_err(|e| PrimerError::Knowledge(format!("embedding insert: {e}")))?;
+        tx.prepare_cached(&self.sql.insert_embedding)
+            .and_then(|mut s| s.execute(rusqlite::params![rowid, model_row, blob]))
+            .map_err(|e| PrimerError::Knowledge(format!("embedding insert: {e}")))?;
         tx.commit()
             .map_err(|e| PrimerError::Knowledge(format!("commit insert: {e}")))?;
         Ok(())
@@ -264,26 +325,14 @@ impl SqliteKnowledgeBase {
         }
         let conn = self.conn.lock().unwrap();
         let model_row = upsert_embedding_model(&conn, model_id, dim)?;
-        let content_table = &self.content_table;
-        let embeddings_table = &self.embeddings_table;
         let rowid: i64 = conn
-            .query_row(
-                &format!("SELECT rowid FROM {content_table} WHERE id = ?1"),
-                rusqlite::params![passage_id],
-                |r| r.get(0),
-            )
+            .prepare_cached(&self.sql.select_rowid_by_id)
+            .and_then(|mut s| s.query_row(rusqlite::params![passage_id], |r| r.get(0)))
             .map_err(|e| PrimerError::Knowledge(format!("lookup passage {passage_id}: {e}")))?;
         let blob = vec_to_blob(vec);
-        conn.execute(
-            &format!(
-                "INSERT INTO {embeddings_table}(content_rowid, model_id, vec) VALUES (?1, ?2, ?3)
-                 ON CONFLICT(content_rowid) DO UPDATE SET
-                    model_id = excluded.model_id,
-                    vec      = excluded.vec"
-            ),
-            rusqlite::params![rowid, model_row, blob],
-        )
-        .map_err(|e| PrimerError::Knowledge(format!("upsert embedding: {e}")))?;
+        conn.prepare_cached(&self.sql.upsert_embedding)
+            .and_then(|mut s| s.execute(rusqlite::params![rowid, model_row, blob]))
+            .map_err(|e| PrimerError::Knowledge(format!("upsert embedding: {e}")))?;
         Ok(())
     }
 
@@ -422,20 +471,11 @@ impl SqliteKnowledgeBase {
     /// corpus size justifies a `sqlite-vec` index.
     fn knn_scan(&self, query: &[f32], model_id: &str, top_k: usize) -> Result<Vec<Passage>> {
         let conn = self.conn.lock().unwrap();
-        let content_table = &self.content_table;
-        let embeddings_table = &self.embeddings_table;
         // The model_id filter on the JOIN ensures we never compare
         // vectors from incompatible models — open-time validation
         // already errors on mismatch, but this is belt-and-braces.
-        let sql = format!(
-            "SELECT c.id, c.source, c.text, e.vec
-             FROM {embeddings_table} e
-             JOIN {content_table} c ON c.rowid = e.content_rowid
-             JOIN embedding_models m ON m.id = e.model_id
-             WHERE m.name = ?1"
-        );
         let mut stmt = conn
-            .prepare(&sql)
+            .prepare_cached(&self.sql.knn_scan)
             .map_err(|e| PrimerError::Knowledge(format!("prepare knn scan: {e}")))?;
         let rows = stmt
             .query_map(rusqlite::params![model_id], |row| {
@@ -644,21 +684,14 @@ impl KnowledgeBase for SqliteKnowledgeBase {
         }
 
         let conn = self.conn.lock().unwrap();
-        let passages_table = &self.passages_table;
 
-        // FTS5 match query with BM25 ranking. Table name is interpolated
-        // (NOT user input — comes from `Locale::pack_id()`, a closed
-        // enum projection), parameters are bound positionally — the
-        // sanitized phrase and limit go through `?1` and `?2`.
-        let sql = format!(
-            "SELECT id, source, text, rank
-             FROM {passages_table}
-             WHERE {passages_table} MATCH ?1
-             ORDER BY rank
-             LIMIT ?2"
-        );
+        // FTS5 match query with BM25 ranking. The statement string is
+        // precomputed in `LocaleSql` (table name comes from
+        // `Locale::pack_id()`, a closed-enum projection, never user
+        // input); parameters are bound positionally — the sanitized
+        // phrase and limit go through `?1` and `?2`.
         let mut stmt = conn
-            .prepare(&sql)
+            .prepare_cached(&self.sql.retrieve)
             .map_err(|e| PrimerError::Knowledge(format!("Query prepare failed: {e}")))?;
 
         let passages = stmt
@@ -1491,5 +1524,51 @@ mod tests {
         kb.insert_passage("p1", "src", "hello world").unwrap();
         kb.insert_passage("p2", "src", "another row").unwrap();
         assert_eq!(kb.passage_count().unwrap(), 2);
+    }
+
+    #[test]
+    fn locale_sql_interpolates_pack_into_every_statement() {
+        // `LocaleSql::new` is the single source of truth for every
+        // per-locale, per-row/per-query SQL string the hot paths cache.
+        // Each statement must carry the locale-qualified table name so a
+        // `de` knowledge base never touches `en` tables.
+        let sql = LocaleSql::new("de");
+        for stmt in [
+            &sql.insert_content,
+            &sql.insert_fts,
+            &sql.insert_embedding,
+            &sql.upsert_embedding,
+            &sql.select_rowid_by_id,
+            &sql.retrieve,
+            &sql.knn_scan,
+        ] {
+            assert!(
+                stmt.contains("_de"),
+                "every per-locale statement must carry the pack id; missing in: {stmt}"
+            );
+        }
+        // No statement should leak the bare (locale-less) table names that
+        // the legacy single-table layout used.
+        assert!(!sql.insert_content.contains("passages_content("));
+        assert!(!sql.retrieve.contains("FROM passages \n"));
+    }
+
+    #[test]
+    fn locale_sql_fts_insert_binds_rowid_as_param_four() {
+        // The FTS insert writes `rowid` (the last-insert id from the
+        // content table) into `?4`, with id/source/text in `?1..?3` —
+        // the order callers bind in `insert_passage_inner`. Pinning this
+        // guards against a silent column/parameter reshuffle when the
+        // statement moves into `LocaleSql`.
+        let sql = LocaleSql::new("en");
+        assert!(
+            sql.insert_fts.contains("(?4, ?1, ?2, ?3)"),
+            "FTS insert must bind rowid as ?4: {}",
+            sql.insert_fts
+        );
+        assert!(
+            sql.insert_fts
+                .contains("passages_en(rowid, id, source, text)")
+        );
     }
 }
