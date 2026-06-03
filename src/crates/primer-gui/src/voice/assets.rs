@@ -1,7 +1,8 @@
 //! Voice-asset resolution.
 //!
 //! `resolve_voice_assets(cfg, locale)` returns either the resolved paths
-//! to the three model files (piper .onnx, piper .onnx.json, whisper .bin)
+//! to the model files the active `(stt, tts)` choice consumes (Whisper
+//! `.bin`; Piper `.onnx` + `.onnx.json`; or the 7-file Supertonic bundle)
 //! or a structured [`AssetMissing`] error the frontend can render.
 
 use std::path::PathBuf;
@@ -10,14 +11,18 @@ use crate::commands::voice::{MissingAsset, kind};
 use crate::config::SpeechSettings;
 use primer_core::consts::speech::{APPROX_PIPER_CONFIG_MB, APPROX_WHISPER_SMALL_MB};
 use primer_core::i18n::Locale;
-use primer_speech::locale_defaults::{LocaleDefault, voice_default_for};
+use primer_speech::locale_defaults::{
+    DEFAULT_SUPERTONIC_VOICE_STYLE_FILE, LocaleDefault, SupertonicSlot, supertonic_assets,
+    voice_default_for,
+};
 
 /// Maximum number of `kinds` the IPC will accept in a single
-/// `download_voice_assets` call. The legitimate set has exactly three
-/// entries; this cap is belt-and-suspenders insurance against a buggy or
-/// hostile webview submitting a giant payload that would burn memory in
-/// the filter loop. Anything above this bound is treated as
-/// "nothing to download" — safe in both directions.
+/// `download_voice_assets` call. The legitimate set is at most eight
+/// (a Whisper model plus the seven-file Supertonic bundle); this cap is
+/// belt-and-suspenders insurance against a buggy or hostile webview
+/// submitting a giant payload that would burn memory in the filter loop.
+/// Anything above this bound is treated as "nothing to download" — safe
+/// in both directions.
 pub const MAX_REQUESTED_KINDS: usize = 16;
 
 /// Resolved paths for one voice mode session.
@@ -27,11 +32,13 @@ pub struct ResolvedAssets {
     pub piper_config: PathBuf,
     pub whisper_model: PathBuf,
     pub voice_id: String,
-    /// Supertonic `onnx/` dir from the per-locale override; `None` when the
-    /// user hasn't set one (Stage C has no Supertonic auto-download —
-    /// `build_tts` then errors clearly at session start).
+    /// Effective Supertonic `onnx/` dir. Under `tts == Supertonic` this is
+    /// the resolved path (per-locale override, else the default
+    /// `<cache>/supertonic/onnx`); for other TTS backends it carries the raw
+    /// override (or `None` when unset).
     pub supertonic_onnx_dir: Option<PathBuf>,
-    /// Supertonic voice-style JSON from the per-locale override; `None` when unset.
+    /// Effective Supertonic voice-style JSON. Resolved like
+    /// [`Self::supertonic_onnx_dir`] (default `<cache>/supertonic/voice_styles/F1.json`).
     pub supertonic_voice_style: Option<PathBuf>,
 }
 
@@ -41,6 +48,10 @@ pub struct ResolvedAssets {
 pub struct AssetMissing {
     pub entries: Vec<MissingAsset>,
     pub locale: String,
+    /// Sum of `entries`' sizes. Computed for in-crate parity/tests only —
+    /// it is NOT carried across the IPC (`StartVoiceModeError::AssetMissing`
+    /// serialises just `entries`), and the frontend recomputes its own total
+    /// by summing each entry's `approx_size_mb`.
     pub approx_total_mb: u32,
 }
 
@@ -62,11 +73,12 @@ pub fn resolve_voice_assets(
     let (piper_onnx, piper_config, whisper_model, voice_id) =
         compute_paths(home, locale, default, override_entry);
 
-    // Supertonic paths come straight from the per-locale override; Stage C
-    // has no Supertonic download URL, so an absent path is NOT gated here —
-    // `build_tts` surfaces it clearly at session start.
-    let supertonic_onnx_dir = override_entry.and_then(|o| o.supertonic_onnx_dir.clone());
-    let supertonic_voice_style = override_entry.and_then(|o| o.supertonic_voice_style_path.clone());
+    // Supertonic effective paths: override wins, else the locale-independent
+    // default cache under `supertonic/`. Gated only when TTS is Supertonic.
+    let (sup_onnx_dir, sup_voice_style) = supertonic_paths(home, override_entry);
+    let mut supertonic_onnx_dir = override_entry.and_then(|o| o.supertonic_onnx_dir.clone());
+    let mut supertonic_voice_style =
+        override_entry.and_then(|o| o.supertonic_voice_style_path.clone());
 
     // Decoupled gating: each asset is required only when the resolved
     // (stt, tts) choice actually consumes it. Whisper is gated iff STT is
@@ -109,6 +121,24 @@ pub fn resolve_voice_assets(
         });
     }
 
+    if tts == crate::config::TtsBackend::Supertonic {
+        for asset in supertonic_assets() {
+            let path = supertonic_asset_path(&sup_onnx_dir, &sup_voice_style, asset);
+            if !path.exists() {
+                missing.push(MissingAsset {
+                    kind: asset.kind.into(),
+                    path,
+                    suggested_url: Some(asset.url.to_string()),
+                    approx_size_mb: Some(asset.approx_size_mb),
+                });
+            }
+        }
+        // Carry the effective paths so the caller builds TtsAssets even when
+        // no override was set.
+        supertonic_onnx_dir = Some(sup_onnx_dir);
+        supertonic_voice_style = Some(sup_voice_style);
+    }
+
     if missing.is_empty() {
         Ok(ResolvedAssets {
             piper_onnx,
@@ -119,11 +149,51 @@ pub fn resolve_voice_assets(
             supertonic_voice_style,
         })
     } else {
+        // Total reflects exactly what will be downloaded: the sum of the
+        // missing entries' sizes. (Previously the Piper/Whisper locale
+        // `approx_total_mb` was used; summing the entries is more accurate
+        // and works for the Supertonic set too.)
+        let approx_total_mb = missing.iter().filter_map(|e| e.approx_size_mb).sum();
         Err(AssetMissing {
             entries: missing,
             locale: locale.pack_id().to_string(),
-            approx_total_mb: default.map(|d| d.approx_total_mb).unwrap_or(0),
+            approx_total_mb,
         })
+    }
+}
+
+/// Resolve the effective Supertonic onnx-dir + voice-style path: the
+/// per-locale override wins, else the locale-independent default cache
+/// location under `supertonic/`.
+fn supertonic_paths(
+    home: &std::path::Path,
+    override_entry: Option<&crate::config::SpeechLocaleOverride>,
+) -> (PathBuf, PathBuf) {
+    let supertonic_root = cache_root(home).join("supertonic");
+    let onnx_dir = override_entry
+        .and_then(|o| o.supertonic_onnx_dir.clone())
+        .unwrap_or_else(|| supertonic_root.join("onnx"));
+    let voice_style = override_entry
+        .and_then(|o| o.supertonic_voice_style_path.clone())
+        .unwrap_or_else(|| {
+            supertonic_root
+                .join("voice_styles")
+                .join(DEFAULT_SUPERTONIC_VOICE_STYLE_FILE)
+        });
+    (onnx_dir, voice_style)
+}
+
+/// Effective on-disk path for one Supertonic asset, given the resolved
+/// onnx-dir + voice-style. Files in the `onnx/` slot live inside the dir;
+/// the voice-style slot IS the resolved style path.
+fn supertonic_asset_path(
+    onnx_dir: &std::path::Path,
+    voice_style: &std::path::Path,
+    asset: &primer_speech::locale_defaults::SupertonicAsset,
+) -> PathBuf {
+    match asset.slot {
+        SupertonicSlot::OnnxDir => onnx_dir.join(asset.file_name),
+        SupertonicSlot::VoiceStyle => voice_style.to_path_buf(),
     }
 }
 
@@ -131,17 +201,17 @@ pub fn resolve_voice_assets(
 /// own view of the active locale's voice assets.
 ///
 /// **Why:** keeps the IPC trust boundary tight. The frontend echoes only
-/// `kind` strings (`"piper_onnx"`, `"piper_config"`, `"whisper_model"`)
-/// from the original `AssetMissing` payload; `path` and `suggested_url`
-/// are *not* round-tripped through the webview. A compromised webview
-/// therefore cannot direct the host to write outside `cache_root(home)`
-/// or to fetch from a non-canonical URL — both come from the server's
-/// own [`resolve_voice_assets`] call.
+/// `kind` strings (`"piper_onnx"`, `"whisper_model"`, the `"supertonic_*"`
+/// bundle kinds, …) from the original `AssetMissing` payload; `path` and
+/// `suggested_url` are *not* round-tripped through the webview. A
+/// compromised webview therefore cannot direct the host to write outside
+/// `cache_root(home)` or to fetch from a non-canonical URL — both come from
+/// the server's own [`resolve_voice_assets`] call.
 ///
 /// Returns the subset of currently-missing entries whose `kind` matches
 /// one of `requested_kinds`. Unknown / already-present kinds are silently
 /// dropped (safe — there is nothing to download). An `Ok(ResolvedAssets)`
-/// from the inner resolver (all three files present) yields an empty
+/// from the inner resolver (every required file present) yields an empty
 /// `Vec`, so the caller can unconditionally iterate the result.
 pub fn resolve_requested_kinds(
     home: &std::path::Path,
@@ -150,7 +220,8 @@ pub fn resolve_requested_kinds(
     requested_kinds: &[String],
 ) -> Vec<MissingAsset> {
     // Cap the request size so a buggy webview submitting a million-entry
-    // list cannot blow up the filter. The legitimate set has 3 entries;
+    // list cannot blow up the filter. The legitimate set is at most eight
+    // entries (Whisper + the seven-file Supertonic bundle);
     // [`MAX_REQUESTED_KINDS`] is comfortably above that.
     if requested_kinds.len() > MAX_REQUESTED_KINDS {
         return Vec::new();
@@ -289,10 +360,175 @@ mod tests {
         assert!(kinds.contains(&"whisper_model"));
     }
 
+    /// Fresh home + Supertonic TTS + Whisper STT → the 7 supertonic files
+    /// AND the whisper model are all missing (8 entries). Each supertonic
+    /// entry carries a canonical HF url and a size; the onnx files resolve
+    /// under the default `supertonic/onnx/` cache dir.
+    #[test]
+    fn supertonic_missing_emits_seven_entries_plus_whisper() {
+        let home = TempDir::new().unwrap();
+        let speech = SpeechSettings {
+            tts_backend: crate::config::TtsBackend::Supertonic,
+            ..Default::default()
+        };
+
+        let err = resolve_voice_assets(
+            home.path(),
+            &speech,
+            &Locale::English,
+            crate::config::SttBackend::Whisper,
+            crate::config::TtsBackend::Supertonic,
+        )
+        .unwrap_err();
+
+        let kinds: Vec<&str> = err.entries.iter().map(|e| e.kind.as_str()).collect();
+        assert!(
+            kinds.contains(&"whisper_model"),
+            "whisper still gated under Whisper STT"
+        );
+        assert!(kinds.contains(&"supertonic_vector_estimator"));
+        assert!(kinds.contains(&"supertonic_voice_style"));
+        assert_eq!(
+            kinds
+                .iter()
+                .filter(|k| k.starts_with("supertonic_"))
+                .count(),
+            7,
+            "all seven supertonic files reported missing",
+        );
+        assert!(!kinds.contains(&"piper_onnx"));
+        assert!(!kinds.contains(&"piper_config"));
+
+        let onnx_dir = cache_root(home.path()).join("supertonic").join("onnx");
+        for e in err
+            .entries
+            .iter()
+            .filter(|e| e.kind.starts_with("supertonic_"))
+        {
+            assert!(e.suggested_url.as_deref().unwrap().contains("supertonic-3"));
+            assert!(e.approx_size_mb.unwrap() >= 1);
+            if e.kind != "supertonic_voice_style" {
+                assert!(
+                    e.path.starts_with(&onnx_dir),
+                    "{} not under onnx dir",
+                    e.kind
+                );
+            }
+        }
+        assert!(err.approx_total_mb >= 800);
+    }
+
+    /// All 7 supertonic files present (+ whisper) → Ok, with the resolved
+    /// onnx dir + voice-style pointing at the default cache locations.
+    #[test]
+    fn supertonic_all_present_resolves_default_cache_paths() {
+        let home = TempDir::new().unwrap();
+        let whisper_dir = home.path().join(".cache/primer/models/whisper");
+        let onnx_dir = home.path().join(".cache/primer/models/supertonic/onnx");
+        let styles_dir = home
+            .path()
+            .join(".cache/primer/models/supertonic/voice_styles");
+        std::fs::create_dir_all(&whisper_dir).unwrap();
+        std::fs::create_dir_all(&onnx_dir).unwrap();
+        std::fs::create_dir_all(&styles_dir).unwrap();
+        std::fs::write(whisper_dir.join("ggml-small.en.bin"), b"").unwrap();
+        for f in [
+            "vector_estimator.onnx",
+            "vocoder.onnx",
+            "text_encoder.onnx",
+            "duration_predictor.onnx",
+            "tts.json",
+            "unicode_indexer.json",
+        ] {
+            std::fs::write(onnx_dir.join(f), b"").unwrap();
+        }
+        std::fs::write(styles_dir.join("F1.json"), b"").unwrap();
+
+        let speech = SpeechSettings {
+            tts_backend: crate::config::TtsBackend::Supertonic,
+            ..Default::default()
+        };
+        let ok = resolve_voice_assets(
+            home.path(),
+            &speech,
+            &Locale::English,
+            crate::config::SttBackend::Whisper,
+            crate::config::TtsBackend::Supertonic,
+        )
+        .expect("all assets present");
+        assert_eq!(ok.supertonic_onnx_dir, Some(onnx_dir));
+        assert_eq!(ok.supertonic_voice_style, Some(styles_dir.join("F1.json")));
+    }
+
+    /// Partial presence: only the vocoder is on disk → the other 5 onnx
+    /// files + the style are still reported (6 supertonic entries).
+    #[test]
+    fn supertonic_partial_presence_reports_only_the_gaps() {
+        let home = TempDir::new().unwrap();
+        let whisper_dir = home.path().join(".cache/primer/models/whisper");
+        let onnx_dir = home.path().join(".cache/primer/models/supertonic/onnx");
+        std::fs::create_dir_all(&whisper_dir).unwrap();
+        std::fs::create_dir_all(&onnx_dir).unwrap();
+        std::fs::write(whisper_dir.join("ggml-small.en.bin"), b"").unwrap();
+        std::fs::write(onnx_dir.join("vocoder.onnx"), b"").unwrap();
+
+        let speech = SpeechSettings {
+            tts_backend: crate::config::TtsBackend::Supertonic,
+            ..Default::default()
+        };
+        let err = resolve_voice_assets(
+            home.path(),
+            &speech,
+            &Locale::English,
+            crate::config::SttBackend::Whisper,
+            crate::config::TtsBackend::Supertonic,
+        )
+        .unwrap_err();
+        let kinds: Vec<&str> = err.entries.iter().map(|e| e.kind.as_str()).collect();
+        assert!(
+            !kinds.contains(&"supertonic_vocoder"),
+            "present file not reported"
+        );
+        assert_eq!(
+            kinds
+                .iter()
+                .filter(|k| k.starts_with("supertonic_"))
+                .count(),
+            6,
+            "the other six supertonic files still missing",
+        );
+    }
+
+    /// resolve_requested_kinds re-resolves supertonic kinds server-side.
+    #[test]
+    fn resolve_requested_kinds_handles_supertonic() {
+        let home = TempDir::new().unwrap();
+        let speech = SpeechSettings {
+            tts_backend: crate::config::TtsBackend::Supertonic,
+            ..Default::default()
+        };
+        let requested = vec![
+            "supertonic_vocoder".to_string(),
+            "supertonic_voice_style".to_string(),
+        ];
+        let result = resolve_requested_kinds(home.path(), &speech, &Locale::English, &requested);
+        let kinds: std::collections::BTreeSet<&str> =
+            result.iter().map(|e| e.kind.as_str()).collect();
+        assert_eq!(
+            kinds,
+            ["supertonic_vocoder", "supertonic_voice_style"]
+                .into_iter()
+                .collect()
+        );
+        for e in &result {
+            assert!(e.suggested_url.as_deref().unwrap().contains("supertonic-3"));
+        }
+    }
+
     /// Decoupling: a Supertonic-TTS session must NOT demand Piper files.
-    /// Only whisper (for STT) is gated. With whisper present and Piper
-    /// absent, the resolve succeeds and the Supertonic override paths flow
-    /// through into the returned `ResolvedAssets`.
+    /// With whisper present, Piper absent, and the override-pointed
+    /// Supertonic assets present, the resolve succeeds and the override
+    /// paths flow through into the returned `ResolvedAssets`.
     #[test]
     fn supertonic_tts_does_not_gate_piper_files() {
         let home = TempDir::new().unwrap();
@@ -300,11 +536,25 @@ mod tests {
         std::fs::create_dir_all(&whisper_dir).unwrap();
         std::fs::write(whisper_dir.join("ggml-small.en.bin"), b"").unwrap();
 
-        let sup_onnx_dir = home.path().join("supertonic/onnx");
-        let sup_style = home.path().join("supertonic/F1.json");
+        let sup_onnx_dir = home.path().join("custom/onnx");
+        let sup_style = home.path().join("custom/F1.json");
+        std::fs::create_dir_all(&sup_onnx_dir).unwrap();
+        for f in [
+            "vector_estimator.onnx",
+            "vocoder.onnx",
+            "text_encoder.onnx",
+            "duration_predictor.onnx",
+            "tts.json",
+            "unicode_indexer.json",
+        ] {
+            std::fs::write(sup_onnx_dir.join(f), b"").unwrap();
+        }
+        std::fs::write(&sup_style, b"").unwrap();
 
-        let mut speech = SpeechSettings::default();
-        speech.tts_backend = crate::config::TtsBackend::Supertonic;
+        let mut speech = SpeechSettings {
+            tts_backend: crate::config::TtsBackend::Supertonic,
+            ..Default::default()
+        };
         speech.overrides.insert(
             "en".to_string(),
             crate::config::SpeechLocaleOverride {

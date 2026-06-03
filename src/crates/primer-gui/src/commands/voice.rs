@@ -26,6 +26,17 @@ pub mod kind {
     pub const PIPER_ONNX: &str = "piper_onnx";
     pub const PIPER_CONFIG: &str = "piper_config";
     pub const WHISPER_MODEL: &str = "whisper_model";
+
+    // Supertonic 3 bundle — one `kind` per file (6 in onnx/ + 1 voice style).
+    // The string values MUST equal the `kind` fields in
+    // `primer_speech::locale_defaults::SUPERTONIC_ASSETS`.
+    pub const SUPERTONIC_VECTOR_ESTIMATOR: &str = "supertonic_vector_estimator";
+    pub const SUPERTONIC_VOCODER: &str = "supertonic_vocoder";
+    pub const SUPERTONIC_TEXT_ENCODER: &str = "supertonic_text_encoder";
+    pub const SUPERTONIC_DURATION_PREDICTOR: &str = "supertonic_duration_predictor";
+    pub const SUPERTONIC_TTS_CONFIG: &str = "supertonic_tts_config";
+    pub const SUPERTONIC_UNICODE_INDEXER: &str = "supertonic_unicode_indexer";
+    pub const SUPERTONIC_VOICE_STYLE: &str = "supertonic_voice_style";
 }
 
 /// Structured error returned by `start_voice_mode`.
@@ -40,6 +51,12 @@ pub enum StartVoiceModeError {
     NotBuilt,
     /// One or more required model files are missing on disk.
     AssetMissing { entries: Vec<MissingAsset> },
+    /// One or more required model files are missing AND
+    /// `disable_auto_download` is set, so no download is offered. The
+    /// frontend renders an informational banner (no Download button)
+    /// listing the missing `kind`s and pointing the user at
+    /// Settings → Speech.
+    AutoDownloadDisabled { entries: Vec<MissingAsset> },
     /// Any other error — message is dev-facing; the frontend renders
     /// a generic banner and does not surface the inner string to the user.
     Other { message: String },
@@ -57,7 +74,8 @@ pub enum StartVoiceModeError {
 #[derive(Serialize, Clone, Debug)]
 pub struct MissingAsset {
     /// Asset type identifier. Stable strings: `"piper_onnx"`,
-    /// `"piper_config"`, `"whisper_model"`.
+    /// `"piper_config"`, `"whisper_model"`, and the seven `"supertonic_*"`
+    /// bundle kinds (see `primer_speech::locale_defaults::SUPERTONIC_ASSETS`).
     pub kind: String,
     /// Absolute path where the asset was expected.
     pub path: std::path::PathBuf,
@@ -72,6 +90,27 @@ pub struct MissingAsset {
 impl From<String> for StartVoiceModeError {
     fn from(message: String) -> Self {
         Self::Other { message }
+    }
+}
+
+/// Map a resolver `AssetMissing` to the right `start_voice_mode` error,
+/// honouring the `disable_auto_download` setting. Pure so the gate is
+/// unit-testable without the Tauri command. When auto-download is on, the
+/// frontend shows the consent modal (`AssetMissing`); when off, it shows an
+/// informational banner with no Download button (`AutoDownloadDisabled`).
+#[cfg(feature = "speech")]
+pub fn missing_to_error(
+    disable_auto_download: bool,
+    missing: crate::voice::assets::AssetMissing,
+) -> StartVoiceModeError {
+    if disable_auto_download {
+        StartVoiceModeError::AutoDownloadDisabled {
+            entries: missing.entries,
+        }
+    } else {
+        StartVoiceModeError::AssetMissing {
+            entries: missing.entries,
+        }
     }
 }
 
@@ -125,9 +164,7 @@ pub async fn start_voice_mode(
     let (stt, tts) = cfg.speech.resolve_backends();
     let assets =
         crate::voice::assets::resolve_voice_assets(&state.home, &cfg.speech, &locale, stt, tts)
-            .map_err(|missing| StartVoiceModeError::AssetMissing {
-                entries: missing.entries,
-            })?;
+            .map_err(|missing| missing_to_error(cfg.speech.disable_auto_download, missing))?;
 
     // 5. Build the local backends (cpal mic + speaker, VAD, STT, TTS,
     //    audio thread, on_audio, drain hook). Lives in primer-speech;
@@ -386,6 +423,10 @@ pub async fn download_voice_assets(
     use primer_core::i18n::Locale;
     let cfg = state.config.lock().await.clone();
     let locale = Locale::from_pack_id(&cfg.learner.locale).unwrap_or_default();
+    // `disable_auto_download` is intentionally NOT re-checked here: the gate
+    // sits at the single `start_voice_mode` resolver-Err site, and reaching
+    // this command means the consent modal already rendered — which only
+    // happens when the flag is off. See `missing_to_error`.
     let to_download =
         crate::voice::assets::resolve_requested_kinds(&state.home, &cfg.speech, &locale, &kinds);
     for asset in &to_download {
@@ -514,6 +555,26 @@ mod tests {
         assert_eq!(json["approx_size_mb"], 470);
     }
 
+    #[cfg(feature = "speech")]
+    #[test]
+    fn supertonic_kind_constants_match_the_asset_table() {
+        use primer_speech::locale_defaults::supertonic_assets;
+        let table_kinds: std::collections::BTreeSet<&str> =
+            supertonic_assets().iter().map(|a| a.kind).collect();
+        let const_kinds: std::collections::BTreeSet<&str> = [
+            kind::SUPERTONIC_VECTOR_ESTIMATOR,
+            kind::SUPERTONIC_VOCODER,
+            kind::SUPERTONIC_TEXT_ENCODER,
+            kind::SUPERTONIC_DURATION_PREDICTOR,
+            kind::SUPERTONIC_TTS_CONFIG,
+            kind::SUPERTONIC_UNICODE_INDEXER,
+            kind::SUPERTONIC_VOICE_STYLE,
+        ]
+        .into_iter()
+        .collect();
+        assert_eq!(const_kinds, table_kinds);
+    }
+
     // Trust-boundary invariant: `MissingAsset` must NEVER implement
     // `Deserialize`. The IPC direction is server→webview only — if a
     // future contributor re-derives `Deserialize` (e.g. "just to
@@ -617,6 +678,52 @@ mod tests {
         let json = serde_json::to_value(&err).unwrap();
         assert_eq!(json["kind"], "other");
         assert_eq!(json["message"], "test message");
+    }
+
+    #[cfg(feature = "speech")]
+    #[test]
+    fn missing_to_error_offers_download_when_auto_download_enabled() {
+        let missing = crate::voice::assets::AssetMissing {
+            entries: vec![MissingAsset {
+                kind: kind::SUPERTONIC_VOCODER.into(),
+                path: std::path::PathBuf::from("/x/vocoder.onnx"),
+                suggested_url: Some("https://example/vocoder.onnx".into()),
+                approx_size_mb: Some(97),
+            }],
+            locale: "en".into(),
+            approx_total_mb: 97,
+        };
+        let err = missing_to_error(false, missing);
+        match err {
+            StartVoiceModeError::AssetMissing { entries } => assert_eq!(entries.len(), 1),
+            other => panic!("expected AssetMissing, got {other:?}"),
+        }
+    }
+
+    #[cfg(feature = "speech")]
+    #[test]
+    fn missing_to_error_blocks_download_when_disabled() {
+        let missing = crate::voice::assets::AssetMissing {
+            entries: vec![MissingAsset {
+                kind: kind::SUPERTONIC_VOCODER.into(),
+                path: std::path::PathBuf::from("/x/vocoder.onnx"),
+                suggested_url: Some("https://example/vocoder.onnx".into()),
+                approx_size_mb: Some(97),
+            }],
+            locale: "en".into(),
+            approx_total_mb: 97,
+        };
+        let err = missing_to_error(true, missing);
+        match err {
+            StartVoiceModeError::AutoDownloadDisabled { entries } => {
+                assert_eq!(
+                    entries.len(),
+                    1,
+                    "entries carried for the informational banner"
+                );
+            }
+            other => panic!("expected AutoDownloadDisabled, got {other:?}"),
+        }
     }
 
     // ─── Issue #102 polished follow-up: preserve sticky toggle ──────
