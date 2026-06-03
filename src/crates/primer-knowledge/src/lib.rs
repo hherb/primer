@@ -1550,7 +1550,10 @@ mod tests {
         // No statement should leak the bare (locale-less) table names that
         // the legacy single-table layout used.
         assert!(!sql.insert_content.contains("passages_content("));
-        assert!(!sql.retrieve.contains("FROM passages \n"));
+        // A half-interpolated `FROM passages` (bare, locale-less table)
+        // would be followed immediately by the newline; the real one is
+        // `FROM passages_de`, so this fires only on the legacy bare name.
+        assert!(!sql.retrieve.contains("FROM passages\n"));
     }
 
     #[test]

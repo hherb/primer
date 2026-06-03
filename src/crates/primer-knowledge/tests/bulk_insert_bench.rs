@@ -121,7 +121,7 @@ fn time_cached_prepare_cached() -> std::time::Duration {
 
 #[test]
 #[ignore = "perf benchmark; run explicitly with --ignored --nocapture"]
-fn bulk_insert_prepare_cached_beats_format_execute() {
+fn bulk_insert_prepare_cached_not_slower_than_format_execute() {
     // Warm both paths once so allocator / page-cache effects don't bias
     // whichever runs first, then take the timed measurement.
     let _ = time_cached_prepare_cached();
