@@ -89,6 +89,47 @@ def test_wiki_source_disambiguation_patterns_compile():
             )
 
 
+def test_lead_anchored_marker_matches_at_lead_start():
+    """A subject-predicate marker right after a short title-as-subject
+    (the disambiguation-lead shape) is matched."""
+    from wiki.source import _lead_anchored_marker
+
+    pat = _lead_anchored_marker("may refer to")
+    assert pat.search("Mercury may refer to: the planet, the element.")
+    assert pat.search("may refer to: ...")  # marker at the very start
+
+
+def test_lead_anchored_marker_ignores_marker_past_the_subject_window():
+    """A marker buried past the subject window — the prose false-positive
+    case from issue #41 — is NOT matched, even though the phrase is
+    present."""
+    from wiki.source import _DISAMBIGUATION_SUBJECT_MAX_CHARS, _lead_anchored_marker
+
+    pat = _lead_anchored_marker("may refer to")
+    # Pad the subject so the marker starts well past the window.
+    prefix = "x" * (_DISAMBIGUATION_SUBJECT_MAX_CHARS + 5) + " "
+    assert pat.search(prefix + "may refer to data") is None
+    # A realistic prose lead that merely contains the phrase mid-sentence.
+    assert (
+        pat.search(
+            "In computer science, a reference is a value that may refer to data."
+        )
+        is None
+    )
+
+
+def test_lead_anchored_marker_is_case_insensitive_and_first_line_only():
+    """The marker match is case-insensitive (extracts vary in casing)
+    and ``.`` excludes newlines, so a marker on a later line does not
+    match through the title line."""
+    from wiki.source import _lead_anchored_marker
+
+    pat = _lead_anchored_marker("steht für")
+    assert pat.search("Saturn STEHT FÜR: den Planeten.")
+    # Marker on a second line is not reachable from the lead-start anchor.
+    assert pat.search("Saturn\nsteht für: den Planeten.") is None
+
+
 def test_wiki_source_is_a_frozen_dataclass():
     """WikiSource carries process-wide configuration; mutating an
     instance after construction would silently change every passage

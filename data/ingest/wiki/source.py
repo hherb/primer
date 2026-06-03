@@ -236,25 +236,68 @@ class WikiSource:
             )
 
 
+# A disambiguation page's lead opens with the page title as the
+# grammatical subject, immediately followed by a marker phrase
+# ("Mercury may refer to:", "Saturn steht für:"). For "subject-
+# predicate" markers like these we anchor the match to lead-start, so
+# that a body sentence which merely *contains* the phrase (e.g.
+# "...a reference is a value that may refer to data...", or German
+# "...Die Farbe Rot steht für Halt...") does not trip the detector.
+#
+# This constant bounds how many characters may precede the marker, i.e.
+# how long the title-as-subject may be. Disambiguation subjects are
+# short, ambiguous terms ("Base", "Mercury", "New York City"), so a
+# small window comfortably covers them while excluding a marker buried
+# deeper in a prose clause. See issue #41.
+#
+# Tradeoff: a disambiguation page whose subject runs longer than this
+# before the marker would be missed (a false negative). That is
+# acceptable and rare — the failure mode this targets is the previous
+# un-anchored rule's *false positives*, which wrongly blocked good
+# articles whose body happened to contain "may refer to".
+_DISAMBIGUATION_SUBJECT_MAX_CHARS = 40
+
+
+def _lead_anchored_marker(phrase: str) -> re.Pattern:
+    """Compile a subject-predicate disambiguation marker.
+
+    The returned pattern matches ``phrase`` only when it appears within
+    the first ``_DISAMBIGUATION_SUBJECT_MAX_CHARS`` characters of the
+    text — i.e. right after the title-as-subject at lead-start — not
+    anywhere later in a prose sentence. The leading ``.{0,N}?`` is lazy
+    so the match stays as close to lead-start as possible, and ``.``
+    excludes newlines, confining the match to the lead's first line.
+    """
+    return re.compile(
+        r"^.{0,%d}?\b%s\b" % (_DISAMBIGUATION_SUBJECT_MAX_CHARS, re.escape(phrase)),
+        re.IGNORECASE,
+    )
+
+
 # Disambiguation phrasings used by Simple English Wikipedia and
-# English Wikipedia. Detected against the start of the extract.
+# English Wikipedia. The subject-predicate markers are lead-anchored
+# (see ``_lead_anchored_marker``); the explicit self-declaration marker
+# ("is a disambiguation") only ever appears on a disambiguation page,
+# so it stays un-anchored and is matched anywhere in the head.
 _EN_DISAMBIGUATION_PATTERNS: tuple[re.Pattern, ...] = (
-    re.compile(r"\bcan mean\b", re.IGNORECASE),
-    re.compile(r"\bmay refer to\b", re.IGNORECASE),
-    re.compile(r"\bcan refer to\b", re.IGNORECASE),
+    _lead_anchored_marker("can mean"),
+    _lead_anchored_marker("may refer to"),
+    _lead_anchored_marker("can refer to"),
     re.compile(r"\bis a disambiguation\b", re.IGNORECASE),
 )
 
 
 # Disambiguation phrasings used in German wikis (Klexikon, de-Wikipedia).
-# The most common form is ``<title> steht fuer: ...``;
-# ``Begriffsklaerung`` is the literal MediaWiki category and sometimes
-# appears in the lead too.
+# The most common form is ``<title> steht fuer: ...``; like the English
+# prose markers it is lead-anchored, because "X steht für Y" is also an
+# ordinary "X stands for Y" prose construction. The explicit
+# ``Begriffsklaerung`` markers (the literal MediaWiki category) and
+# ``ist mehrdeutig`` stay un-anchored.
 _DE_DISAMBIGUATION_PATTERNS: tuple[re.Pattern, ...] = (
-    re.compile(r"\bsteht für\b", re.IGNORECASE),
+    _lead_anchored_marker("steht für"),
+    _lead_anchored_marker("kann sich beziehen auf"),
     re.compile(r"\bist eine Begriffsklärung\b", re.IGNORECASE),
     re.compile(r"\bBegriffsklärungsseite\b", re.IGNORECASE),
-    re.compile(r"\bkann sich beziehen auf\b", re.IGNORECASE),
     re.compile(r"\bist mehrdeutig\b", re.IGNORECASE),
 )
 
