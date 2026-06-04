@@ -12,3 +12,8 @@ pub mod params;
 pub mod engine;
 
 pub use engine::LlamaEngine;
+
+pub mod backend;
+
+pub use backend::LlamaCppBackend;
+pub use primer_core::backend::LLAMACPP_NAME_PREFIX;

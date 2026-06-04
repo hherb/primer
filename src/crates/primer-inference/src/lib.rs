@@ -29,6 +29,7 @@ pub use cloud::CloudBackend;
 pub use ollama::OllamaBackend;
 pub use openai_compat::OpenAiCompatBackend;
 pub use stub::StubBackend;
+pub use llamacpp::LlamaCppBackend;
 
 #[cfg(feature = "qnn")]
 pub use qnn::QnnBackend;
