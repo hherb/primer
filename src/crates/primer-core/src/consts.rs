@@ -373,3 +373,37 @@ pub mod reasoning {
     pub const DEFAULT_MARKERS: &[(&str, &str)] =
         &[("<think>", "</think>"), ("<|channel>", "<channel|>")];
 }
+
+/// Tunables for the embedded llama.cpp backend (Phase 1.1).
+pub mod inference {
+    /// `n_gpu_layers` value meaning "offload every layer to the GPU".
+    /// The default when a GPU passthrough feature (metal/cuda/vulkan) is
+    /// compiled in.
+    pub const LLAMACPP_GPU_LAYERS_ALL: i32 = -1;
+
+    /// `n_gpu_layers` value meaning "CPU only". The default on a plain
+    /// `llamacpp` (no-GPU) build.
+    pub const LLAMACPP_GPU_LAYERS_CPU: i32 = 0;
+
+    /// Default `n_ctx`. `0` tells llama.cpp to use the model's own trained
+    /// context length rather than imposing one.
+    pub const LLAMACPP_DEFAULT_N_CTX: u32 = 0;
+
+    /// Fixed RNG seed for the sampler so a given prompt + params is
+    /// reproducible across runs. (`GenerationParams` carries no seed.)
+    pub const LLAMACPP_DEFAULT_SAMPLER_SEED: u32 = 1234;
+}
+
+#[cfg(test)]
+mod tests {
+    #[test]
+    fn inference_llamacpp_consts_are_sane() {
+        use super::inference::*;
+        assert_eq!(LLAMACPP_GPU_LAYERS_ALL, -1);
+        assert_eq!(LLAMACPP_GPU_LAYERS_CPU, 0);
+        // 0 = "use the model's trained context length" (llama.cpp convention).
+        assert_eq!(LLAMACPP_DEFAULT_N_CTX, 0);
+        // A fixed seed keeps a given prompt reproducible across runs.
+        assert_eq!(LLAMACPP_DEFAULT_SAMPLER_SEED, 1234);
+    }
+}
