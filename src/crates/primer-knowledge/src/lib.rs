@@ -41,8 +41,9 @@ use std::sync::Mutex;
 /// Current schema version. Bumped whenever a new `apply_vN_migrations`
 /// is added. v1 = legacy / per-locale tables only; v2 = `sources` table;
 /// v3 = `embedding_models` lookup + per-locale `embeddings_<pack>` table
-/// holding one float-vector per passage for hybrid retrieval.
-pub const USER_VERSION: i32 = 3;
+/// holding one float-vector per passage for hybrid retrieval;
+/// v4 = `sources.parent_source_id` self-FK for umbrella attribution (#40).
+pub const USER_VERSION: i32 = 4;
 
 /// Precomputed, locale-qualified SQL for every per-row / per-query hot
 /// path. Built once per `SqliteKnowledgeBase` (in `open_for_locale`) so
@@ -625,19 +626,21 @@ impl KnowledgeBase for SqliteKnowledgeBase {
     async fn upsert_source(&self, source: &SourceMeta) -> Result<()> {
         let conn = self.conn.lock().unwrap();
         conn.execute(
-            "INSERT INTO sources(id, license, attribution, source_url, retrieved_at)
-                 VALUES (?1, ?2, ?3, ?4, ?5)
+            "INSERT INTO sources(id, license, attribution, source_url, retrieved_at, parent_source_id)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6)
                  ON CONFLICT(id) DO UPDATE SET
-                    license       = excluded.license,
-                    attribution   = excluded.attribution,
-                    source_url    = excluded.source_url,
-                    retrieved_at  = excluded.retrieved_at",
+                    license          = excluded.license,
+                    attribution      = excluded.attribution,
+                    source_url       = excluded.source_url,
+                    retrieved_at     = excluded.retrieved_at,
+                    parent_source_id = excluded.parent_source_id",
             rusqlite::params![
                 source.id,
                 source.license,
                 source.attribution,
                 source.source_url,
                 source.retrieved_at,
+                source.parent_source_id,
             ],
         )
         .map_err(|e| PrimerError::Knowledge(format!("upsert source: {e}")))?;
@@ -648,7 +651,7 @@ impl KnowledgeBase for SqliteKnowledgeBase {
         let conn = self.conn.lock().unwrap();
         let mut stmt = conn
             .prepare(
-                "SELECT id, license, attribution, source_url, retrieved_at
+                "SELECT id, license, attribution, source_url, retrieved_at, parent_source_id
                  FROM sources ORDER BY id",
             )
             .map_err(|e| PrimerError::Knowledge(format!("prepare list sources: {e}")))?;
@@ -660,6 +663,7 @@ impl KnowledgeBase for SqliteKnowledgeBase {
                     attribution: row.get(2)?,
                     source_url: row.get(3)?,
                     retrieved_at: row.get(4)?,
+                    parent_source_id: row.get(5)?,
                 })
             })
             .map_err(|e| PrimerError::Knowledge(format!("query sources: {e}")))?;
@@ -836,15 +840,44 @@ fn create_embedding_tables(conn: &Connection, pack: &str) -> Result<()> {
 fn create_sources_table(conn: &Connection) -> Result<()> {
     conn.execute_batch(
         "CREATE TABLE IF NOT EXISTS sources(
-            id            TEXT PRIMARY KEY,
-            license       TEXT NOT NULL,
-            attribution   TEXT NOT NULL,
-            source_url    TEXT,
-            retrieved_at  INTEGER NOT NULL
+            id                TEXT PRIMARY KEY,
+            license           TEXT NOT NULL,
+            attribution       TEXT NOT NULL,
+            source_url        TEXT,
+            retrieved_at      INTEGER NOT NULL,
+            parent_source_id  TEXT REFERENCES sources(id)
         );",
     )
     .map_err(|e| PrimerError::Knowledge(format!("create sources table: {e}")))?;
     Ok(())
+}
+
+/// v4 (#40): add the nullable self-referential `parent_source_id` column to
+/// an existing `sources` table. Idempotent — guarded by a `pragma_table_info`
+/// check so re-running on a DB that already has the column is a no-op. A fresh
+/// DB gets the column directly from `create_sources_table` and skips this.
+fn add_parent_source_id_column(conn: &Connection) -> Result<()> {
+    if sources_has_parent_source_id(conn)? {
+        return Ok(());
+    }
+    conn.execute_batch(
+        "ALTER TABLE sources ADD COLUMN parent_source_id TEXT REFERENCES sources(id);",
+    )
+    .map_err(|e| PrimerError::Knowledge(format!("add sources.parent_source_id: {e}")))?;
+    Ok(())
+}
+
+/// True if the `sources` table already has a `parent_source_id` column.
+fn sources_has_parent_source_id(conn: &Connection) -> Result<bool> {
+    let mut stmt = conn
+        .prepare("PRAGMA table_info(sources)")
+        .map_err(|e| PrimerError::Knowledge(format!("pragma table_info sources: {e}")))?;
+    let has = stmt
+        .query_map([], |r| r.get::<_, String>(1))
+        .map_err(|e| PrimerError::Knowledge(format!("read sources columns: {e}")))?
+        .filter_map(|r| r.ok())
+        .any(|name| name == "parent_source_id");
+    Ok(has)
 }
 
 /// Read SQLite's `PRAGMA user_version`. Defaults to 0 on a fresh DB.
@@ -924,6 +957,10 @@ fn migrate_or_create(conn: &Connection, pack: &str) -> Result<()> {
     // safe to run on every open regardless of `existing_version`.
     create_sources_table(&tx)?;
 
+    // v4: add `sources.parent_source_id` to DBs created before v4. A fresh
+    // DB already has it from `create_sources_table`; this no-ops there.
+    add_parent_source_id_column(&tx)?;
+
     // v3: cross-locale `embedding_models` lookup + per-locale
     // `embeddings_<pack>` table. Same idempotent CREATE IF NOT EXISTS
     // shape; safe to re-run.
@@ -950,6 +987,19 @@ mod tests {
     /// happy to open the 0-byte file as a fresh DB.
     fn tmp_db() -> NamedTempFile {
         NamedTempFile::new().expect("create temp DB file")
+    }
+
+    /// True if `table` has a column named `column` (via `pragma_table_info`).
+    fn column_exists(conn: &Connection, table: &str, column: &str) -> bool {
+        let mut stmt = conn
+            .prepare(&format!("PRAGMA table_info({table})"))
+            .expect("prepare pragma");
+        let names: Vec<String> = stmt
+            .query_map([], |r| r.get::<_, String>(1))
+            .expect("query pragma")
+            .map(|r| r.expect("read column name"))
+            .collect();
+        names.iter().any(|n| n == column)
     }
 
     #[tokio::test]
@@ -1258,6 +1308,7 @@ mod tests {
             attribution: "The Primer seed corpus".to_string(),
             source_url: None,
             retrieved_at: 1_700_000_000,
+            parent_source_id: None,
         };
         let s2 = SourceMeta {
             id: "wikipedia:en:Rayleigh_scattering".to_string(),
@@ -1265,6 +1316,7 @@ mod tests {
             attribution: "Wikipedia contributors".to_string(),
             source_url: Some("https://en.wikipedia.org/wiki/Rayleigh_scattering".to_string()),
             retrieved_at: 1_700_001_000,
+            parent_source_id: None,
         };
         kb.upsert_source(&s1).await.unwrap();
         kb.upsert_source(&s2).await.unwrap();
@@ -1285,6 +1337,95 @@ mod tests {
         let listed = kb.list_sources().await.unwrap();
         assert_eq!(listed.len(), 2, "upsert must not create a duplicate");
         assert_eq!(listed[0], s1_updated);
+    }
+
+    #[tokio::test]
+    async fn fresh_db_sources_table_has_parent_source_id_column() {
+        // Schema v4 (issue #40): `sources` carries a nullable self-FK
+        // `parent_source_id` so per-article rows can point at one shared
+        // umbrella source row.
+        let db = tmp_db();
+        let _kb = SqliteKnowledgeBase::open_for_locale(db.path(), Locale::English).unwrap();
+        let conn = Connection::open(db.path()).unwrap();
+        assert!(
+            column_exists(&conn, "sources", "parent_source_id"),
+            "fresh sources table must have parent_source_id (schema v4)"
+        );
+    }
+
+    #[tokio::test]
+    async fn v3_sources_table_migrates_to_v4_non_destructively() {
+        // A v3 DB has a `sources` table WITHOUT `parent_source_id`. Opening
+        // it must add the column without dropping existing rows.
+        let db = tmp_db();
+        let path = db.path();
+        {
+            let conn = Connection::open(path).unwrap();
+            conn.execute_batch(
+                "CREATE TABLE sources(
+                    id            TEXT PRIMARY KEY,
+                    license       TEXT NOT NULL,
+                    attribution   TEXT NOT NULL,
+                    source_url    TEXT,
+                    retrieved_at  INTEGER NOT NULL
+                );
+                INSERT INTO sources(id, license, attribution, source_url, retrieved_at)
+                    VALUES ('seed:en:x', 'CC0-1.0', 'old row', NULL, 1700000000);",
+            )
+            .unwrap();
+            conn.pragma_update(None, "user_version", 3).unwrap();
+        }
+
+        let kb = SqliteKnowledgeBase::open_for_locale(path, Locale::English).unwrap();
+        let conn = Connection::open(path).unwrap();
+        assert!(
+            column_exists(&conn, "sources", "parent_source_id"),
+            "v3 → v4 migration must add parent_source_id"
+        );
+        let v: i32 = conn
+            .pragma_query_value(None, "user_version", |r| r.get(0))
+            .unwrap();
+        assert_eq!(v, USER_VERSION);
+
+        // Pre-existing row survives, with NULL parent.
+        let listed = kb.list_sources().await.unwrap();
+        assert_eq!(listed.len(), 1);
+        assert_eq!(listed[0].id, "seed:en:x");
+        assert_eq!(listed[0].parent_source_id, None);
+    }
+
+    #[tokio::test]
+    async fn upsert_and_list_sources_round_trip_parent_source_id() {
+        let db = tmp_db();
+        let kb = SqliteKnowledgeBase::open_for_locale(db.path(), Locale::English).unwrap();
+        let umbrella = SourceMeta {
+            id: "wiki-simple:en".to_string(),
+            license: "CC-BY-SA-3.0".to_string(),
+            attribution: "Corpus from Simple English Wikipedia".to_string(),
+            source_url: Some("https://simple.wikipedia.org/".to_string()),
+            retrieved_at: 1_700_000_000,
+            parent_source_id: None,
+        };
+        let child = SourceMeta {
+            id: "wiki-simple:en:mercury".to_string(),
+            license: "CC-BY-SA-3.0".to_string(),
+            attribution: "'Mercury' from Simple English Wikipedia".to_string(),
+            source_url: Some("https://simple.wikipedia.org/wiki/Mercury".to_string()),
+            retrieved_at: 1_700_000_500,
+            parent_source_id: Some("wiki-simple:en".to_string()),
+        };
+        kb.upsert_source(&umbrella).await.unwrap();
+        kb.upsert_source(&child).await.unwrap();
+
+        let listed = kb.list_sources().await.unwrap();
+        assert_eq!(listed.len(), 2);
+        // ORDER BY id: "wiki-simple:en" < "wiki-simple:en:mercury"
+        assert_eq!(listed[0], umbrella);
+        assert_eq!(listed[1], child);
+        assert_eq!(
+            listed[1].parent_source_id.as_deref(),
+            Some("wiki-simple:en")
+        );
     }
 
     #[tokio::test]
