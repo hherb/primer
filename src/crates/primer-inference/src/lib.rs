@@ -20,6 +20,7 @@ pub mod ollama;
 pub mod openai_compat;
 mod reasoning_stream;
 pub mod stub;
+pub mod llamacpp;
 
 #[cfg(feature = "qnn")]
 pub mod qnn;
