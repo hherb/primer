@@ -64,10 +64,19 @@ mod real {
         if let Some(b) = LLAMA_BACKEND.get() {
             return Ok(b);
         }
-        let b = LlamaBackend::init()
-            .map_err(|e| PrimerError::Inference(format!("llama.cpp init failed: {e}").into()))?;
-        let _ = LLAMA_BACKEND.set(b);
-        Ok(LLAMA_BACKEND.get().expect("just set"))
+        // `LlamaBackend::init()` is a process-wide one-shot (internal CAS):
+        // only the first caller gets `Ok`, any concurrent caller gets
+        // `Err(BackendAlreadyInitialized)`. So we must NOT propagate the init
+        // error directly — a second `RealLlamaEngine::new`/`infer` racing the
+        // first would spuriously fail despite a healthy backend. Store on
+        // success, ignore the error otherwise, then read back the populated
+        // cell; only a genuinely-empty cell is a real failure.
+        if let Ok(b) = LlamaBackend::init() {
+            let _ = LLAMA_BACKEND.set(b);
+        }
+        LLAMA_BACKEND
+            .get()
+            .ok_or_else(|| PrimerError::Inference("llama.cpp backend init failed".into()))
     }
 
     /// Minimal fallback chat template for GGUFs that embed none.
