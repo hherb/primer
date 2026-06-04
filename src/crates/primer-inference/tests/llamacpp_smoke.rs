@@ -18,8 +18,8 @@ use primer_inference::llamacpp::engine::RealLlamaEngine;
 async fn generates_nonempty_response() {
     let gguf = std::env::var("PRIMER_LLAMACPP_TEST_GGUF")
         .expect("set PRIMER_LLAMACPP_TEST_GGUF to a .gguf path");
-    let engine = RealLlamaEngine::new(std::path::Path::new(&gguf), -1, Some(2048))
-        .expect("load model");
+    let engine =
+        RealLlamaEngine::new(std::path::Path::new(&gguf), -1, Some(2048)).expect("load model");
     let backend = LlamaCppBackend::new(Arc::new(engine));
 
     assert!(backend.name().starts_with("llamacpp:"));

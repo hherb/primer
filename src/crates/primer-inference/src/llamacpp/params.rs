@@ -4,9 +4,6 @@
 //! feature, so the orchestration logic stays in CI's reach. The
 //! feature-gated `RealLlamaEngine` consumes these helpers.
 
-use primer_core::consts::inference::{
-    LLAMACPP_DEFAULT_N_CTX, LLAMACPP_DEFAULT_SAMPLER_SEED,
-};
 #[cfg(any(
     feature = "llamacpp-metal",
     feature = "llamacpp-cuda",
@@ -19,6 +16,7 @@ use primer_core::consts::inference::LLAMACPP_GPU_LAYERS_ALL;
     feature = "llamacpp-vulkan"
 )))]
 use primer_core::consts::inference::LLAMACPP_GPU_LAYERS_CPU;
+use primer_core::consts::inference::{LLAMACPP_DEFAULT_N_CTX, LLAMACPP_DEFAULT_SAMPLER_SEED};
 use primer_core::error::InferenceError;
 use primer_core::inference::GenerationParams;
 use std::path::Path;

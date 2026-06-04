@@ -860,7 +860,9 @@ async fn async_main() -> anyhow::Result<()> {
         // value is a valid non-empty string; it's rebound to
         // `backend.name()` (= "llamacpp:<stem>") after construction.
         "llamacpp" => cli.model.clone().unwrap_or_else(|| {
-            eprintln!("Error: --model required for llamacpp backend (filesystem path to the .gguf file).");
+            eprintln!(
+                "Error: --model required for llamacpp backend (filesystem path to the .gguf file)."
+            );
             std::process::exit(1);
         }),
         "qnn" => {

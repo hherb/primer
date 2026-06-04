@@ -79,7 +79,10 @@ impl InferenceBackend for LlamaCppBackend {
             let mut on_token = |piece: &str| -> bool {
                 match process_filtered_chunk(
                     &mut filter,
-                    TokenChunk { text: piece.to_string(), done: false },
+                    TokenChunk {
+                        text: piece.to_string(),
+                        done: false,
+                    },
                     &mut had_visible,
                     "llamacpp",
                 ) {
@@ -100,7 +103,10 @@ impl InferenceBackend for LlamaCppBackend {
                     // reasoning-only stream surfaces ReasoningWithoutAnswer.
                     if let FilterAction::Final(r) = process_filtered_chunk(
                         &mut filter,
-                        TokenChunk { text: String::new(), done: true },
+                        TokenChunk {
+                            text: String::new(),
+                            done: true,
+                        },
                         &mut had_visible,
                         "llamacpp",
                     ) {
@@ -157,7 +163,11 @@ mod tests {
             &self.model_id
         }
         fn render_prompt(&self, prompt: &Prompt) -> Result<String> {
-            Ok(format!("SYS:{}|MSGS:{}", prompt.system, prompt.messages.len()))
+            Ok(format!(
+                "SYS:{}|MSGS:{}",
+                prompt.system,
+                prompt.messages.len()
+            ))
         }
         fn infer(
             &self,
@@ -205,8 +215,7 @@ mod tests {
 
     #[test]
     fn name_is_prefixed_model_id() {
-        let backend =
-            LlamaCppBackend::new(Arc::new(MockLlamaEngine::new("Qwen3-7B", &["hi"])));
+        let backend = LlamaCppBackend::new(Arc::new(MockLlamaEngine::new("Qwen3-7B", &["hi"])));
         assert_eq!(backend.name(), "llamacpp:Qwen3-7B");
     }
 
@@ -223,8 +232,7 @@ mod tests {
 
     #[tokio::test]
     async fn generate_aggregates_stream() {
-        let backend =
-            LlamaCppBackend::new(Arc::new(MockLlamaEngine::new("m", &["a", "b", "c"])));
+        let backend = LlamaCppBackend::new(Arc::new(MockLlamaEngine::new("m", &["a", "b", "c"])));
         let text = backend
             .generate(&prompt(), &GenerationParams::default())
             .await
