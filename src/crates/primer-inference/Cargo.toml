@@ -16,6 +16,17 @@ default = []
 # step 1.2.4 will need for the `--backend qnn` CLI flag.
 qnn = ["dep:primer-qnn-sys", "dep:minijinja"]
 
+# Embedded llama.cpp inference (Phase 1.1). Adds the `RealLlamaEngine`
+# body behind `LlamaCppBackend`. Non-default — compiles llama.cpp (C++),
+# so default builds and CI stay light. The backend type, the LlamaEngine
+# trait, the mock, and the pure helpers all compile WITHOUT this feature;
+# only the real engine's llama-cpp-2 calls are gated.
+llamacpp = ["dep:llama-cpp-2"]
+# GPU passthrough — forward to llama-cpp-2's own backend features.
+llamacpp-metal = ["llamacpp", "llama-cpp-2/metal"]
+llamacpp-cuda = ["llamacpp", "llama-cpp-2/cuda"]
+llamacpp-vulkan = ["llamacpp", "llama-cpp-2/vulkan"]
+
 [dependencies]
 primer-core.workspace = true
 async-trait.workspace = true
@@ -31,13 +42,13 @@ thiserror.workspace = true
 primer-qnn-sys = { workspace = true, optional = true }
 minijinja = { workspace = true, optional = true }
 
+# Optional — only pulled when the `llamacpp` feature is enabled.
+llama-cpp-2 = { workspace = true, optional = true }
+
 [dev-dependencies]
 chrono.workspace = true
 tempfile.workspace = true
 clap.workspace = true
-
-# llama.cpp bindings — uncomment when integrating:
-# llama-cpp-2 = "0.1"
 
 # QNN throughput + thermal benchmark (Phase 1.2 step 1.2.6). Device test;
 # requires the `qnn` feature so `QnnBackend` is in the dep graph. Declaring
