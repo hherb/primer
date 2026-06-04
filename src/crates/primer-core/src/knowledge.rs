@@ -48,6 +48,14 @@ pub struct SourceMeta {
     pub source_url: Option<String>,
     /// When this source was last fetched / written, as Unix epoch seconds.
     pub retrieved_at: i64,
+    /// Optional self-referential link to an umbrella source row. Lets many
+    /// per-article rows (e.g. `wiki-simple:en:mercury`) point at one shared
+    /// parent (`wiki-simple:en`) so a credits UI can render a single
+    /// aggregated "Powered by …" line without walking every article row.
+    /// `None` for hand-authored seed content and for umbrella rows
+    /// themselves (an umbrella has no parent). See issue #40.
+    #[serde(default)]
+    pub parent_source_id: Option<String>,
 }
 
 /// Parameters for knowledge retrieval.

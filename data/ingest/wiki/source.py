@@ -26,6 +26,7 @@ from __future__ import annotations
 import dataclasses
 import re
 import unicodedata
+import urllib.parse
 from pathlib import Path
 
 
@@ -369,6 +370,41 @@ def to_passage(record: dict, *, source: WikiSource) -> dict:
         "source_url": record["canonical_url"],
         "text": _strip_math_artifacts(record["lead_text"]),
         "topics": ["wikipedia", *source.topic_tags, slug],
+        "parent_source": _parent_source(source),
+    }
+
+
+def _site_root(url: str) -> str:
+    """Return the bare ``scheme://netloc/`` root of ``url``.
+
+    ``web_base_url`` is an article-path prefix (e.g.
+    ``https://simple.wikipedia.org/wiki/``); the umbrella source's
+    ``source_url`` should point at the site root instead. Derived via
+    :mod:`urllib.parse` rather than string-trimming so a port or unusual
+    path is handled correctly.
+    """
+    parts = urllib.parse.urlsplit(url)
+    return f"{parts.scheme}://{parts.netloc}/"
+
+
+def _parent_source(source: WikiSource) -> dict:
+    """Build the umbrella ``parent_source`` object for a Wikipedia-shaped
+    source (issue #40).
+
+    Every passage from one ``WikiSource`` shares the same umbrella so the
+    loader can de-dupe them into a single ``sources`` row that each
+    per-article row links to via ``parent_source_id``. The id is the
+    source family prefix (``<id_prefix>:<pack_id>``) — i.e. each child's
+    id minus its ``:<slug>`` tail.
+    """
+    return {
+        "id": f"{source.id_prefix}:{source.pack_id}",
+        "license": source.license,
+        "attribution": (
+            f"Corpus from {source.human_label}, licensed under "
+            f"{source.license} (per-article credits at the linked pages)"
+        ),
+        "source_url": _site_root(source.web_base_url),
     }
 
 

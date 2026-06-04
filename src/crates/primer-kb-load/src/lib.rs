@@ -21,7 +21,11 @@
 //! ```
 //!
 //! `topics` is informational only and not persisted. `source` is a stable
-//! string reused as the foreign key into the `sources` table.
+//! string reused as the foreign key into the `sources` table. An optional
+//! `parent_source` object (issue #40) declares an umbrella source the
+//! passage belongs to; the loader registers it once and links each child
+//! source to it via `sources.parent_source_id`. The flat hand-drafted seed
+//! corpus omits `parent_source`.
 //!
 //! ## Idempotency
 //!
@@ -61,6 +65,30 @@ pub struct SeedPassage {
     /// Informational topic tags. Not persisted.
     #[serde(default)]
     pub topics: Vec<String>,
+    /// Optional umbrella source this passage belongs to (issue #40). When
+    /// present, the passage's own source row is linked to `parent_source.id`
+    /// and the umbrella row itself is registered in the `sources` table.
+    /// Absent for the flat hand-drafted seed corpus.
+    #[serde(default)]
+    pub parent_source: Option<ParentSource>,
+}
+
+/// An umbrella source declaration carried inline on each Wikipedia-shaped
+/// passage so a credits UI can render one aggregated "Powered by …" line
+/// instead of one row per article. Many passages repeat the same value;
+/// the loader de-dupes it into a single `sources` row. See issue #40.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ParentSource {
+    /// Stable umbrella id, e.g. `"wiki-simple:en"`. Referenced by each
+    /// child source's `parent_source_id`.
+    pub id: String,
+    /// Licence tag for the corpus as a whole.
+    pub license: String,
+    /// Aggregated human-readable credit line for the whole corpus.
+    pub attribution: String,
+    /// Canonical site-root URL for the source, if any.
+    #[serde(default)]
+    pub source_url: Option<String>,
 }
 
 /// Summary of a load run.
@@ -100,7 +128,8 @@ pub async fn load_jsonl(kb: &SqliteKnowledgeBase, path: &Path) -> Result<LoadSta
             PrimerError::Knowledge(format!("parse JSONL line {}: {e}", line_no + 1))
         })?;
 
-        // Upsert the source the first time we see it in this file.
+        // Register the source the first time we see it in this file, linking
+        // it to its umbrella parent when the passage declares one (#40).
         sources
             .entry(passage.source.clone())
             .or_insert_with(|| SourceMeta {
@@ -109,7 +138,23 @@ pub async fn load_jsonl(kb: &SqliteKnowledgeBase, path: &Path) -> Result<LoadSta
                 attribution: passage.attribution.clone(),
                 source_url: passage.source_url.clone(),
                 retrieved_at: now,
+                parent_source_id: passage.parent_source.as_ref().map(|p| p.id.clone()),
             });
+
+        // Register the umbrella source itself (de-duped across passages that
+        // share it). An umbrella has no parent of its own.
+        if let Some(parent) = &passage.parent_source {
+            sources
+                .entry(parent.id.clone())
+                .or_insert_with(|| SourceMeta {
+                    id: parent.id.clone(),
+                    license: parent.license.clone(),
+                    attribution: parent.attribution.clone(),
+                    source_url: parent.source_url.clone(),
+                    retrieved_at: now,
+                    parent_source_id: None,
+                });
+        }
 
         if existing_ids.contains(&passage.id) {
             stats.skipped_existing += 1;
@@ -119,7 +164,14 @@ pub async fn load_jsonl(kb: &SqliteKnowledgeBase, path: &Path) -> Result<LoadSta
         stats.inserted += 1;
     }
 
-    for src in sources.values() {
+    // Upsert umbrella (parent-less) rows before child rows: the
+    // `sources.parent_source_id` FK references `sources(id)`, so a child
+    // written before its umbrella exists would fail the constraint. The
+    // HashMap iteration order is arbitrary, so we must order explicitly.
+    for src in sources.values().filter(|s| s.parent_source_id.is_none()) {
+        kb.upsert_source(src).await?;
+    }
+    for src in sources.values().filter(|s| s.parent_source_id.is_some()) {
         kb.upsert_source(src).await?;
     }
     stats.sources_seen = sources.len();
@@ -379,6 +431,78 @@ mod tests {
 
         let sources = kb.list_sources().await.unwrap();
         assert_eq!(sources.len(), 2);
+    }
+
+    #[tokio::test]
+    async fn parent_source_creates_umbrella_and_links_child() {
+        // A passage carrying a nested `parent_source` must (a) link its own
+        // source row to the umbrella via parent_source_id, and (b) cause the
+        // umbrella row itself to be registered. Issue #40.
+        let db = tempfile::NamedTempFile::new().unwrap();
+        let kb = SqliteKnowledgeBase::open_for_locale(db.path(), Locale::English).unwrap();
+        let jsonl = write_jsonl(&[
+            r#"{"id":"wiki-simple:en:mercury","source":"wiki-simple:en:mercury","license":"CC-BY-SA-3.0","attribution":"'Mercury' from Simple English Wikipedia","source_url":"https://simple.wikipedia.org/wiki/Mercury","parent_source":{"id":"wiki-simple:en","license":"CC-BY-SA-3.0","attribution":"Corpus from Simple English Wikipedia","source_url":"https://simple.wikipedia.org/"},"text":"mercury is the smallest planet"}"#,
+        ]);
+        let stats = load_jsonl(&kb, jsonl.path()).await.unwrap();
+        assert_eq!(stats.inserted, 1);
+        // One child source + one umbrella source.
+        assert_eq!(stats.sources_seen, 2);
+
+        let sources = kb.list_sources().await.unwrap();
+        let child = sources
+            .iter()
+            .find(|s| s.id == "wiki-simple:en:mercury")
+            .expect("child source registered");
+        assert_eq!(child.parent_source_id.as_deref(), Some("wiki-simple:en"));
+
+        let umbrella = sources
+            .iter()
+            .find(|s| s.id == "wiki-simple:en")
+            .expect("umbrella source registered");
+        assert_eq!(umbrella.parent_source_id, None);
+        assert_eq!(umbrella.attribution, "Corpus from Simple English Wikipedia");
+        assert_eq!(
+            umbrella.source_url.as_deref(),
+            Some("https://simple.wikipedia.org/")
+        );
+    }
+
+    #[tokio::test]
+    async fn no_parent_source_stays_flat() {
+        // A passage without `parent_source` (the hand-drafted seed shape)
+        // registers a source row with a NULL parent_source_id.
+        let db = tempfile::NamedTempFile::new().unwrap();
+        let kb = SqliteKnowledgeBase::open_for_locale(db.path(), Locale::English).unwrap();
+        let jsonl = write_jsonl(&[
+            r#"{"id":"seed:en:p1","source":"seed:en:p1","license":"CC0-1.0","attribution":"The Primer seed corpus","text":"the sky is blue"}"#,
+        ]);
+        load_jsonl(&kb, jsonl.path()).await.unwrap();
+        let sources = kb.list_sources().await.unwrap();
+        assert_eq!(sources.len(), 1);
+        assert_eq!(sources[0].parent_source_id, None);
+    }
+
+    #[tokio::test]
+    async fn two_children_share_one_umbrella() {
+        // Two passages pointing at the same parent_source must yield exactly
+        // one umbrella row (de-duped), plus the two child rows.
+        let db = tempfile::NamedTempFile::new().unwrap();
+        let kb = SqliteKnowledgeBase::open_for_locale(db.path(), Locale::English).unwrap();
+        let jsonl = write_jsonl(&[
+            r#"{"id":"wiki-simple:en:mercury","source":"wiki-simple:en:mercury","license":"CC-BY-SA-3.0","attribution":"'Mercury' …","parent_source":{"id":"wiki-simple:en","license":"CC-BY-SA-3.0","attribution":"Corpus from Simple English Wikipedia","source_url":"https://simple.wikipedia.org/"},"text":"mercury is a planet"}"#,
+            r#"{"id":"wiki-simple:en:atom","source":"wiki-simple:en:atom","license":"CC-BY-SA-3.0","attribution":"'Atom' …","parent_source":{"id":"wiki-simple:en","license":"CC-BY-SA-3.0","attribution":"Corpus from Simple English Wikipedia","source_url":"https://simple.wikipedia.org/"},"text":"an atom is tiny"}"#,
+        ]);
+        let stats = load_jsonl(&kb, jsonl.path()).await.unwrap();
+        assert_eq!(stats.inserted, 2);
+        // 2 children + 1 shared umbrella.
+        assert_eq!(stats.sources_seen, 3);
+
+        let sources = kb.list_sources().await.unwrap();
+        let umbrellas: Vec<_> = sources
+            .iter()
+            .filter(|s| s.id == "wiki-simple:en")
+            .collect();
+        assert_eq!(umbrellas.len(), 1, "umbrella must be de-duped to one row");
     }
 
     #[tokio::test]

@@ -144,6 +144,29 @@ def test_wiki_source_is_a_frozen_dataclass():
         SIMPLE_ENGLISH.pack_id = "xx"  # type: ignore[misc]
 
 
+def test_site_root_strips_article_path():
+    # Issue #40: the umbrella source_url is the site root, derived from
+    # web_base_url (which is the article-path prefix), not the full prefix.
+    from wiki.source import _site_root
+
+    assert _site_root("https://simple.wikipedia.org/wiki/") == "https://simple.wikipedia.org/"
+    assert _site_root("https://klexikon.zum.de/wiki/") == "https://klexikon.zum.de/"
+
+
+def test_site_root_preserves_port_and_handles_bare_root():
+    from wiki.source import _site_root
+
+    assert _site_root("http://localhost:8080/wiki/") == "http://localhost:8080/"
+    assert _site_root("https://example.org/") == "https://example.org/"
+
+
+def test_umbrella_id_is_id_prefix_and_pack_id():
+    # Drift guard: the umbrella id the emitter builds must be exactly
+    # "<id_prefix>:<pack_id>" so it matches each child's "<...>:<slug>" family.
+    assert SIMPLE_ENGLISH.id_prefix + ":" + SIMPLE_ENGLISH.pack_id == "wiki-simple:en"
+    assert KLEXIKON.id_prefix + ":" + KLEXIKON.pack_id == "wiki-klexikon:de"
+
+
 def test_unknown_fetch_strategy_is_rejected():
     """A typo in `fetch_strategy` would silently fall through to
     whichever default branch the dispatch picks. Validate the field

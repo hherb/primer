@@ -18,6 +18,15 @@ def test_basic_record():
         "source_url": "https://simple.wikipedia.org/wiki/Photosynthesis",
         "text": "Photosynthesis is a process used by plants and other organisms.",
         "topics": ["wikipedia", "simple-english", "science", "photosynthesis"],
+        "parent_source": {
+            "id": "wiki-simple:en",
+            "license": "CC-BY-SA-3.0",
+            "attribution": (
+                "Corpus from Simple English Wikipedia, licensed under "
+                "CC-BY-SA-3.0 (per-article credits at the linked pages)"
+            ),
+            "source_url": "https://simple.wikipedia.org/",
+        },
     }
 
 
@@ -134,6 +143,45 @@ def test_to_passage_with_klexikon_source_uses_de_pack_id_and_label():
     assert p["source_url"] == "https://klexikon.zum.de/wiki/Klima"
     # Topics: ["wikipedia", *source.topic_tags, slug].
     assert p["topics"] == ["wikipedia", "klexikon", "klima"]
+
+
+def test_parent_source_emitted_for_simple_english():
+    # Issue #40: each passage carries a nested `parent_source` umbrella so
+    # the loader can register one shared "Simple English Wikipedia" row that
+    # every per-article source points at via parent_source_id.
+    record = {
+        "title": "Mercury (planet)",
+        "lead_text": "Mercury is the smallest planet in the Solar System.",
+        "canonical_url": "https://simple.wikipedia.org/wiki/Mercury_(planet)",
+    }
+    p = to_passage(record, source=SIMPLE_ENGLISH)
+    assert p["parent_source"] == {
+        "id": "wiki-simple:en",
+        "license": "CC-BY-SA-3.0",
+        "attribution": (
+            "Corpus from Simple English Wikipedia, licensed under "
+            "CC-BY-SA-3.0 (per-article credits at the linked pages)"
+        ),
+        "source_url": "https://simple.wikipedia.org/",
+    }
+
+
+def test_parent_source_emitted_for_klexikon():
+    record = {
+        "title": "Klima",
+        "lead_text": "Wenn man vom Klima spricht, ist gemeint, wie warm es ist.",
+        "canonical_url": "https://klexikon.zum.de/wiki/Klima",
+    }
+    p = to_passage(record, source=KLEXIKON)
+    assert p["parent_source"] == {
+        "id": "wiki-klexikon:de",
+        "license": "CC-BY-SA-4.0",
+        "attribution": (
+            "Corpus from Klexikon, licensed under CC-BY-SA-4.0 "
+            "(per-article credits at the linked pages)"
+        ),
+        "source_url": "https://klexikon.zum.de/",
+    }
 
 
 def test_to_passage_with_klexikon_source_handles_eszett_in_title():
