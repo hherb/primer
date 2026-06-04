@@ -8,3 +8,7 @@
 //! CI-covered via the mock).
 
 pub mod params;
+
+pub mod engine;
+
+pub use engine::LlamaEngine;
