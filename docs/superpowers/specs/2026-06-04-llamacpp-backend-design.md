@@ -25,9 +25,11 @@ depend on.
 
 ## Binding choice
 
-`llama-cpp-2` (crate published by utilityai; repo `utilityai/llama-cpp-rs`).
+`llama-cpp-2` (crate published by utilityai; repo `utilityai/llama-cpp-rs`;
+current version **0.1.146**, pinned `"0.1.146"` in `[workspace.dependencies]`).
 The most maintained, widely-used Rust binding; already pencilled into
-`primer-inference/Cargo.toml` as the intended dependency. It compiles
+`primer-inference/Cargo.toml` as the intended dependency. It does **not** pull
+`ort`, so it does not interact with the workspace's `=2.0.0-rc.10` ort pin. It compiles
 llama.cpp via cmake/C++ — therefore the backend **must** be a non-default
 cargo feature (CLAUDE.md: "No system dependencies for default builds").
 
@@ -82,17 +84,24 @@ it holds an `Arc<dyn LlamaEngine>`).
 pub trait LlamaEngine: Send + Sync {
     fn model_id(&self) -> &str;
     fn render_prompt(&self, prompt: &Prompt) -> Result<String>;
-    fn infer_streaming(
+    /// Run the blocking decode loop. For each detokenized RAW piece, call
+    /// `on_token(piece)`; stop early if it returns `false` (the consumer
+    /// dropped). Return `Ok(())` on natural completion (eos / max_tokens /
+    /// stop-sequence), `Err` on a decode failure.
+    fn infer(
         &self,
         rendered: &str,
         params: &GenerationParams,
-        tx: mpsc::UnboundedSender<Result<TokenChunk>>,
-    );
+        on_token: &mut dyn FnMut(&str) -> bool,
+    ) -> Result<()>;
 }
 ```
 
 - `render_prompt` applies the chat template (cheap CPU; runs on the calling task).
-- `infer_streaming` owns the blocking decode loop; called inside `spawn_blocking`.
+- `infer` owns the blocking decode loop; called inside `spawn_blocking`. It
+  emits **raw, unfiltered** token text — reasoning-marker stripping is the
+  backend's job (see below), which keeps that logic in the always-compiled,
+  host-tested path rather than inside the feature-gated engine.
 
 ### `RealLlamaEngine` (`#[cfg(feature = "llamacpp")]`)
 
@@ -112,36 +121,48 @@ pub trait LlamaEngine: Send + Sync {
      load never hard-fails on a template-less GGUF.
   5. `model_id` = GGUF file stem.
   - No ABI smoke check (in-process, not a dlopen'd FFI surface like QNN).
-- `infer_streaming`: tokenize → batch decode loop → build a `LlamaSampler`
-  chain from the `SamplerSpec` that `params.rs` derived (top_p, temp, dist
-  with a default seed const since `GenerationParams` has no seed field) →
-  `token_to_piece` → push each detokenized piece through the
-  **shared reasoning filter** then to `tx`. Halt on `token_eos()`, on
-  `max_tokens`, or when any `params.stop_sequences` matches the accumulated
-  output tail. Push a final `TokenChunk { text: "", done: true }`.
+- `infer`: tokenize → batch decode loop → build a `LlamaSampler` chain from
+  the `SamplerSpec` that `params.rs` derived (top_p, temp, dist with a default
+  seed const since `GenerationParams` has no seed field) → `token_to_piece` →
+  call `on_token(piece)` with each **raw** piece. Halt on `token_eos()`, on
+  `max_tokens`, when any `params.stop_sequences` matches the accumulated raw
+  output tail (via the pure `tail_matches_any_stop` helper), or when
+  `on_token` returns `false`. Return `Ok(())` on completion / `Err` on a
+  decode failure — the backend translates that into the terminal stream chunk.
 
-### Reasoning filter
+### Reasoning filter (in the backend bridge, not the engine)
 
-`RealLlamaEngine` runs each piece through
+The reasoning-marker strip lives in `LlamaCppBackend`'s `spawn_blocking`
+bridge, wrapping the engine's raw `on_token` stream through
 `reasoning_stream::process_filtered_chunk` with `default_markers()` + the
-extra pairs threaded via `BackendParams.reasoning_markers` — identical to
-`OllamaBackend`/`OpenAiCompatBackend`, so `<think>…</think>` and Gemma4-style
-markers never reach a child. `ReasoningWithoutAnswer` is surfaced when the
-model reasons but emits no visible answer (same as the HTTP backends).
+extra pairs threaded via `BackendParams.reasoning_markers` — identical
+semantics to `OllamaBackend`/`OpenAiCompatBackend`, so `<think>…</think>` and
+Gemma4-style markers never reach a child, and `ReasoningWithoutAnswer` is
+surfaced when the model reasons but emits no visible answer. Putting the
+filter here (not in `RealLlamaEngine`) is deliberate: the mock engine emits
+raw `<think>` content and the **default `cargo test`** asserts the consumer
+sees it stripped — the integration is CI-covered, not only the shared
+`reasoning_stream` unit tests.
 
 ### `LlamaCppBackend` (always compiled)
 
 ```rust
 pub struct LlamaCppBackend {
-    name: String,                 // cached "llamacpp:{model_id}"
+    name: String,                                       // cached "llamacpp:{model_id}"
     engine: Arc<dyn LlamaEngine>,
+    reasoning_markers: Vec<primer_core::reasoning::ReasoningMarker>,
 }
 ```
 
+- `new(engine)` uses `default_markers()`; `with_extra_markers(extra)` appends
+  custom pairs (mirrors `OllamaBackend`). `name` = `"llamacpp:{model_id()}"`.
 - `generate_stream`: `engine.render_prompt(prompt)?` on the calling task;
-  build `mpsc::unbounded`; clone the `Arc<dyn LlamaEngine>`;
-  `spawn_blocking(move || engine.infer_streaming(&rendered, &params, tx))`;
-  return the receiver wrapped as `TokenStream`.
+  build `mpsc::unbounded`; clone the `Arc<dyn LlamaEngine>`, the markers, and
+  `params`; in `spawn_blocking`, construct a `ReasoningFilter`, run the
+  engine's raw `on_token` pieces through `process_filtered_chunk`
+  (`unbounded_send` each `Forward`; stop on send failure), then flush a
+  synthetic done chunk on `Ok(())` (or forward the `Err`); return the receiver
+  wrapped as `TokenStream`.
 - `generate`: trait default (collects the stream).
 - `name()`: cached `"llamacpp:{model_id}"`.
 - `is_available()`: `true` (construction succeeded ⇒ model loaded).
