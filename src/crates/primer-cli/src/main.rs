@@ -68,8 +68,9 @@ use uuid::Uuid;
 )]
 struct Cli {
     /// Inference backend: "stub", "cloud", "ollama", "openai-compat",
-    /// or "qnn" (the last requires `--features qnn` at build time and
-    /// targets the Qualcomm NPU on Android).
+    /// "qnn", or "llamacpp" (qnn requires `--features qnn` at build time
+    /// and targets the Qualcomm NPU on Android; llamacpp requires a
+    /// `--features llamacpp*` build).
     #[arg(long, default_value = "stub")]
     backend: String,
 
@@ -78,6 +79,7 @@ struct Cli {
     /// For openai-compat: server-specific model id — required.
     /// For qnn: ignored — the model id is read from `primer-meta.json`
     /// inside the bundle and surfaced as `qnn:<model_id>`.
+    /// For llamacpp: filesystem path to the .gguf file — required.
     #[arg(long)]
     model: Option<String>,
 
@@ -439,6 +441,17 @@ struct Cli {
     #[cfg(feature = "qnn")]
     #[arg(long, value_name = "DIR", env = "PRIMER_QNN_QAIRT_LIB_DIR")]
     qnn_qairt_lib_dir: Option<PathBuf>,
+
+    /// llama.cpp: number of model layers to offload to GPU. Default:
+    /// all layers (-1) when built with a GPU feature, else CPU (0).
+    /// Only meaningful with `--backend llamacpp`.
+    #[arg(long, value_name = "N")]
+    llamacpp_gpu_layers: Option<i32>,
+
+    /// llama.cpp: context length (n_ctx). Default: the model's trained
+    /// length. Only meaningful with `--backend llamacpp`.
+    #[arg(long, value_name = "N")]
+    llamacpp_n_ctx: Option<u32>,
 }
 
 #[cfg(feature = "speech")]
@@ -841,6 +854,15 @@ async fn async_main() -> anyhow::Result<()> {
             eprintln!("Error: --model required for openai-compat backend.");
             std::process::exit(1);
         }),
+        // For llamacpp `--model` is the GGUF path (required). The string
+        // is unused by the llamacpp arm of `build_backend` (which reads
+        // `gguf_path`), but seed it with the path so the pre-construction
+        // value is a valid non-empty string; it's rebound to
+        // `backend.name()` (= "llamacpp:<stem>") after construction.
+        "llamacpp" => cli.model.clone().unwrap_or_else(|| {
+            eprintln!("Error: --model required for llamacpp backend (filesystem path to the .gguf file).");
+            std::process::exit(1);
+        }),
         "qnn" => {
             // Surface a one-line note when the user passed `--model`
             // alongside `--backend qnn`. Documented behaviour is that
@@ -890,6 +912,13 @@ async fn async_main() -> anyhow::Result<()> {
         qnn_qairt_lib_dir: cli.qnn_qairt_lib_dir.clone(),
         #[cfg(not(feature = "qnn"))]
         qnn_qairt_lib_dir: None,
+        gguf_path: if cli.backend == "llamacpp" {
+            cli.model.clone().map(std::path::PathBuf::from)
+        } else {
+            None
+        },
+        llamacpp_gpu_layers: cli.llamacpp_gpu_layers,
+        llamacpp_n_ctx: cli.llamacpp_n_ctx,
         reasoning_markers: pair_reasoning_markers(cli.reasoning_marker.clone()),
     };
 
@@ -906,7 +935,7 @@ async fn async_main() -> anyhow::Result<()> {
     // `main_model` to `backend.name()` (e.g. "qnn:Qwen3-4B") so the
     // downstream classifier/extractor/comprehension identifiers carry
     // the real model id instead of the "qnn-pending" placeholder.
-    let main_model: String = if cli.backend == "qnn" {
+    let main_model: String = if cli.backend == "qnn" || cli.backend == "llamacpp" {
         backend.name().to_string()
     } else {
         main_model
@@ -927,9 +956,12 @@ async fn async_main() -> anyhow::Result<()> {
             eprintln!("Using qnn (Qualcomm NPU) backend with {main_model}.");
             warn_on_npu_serialisation(&cli);
         }
+        "llamacpp" => {
+            eprintln!("Using embedded llama.cpp backend with {main_model}.");
+        }
         other => {
             eprintln!(
-                "Unknown backend: {other}. Use 'stub', 'cloud', 'ollama', 'openai-compat', or 'qnn'."
+                "Unknown backend: {other}. Use 'stub', 'cloud', 'ollama', 'openai-compat', 'qnn', or 'llamacpp'."
             );
             std::process::exit(1);
         }

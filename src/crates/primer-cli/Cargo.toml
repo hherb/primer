@@ -103,3 +103,11 @@ macos-native-26 = ["primer-speech/macos-native-26"]
 # error from `primer-qnn-sys::GenieLibrary::open` (PlatformUnsupported)
 # surfaces cleanly via the existing inference-error rendering.
 qnn = ["primer-inference/qnn", "primer-engine/qnn"]
+
+# Embedded llama.cpp backend (Phase 1.1). Wires `--backend llamacpp` through
+# to `LlamaCppBackend`. GPU variants forward to the binding's backend
+# features. Non-default (compiles llama.cpp C++).
+llamacpp = ["primer-inference/llamacpp", "primer-engine/llamacpp"]
+llamacpp-metal = ["primer-inference/llamacpp-metal", "primer-engine/llamacpp-metal"]
+llamacpp-cuda = ["primer-inference/llamacpp-cuda", "primer-engine/llamacpp-cuda"]
+llamacpp-vulkan = ["primer-inference/llamacpp-vulkan", "primer-engine/llamacpp-vulkan"]
