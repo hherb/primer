@@ -328,6 +328,7 @@
                 <option value="ollama">ollama (local)</option>
                 <option value="openai-compat">openai-compat (oMLX / LM Studio / vLLM)</option>
                 <option value="qnn">qnn (Qualcomm NPU — Android)</option>
+                <option value="llamacpp">llamacpp (local GGUF)</option>
               </select>
             </label>
             <label class="field">
@@ -376,6 +377,41 @@
               <small class="hint muted"
                 >Directory containing <code>libGenie.so</code>. Leave blank to
                 use the conventional layout.</small
+              >
+            </label>
+            <label class="field" id="f-backend-gguf-path-field">
+              <span>GGUF model path</span>
+              <input
+                type="text"
+                id="f-backend-gguf-path"
+                placeholder="/path/to/model.gguf"
+              />
+              <small class="hint muted"
+                >Filesystem path to the <code>.gguf</code> model file.</small
+              >
+            </label>
+            <label class="field" id="f-backend-llamacpp-gpu-layers-field">
+              <span>GPU layers (optional)</span>
+              <input
+                type="number"
+                id="f-backend-llamacpp-gpu-layers"
+                placeholder="(feature default)"
+              />
+              <small class="hint muted"
+                >Number of layers to offload to the GPU. Leave blank to use the
+                compiled backend's default.</small
+              >
+            </label>
+            <label class="field" id="f-backend-llamacpp-n-ctx-field">
+              <span>Context length (optional)</span>
+              <input
+                type="number"
+                id="f-backend-llamacpp-n-ctx"
+                placeholder="(model default)"
+              />
+              <small class="hint muted"
+                >Token context window. Leave blank to use the model's trained
+                default.</small
               >
             </label>
             <label class="field" id="f-backend-reasoning-markers-field">

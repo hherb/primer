@@ -50,6 +50,14 @@ const dom = {
     backendQnnBundleDirField: document.getElementById("f-backend-qnn-bundle-dir-field"),
     backendQnnQairtLibDir: document.getElementById("f-backend-qnn-qairt-lib-dir"),
     backendQnnQairtLibDirField: document.getElementById("f-backend-qnn-qairt-lib-dir-field"),
+    backendGgufPath: document.getElementById("f-backend-gguf-path"),
+    backendGgufPathField: document.getElementById("f-backend-gguf-path-field"),
+    backendLlamacppGpuLayers: document.getElementById("f-backend-llamacpp-gpu-layers"),
+    backendLlamacppGpuLayersField: document.getElementById(
+      "f-backend-llamacpp-gpu-layers-field",
+    ),
+    backendLlamacppNCtx: document.getElementById("f-backend-llamacpp-n-ctx"),
+    backendLlamacppNCtxField: document.getElementById("f-backend-llamacpp-n-ctx-field"),
     backendReasoningMarkers: document.getElementById("f-backend-reasoning-markers"),
     backendReasoningMarkersField: document.getElementById(
       "f-backend-reasoning-markers-field",
@@ -283,6 +291,9 @@ function populate(view) {
   f.backendOpenaiCompatUrl.value = view.backend.openai_compat_url ?? "";
   f.backendQnnBundleDir.value = view.backend.qnn_bundle_dir ?? "";
   f.backendQnnQairtLibDir.value = view.backend.qnn_qairt_lib_dir ?? "";
+  f.backendGgufPath.value = view.backend.gguf_path ?? "";
+  f.backendLlamacppGpuLayers.value = view.backend.llamacpp_gpu_layers ?? "";
+  f.backendLlamacppNCtx.value = view.backend.llamacpp_n_ctx ?? "";
   f.backendReasoningMarkers.value = view.backend.reasoning_markers ?? "";
   applyBackendKindReveal(view.backend.kind);
 
@@ -508,6 +519,11 @@ function applyBackendKindReveal(kind) {
   const qnn = kind === "qnn";
   dom.fields.backendQnnBundleDirField.hidden = !qnn;
   dom.fields.backendQnnQairtLibDirField.hidden = !qnn;
+  // GGUF path / gpu-layers / n_ctx only relevant for the llamacpp backend.
+  const llamacpp = kind === "llamacpp";
+  dom.fields.backendGgufPathField.hidden = !llamacpp;
+  dom.fields.backendLlamacppGpuLayersField.hidden = !llamacpp;
+  dom.fields.backendLlamacppNCtxField.hidden = !llamacpp;
   // Reasoning markers only apply to the ollama / openai-compat backends
   // (stub/cloud/qnn ignore them).
   dom.fields.backendReasoningMarkersField.hidden =
@@ -713,6 +729,12 @@ function gather() {
       // Keep/Env dance.
       qnn_bundle_dir: orNull(f.backendQnnBundleDir.value.trim()),
       qnn_qairt_lib_dir: orNull(f.backendQnnQairtLibDir.value.trim()),
+      // llama.cpp GGUF path / gpu-layers / n_ctx — also mandatory (no
+      // serde default). GGUF path is null when blank; the two numeric
+      // overrides are null when empty, else integers.
+      gguf_path: orNull(f.backendGgufPath.value.trim()),
+      llamacpp_gpu_layers: orNullNumber(f.backendLlamacppGpuLayers.value),
+      llamacpp_n_ctx: orNullNumber(f.backendLlamacppNCtx.value),
       // Raw textarea text — also mandatory (no serde default). Sent
       // verbatim (no trim) so the stored text round-trips exactly; the
       // Rust parser handles all whitespace. Empty string when blank.

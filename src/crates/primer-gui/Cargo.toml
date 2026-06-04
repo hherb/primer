@@ -94,6 +94,19 @@ openai-compat-embedding = ["primer-engine/openai-compat-embedding"]
 # error-inline pattern. Android target only at runtime.
 qnn = ["primer-engine/qnn"]
 
+# Embedded llama.cpp inference backend (Phase 1.1). Forwards to
+# `primer-engine/llamacpp` so the `LlamaCppBackend` lands in the GUI's
+# dep graph and `build_llamacpp_backend`'s real arm constructs. WITHOUT
+# this feature the llamacpp option is still selectable in Settings (the
+# GGUF path / gpu-layers / n_ctx config fields are always-present), but
+# selecting it surfaces the "rebuild with --features llamacpp" hint
+# inline — mirroring the qnn pattern. The `-metal` / `-cuda` / `-vulkan`
+# variants enable the corresponding GPU acceleration backend.
+llamacpp = ["primer-inference/llamacpp", "primer-engine/llamacpp"]
+llamacpp-metal = ["primer-inference/llamacpp-metal", "primer-engine/llamacpp-metal"]
+llamacpp-cuda = ["primer-inference/llamacpp-cuda", "primer-engine/llamacpp-cuda"]
+llamacpp-vulkan = ["primer-inference/llamacpp-vulkan", "primer-engine/llamacpp-vulkan"]
+
 # Voice mode — pulls every speech backend feature so the GUI binary can
 # drive the LISTEN → LATENT_THINK → SPEAK → LISTEN state machine end-to-
 # end. Also pulls reqwest for streaming asset downloads (PR 4).
