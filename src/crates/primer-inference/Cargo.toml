@@ -21,7 +21,7 @@ qnn = ["dep:primer-qnn-sys", "dep:minijinja"]
 # so default builds and CI stay light. The backend type, the LlamaEngine
 # trait, the mock, and the pure helpers all compile WITHOUT this feature;
 # only the real engine's llama-cpp-2 calls are gated.
-llamacpp = ["dep:llama-cpp-2"]
+llamacpp = ["dep:llama-cpp-2", "dep:encoding_rs"]
 # GPU passthrough — forward to llama-cpp-2's own backend features.
 llamacpp-metal = ["llamacpp", "llama-cpp-2/metal"]
 llamacpp-cuda = ["llamacpp", "llama-cpp-2/cuda"]
@@ -44,6 +44,9 @@ minijinja = { workspace = true, optional = true }
 
 # Optional — only pulled when the `llamacpp` feature is enabled.
 llama-cpp-2 = { workspace = true, optional = true }
+# `token_to_piece` needs an `encoding_rs::Decoder`; this is also a transitive
+# dep of llama-cpp-2 0.1.146, so the version aligns naturally.
+encoding_rs = { version = "0.8", optional = true }
 
 [dev-dependencies]
 chrono.workspace = true
