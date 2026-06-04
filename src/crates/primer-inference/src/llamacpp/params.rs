@@ -73,11 +73,38 @@ pub fn resolve_n_ctx(override_value: Option<u32>) -> u32 {
     override_value.unwrap_or(LLAMACPP_DEFAULT_N_CTX)
 }
 
-/// True if `accumulated` ends with any of the (non-empty) stop sequences.
-pub fn tail_matches_any_stop(accumulated: &str, stops: &[String]) -> bool {
-    stops
-        .iter()
-        .any(|s| !s.is_empty() && accumulated.ends_with(s.as_str()))
+/// Stop-sequence handling for the decode loop.
+///
+/// `piece` is the token text just produced; `accumulated` is the full
+/// visible text *including* `piece`. If appending `piece` made
+/// `accumulated` end with any non-empty stop sequence, return
+/// `Some(prefix)` where `prefix` is the leading slice of `piece` that
+/// should still reach the consumer — everything before the stop marker
+/// starts, trimmed back to a UTF-8 char boundary. The caller emits
+/// `prefix` and then stops, so the matched stop marker is never shown to
+/// the child. `None` means no stop matched — forward `piece` unchanged.
+///
+/// Only the portion of the marker that falls inside the final `piece` is
+/// trimmed; a marker that straddled an earlier piece boundary has already
+/// been partially emitted (an accepted edge case — stop sequences are rare
+/// and usually template artifacts that arrive in a single token).
+pub fn visible_prefix_before_stop<'a>(
+    piece: &'a str,
+    accumulated: &str,
+    stops: &[String],
+) -> Option<&'a str> {
+    for s in stops.iter().filter(|s| !s.is_empty()) {
+        if accumulated.ends_with(s.as_str()) {
+            // Bytes of the stop marker that fall inside this final piece.
+            let overlap = s.len().min(piece.len());
+            let mut cut = piece.len() - overlap;
+            while cut > 0 && !piece.is_char_boundary(cut) {
+                cut -= 1;
+            }
+            return Some(&piece[..cut]);
+        }
+    }
+    None
 }
 
 /// Validate that `path` points to an existing GGUF file. Dev-facing error.
@@ -133,13 +160,33 @@ mod tests {
     }
 
     #[test]
-    fn stop_sequence_tail_match() {
+    fn stop_sequence_trims_marker_from_visible_piece() {
         let stops = vec!["</s>".to_string(), "\n\nUser:".to_string()];
-        assert!(tail_matches_any_stop("hello</s>", &stops));
-        assert!(tail_matches_any_stop("a\n\nUser:", &stops));
-        assert!(!tail_matches_any_stop("hello there", &stops));
+        // Marker wholly inside the final piece → emit only the prefix.
+        assert_eq!(
+            visible_prefix_before_stop("bye</s>", "hello bye</s>", &stops),
+            Some("bye")
+        );
+        // Piece is exactly the marker → nothing visible.
+        assert_eq!(
+            visible_prefix_before_stop("</s>", "hi</s>", &stops),
+            Some("")
+        );
+        // Multi-byte char before the marker stays intact (char-boundary trim).
+        assert_eq!(
+            visible_prefix_before_stop("ü</s>", "café ü</s>", &stops),
+            Some("ü")
+        );
+        // No stop matched → None (forward the piece unchanged).
+        assert_eq!(
+            visible_prefix_before_stop(" there", "hello there", &stops),
+            None
+        );
         // Empty stop strings never match.
-        assert!(!tail_matches_any_stop("anything", &["".to_string()]));
+        assert_eq!(
+            visible_prefix_before_stop("x", "anything", &["".to_string()]),
+            None
+        );
     }
 
     #[test]

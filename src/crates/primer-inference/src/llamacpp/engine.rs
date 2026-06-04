@@ -53,7 +53,7 @@ mod real {
     use tokio::sync::Mutex;
 
     use crate::llamacpp::params::{
-        resolve_n_ctx, sampler_spec, tail_matches_any_stop, validate_gguf_path,
+        resolve_n_ctx, sampler_spec, validate_gguf_path, visible_prefix_before_stop,
     };
 
     /// Global llama.cpp backend handle. `LlamaBackend::init()` may be called
@@ -180,29 +180,55 @@ mod real {
                 .new_context(backend, LlamaContextParams::default().with_n_ctx(n_ctx))
                 .map_err(|e| PrimerError::Inference(format!("context: {e}").into()))?;
 
+            // `apply_chat_template` returns plain text WITHOUT the literal BOS
+            // token, so we add it once here via `AddBos::Always`. Templates
+            // that embed a literal `<bos>` — e.g. some Gemma variants — would
+            // double-encode it; empirical cross-model verification is tracked
+            // in issue #201 (run the owner-gated smoke against Gemma + Qwen3).
             let tokens = self
                 .model
                 .str_to_token(rendered, AddBos::Always)
                 .map_err(|e| PrimerError::Inference(format!("tokenize: {e}").into()))?;
 
-            let mut batch = LlamaBatch::new(512, 1);
-            let last = tokens.len() - 1;
-            for (i, tok) in tokens.iter().enumerate() {
-                batch
-                    .add(*tok, i as i32, &[0], i == last)
-                    .map_err(|e| PrimerError::Inference(format!("batch: {e}").into()))?;
+            // Prefill the whole prompt, decoding in `n_batch`-sized chunks. A
+            // fixed single batch (the previous `LlamaBatch::new(512, 1)`)
+            // overflowed on realistic prompts — the Socratic system prompt +
+            // retrieved KB passages + conversation history routinely exceed 512
+            // tokens — failing with an opaque `batch: InsufficientSpace(512)`.
+            // Chunking lets prompts up to the model's context length prefill
+            // correctly. Only the final prompt token carries logits.
+            let n_batch = (ctx.n_batch() as usize).max(1);
+            let last_idx = tokens.len() - 1;
+            let mut batch = LlamaBatch::new(n_batch, 1);
+            let mut pos: i32 = 0;
+            for chunk in tokens.chunks(n_batch) {
+                batch.clear();
+                for (j, tok) in chunk.iter().enumerate() {
+                    let is_last = pos as usize + j == last_idx;
+                    batch
+                        .add(*tok, pos + j as i32, &[0], is_last)
+                        .map_err(|e| PrimerError::Inference(format!("batch: {e}").into()))?;
+                }
+                ctx.decode(&mut batch)
+                    .map_err(|e| PrimerError::Inference(format!("decode: {e}").into()))?;
+                pos += chunk.len() as i32;
             }
-            ctx.decode(&mut batch)
-                .map_err(|e| PrimerError::Inference(format!("decode: {e}").into()))?;
 
             let spec = sampler_spec(params);
+            // Chain order matches llama.cpp's conventional sampler pipeline:
+            // truncate the distribution (top-p), then scale by temperature,
+            // then sample (dist). top-k and repetition penalty are deliberately
+            // omitted in this first cut; add them here if output quality needs
+            // them.
             let mut sampler = LlamaSampler::chain_simple([
                 LlamaSampler::top_p(spec.top_p, 1),
                 LlamaSampler::temp(spec.temperature),
                 LlamaSampler::dist(spec.seed),
             ]);
 
-            let mut n_cur = batch.n_tokens();
+            // After chunked prefill, `pos` is the next absolute position and
+            // `batch` holds the final chunk whose last token carries logits.
+            let mut n_cur = pos;
             let mut accumulated = String::new();
             let mut decoder = encoding_rs::UTF_8.new_decoder();
 
@@ -217,11 +243,19 @@ mod real {
                     .token_to_piece(token, &mut decoder, false, None)
                     .map_err(|e| PrimerError::Inference(format!("detok: {e}").into()))?;
                 accumulated.push_str(&piece);
+                // Check for a stop sequence BEFORE forwarding so the matched
+                // marker text is never shown to the child. Emit only the part
+                // of this piece that precedes the marker, then stop.
+                if let Some(visible) =
+                    visible_prefix_before_stop(&piece, &accumulated, &params.stop_sequences)
+                {
+                    if !visible.is_empty() {
+                        let _ = on_token(visible);
+                    }
+                    break;
+                }
                 if !on_token(&piece) {
                     return Ok(());
-                }
-                if tail_matches_any_stop(&accumulated, &params.stop_sequences) {
-                    break;
                 }
                 batch.clear();
                 batch
