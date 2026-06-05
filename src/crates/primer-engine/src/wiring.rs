@@ -207,6 +207,79 @@ pub async fn build_backend(
     }
 }
 
+/// Construct the main inference backend, applying the opt-in construction
+/// fallback. When `params.fallback_backend` is `None`, this is exactly
+/// `build_backend(primary_name, primary_model, params)`.
+///
+/// Otherwise it builds both legs and applies [`plan_main_backend`]:
+/// - `Wrapped` ⇒ `FallbackBackend { primary, secondary }`;
+/// - `SecondaryAlone` ⇒ secondary alone (primary was unavailable at startup);
+/// - `PrimaryAlone` ⇒ primary alone (no fallback, or fallback unbuildable);
+/// - `Fail` ⇒ the primary's construction error.
+pub async fn build_main_backend(
+    primary_name: &str,
+    primary_model: String,
+    params: &BackendParams,
+) -> Result<Arc<dyn InferenceBackend>> {
+    use primer_inference::FallbackBackend;
+
+    // Warn on a pointless same-backend fallback (still works, just no resilience).
+    if let Some(fb) = params.fallback_backend.as_deref() {
+        if fb == primary_name {
+            tracing::warn!(
+                backend = primary_name,
+                "--fallback-backend equals --backend; no resilience gain"
+            );
+        }
+    }
+
+    let primary = build_backend(primary_name, primary_model, params).await;
+
+    let Some(fb_name) = params.fallback_backend.clone() else {
+        // No fallback configured: today's behavior verbatim.
+        return primary;
+    };
+
+    // A fallback IS configured. Resolve the secondary model (may error for a
+    // required-model backend) and try to build it.
+    let fb_model = resolve_fallback_model(&fb_name, params.fallback_model.clone())
+        .map_err(|m| PrimerError::Inference(m.into()))?;
+    let secondary = build_backend(&fb_name, fb_model.unwrap_or_default(), params).await;
+
+    match plan_main_backend(primary.is_ok(), true, secondary.is_ok()) {
+        MainBackendPlan::Wrapped => {
+            // Both built — wrap. expect() is safe: plan returned Wrapped only
+            // because both is_ok() were true.
+            let primary = primary.expect("Wrapped implies primary built");
+            let secondary = secondary.expect("Wrapped implies secondary built");
+            Ok(Arc::new(FallbackBackend::new(primary, secondary)))
+        }
+        MainBackendPlan::SecondaryAlone => {
+            tracing::warn!(
+                primary = primary_name,
+                secondary = %fb_name,
+                "primary backend unavailable at startup; using fallback backend alone"
+            );
+            secondary
+        }
+        MainBackendPlan::PrimaryAlone => {
+            // Reached only when primary built but secondary did not.
+            if let Err(ref e) = secondary {
+                tracing::warn!(
+                    secondary = %fb_name,
+                    error = %e,
+                    "fallback backend failed to construct; using primary alone"
+                );
+            }
+            primary
+        }
+        MainBackendPlan::Fail => {
+            // Both failed: surface the primary's (most informative) error.
+            primary
+        }
+    }
+}
+
 /// Construct the QNN backend from [`BackendParams`].
 ///
 /// Behind the `qnn` cargo feature this validates the required
@@ -1232,6 +1305,78 @@ mod main_backend_plan_tests {
             MainBackendPlan::Fail
         );
         assert_eq!(plan_main_backend(false, false, true), MainBackendPlan::Fail);
+    }
+}
+
+#[cfg(test)]
+mod build_main_backend_tests {
+    use super::*;
+
+    fn params(fallback_backend: Option<&str>, fallback_model: Option<&str>) -> BackendParams {
+        BackendParams {
+            api_key: None,
+            ollama_url: "http://localhost:11434".into(),
+            openai_compat_url: "http://localhost:8000".into(),
+            openai_compat_api_key: None,
+            classifier_backend: None,
+            classifier_model: None,
+            extractor_backend: None,
+            extractor_model: None,
+            comprehension_backend: None,
+            comprehension_model: None,
+            qnn_bundle_dir: None,
+            qnn_qairt_lib_dir: None,
+            gguf_path: None,
+            llamacpp_gpu_layers: None,
+            llamacpp_n_ctx: None,
+            reasoning_markers: Vec::new(),
+            fallback_backend: fallback_backend.map(String::from),
+            fallback_model: fallback_model.map(String::from),
+        }
+    }
+
+    /// No fallback configured ⇒ primary alone (unchanged behavior).
+    #[tokio::test]
+    async fn no_fallback_returns_primary() {
+        let p = params(None, None);
+        let b = build_main_backend("stub", "m".into(), &p).await.unwrap();
+        assert_eq!(b.name(), "stub");
+    }
+
+    /// Primary fails to build, fallback (stub) builds ⇒ secondary alone.
+    /// `unknown-backend` is an unbuildable backend name, so the primary leg errors.
+    #[tokio::test]
+    async fn primary_unbuildable_falls_back_to_secondary() {
+        let p = params(Some("stub"), None);
+        let b = build_main_backend("unknown-backend", "m".into(), &p)
+            .await
+            .unwrap();
+        // Secondary stub served ⇒ its name surfaces.
+        assert_eq!(b.name(), "stub");
+    }
+
+    /// Primary builds, fallback fails to build ⇒ primary alone, no error.
+    #[tokio::test]
+    async fn fallback_unbuildable_keeps_primary() {
+        let p = params(Some("unknown-backend"), Some("m"));
+        let b = build_main_backend("stub", "m".into(), &p).await.unwrap();
+        assert_eq!(b.name(), "stub");
+    }
+
+    /// Both unbuildable ⇒ error (the primary's construction error).
+    #[tokio::test]
+    async fn both_unbuildable_errors() {
+        let p = params(Some("unknown-fallback"), Some("m"));
+        let r = build_main_backend("unknown-primary", "m".into(), &p).await;
+        assert!(r.is_err());
+    }
+
+    /// Fallback configured as ollama without a model ⇒ resolve error surfaces.
+    #[tokio::test]
+    async fn fallback_ollama_without_model_errors() {
+        let p = params(Some("ollama"), None);
+        let r = build_main_backend("stub", "m".into(), &p).await;
+        assert!(r.is_err(), "ollama fallback needs a model");
     }
 }
 
