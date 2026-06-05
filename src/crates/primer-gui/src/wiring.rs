@@ -118,11 +118,26 @@ async fn build_with_strategy(
 
     // ─── BackendParams ───────────────────────────────────────────────
     // The cloud `api_key` resolves Env vs Inline here so the wiring
-    // crate doesn't need to touch env vars on every helper call.
-    let api_key = match (&backend_config.api_key_source, backend_config.kind.as_str()) {
-        (ApiKeySource::Inline { key }, _) => Some(key.clone()),
-        (ApiKeySource::Env, "cloud") => std::env::var("ANTHROPIC_API_KEY").ok(),
-        (ApiKeySource::Env, _) => None,
+    // crate doesn't need to touch env vars on every helper call. The
+    // `ANTHROPIC_API_KEY` env var is consulted whenever the cloud backend
+    // is reachable — as the primary OR as the opt-in fallback secondary
+    // (issue #205 follow-up). A local-primary → cloud-fallback setup (the
+    // supported fallback direction) needs the key even though the primary
+    // `kind` is not "cloud"; without this the cloud secondary fails to
+    // build with an Auth error and the fallback silently degrades to
+    // PrimaryAlone. An Inline key is kind-agnostic (it may be entered for
+    // a cloud fallback even when the primary is local).
+    let api_key = match &backend_config.api_key_source {
+        ApiKeySource::Inline { key } => Some(key.clone()),
+        ApiKeySource::Env
+            if cloud_backend_in_use(
+                &backend_config.kind,
+                backend_config.fallback_backend.as_deref(),
+            ) =>
+        {
+            std::env::var("ANTHROPIC_API_KEY").ok()
+        }
+        ApiKeySource::Env => None,
     };
 
     // OpenAI-compat key resolves independently of the cloud key. `Env`
@@ -467,6 +482,15 @@ async fn build_with_strategy(
     })
 }
 
+/// Is the Anthropic cloud backend reachable in this config — either as the
+/// primary backend or as the opt-in fallback secondary? Determines whether
+/// the `ANTHROPIC_API_KEY` env var is worth resolving for `Env` key mode.
+/// A local-primary → cloud-fallback setup (the supported fallback direction,
+/// issue #205) needs the key even though the primary `kind` is not `"cloud"`.
+fn cloud_backend_in_use(primary_kind: &str, fallback_backend: Option<&str>) -> bool {
+    primary_kind == "cloud" || fallback_backend == Some("cloud")
+}
+
 /// Resolve the main backend's model id from the GUI's optional override.
 /// Mirrors `primer-cli`: cloud defaults to claude-sonnet-4-6, ollama
 /// requires an explicit value, stub falls back to the literal "stub".
@@ -681,6 +705,29 @@ mod tests {
             err.contains("secret-sauce"),
             "error must name the offending embedder: {err}"
         );
+    }
+
+    #[test]
+    fn cloud_key_needed_when_cloud_is_primary() {
+        assert!(cloud_backend_in_use("cloud", None));
+        assert!(cloud_backend_in_use("cloud", Some("ollama")));
+    }
+
+    #[test]
+    fn cloud_key_needed_when_cloud_is_fallback_of_local_primary() {
+        // The supported fallback direction is local-primary → cloud-fallback
+        // (issue #205 follow-up). The cloud key must resolve even though the
+        // primary `kind` is not "cloud", or the cloud secondary fails to build
+        // with an Auth error and the fallback silently degrades to PrimaryAlone.
+        assert!(cloud_backend_in_use("llamacpp", Some("cloud")));
+        assert!(cloud_backend_in_use("ollama", Some("cloud")));
+    }
+
+    #[test]
+    fn cloud_key_not_needed_when_cloud_absent() {
+        assert!(!cloud_backend_in_use("ollama", None));
+        assert!(!cloud_backend_in_use("llamacpp", Some("openai-compat")));
+        assert!(!cloud_backend_in_use("stub", Some("ollama")));
     }
 
     #[test]

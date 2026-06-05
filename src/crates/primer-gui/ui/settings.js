@@ -527,9 +527,12 @@ function wireFallbackReveal() {
 
 // The fallback model field only matters once a fallback backend is chosen —
 // hide it for "(no fallback)" so the form isn't cluttered. The picker itself
-// is always visible: any primary backend may opt into a fallback.
+// is always visible: any primary backend may opt into a fallback. Choosing
+// cloud as the fallback also enables the cloud API-key fieldset so a local
+// primary can supply the key the cloud secondary needs (issue #205 follow-up).
 function applyFallbackReveal(fallbackKind) {
   dom.fields.backendFallbackModelField.hidden = !fallbackKind;
+  applyCloudKeyEnable();
 }
 
 function applyBackendKindReveal(kind) {
@@ -556,13 +559,26 @@ function applyBackendKindReveal(kind) {
   // non-openai-compat backends (it would otherwise clutter the cloud /
   // stub / ollama forms); the cloud fieldset keeps its long-standing
   // disabled-fade behaviour.
-  const cloud = kind === "cloud";
-  if (cloud) {
+  applyCloudKeyEnable();
+  dom.fields.ocApiKeyFieldset.hidden = kind !== "openai-compat";
+}
+
+// Enable the cloud API-key fieldset whenever the cloud backend is reachable —
+// as the primary OR as the opt-in fallback secondary (issue #205 follow-up).
+// A local-primary → cloud-fallback setup needs a way to supply the cloud key;
+// without this the fieldset stays disabled and the inline-key path is blocked,
+// leaving env-mode the only option (which itself only worked for a cloud
+// primary before the wiring fix). Driven by both the backend-kind picker and
+// the fallback picker.
+function applyCloudKeyEnable() {
+  const cloudInUse =
+    dom.fields.backendKind.value === "cloud" ||
+    dom.fields.backendFallbackBackend.value === "cloud";
+  if (cloudInUse) {
     dom.fields.apiKeyFieldset.removeAttribute("disabled");
   } else {
     dom.fields.apiKeyFieldset.setAttribute("disabled", "");
   }
-  dom.fields.ocApiKeyFieldset.hidden = kind !== "openai-compat";
 }
 
 function wireEmbedderKindReveal() {
