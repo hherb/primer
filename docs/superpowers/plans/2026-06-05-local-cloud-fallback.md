@@ -804,7 +804,19 @@ In `crates/primer-cli/src/main.rs`, in the `BackendParams { … }` literal (ends
         fallback_model: cli.fallback_model.clone(),
 ```
 
-- [ ] **Step 3: Swap the call site from `build_backend` to `build_main_backend`**
+- [ ] **Step 3a: Re-export `build_main_backend` from `primer-engine`'s crate root**
+
+`build_main_backend` lives in `wiring.rs` but is not yet re-exported, so the CLI cannot import it as `primer_engine::build_main_backend`. In `crates/primer-engine/src/lib.rs`, add `build_main_backend` to the `pub use wiring::{…}` list (keep `build_backend` — the GUI and subsystem builders still use it):
+
+```rust
+pub use wiring::{
+    BackendParams, build_backend, build_classifier, build_comprehension, build_extractor,
+    build_fastembed_embedder, build_main_backend, build_ollama_embedder,
+    build_openai_compat_embedder, default_qairt_lib_dir,
+};
+```
+
+- [ ] **Step 3b: Swap the call site from `build_backend` to `build_main_backend`**
 
 In `crates/primer-cli/src/main.rs`, line 943 is the ONLY code reference to `build_backend` in this file (the other matches are comments), so replace it in the import. Change the import line (line 36) from:
 
