@@ -59,7 +59,7 @@ Status key: ✅ done · 🟡 in progress · [ ] not started.
 
 - [x] `LlamaCppBackend` via `llama-cpp-2` bindings; GGUF loading from a configurable path (behind the non-default `llamacpp` feature; CPU + Metal/CUDA/Vulkan passthrough). Benchmarking (bullet 2) + local→cloud fallback (bullet 3) still open.
 - [ ] Benchmark Qwen3 7B Q4_K_M on MacBook (Metal), DGX (CUDA), RedMagic (Vulkan).
-- [ ] Automatic local→cloud fallback; 3B fallback path for constrained devices.
+- [x] Automatic local→cloud fallback (opt-in `--fallback-backend`/`--fallback-model`; `FallbackBackend` decorator falls back at startup + pre-stream, never mid-stream; CLI shipped, GUI mirror is a follow-up). 3B constrained-device chain still ahead.
 
 ### 1.2 — Qualcomm NPU (Snapdragon 8 Elite) 🟡
 
