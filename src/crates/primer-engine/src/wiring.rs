@@ -100,6 +100,37 @@ pub fn default_qairt_lib_dir(bundle_dir: &Path) -> PathBuf {
         .unwrap_or_else(|| PathBuf::from("qairt/lib/aarch64-android"))
 }
 
+/// Outcome of the main-backend construction decision. See the truth table
+/// in docs/superpowers/specs/2026-06-05-local-cloud-fallback-design.md.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum MainBackendPlan {
+    /// Use the primary backend alone (no fallback, or fallback unbuildable).
+    PrimaryAlone,
+    /// Primary failed to build; use the secondary alone (startup fallback).
+    SecondaryAlone,
+    /// Both built and a fallback is configured; wrap them in `FallbackBackend`.
+    Wrapped,
+    /// Nothing usable; surface the primary's construction error.
+    Fail,
+}
+
+/// Pure decision: given whether each leg built and whether a fallback was
+/// configured, choose how to assemble the main backend. No I/O.
+pub fn plan_main_backend(
+    primary_built: bool,
+    fallback_configured: bool,
+    secondary_built: bool,
+) -> MainBackendPlan {
+    match (primary_built, fallback_configured, secondary_built) {
+        (true, false, _) => MainBackendPlan::PrimaryAlone,
+        (true, true, true) => MainBackendPlan::Wrapped,
+        (true, true, false) => MainBackendPlan::PrimaryAlone,
+        (false, true, true) => MainBackendPlan::SecondaryAlone,
+        (false, true, false) => MainBackendPlan::Fail,
+        (false, false, _) => MainBackendPlan::Fail,
+    }
+}
+
 /// Construct an `InferenceBackend` of the named type with the given model.
 ///
 /// All three backend variants are synchronous at construction time; the
@@ -1105,5 +1136,60 @@ mod qnn_dispatch_tests {
             Err(e) => e,
         };
         assert!(format!("{err}").to_lowercase().contains("llamacpp"));
+    }
+}
+
+#[cfg(test)]
+mod main_backend_plan_tests {
+    use super::{MainBackendPlan, plan_main_backend};
+
+    #[test]
+    fn primary_ok_no_fallback_is_primary_alone() {
+        assert_eq!(
+            plan_main_backend(true, false, false),
+            MainBackendPlan::PrimaryAlone
+        );
+        assert_eq!(
+            plan_main_backend(true, false, true),
+            MainBackendPlan::PrimaryAlone
+        );
+    }
+
+    #[test]
+    fn primary_ok_fallback_built_is_wrapped() {
+        assert_eq!(
+            plan_main_backend(true, true, true),
+            MainBackendPlan::Wrapped
+        );
+    }
+
+    #[test]
+    fn primary_ok_fallback_failed_is_primary_alone() {
+        assert_eq!(
+            plan_main_backend(true, true, false),
+            MainBackendPlan::PrimaryAlone
+        );
+    }
+
+    #[test]
+    fn primary_failed_secondary_built_is_secondary_alone() {
+        assert_eq!(
+            plan_main_backend(false, true, true),
+            MainBackendPlan::SecondaryAlone
+        );
+    }
+
+    #[test]
+    fn primary_failed_secondary_failed_is_fail() {
+        assert_eq!(plan_main_backend(false, true, false), MainBackendPlan::Fail);
+    }
+
+    #[test]
+    fn primary_failed_no_fallback_is_fail() {
+        assert_eq!(
+            plan_main_backend(false, false, false),
+            MainBackendPlan::Fail
+        );
+        assert_eq!(plan_main_backend(false, false, true), MainBackendPlan::Fail);
     }
 }
