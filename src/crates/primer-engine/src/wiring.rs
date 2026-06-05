@@ -77,6 +77,15 @@ pub struct BackendParams {
     /// output clean for parsing), and a user-supplied custom pair applies
     /// everywhere rather than to the chat backend alone.
     pub reasoning_markers: Vec<(String, String)>,
+    /// Opt-in fallback secondary backend name (`stub`/`cloud`/`ollama`/
+    /// `openai-compat`). `None` ⇒ no fallback ⇒ local-only (the privacy
+    /// default). Consumed only by [`build_main_backend`]; the flag's
+    /// presence is the explicit cloud-fallback consent.
+    pub fallback_backend: Option<String>,
+    /// Model for the fallback secondary. Resolution rules live in
+    /// [`resolve_fallback_model`]. `None` is valid (cloud defaults; stub
+    /// ignores it; ollama/openai-compat error).
+    pub fallback_model: Option<String>,
 }
 
 /// Conventional default location of the QAIRT runtime libraries
@@ -98,6 +107,61 @@ pub fn default_qairt_lib_dir(bundle_dir: &Path) -> PathBuf {
         // panicking — the downstream `RealGenieLibrary::open` will
         // produce a clear `LibraryLoad` error.
         .unwrap_or_else(|| PathBuf::from("qairt/lib/aarch64-android"))
+}
+
+/// Outcome of the main-backend construction decision. See the truth table
+/// in docs/superpowers/specs/2026-06-05-local-cloud-fallback-design.md.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum MainBackendPlan {
+    /// Use the primary backend alone (no fallback, or fallback unbuildable).
+    PrimaryAlone,
+    /// Primary failed to build; use the secondary alone (startup fallback).
+    SecondaryAlone,
+    /// Both built and a fallback is configured; wrap them in `FallbackBackend`.
+    Wrapped,
+    /// Nothing usable; surface the primary's construction error.
+    Fail,
+}
+
+/// Pure decision: given whether each leg built and whether a fallback was
+/// configured, choose how to assemble the main backend. No I/O.
+pub fn plan_main_backend(
+    primary_built: bool,
+    fallback_configured: bool,
+    secondary_built: bool,
+) -> MainBackendPlan {
+    match (primary_built, fallback_configured, secondary_built) {
+        (true, false, _) => MainBackendPlan::PrimaryAlone,
+        (true, true, true) => MainBackendPlan::Wrapped,
+        (true, true, false) => MainBackendPlan::PrimaryAlone,
+        (false, true, true) => MainBackendPlan::SecondaryAlone,
+        (false, true, false) => MainBackendPlan::Fail,
+        (false, false, _) => MainBackendPlan::Fail,
+    }
+}
+
+/// Resolve the fallback secondary's model from its backend name + optional
+/// explicit `--fallback-model`. Pure — no I/O.
+///
+/// - `stub` ⇒ `Ok(None)` (model ignored by the stub backend).
+/// - `cloud` ⇒ `Ok(Some(model | DEFAULT_CLOUD_MODEL))`.
+/// - `ollama` / `openai-compat` ⇒ model required ⇒ `Err` when `None`.
+/// - any other name ⇒ `Ok(model)` passthrough (`build_backend` rejects the
+///   unknown name later with its own clear error).
+pub fn resolve_fallback_model(
+    backend: &str,
+    model: Option<String>,
+) -> std::result::Result<Option<String>, String> {
+    match backend {
+        "stub" => Ok(None),
+        "cloud" => Ok(Some(model.unwrap_or_else(|| {
+            primer_core::consts::inference::DEFAULT_CLOUD_MODEL.to_string()
+        }))),
+        "ollama" | "openai-compat" => model.map(Some).ok_or_else(|| {
+            format!("--fallback-model is required when --fallback-backend is {backend}")
+        }),
+        _ => Ok(model),
+    }
 }
 
 /// Construct an `InferenceBackend` of the named type with the given model.
@@ -140,6 +204,89 @@ pub async fn build_backend(
         other => Err(PrimerError::Inference(
             format!("unknown backend: {other}").into(),
         )),
+    }
+}
+
+/// Construct the main inference backend, applying the opt-in construction
+/// fallback. When `params.fallback_backend` is `None`, this is exactly
+/// `build_backend(primary_name, primary_model, params)`.
+///
+/// Otherwise it builds both legs and applies [`plan_main_backend`]:
+/// - `Wrapped` ⇒ `FallbackBackend { primary, secondary }`;
+/// - `SecondaryAlone` ⇒ secondary alone (primary was unavailable at startup);
+/// - `PrimaryAlone` ⇒ primary alone (no fallback, or the fallback was
+///   unbuildable/misconfigured — a broken opt-in fallback never aborts a
+///   healthy primary);
+/// - `Fail` ⇒ the primary's construction error.
+pub async fn build_main_backend(
+    primary_name: &str,
+    primary_model: String,
+    params: &BackendParams,
+) -> Result<Arc<dyn InferenceBackend>> {
+    use primer_inference::FallbackBackend;
+
+    // Warn on a pointless same-backend fallback (still works, just no resilience).
+    if let Some(fb) = params.fallback_backend.as_deref() {
+        if fb == primary_name {
+            tracing::warn!(
+                backend = primary_name,
+                "--fallback-backend equals --backend; no resilience gain"
+            );
+        }
+    }
+
+    let primary = build_backend(primary_name, primary_model, params).await;
+
+    let Some(fb_name) = params.fallback_backend.clone() else {
+        // No fallback configured: today's behavior verbatim.
+        return primary;
+    };
+
+    // A fallback IS configured. Resolve the secondary model (may fail for a
+    // required-model backend like ollama/openai-compat) and try to build it.
+    // A misconfigured or unbuildable *opt-in* fallback must NEVER abort startup
+    // when the primary is healthy — it degrades to `PrimaryAlone` in the match
+    // below — so a resolve error is folded into the `secondary` Result rather
+    // than `?`-propagated. When the primary ALSO failed, `plan_main_backend`
+    // returns `Fail` and the primary's (more actionable) error surfaces.
+    let secondary = match resolve_fallback_model(&fb_name, params.fallback_model.clone()) {
+        Ok(fb_model) => build_backend(&fb_name, fb_model.unwrap_or_default(), params).await,
+        Err(msg) => Err(PrimerError::Inference(msg.into())),
+    };
+
+    match plan_main_backend(primary.is_ok(), true, secondary.is_ok()) {
+        MainBackendPlan::Wrapped => {
+            // Both built — wrap. expect() is safe: plan returned Wrapped only
+            // because both is_ok() were true.
+            let primary = primary.expect("Wrapped implies primary built");
+            let secondary = secondary.expect("Wrapped implies secondary built");
+            Ok(Arc::new(FallbackBackend::new(primary, secondary)))
+        }
+        MainBackendPlan::SecondaryAlone => {
+            tracing::warn!(
+                primary = primary_name,
+                secondary = %fb_name,
+                "primary backend unavailable at startup; using fallback backend alone"
+            );
+            secondary
+        }
+        MainBackendPlan::PrimaryAlone => {
+            // Reached only when primary built but the secondary did not — either
+            // unbuildable or misconfigured (e.g. ollama fallback without a
+            // model). The broken opt-in fallback is dropped, not fatal.
+            if let Err(ref e) = secondary {
+                tracing::warn!(
+                    secondary = %fb_name,
+                    error = %e,
+                    "fallback backend unusable (misconfigured or failed to construct); using primary alone"
+                );
+            }
+            primary
+        }
+        MainBackendPlan::Fail => {
+            // Both failed: surface the primary's (most informative) error.
+            primary
+        }
     }
 }
 
@@ -578,6 +725,8 @@ mod classifier_construction_tests {
             llamacpp_gpu_layers: None,
             llamacpp_n_ctx: None,
             reasoning_markers: Vec::new(),
+            fallback_backend: None,
+            fallback_model: None,
         }
     }
 
@@ -735,6 +884,8 @@ mod extractor_construction_tests {
             llamacpp_gpu_layers: None,
             llamacpp_n_ctx: None,
             reasoning_markers: Vec::new(),
+            fallback_backend: None,
+            fallback_model: None,
         }
     }
 
@@ -848,6 +999,8 @@ mod comprehension_construction_tests {
             llamacpp_gpu_layers: None,
             llamacpp_n_ctx: None,
             reasoning_markers: Vec::new(),
+            fallback_backend: None,
+            fallback_model: None,
         }
     }
 
@@ -966,6 +1119,8 @@ mod qnn_dispatch_tests {
             llamacpp_gpu_layers: None,
             llamacpp_n_ctx: None,
             reasoning_markers: Vec::new(),
+            fallback_backend: None,
+            fallback_model: None,
         }
     }
 
@@ -1105,5 +1260,214 @@ mod qnn_dispatch_tests {
             Err(e) => e,
         };
         assert!(format!("{err}").to_lowercase().contains("llamacpp"));
+    }
+}
+
+#[cfg(test)]
+mod main_backend_plan_tests {
+    use super::{MainBackendPlan, plan_main_backend};
+
+    #[test]
+    fn primary_ok_no_fallback_is_primary_alone() {
+        assert_eq!(
+            plan_main_backend(true, false, false),
+            MainBackendPlan::PrimaryAlone
+        );
+        assert_eq!(
+            plan_main_backend(true, false, true),
+            MainBackendPlan::PrimaryAlone
+        );
+    }
+
+    #[test]
+    fn primary_ok_fallback_built_is_wrapped() {
+        assert_eq!(
+            plan_main_backend(true, true, true),
+            MainBackendPlan::Wrapped
+        );
+    }
+
+    #[test]
+    fn primary_ok_fallback_failed_is_primary_alone() {
+        assert_eq!(
+            plan_main_backend(true, true, false),
+            MainBackendPlan::PrimaryAlone
+        );
+    }
+
+    #[test]
+    fn primary_failed_secondary_built_is_secondary_alone() {
+        assert_eq!(
+            plan_main_backend(false, true, true),
+            MainBackendPlan::SecondaryAlone
+        );
+    }
+
+    #[test]
+    fn primary_failed_secondary_failed_is_fail() {
+        assert_eq!(plan_main_backend(false, true, false), MainBackendPlan::Fail);
+    }
+
+    #[test]
+    fn primary_failed_no_fallback_is_fail() {
+        assert_eq!(
+            plan_main_backend(false, false, false),
+            MainBackendPlan::Fail
+        );
+        assert_eq!(plan_main_backend(false, false, true), MainBackendPlan::Fail);
+    }
+}
+
+#[cfg(test)]
+mod build_main_backend_tests {
+    use super::*;
+
+    fn params(fallback_backend: Option<&str>, fallback_model: Option<&str>) -> BackendParams {
+        BackendParams {
+            api_key: None,
+            ollama_url: "http://localhost:11434".into(),
+            openai_compat_url: "http://localhost:8000".into(),
+            openai_compat_api_key: None,
+            classifier_backend: None,
+            classifier_model: None,
+            extractor_backend: None,
+            extractor_model: None,
+            comprehension_backend: None,
+            comprehension_model: None,
+            qnn_bundle_dir: None,
+            qnn_qairt_lib_dir: None,
+            gguf_path: None,
+            llamacpp_gpu_layers: None,
+            llamacpp_n_ctx: None,
+            reasoning_markers: Vec::new(),
+            fallback_backend: fallback_backend.map(String::from),
+            fallback_model: fallback_model.map(String::from),
+        }
+    }
+
+    /// No fallback configured ⇒ primary alone (unchanged behavior).
+    #[tokio::test]
+    async fn no_fallback_returns_primary() {
+        let p = params(None, None);
+        let b = build_main_backend("stub", "m".into(), &p).await.unwrap();
+        assert_eq!(b.name(), "stub");
+    }
+
+    /// Primary fails to build, fallback (stub) builds ⇒ secondary alone.
+    /// `unknown-backend` is an unbuildable backend name, so the primary leg errors.
+    #[tokio::test]
+    async fn primary_unbuildable_falls_back_to_secondary() {
+        let p = params(Some("stub"), None);
+        let b = build_main_backend("unknown-backend", "m".into(), &p)
+            .await
+            .unwrap();
+        // Secondary stub served ⇒ its name surfaces.
+        assert_eq!(b.name(), "stub");
+    }
+
+    /// Primary builds, fallback fails to build ⇒ primary alone, no error.
+    #[tokio::test]
+    async fn fallback_unbuildable_keeps_primary() {
+        let p = params(Some("unknown-backend"), Some("m"));
+        let b = build_main_backend("stub", "m".into(), &p).await.unwrap();
+        assert_eq!(b.name(), "stub");
+    }
+
+    /// Both unbuildable ⇒ error (the primary's construction error).
+    #[tokio::test]
+    async fn both_unbuildable_errors() {
+        let p = params(Some("unknown-fallback"), Some("m"));
+        let r = build_main_backend("unknown-primary", "m".into(), &p).await;
+        // `Result::err` drops the `Ok` value (`Arc<dyn InferenceBackend>` is
+        // not `Debug`, so `expect_err` won't compile here).
+        let err = r.err().expect("both legs unbuildable must error");
+        // Spec invariant: the `Fail` arm surfaces the PRIMARY's (most
+        // informative) error, not the secondary's. Distinct backend names let
+        // us prove which one propagated.
+        let msg = format!("{err}");
+        assert!(
+            msg.contains("unknown-primary"),
+            "expected the primary's error to surface; got: {msg}"
+        );
+        assert!(
+            !msg.contains("unknown-fallback"),
+            "must not surface the secondary's error; got: {msg}"
+        );
+    }
+
+    /// Fallback misconfigured (ollama without a model) but the primary is
+    /// healthy ⇒ the broken opt-in fallback is dropped and the primary serves
+    /// alone. A misconfigured fallback must NEVER abort startup when the
+    /// primary built fine.
+    #[tokio::test]
+    async fn fallback_misconfigured_keeps_primary() {
+        let p = params(Some("ollama"), None);
+        let b = build_main_backend("stub", "m".into(), &p).await.unwrap();
+        assert_eq!(b.name(), "stub");
+    }
+
+    /// Primary unbuildable AND fallback misconfigured ⇒ error. The `Fail` arm
+    /// surfaces the PRIMARY's (more actionable) error, not the fallback's
+    /// resolve message.
+    #[tokio::test]
+    async fn primary_unbuildable_and_fallback_misconfigured_errors() {
+        // `ollama` without a model is a resolve error (misconfigured fallback).
+        let p = params(Some("ollama"), None);
+        let r = build_main_backend("unknown-primary", "m".into(), &p).await;
+        let err = r.err().expect("both legs unusable must error");
+        let msg = format!("{err}");
+        assert!(
+            msg.contains("unknown-primary"),
+            "expected the primary's error to surface; got: {msg}"
+        );
+    }
+}
+
+#[cfg(test)]
+mod resolve_fallback_model_tests {
+    use super::resolve_fallback_model;
+    use primer_core::consts::inference::DEFAULT_CLOUD_MODEL;
+
+    #[test]
+    fn stub_ignores_model() {
+        assert_eq!(resolve_fallback_model("stub", None).unwrap(), None);
+        assert_eq!(
+            resolve_fallback_model("stub", Some("x".into())).unwrap(),
+            None
+        );
+    }
+
+    #[test]
+    fn cloud_defaults_when_unset() {
+        assert_eq!(
+            resolve_fallback_model("cloud", None).unwrap(),
+            Some(DEFAULT_CLOUD_MODEL.to_string())
+        );
+    }
+
+    #[test]
+    fn cloud_uses_explicit_model() {
+        assert_eq!(
+            resolve_fallback_model("cloud", Some("claude-opus-4-7".into())).unwrap(),
+            Some("claude-opus-4-7".to_string())
+        );
+    }
+
+    #[test]
+    fn ollama_requires_model() {
+        assert!(resolve_fallback_model("ollama", None).is_err());
+        assert_eq!(
+            resolve_fallback_model("ollama", Some("llama3.2".into())).unwrap(),
+            Some("llama3.2".to_string())
+        );
+    }
+
+    #[test]
+    fn openai_compat_requires_model() {
+        assert!(resolve_fallback_model("openai-compat", None).is_err());
+        assert_eq!(
+            resolve_fallback_model("openai-compat", Some("Qwen3-8B".into())).unwrap(),
+            Some("Qwen3-8B".to_string())
+        );
     }
 }
