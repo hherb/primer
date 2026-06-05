@@ -106,8 +106,11 @@ qnn = ["primer-inference/qnn", "primer-engine/qnn"]
 
 # Embedded llama.cpp backend (Phase 1.1). Wires `--backend llamacpp` through
 # to `LlamaCppBackend`. GPU variants forward to the binding's backend
-# features. Non-default (compiles llama.cpp C++).
+# features. Non-default (compiles llama.cpp C++). GPU variants chain to the
+# base `llamacpp` feature so (a) primer-engine's real `build_llamacpp_backend`
+# arm activates and (b) the `#[cfg(feature = "llamacpp")]`-gated `--llamacpp-*`
+# flags appear in `--help` on GPU builds too.
 llamacpp = ["primer-inference/llamacpp", "primer-engine/llamacpp"]
-llamacpp-metal = ["primer-inference/llamacpp-metal", "primer-engine/llamacpp-metal"]
-llamacpp-cuda = ["primer-inference/llamacpp-cuda", "primer-engine/llamacpp-cuda"]
-llamacpp-vulkan = ["primer-inference/llamacpp-vulkan", "primer-engine/llamacpp-vulkan"]
+llamacpp-metal = ["llamacpp", "primer-inference/llamacpp-metal", "primer-engine/llamacpp-metal"]
+llamacpp-cuda = ["llamacpp", "primer-inference/llamacpp-cuda", "primer-engine/llamacpp-cuda"]
+llamacpp-vulkan = ["llamacpp", "primer-inference/llamacpp-vulkan", "primer-engine/llamacpp-vulkan"]

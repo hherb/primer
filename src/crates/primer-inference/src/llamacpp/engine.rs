@@ -190,6 +190,18 @@ mod real {
                 .str_to_token(rendered, AddBos::Always)
                 .map_err(|e| PrimerError::Inference(format!("tokenize: {e}").into()))?;
 
+            // `AddBos::Always` normally guarantees at least the BOS token, so
+            // `tokens` is non-empty in practice. Guard explicitly anyway: an
+            // empty `tokens` would make `tokens.len() - 1` below underflow
+            // (panic in debug, wrap to usize::MAX in release → no token ever
+            // carries logits → garbage sampling). A model with no BOS token
+            // fed an empty `rendered` is the only way to reach this.
+            if tokens.is_empty() {
+                return Err(PrimerError::Inference(
+                    "tokenization produced no tokens (empty prompt and model has no BOS)".into(),
+                ));
+            }
+
             // Prefill the whole prompt, decoding in `n_batch`-sized chunks. A
             // fixed single batch (the previous `LlamaBatch::new(512, 1)`)
             // overflowed on realistic prompts — the Socratic system prompt +
