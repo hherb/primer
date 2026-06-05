@@ -934,6 +934,11 @@ async fn async_main() -> anyhow::Result<()> {
         qnn_qairt_lib_dir: cli.qnn_qairt_lib_dir.clone(),
         #[cfg(not(feature = "qnn"))]
         qnn_qairt_lib_dir: None,
+        // `gguf_path` is sourced from the PRIMARY `--model` only when the
+        // primary is llamacpp. A llamacpp *fallback* (`--fallback-backend
+        // llamacpp`) would therefore have no GGUF path and fail to build —
+        // intentional: the supported direction is local-primary → cloud-
+        // fallback, not the reverse.
         gguf_path: if cli.backend == "llamacpp" {
             cli.model.clone().map(std::path::PathBuf::from)
         } else {

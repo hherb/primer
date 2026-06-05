@@ -1368,7 +1368,21 @@ mod build_main_backend_tests {
     async fn both_unbuildable_errors() {
         let p = params(Some("unknown-fallback"), Some("m"));
         let r = build_main_backend("unknown-primary", "m".into(), &p).await;
-        assert!(r.is_err());
+        // `Result::err` drops the `Ok` value (`Arc<dyn InferenceBackend>` is
+        // not `Debug`, so `expect_err` won't compile here).
+        let err = r.err().expect("both legs unbuildable must error");
+        // Spec invariant: the `Fail` arm surfaces the PRIMARY's (most
+        // informative) error, not the secondary's. Distinct backend names let
+        // us prove which one propagated.
+        let msg = format!("{err}");
+        assert!(
+            msg.contains("unknown-primary"),
+            "expected the primary's error to surface; got: {msg}"
+        );
+        assert!(
+            !msg.contains("unknown-fallback"),
+            "must not surface the secondary's error; got: {msg}"
+        );
     }
 
     /// Fallback configured as ollama without a model ⇒ resolve error surfaces.
