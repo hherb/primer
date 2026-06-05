@@ -20,9 +20,10 @@ use primer_core::config::PedagogyConfig;
 use primer_core::i18n::Locale;
 use primer_core::storage::{LearnerStore, SessionStore};
 use primer_engine::{
-    BackendParams, IN_MEMORY, build_backend, build_classifier, build_comprehension,
-    build_extractor, build_fastembed_embedder, build_ollama_embedder, build_openai_compat_embedder,
-    create_learner_with_id, parse_languages, reconcile_persisted_learner, resolve_session_db_path,
+    BackendParams, IN_MEMORY, build_classifier, build_comprehension, build_extractor,
+    build_fastembed_embedder, build_main_backend, build_ollama_embedder,
+    build_openai_compat_embedder, create_learner_with_id, parse_languages,
+    reconcile_persisted_learner, resolve_session_db_path,
 };
 use primer_extractor::ExtractorSettings;
 use primer_knowledge::SqliteKnowledgeBase;
@@ -173,14 +174,22 @@ async fn build_with_strategy(
         reasoning_markers: crate::reasoning_markers::parse_reasoning_markers(
             &backend_config.reasoning_markers,
         ),
-        // GUI fallback wiring is a separate follow-up issue; set to None so the
-        // GUI keeps today's single-backend behavior. CLI exposes the fallback.
-        fallback_backend: None,
-        fallback_model: None,
+        // Opt-in local→cloud fallback (issue #205): the fallback backend /
+        // model come straight from Settings → Inference backend. `None` ⇒ no
+        // fallback ⇒ today's single-backend behavior (the privacy default —
+        // a local-only setup never silently reaches the cloud). When set,
+        // `build_main_backend` wraps the primary in a `FallbackBackend`
+        // decorator that serves the turn from the secondary if the primary is
+        // unavailable at startup or fails *before any token streams*. Mirrors
+        // the CLI's `--fallback-backend` / `--fallback-model`.
+        fallback_backend: backend_config.fallback_backend.clone(),
+        fallback_model: backend_config.fallback_model.clone(),
     };
 
     // ─── Main backend (locale-independent) ───────────────────────────
-    let backend = build_backend(&backend_config.kind, main_model.clone(), &params)
+    // `build_main_backend` is `build_backend` plus the opt-in fallback wrap;
+    // with no fallback configured it is byte-for-byte today's behavior.
+    let backend = build_main_backend(&backend_config.kind, main_model.clone(), &params)
         .await
         .map_err(|e| format!("constructing inference backend: {e}"))?;
 

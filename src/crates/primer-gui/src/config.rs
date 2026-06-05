@@ -119,6 +119,23 @@ pub struct BackendConfig {
     /// verbatim so the textarea round-trips losslessly. Not a secret —
     /// crosses the IPC View/Update DTOs unredacted.
     pub reasoning_markers: String,
+    /// Opt-in fallback inference backend name (`stub`/`cloud`/`ollama`/
+    /// `openai-compat`). `None` ⇒ no fallback ⇒ local-only (the privacy
+    /// default — a local-only setup never silently reaches the cloud).
+    /// Mirrors the CLI's `--fallback-backend`. Consumed by
+    /// `primer_engine::build_main_backend` at session-wiring time: when the
+    /// primary is unavailable at startup or fails *before any token streams*,
+    /// the turn is served from this secondary. Not a secret, so it crosses
+    /// the IPC view/update DTOs verbatim (no Keep/Env dance).
+    #[serde(default)]
+    pub fallback_backend: Option<String>,
+    /// Model id for the fallback secondary. Mirrors the CLI's
+    /// `--fallback-model`. Resolution rules live in
+    /// `primer_engine::resolve_fallback_model`: `None` is valid (cloud
+    /// defaults to `claude-sonnet-4-6`; stub ignores it; ollama/openai-compat
+    /// require an explicit model). Not a secret — crosses IPC verbatim.
+    #[serde(default)]
+    pub fallback_model: Option<String>,
 }
 
 impl Default for BackendConfig {
@@ -136,6 +153,8 @@ impl Default for BackendConfig {
             llamacpp_gpu_layers: None,
             llamacpp_n_ctx: None,
             reasoning_markers: String::new(),
+            fallback_backend: None,
+            fallback_model: None,
         }
     }
 }
@@ -651,6 +670,10 @@ pub struct BackendConfigView {
     /// Raw reasoning-markers textarea text — passes through verbatim
     /// (not a secret), so the settings form can re-show it.
     pub reasoning_markers: String,
+    /// Opt-in fallback backend / model — pass through verbatim (not
+    /// secrets), so the settings form can re-show the chosen fallback.
+    pub fallback_backend: Option<String>,
+    pub fallback_model: Option<String>,
 }
 
 impl From<&GuiConfig> for GuiConfigView {
@@ -670,6 +693,8 @@ impl From<&GuiConfig> for GuiConfigView {
                 llamacpp_gpu_layers: c.backend.llamacpp_gpu_layers,
                 llamacpp_n_ctx: c.backend.llamacpp_n_ctx,
                 reasoning_markers: c.backend.reasoning_markers.clone(),
+                fallback_backend: c.backend.fallback_backend.clone(),
+                fallback_model: c.backend.fallback_model.clone(),
             },
             classifier: c.classifier.clone(),
             extractor: c.extractor.clone(),
@@ -742,6 +767,13 @@ pub struct BackendConfigUpdate {
     /// so `settings.js::gather()` must always send it (empty string when
     /// the textarea is blank). Not a secret — no Keep/Env dance.
     pub reasoning_markers: String,
+    /// Opt-in fallback backend / model. Not secrets, so they cross IPC
+    /// verbatim. Like every other `BackendConfigUpdate` field, these are
+    /// **mandatory** in the `update_settings` payload (the struct has no
+    /// `#[serde(default)]`), so `settings.js::gather()` must always send
+    /// them (as `null` when unset).
+    pub fallback_backend: Option<String>,
+    pub fallback_model: Option<String>,
 }
 
 impl GuiConfigUpdate {
@@ -770,6 +802,8 @@ impl GuiConfigUpdate {
                 llamacpp_gpu_layers: self.backend.llamacpp_gpu_layers,
                 llamacpp_n_ctx: self.backend.llamacpp_n_ctx,
                 reasoning_markers: self.backend.reasoning_markers,
+                fallback_backend: self.backend.fallback_backend,
+                fallback_model: self.backend.fallback_model,
             },
             classifier: self.classifier,
             extractor: self.extractor,
@@ -1074,7 +1108,9 @@ mod tests {
                 "qnn_qairt_lib_dir": "/qairt/lib/aarch64-android",
                 "gguf_path": null,
                 "llamacpp_gpu_layers": null,
-                "llamacpp_n_ctx": null
+                "llamacpp_n_ctx": null,
+                "fallback_backend": null,
+                "fallback_model": null
             },
             "classifier": {"match_main": true, "kind": null, "model": null, "timeout_ms": 3000},
             "extractor": {"match_main": true, "kind": null, "model": null, "timeout_ms": 5000},
@@ -1144,7 +1180,9 @@ mod tests {
                 "qnn_qairt_lib_dir": null,
                 "gguf_path": null,
                 "llamacpp_gpu_layers": null,
-                "llamacpp_n_ctx": null
+                "llamacpp_n_ctx": null,
+                "fallback_backend": null,
+                "fallback_model": null
             },
             "classifier": {"match_main": true, "kind": null, "model": null, "timeout_ms": 3000},
             "extractor": {"match_main": true, "kind": null, "model": null, "timeout_ms": 5000},
@@ -1159,6 +1197,96 @@ mod tests {
         let update: GuiConfigUpdate = serde_json::from_str(update_json).unwrap();
         let resolved = update.into_config(&current);
         assert_eq!(resolved.backend.reasoning_markers, "[[r]] [[/r]]");
+    }
+
+    #[test]
+    fn default_fallback_is_none() {
+        let cfg = GuiConfig::default();
+        assert_eq!(cfg.backend.fallback_backend, None);
+        assert_eq!(cfg.backend.fallback_model, None);
+    }
+
+    #[test]
+    fn fallback_round_trips_through_disk() {
+        let dir = TempDir::new().unwrap();
+        let mut cfg = GuiConfig::default();
+        cfg.backend.kind = "llamacpp".to_string();
+        cfg.backend.fallback_backend = Some("cloud".to_string());
+        cfg.backend.fallback_model = Some("claude-opus-4-7".to_string());
+
+        save(dir.path(), &cfg).unwrap();
+        let round_trip = load(dir.path()).unwrap();
+        assert_eq!(round_trip, cfg);
+    }
+
+    #[test]
+    fn older_config_without_fallback_fields_loads_with_defaults() {
+        // A config written before the fallback fields existed must still load
+        // — struct-level `#[serde(default)]` on BackendConfig fills both as
+        // None rather than erroring. Mirrors the qnn/llamacpp forward-compat.
+        let dir = TempDir::new().unwrap();
+        let path = config_path(dir.path());
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        let legacy = r#"{
+            "learner": {"name": "Ada", "age": 7, "locale": "en"},
+            "backend": {"kind": "ollama", "model": null, "ollama_url": "http://localhost:11434"}
+        }"#;
+        std::fs::write(&path, legacy).unwrap();
+        let cfg = load(dir.path()).unwrap();
+        assert_eq!(cfg.backend.fallback_backend, None);
+        assert_eq!(cfg.backend.fallback_model, None);
+    }
+
+    #[test]
+    fn fallback_passes_through_view_verbatim() {
+        // Not a secret — the view carries the fallback choice through
+        // unredacted so the settings form can re-show it.
+        let mut cfg = GuiConfig::default();
+        cfg.backend.fallback_backend = Some("cloud".to_string());
+        cfg.backend.fallback_model = None;
+        let view: GuiConfigView = (&cfg).into();
+        assert_eq!(view.backend.fallback_backend, Some("cloud".to_string()));
+        assert_eq!(view.backend.fallback_model, None);
+    }
+
+    #[test]
+    fn fallback_passes_through_update_verbatim() {
+        let current = GuiConfig::default();
+        let update_json = r#"{
+            "learner": {"name": "Ada", "age": 7, "locale": "en"},
+            "backend": {
+                "kind": "llamacpp",
+                "model": null,
+                "ollama_url": "http://localhost:11434",
+                "openai_compat_url": "http://localhost:8000",
+                "api_key_source": {"kind": "keep"},
+                "openai_compat_api_key_source": {"kind": "keep"},
+                "reasoning_markers": "",
+                "qnn_bundle_dir": null,
+                "qnn_qairt_lib_dir": null,
+                "gguf_path": null,
+                "llamacpp_gpu_layers": null,
+                "llamacpp_n_ctx": null,
+                "fallback_backend": "cloud",
+                "fallback_model": "claude-opus-4-7"
+            },
+            "classifier": {"match_main": true, "kind": null, "model": null, "timeout_ms": 3000},
+            "extractor": {"match_main": true, "kind": null, "model": null, "timeout_ms": 5000},
+            "comprehension": {"match_main": true, "kind": null, "model": null, "timeout_ms": 5000},
+            "embedder": {"kind": "none", "model": null, "ollama_url": null, "openai_compat_url": null},
+            "vocab": {"max_per_prompt": null},
+            "breaks": {"after_mins": 30},
+            "persistence": {"session_db": null, "knowledge_db": null, "no_persist": false},
+            "ui": {"sidebar_open": true, "last_section": "current_turn"},
+            "speech": {"voice_mode_enabled": false, "disable_auto_download": false, "mic_silence_ms": 600, "overrides": {}}
+        }"#;
+        let update: GuiConfigUpdate = serde_json::from_str(update_json).unwrap();
+        let resolved = update.into_config(&current);
+        assert_eq!(resolved.backend.fallback_backend, Some("cloud".to_string()));
+        assert_eq!(
+            resolved.backend.fallback_model,
+            Some("claude-opus-4-7".to_string())
+        );
     }
 
     #[test]
@@ -1221,7 +1349,9 @@ mod tests {
                 "qnn_qairt_lib_dir": null,
                 "gguf_path": null,
                 "llamacpp_gpu_layers": null,
-                "llamacpp_n_ctx": null
+                "llamacpp_n_ctx": null,
+                "fallback_backend": null,
+                "fallback_model": null
             },
             "classifier": {"match_main": true, "kind": null, "model": null, "timeout_ms": 3000},
             "extractor": {"match_main": true, "kind": null, "model": null, "timeout_ms": 5000},
@@ -1415,6 +1545,8 @@ mod tests {
                 "gguf_path": null,
                 "llamacpp_gpu_layers": null,
                 "llamacpp_n_ctx": null,
+                "fallback_backend": null,
+                "fallback_model": null,
             },
             "classifier": {"match_main": true, "kind": null, "model": null, "timeout_ms": 3000},
             "extractor": {"match_main": true, "kind": null, "model": null, "timeout_ms": 5000},
@@ -1460,7 +1592,9 @@ mod tests {
                 "gguf_path": null,
                 "llamacpp_gpu_layers": null,
                 "llamacpp_n_ctx": null,
-                "reasoning_markers": ""
+                "reasoning_markers": "",
+                "fallback_backend": null,
+                "fallback_model": null
             },
             "classifier": {"match_main": true, "kind": null, "model": null, "timeout_ms": 3000},
             "extractor": {"match_main": true, "kind": null, "model": null, "timeout_ms": 5000},
@@ -1511,7 +1645,9 @@ mod tests {
                 "gguf_path": null,
                 "llamacpp_gpu_layers": null,
                 "llamacpp_n_ctx": null,
-                "reasoning_markers": ""
+                "reasoning_markers": "",
+                "fallback_backend": null,
+                "fallback_model": null
             },
             "classifier": {"match_main": true, "kind": null, "model": null, "timeout_ms": 3000},
             "extractor": {"match_main": true, "kind": null, "model": null, "timeout_ms": 5000},
