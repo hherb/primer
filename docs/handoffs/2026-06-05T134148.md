@@ -65,7 +65,8 @@ These are unchanged from the prior brief and remain the highest-value real valid
 
 ## Open decisions / risks
 
-- **Branch protection is now ACTIVE on `main`** with `enforce_admins: false`. The owner CAN still admin-merge a PR whose check is stuck, and direct pushes to `main` are gated by the `cargo test (default features)` check. If a future legitimate hotfix needs to bypass, either let CI run or temporarily relax via `gh api -X PUT …/protection`. Don't be surprised when a direct `git push origin main` of an untested commit is rejected — that's the intended behaviour now.
+- **Branch protection is now ACTIVE on `main`** (required check: `cargo test (default features)`, strict; force-push/delete blocked; `enforce_admins: false`). It does its core job: blocking untested **code** from `main`.
+- **⚠️ Docs-only PRs are DEADLOCKED through the normal flow — admin-merge them.** This is the documented caveat in `.github/workflows/ci.yml` (issue #168): the CI workflow has `paths-ignore: ['**/*.md', 'docs/**', …]` to save macOS runner minutes, so a docs-only change never triggers the Rust workflow → `cargo test (default features)` never runs → the required check stays pending → `mergeStateStatus: BLOCKED` forever. **This session hit it on the docs PR #203 and resolved it with `gh pr merge 203 --squash --admin`.** Because `enforce_admins: false`, the admin owner can also just `git push origin main` docs directly (the old handoff-to-main flow still works for the admin). **The ci.yml comment lists the proper zero-friction fix** if the owner ever wants docs PRs to merge without `--admin`: a "skipped-but-required" stub — a second workflow (or per-job `paths` allowlist) that emits a passing `cargo test (default features)` status on docs-only paths. It's fiddly (duplicate-check-name / mutually-exclusive-paths sharp edges) and was deliberately NOT rushed this session; flag for the owner as an optional infra follow-up. **Net rule for the next session: code PRs go through CI (enforced); docs-only PRs use `--admin` or an admin direct-push.**
 - **The real llama.cpp model has STILL never been run by any autonomous session** — no GGUF was downloaded. The backend's decode loop / GGUF load / chat-template / Metal offload are verified to COMPILE, the orchestration is host-tested via the mock, and (new this session) the GPU-variant feature resolution + real-arm compilation are proven. But the actual generation round-trip remains owner-gated (the `#[ignore]` smoke + the GPU REPL command above). Treat "it generates real text on GPU" as unverified until one of those runs.
 - **`llama-cpp-2` 0.1.146 is a 0.1.x crate (patch releases can break).** Pinned `"0.1.146"` in `[workspace.dependencies]`. A `cargo update` could pull a breaking 0.1.x patch; the signature reconciliations (u32 `with_n_gpu_layers`; `token_to_piece` + `encoding_rs`) live only in the feature-gated `real` module of `crates/primer-inference/src/llamacpp/engine.rs`.
 - **`backup/pre-rebase-stageB` still KEPT** (unchanged). Tip `6378316`, not in `main` — intentional pre-rebase Stage B snapshot. Owner decision: `git branch -D` it if the Stage B work is fully merged and the snapshot is no longer wanted.
@@ -117,6 +118,9 @@ git checkout -b <branch> main
 git push -u origin <branch> && gh pr create --base main ...
 gh pr checks <n>                              # wait green, then:
 gh pr merge <n> --squash --delete-branch
+# DOCS-ONLY PRs: CI is path-ignored (#168) so the required check never runs →
+# the PR is BLOCKED. Admin-merge instead (or admin direct-push docs to main):
+gh pr merge <n> --squash --delete-branch --admin
 ```
 
 ## Reporting back
