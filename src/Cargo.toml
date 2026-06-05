@@ -108,6 +108,13 @@ tauri-build = { version = "2" }
 # only when the qnn feature is on is acceptable. Pinned to 2.x.
 minijinja = "2"
 
+# llama.cpp Rust binding (Phase 1.1 LlamaCppBackend). Compiles llama.cpp
+# via cmake/C++, so it is ONLY pulled behind primer-inference's non-default
+# `llamacpp` feature. Pinned because it is a 0.1.x crate (patch releases can
+# break). Does NOT pull `ort`, so it is independent of the workspace's
+# `=2.0.0-rc.10` ort pin.
+llama-cpp-2 = "0.1.146"
+
 # Workspace crates
 primer-core = { path = "crates/primer-core" }
 primer-qnn-sys = { path = "crates/primer-qnn-sys" }

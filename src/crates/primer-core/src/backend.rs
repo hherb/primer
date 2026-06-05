@@ -19,6 +19,16 @@
 /// a single source of truth.
 pub const QNN_NAME_PREFIX: &str = "qnn:";
 
+/// Prefix that `LlamaCppBackend::name()` prepends to its model id
+/// (e.g. `"llamacpp:Qwen3-7B-Q4_K_M"`).
+///
+/// Re-exported by `primer-inference` as
+/// `primer_inference::llamacpp::LLAMACPP_NAME_PREFIX`. Unlike
+/// [`QNN_NAME_PREFIX`], a `llamacpp:`-named backend is **not** treated as
+/// small-context: local llama models commonly run 8K+ context. A future
+/// constrained-device path can revisit [`is_small_context_backend`].
+pub const LLAMACPP_NAME_PREFIX: &str = "llamacpp:";
+
 /// True if a backend with this `name()` is a small-context (≈4K-token)
 /// backend that should run under the constrained pedagogy budget — a
 /// shorter recent-turn window and fewer retrieved passages — instead of
@@ -64,5 +74,13 @@ mod tests {
         // The detection is prefix-anchored, not a substring search, so a
         // backend that merely mentions "qnn" later in its name is unaffected.
         assert!(!is_small_context_backend("my-qnn:model"));
+    }
+
+    #[test]
+    fn llamacpp_prefix_value_and_not_small_context() {
+        assert_eq!(LLAMACPP_NAME_PREFIX, "llamacpp:");
+        // Local llama models commonly run 8K+ context; the constrained 3B
+        // path is deferred (Phase 1.1 bullet c), so llamacpp is NOT small-context.
+        assert!(!is_small_context_backend("llamacpp:Qwen3-7B-Q4_K_M"));
     }
 }

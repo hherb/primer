@@ -55,9 +55,9 @@ Status key: ✅ done · 🟡 in progress · [ ] not started.
 
 **Goal:** run the conversation loop offline on available hardware.
 
-### 1.1 — llama.cpp integration
+### 1.1 — llama.cpp integration 🟡
 
-- [ ] `LlamaCppBackend` via bindings/FFI; GGUF loading from a configurable path.
+- [x] `LlamaCppBackend` via `llama-cpp-2` bindings; GGUF loading from a configurable path (behind the non-default `llamacpp` feature; CPU + Metal/CUDA/Vulkan passthrough). Benchmarking (bullet 2) + local→cloud fallback (bullet 3) still open.
 - [ ] Benchmark Qwen3 7B Q4_K_M on MacBook (Metal), DGX (CUDA), RedMagic (Vulkan).
 - [ ] Automatic local→cloud fallback; 3B fallback path for constrained devices.
 

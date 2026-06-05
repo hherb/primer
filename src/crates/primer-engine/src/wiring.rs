@@ -54,6 +54,18 @@ pub struct BackendParams {
     /// `--qnn-qairt-lib-dir` flag with the same default applied when
     /// unset.
     pub qnn_qairt_lib_dir: Option<PathBuf>,
+    /// Path to the GGUF model file. Consumed by the `"llamacpp"` arm of
+    /// [`build_backend`] only; ignored by every other arm. Always present
+    /// in the struct (qnn-style) so the shape is identical across feature
+    /// combinations. The CLI surfaces this by reusing `--model`.
+    pub gguf_path: Option<PathBuf>,
+    /// Explicit `n_gpu_layers` override for the llama.cpp backend
+    /// (`--llamacpp-gpu-layers`). `None` ⇒ resolved by feature
+    /// (`primer_inference::llamacpp::params::resolve_gpu_layers`).
+    pub llamacpp_gpu_layers: Option<i32>,
+    /// Explicit `n_ctx` override (`--llamacpp-n-ctx`). `None` ⇒ the model's
+    /// trained default.
+    pub llamacpp_n_ctx: Option<u32>,
     /// Extra `(open, close)` reasoning-marker pairs appended to the built-in
     /// defaults for the Ollama / openai-compat backends. Empty ⇒ defaults
     /// only. Ignored by every other backend arm.
@@ -124,6 +136,7 @@ pub async fn build_backend(
             .with_extra_markers(params.reasoning_markers.clone()),
         )),
         "qnn" => build_qnn_backend(params).await,
+        "llamacpp" => build_llamacpp_backend(params).await,
         other => Err(PrimerError::Inference(
             format!("unknown backend: {other}").into(),
         )),
@@ -170,6 +183,36 @@ async fn build_qnn_backend(_params: &BackendParams) -> Result<Arc<dyn InferenceB
     Err(PrimerError::Inference(
         "qnn backend requires the `qnn` cargo feature. \
          Build with `cargo build --features primer-cli/qnn` (Android target only)."
+            .into(),
+    ))
+}
+
+/// Construct the llama.cpp backend. Mirrors [`build_qnn_backend`]'s two-cfg
+/// shape: feature-on validates the GGUF path and constructs the real engine;
+/// feature-off returns a distinct build-time hint.
+#[cfg(feature = "llamacpp")]
+async fn build_llamacpp_backend(params: &BackendParams) -> Result<Arc<dyn InferenceBackend>> {
+    use primer_inference::llamacpp::params::resolve_gpu_layers;
+    let gguf_path = params.gguf_path.as_ref().ok_or_else(|| {
+        PrimerError::Inference("--model <path-to.gguf> is required for --backend llamacpp".into())
+    })?;
+    let n_gpu_layers = resolve_gpu_layers(params.llamacpp_gpu_layers);
+    let engine = primer_inference::llamacpp::engine::RealLlamaEngine::new(
+        gguf_path,
+        n_gpu_layers,
+        params.llamacpp_n_ctx,
+    )?;
+    let backend = primer_inference::LlamaCppBackend::new(Arc::new(engine))
+        .with_extra_markers(params.reasoning_markers.clone());
+    Ok(Arc::new(backend))
+}
+
+#[cfg(not(feature = "llamacpp"))]
+async fn build_llamacpp_backend(_params: &BackendParams) -> Result<Arc<dyn InferenceBackend>> {
+    Err(PrimerError::Inference(
+        "llamacpp backend requires the `llamacpp` cargo feature. \
+         Build with `cargo build --features primer-cli/llamacpp` \
+         (or llamacpp-metal / llamacpp-cuda / llamacpp-vulkan for GPU)."
             .into(),
     ))
 }
@@ -531,6 +574,9 @@ mod classifier_construction_tests {
             comprehension_model: None,
             qnn_bundle_dir: None,
             qnn_qairt_lib_dir: None,
+            gguf_path: None,
+            llamacpp_gpu_layers: None,
+            llamacpp_n_ctx: None,
             reasoning_markers: Vec::new(),
         }
     }
@@ -685,6 +731,9 @@ mod extractor_construction_tests {
             comprehension_model: None,
             qnn_bundle_dir: None,
             qnn_qairt_lib_dir: None,
+            gguf_path: None,
+            llamacpp_gpu_layers: None,
+            llamacpp_n_ctx: None,
             reasoning_markers: Vec::new(),
         }
     }
@@ -795,6 +844,9 @@ mod comprehension_construction_tests {
             comprehension_model: comprehension_model.map(String::from),
             qnn_bundle_dir: None,
             qnn_qairt_lib_dir: None,
+            gguf_path: None,
+            llamacpp_gpu_layers: None,
+            llamacpp_n_ctx: None,
             reasoning_markers: Vec::new(),
         }
     }
@@ -910,6 +962,9 @@ mod qnn_dispatch_tests {
             comprehension_model: None,
             qnn_bundle_dir: None,
             qnn_qairt_lib_dir: None,
+            gguf_path: None,
+            llamacpp_gpu_layers: None,
+            llamacpp_n_ctx: None,
             reasoning_markers: Vec::new(),
         }
     }
@@ -1019,5 +1074,36 @@ mod qnn_dispatch_tests {
                 || msg.to_lowercase().contains("only supported"),
             "expected PlatformUnsupported-flavoured error; got: {msg}"
         );
+    }
+
+    /// Without the `llamacpp` feature (the default test build), the
+    /// dispatch arm hands back a build hint mentioning `llamacpp` and
+    /// `feature` — not the generic "unknown backend" string.
+    #[tokio::test]
+    async fn llamacpp_without_feature_returns_build_hint() {
+        let params = BackendParams {
+            gguf_path: Some(std::path::PathBuf::from("/tmp/model.gguf")),
+            ..params()
+        };
+        let err = match build_backend("llamacpp", "ignored".into(), &params).await {
+            Ok(_) => panic!("expected llamacpp-without-feature to error, got Ok"),
+            Err(e) => e,
+        };
+        let msg = format!("{err}");
+        assert!(msg.contains("llamacpp"), "got: {msg}");
+        assert!(msg.contains("feature"), "got: {msg}");
+    }
+
+    /// The `"llamacpp"` string reaches its own dispatch arm (the error
+    /// mentions llamacpp, proving it didn't fall through to the generic
+    /// unknown-backend arm).
+    #[tokio::test]
+    async fn llamacpp_dispatch_reaches_arm() {
+        let params = params();
+        let err = match build_backend("llamacpp", "ignored".into(), &params).await {
+            Ok(_) => panic!("expected llamacpp dispatch to error, got Ok"),
+            Err(e) => e,
+        };
+        assert!(format!("{err}").to_lowercase().contains("llamacpp"));
     }
 }

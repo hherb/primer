@@ -12,10 +12,13 @@
 //! - `QnnBackend`: Qualcomm QNN SDK for Snapdragon NPU (behind the
 //!   `qnn` cargo feature; Phase 1.2 step 1.2.2 lands the safe wrapper
 //!   on top of [`primer-qnn-sys`]).
-//! - `LlamaCppBackend`: (TODO) Binds to llama.cpp for local inference.
+//! - `LlamaCppBackend`: Embedded llama.cpp inference from a local GGUF
+//!   (behind the `llamacpp` cargo feature; CPU + Metal/CUDA/Vulkan
+//!   passthrough features). Phase 1.1.
 //! - `RknnBackend`: (TODO) Rockchip RKNN-LLM for RK1828 NPU.
 
 pub mod cloud;
+pub mod llamacpp;
 pub mod ollama;
 pub mod openai_compat;
 mod reasoning_stream;
@@ -25,6 +28,7 @@ pub mod stub;
 pub mod qnn;
 
 pub use cloud::CloudBackend;
+pub use llamacpp::LlamaCppBackend;
 pub use ollama::OllamaBackend;
 pub use openai_compat::OpenAiCompatBackend;
 pub use stub::StubBackend;

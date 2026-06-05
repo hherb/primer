@@ -41,3 +41,10 @@ openai-compat-embedding = ["primer-embedding/openai-compat"]
 # `QnnBackend::new` returns a typed `PlatformUnsupported` error from
 # `primer-qnn-sys` rather than failing to link.
 qnn = ["primer-inference/qnn"]
+
+# Embedded llama.cpp backend (Phase 1.1). Adds the `llamacpp` arm to
+# `build_backend` and pulls in primer-inference/llamacpp.
+llamacpp = ["primer-inference/llamacpp"]
+llamacpp-metal = ["primer-inference/llamacpp-metal"]
+llamacpp-cuda = ["primer-inference/llamacpp-cuda"]
+llamacpp-vulkan = ["primer-inference/llamacpp-vulkan"]

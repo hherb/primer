@@ -154,6 +154,18 @@ async fn build_with_strategy(
         // killing the GUI (mirrors the openai-compat-embedder pattern).
         qnn_bundle_dir: backend_config.qnn_bundle_dir.clone(),
         qnn_qairt_lib_dir: backend_config.qnn_qairt_lib_dir.clone(),
+        // llama.cpp backend (Phase 1.1): the GGUF path / gpu-layers /
+        // n_ctx come straight from Settings → Inference backend. The GUI
+        // carries a dedicated `gguf_path` field (unlike the CLI, which
+        // reuses `--model`). On a default (non-`llamacpp`-feature) build,
+        // `build_llamacpp_backend`'s `not(feature = "llamacpp")` arm
+        // returns the "rebuild with --features llamacpp" hint regardless
+        // of these values, so selecting llamacpp surfaces a clear
+        // build-time error inline rather than killing the GUI (mirrors
+        // the qnn pattern).
+        gguf_path: backend_config.gguf_path.clone(),
+        llamacpp_gpu_layers: backend_config.llamacpp_gpu_layers,
+        llamacpp_n_ctx: backend_config.llamacpp_n_ctx,
         // Custom reasoning markers from Settings → Inference backend.
         // Parsed from the raw textarea text into `(open, close)` pairs and
         // appended to the built-in defaults by the ollama / openai-compat
@@ -169,11 +181,12 @@ async fn build_with_strategy(
         .map_err(|e| format!("constructing inference backend: {e}"))?;
 
     // For QNN the real model id comes from `primer-meta.json` inside the
-    // bundle; rebind `main_model` to `backend.name()` (e.g.
-    // "qnn:Qwen3-4B") so the downstream subsystem identifiers carry the
-    // real model id instead of the "qnn-pending" placeholder. Mirrors
-    // the CLI's post-construction rebind.
-    let main_model = if backend_config.kind == "qnn" {
+    // bundle; for llamacpp it comes from the GGUF stem. In both cases
+    // rebind `main_model` to `backend.name()` (e.g. "qnn:Qwen3-4B" or
+    // "llamacpp:qwen3-4b-q4") so the downstream subsystem identifiers
+    // carry the real model id instead of the "*-pending" placeholder.
+    // Mirrors the CLI's post-construction rebind.
+    let main_model = if backend_config.kind == "qnn" || backend_config.kind == "llamacpp" {
         backend.name().to_string()
     } else {
         main_model
@@ -467,8 +480,17 @@ fn resolve_main_model(kind: &str, model: Option<&str>) -> Result<String, String>
             // the CLI's "qnn-pending" placeholder).
             Ok("qnn-pending".to_string())
         }
+        "llamacpp" => {
+            // The real model id comes from the GGUF stem at construction
+            // time (`backend.name()` == "llamacpp:<stem>"). The `model`
+            // override is ignored — the GGUF path lives in its own config
+            // field. Return a placeholder that `build_active_session`
+            // rebinds to `backend.name()` once the backend constructs
+            // (mirrors the CLI's "llamacpp" rebind).
+            Ok("llamacpp-pending".to_string())
+        }
         other => Err(format!(
-            "unknown backend kind {other:?}: expected one of stub, cloud, ollama, openai-compat, qnn"
+            "unknown backend kind {other:?}: expected one of stub, cloud, ollama, openai-compat, qnn, llamacpp"
         )),
     }
 }

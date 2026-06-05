@@ -95,6 +95,22 @@ pub struct BackendConfig {
     /// conventional `<bundle>/../qairt/lib/aarch64-android/` layout via
     /// `primer_engine::default_qairt_lib_dir`.
     pub qnn_qairt_lib_dir: Option<PathBuf>,
+    /// GGUF model file path (used when `kind == "llamacpp"`). Mirrors the
+    /// CLI's reuse of `--model` for the GGUF path, but the GUI carries a
+    /// dedicated field. `None` here means "unset" — selecting the llamacpp
+    /// backend without it errors at session-start via
+    /// `build_llamacpp_backend`'s "GGUF path required" message. Not a
+    /// secret, so it crosses the IPC view/update DTOs verbatim.
+    #[serde(default)]
+    pub gguf_path: Option<PathBuf>,
+    /// llama.cpp `n_gpu_layers` override (used when `kind == "llamacpp"`).
+    /// `None` ⇒ resolved by the compiled GPU feature.
+    #[serde(default)]
+    pub llamacpp_gpu_layers: Option<i32>,
+    /// llama.cpp `n_ctx` override (used when `kind == "llamacpp"`).
+    /// `None` ⇒ the model's trained default.
+    #[serde(default)]
+    pub llamacpp_n_ctx: Option<u32>,
     /// Raw "reasoning markers" textarea text from Settings: one
     /// `open<whitespace>close` pair per line. Parsed into `(open, close)`
     /// pairs by `crate::reasoning_markers::parse_reasoning_markers` at
@@ -116,6 +132,9 @@ impl Default for BackendConfig {
             openai_compat_api_key_source: ApiKeySource::default(),
             qnn_bundle_dir: None,
             qnn_qairt_lib_dir: None,
+            gguf_path: None,
+            llamacpp_gpu_layers: None,
+            llamacpp_n_ctx: None,
             reasoning_markers: String::new(),
         }
     }
@@ -624,6 +643,11 @@ pub struct BackendConfigView {
     /// QNN bundle / QAIRT lib paths pass through verbatim — not secrets.
     pub qnn_bundle_dir: Option<PathBuf>,
     pub qnn_qairt_lib_dir: Option<PathBuf>,
+    /// llama.cpp GGUF path / gpu-layers / n_ctx pass through verbatim —
+    /// not secrets.
+    pub gguf_path: Option<PathBuf>,
+    pub llamacpp_gpu_layers: Option<i32>,
+    pub llamacpp_n_ctx: Option<u32>,
     /// Raw reasoning-markers textarea text — passes through verbatim
     /// (not a secret), so the settings form can re-show it.
     pub reasoning_markers: String,
@@ -642,6 +666,9 @@ impl From<&GuiConfig> for GuiConfigView {
                 openai_compat_api_key_source: (&c.backend.openai_compat_api_key_source).into(),
                 qnn_bundle_dir: c.backend.qnn_bundle_dir.clone(),
                 qnn_qairt_lib_dir: c.backend.qnn_qairt_lib_dir.clone(),
+                gguf_path: c.backend.gguf_path.clone(),
+                llamacpp_gpu_layers: c.backend.llamacpp_gpu_layers,
+                llamacpp_n_ctx: c.backend.llamacpp_n_ctx,
                 reasoning_markers: c.backend.reasoning_markers.clone(),
             },
             classifier: c.classifier.clone(),
@@ -701,6 +728,14 @@ pub struct BackendConfigUpdate {
     /// them (as `null` when unset).
     pub qnn_bundle_dir: Option<PathBuf>,
     pub qnn_qairt_lib_dir: Option<PathBuf>,
+    /// llama.cpp GGUF path / gpu-layers / n_ctx. Not secrets, so they
+    /// cross IPC verbatim. Like every other `BackendConfigUpdate` field,
+    /// these are **mandatory** in the `update_settings` payload (the
+    /// struct has no `#[serde(default)]`), so `settings.js::gather()` must
+    /// always send them (as `null` when unset).
+    pub gguf_path: Option<PathBuf>,
+    pub llamacpp_gpu_layers: Option<i32>,
+    pub llamacpp_n_ctx: Option<u32>,
     /// Raw reasoning-markers textarea text. Like every other
     /// `BackendConfigUpdate` field, this is **mandatory** in the
     /// `update_settings` payload (the struct has no `#[serde(default)]`),
@@ -731,6 +766,9 @@ impl GuiConfigUpdate {
                     .resolve(&current.backend.openai_compat_api_key_source),
                 qnn_bundle_dir: self.backend.qnn_bundle_dir,
                 qnn_qairt_lib_dir: self.backend.qnn_qairt_lib_dir,
+                gguf_path: self.backend.gguf_path,
+                llamacpp_gpu_layers: self.backend.llamacpp_gpu_layers,
+                llamacpp_n_ctx: self.backend.llamacpp_n_ctx,
                 reasoning_markers: self.backend.reasoning_markers,
             },
             classifier: self.classifier,
@@ -1033,7 +1071,10 @@ mod tests {
                 "openai_compat_api_key_source": {"kind": "keep"},
                 "reasoning_markers": "",
                 "qnn_bundle_dir": "/bundles/qwen3-4b",
-                "qnn_qairt_lib_dir": "/qairt/lib/aarch64-android"
+                "qnn_qairt_lib_dir": "/qairt/lib/aarch64-android",
+                "gguf_path": null,
+                "llamacpp_gpu_layers": null,
+                "llamacpp_n_ctx": null
             },
             "classifier": {"match_main": true, "kind": null, "model": null, "timeout_ms": 3000},
             "extractor": {"match_main": true, "kind": null, "model": null, "timeout_ms": 5000},
@@ -1100,7 +1141,10 @@ mod tests {
                 "openai_compat_api_key_source": {"kind": "keep"},
                 "reasoning_markers": "[[r]] [[/r]]",
                 "qnn_bundle_dir": null,
-                "qnn_qairt_lib_dir": null
+                "qnn_qairt_lib_dir": null,
+                "gguf_path": null,
+                "llamacpp_gpu_layers": null,
+                "llamacpp_n_ctx": null
             },
             "classifier": {"match_main": true, "kind": null, "model": null, "timeout_ms": 3000},
             "extractor": {"match_main": true, "kind": null, "model": null, "timeout_ms": 5000},
@@ -1174,7 +1218,10 @@ mod tests {
                 "openai_compat_api_key_source": {"kind": "keep"},
                 "reasoning_markers": "",
                 "qnn_bundle_dir": null,
-                "qnn_qairt_lib_dir": null
+                "qnn_qairt_lib_dir": null,
+                "gguf_path": null,
+                "llamacpp_gpu_layers": null,
+                "llamacpp_n_ctx": null
             },
             "classifier": {"match_main": true, "kind": null, "model": null, "timeout_ms": 3000},
             "extractor": {"match_main": true, "kind": null, "model": null, "timeout_ms": 5000},
@@ -1365,6 +1412,9 @@ mod tests {
                 "reasoning_markers": "",
                 "qnn_bundle_dir": null,
                 "qnn_qairt_lib_dir": null,
+                "gguf_path": null,
+                "llamacpp_gpu_layers": null,
+                "llamacpp_n_ctx": null,
             },
             "classifier": {"match_main": true, "kind": null, "model": null, "timeout_ms": 3000},
             "extractor": {"match_main": true, "kind": null, "model": null, "timeout_ms": 5000},
@@ -1407,6 +1457,9 @@ mod tests {
                 "openai_compat_api_key_source": {"kind": "keep"},
                 "qnn_bundle_dir": null,
                 "qnn_qairt_lib_dir": null,
+                "gguf_path": null,
+                "llamacpp_gpu_layers": null,
+                "llamacpp_n_ctx": null,
                 "reasoning_markers": ""
             },
             "classifier": {"match_main": true, "kind": null, "model": null, "timeout_ms": 3000},
@@ -1455,6 +1508,9 @@ mod tests {
                 "openai_compat_api_key_source": {"kind": "keep"},
                 "qnn_bundle_dir": null,
                 "qnn_qairt_lib_dir": null,
+                "gguf_path": null,
+                "llamacpp_gpu_layers": null,
+                "llamacpp_n_ctx": null,
                 "reasoning_markers": ""
             },
             "classifier": {"match_main": true, "kind": null, "model": null, "timeout_ms": 3000},
