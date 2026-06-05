@@ -374,8 +374,13 @@ pub mod reasoning {
         &[("<think>", "</think>"), ("<|channel>", "<channel|>")];
 }
 
-/// Tunables for the embedded llama.cpp backend (Phase 1.1).
+/// Tunables for the embedded llama.cpp backend (Phase 1.1) and
+/// inference-backend defaults shared across the CLI, GUI, and engine.
 pub mod inference {
+    /// Default Anthropic model id used when the cloud backend is selected
+    /// without an explicit model (primary `--model` or `--fallback-model`).
+    pub const DEFAULT_CLOUD_MODEL: &str = "claude-sonnet-4-6";
+
     /// `n_gpu_layers` value meaning "offload every layer to the GPU".
     /// The default when a GPU passthrough feature (metal/cuda/vulkan) is
     /// compiled in.

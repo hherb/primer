@@ -850,7 +850,7 @@ async fn async_main() -> anyhow::Result<()> {
         "cloud" => cli
             .model
             .clone()
-            .unwrap_or_else(|| "claude-sonnet-4-6".to_string()),
+            .unwrap_or_else(|| primer_core::consts::inference::DEFAULT_CLOUD_MODEL.to_string()),
         "ollama" => cli.model.clone().unwrap_or_else(|| {
             eprintln!("Error: --model required for ollama backend (e.g., --model llama3.2).");
             std::process::exit(1);
