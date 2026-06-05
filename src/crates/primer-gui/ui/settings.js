@@ -62,6 +62,11 @@ const dom = {
     backendReasoningMarkersField: document.getElementById(
       "f-backend-reasoning-markers-field",
     ),
+    backendFallbackBackend: document.getElementById("f-backend-fallback-backend"),
+    backendFallbackModel: document.getElementById("f-backend-fallback-model"),
+    backendFallbackModelField: document.getElementById(
+      "f-backend-fallback-model-field",
+    ),
     apiKeyFieldset: document.getElementById("f-api-key-fieldset"),
     apiKeyEnv: document.getElementById("f-api-key-env"),
     apiKeyInline: document.getElementById("f-api-key-inline"),
@@ -160,6 +165,7 @@ const state = {
 // `list_locales` IPC returns.
 wireDismiss();
 wireBackendKindReveal();
+wireFallbackReveal();
 wireEmbedderKindReveal();
 wireApiKeyRadios();
 wireSubsystemMatchMain();
@@ -295,7 +301,10 @@ function populate(view) {
   f.backendLlamacppGpuLayers.value = view.backend.llamacpp_gpu_layers ?? "";
   f.backendLlamacppNCtx.value = view.backend.llamacpp_n_ctx ?? "";
   f.backendReasoningMarkers.value = view.backend.reasoning_markers ?? "";
+  f.backendFallbackBackend.value = view.backend.fallback_backend ?? "";
+  f.backendFallbackModel.value = view.backend.fallback_model ?? "";
   applyBackendKindReveal(view.backend.kind);
+  applyFallbackReveal(f.backendFallbackBackend.value);
 
   // API key (cloud)
   state.hasInlineKey =
@@ -508,6 +517,19 @@ function wireBackendKindReveal() {
   dom.fields.backendKind.addEventListener("change", () => {
     applyBackendKindReveal(dom.fields.backendKind.value);
   });
+}
+
+function wireFallbackReveal() {
+  dom.fields.backendFallbackBackend.addEventListener("change", () => {
+    applyFallbackReveal(dom.fields.backendFallbackBackend.value);
+  });
+}
+
+// The fallback model field only matters once a fallback backend is chosen —
+// hide it for "(no fallback)" so the form isn't cluttered. The picker itself
+// is always visible: any primary backend may opt into a fallback.
+function applyFallbackReveal(fallbackKind) {
+  dom.fields.backendFallbackModelField.hidden = !fallbackKind;
 }
 
 function applyBackendKindReveal(kind) {
@@ -739,6 +761,11 @@ function gather() {
       // verbatim (no trim) so the stored text round-trips exactly; the
       // Rust parser handles all whitespace. Empty string when blank.
       reasoning_markers: f.backendReasoningMarkers.value,
+      // Opt-in local→cloud fallback (issue #205) — also mandatory (no serde
+      // default). Both null when no fallback is chosen; the picker's empty
+      // value and a blank model field map to null via orNull.
+      fallback_backend: orNull(f.backendFallbackBackend.value.trim()),
+      fallback_model: orNull(f.backendFallbackModel.value.trim()),
     },
     classifier: gatherSubsystem("classifier"),
     extractor: gatherSubsystem("extractor"),

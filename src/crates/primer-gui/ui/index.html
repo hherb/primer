@@ -429,6 +429,36 @@
                 apply — this only adds more. Literal text, not regex.</small
               >
             </label>
+            <label class="field">
+              <span>Fallback backend (optional)</span>
+              <select id="f-backend-fallback-backend">
+                <option value="">(no fallback — local only)</option>
+                <option value="stub">stub (no API key)</option>
+                <option value="cloud">cloud (Anthropic)</option>
+                <option value="ollama">ollama (local)</option>
+                <option value="openai-compat">openai-compat (oMLX / LM Studio / vLLM)</option>
+              </select>
+              <small class="hint muted"
+                >If the main backend is unavailable at startup or fails before
+                any reply streams, serve the turn from this one instead. Leave
+                as "no fallback" to stay local-only — choosing
+                <strong>cloud</strong> here is explicit consent to send the
+                child's turn to the cloud on fallback.</small
+              >
+            </label>
+            <label class="field" id="f-backend-fallback-model-field">
+              <span>Fallback model (optional)</span>
+              <input
+                type="text"
+                id="f-backend-fallback-model"
+                placeholder="(per-backend default)"
+              />
+              <small class="hint muted"
+                >Model for the fallback backend. Cloud defaults to
+                <code>claude-sonnet-4-6</code> when blank; ollama and
+                openai-compat require an explicit model name.</small
+              >
+            </label>
           </div>
 
           <fieldset class="api-key-fieldset" id="f-api-key-fieldset">
