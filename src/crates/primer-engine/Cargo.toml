@@ -43,8 +43,13 @@ openai-compat-embedding = ["primer-embedding/openai-compat"]
 qnn = ["primer-inference/qnn"]
 
 # Embedded llama.cpp backend (Phase 1.1). Adds the `llamacpp` arm to
-# `build_backend` and pulls in primer-inference/llamacpp.
+# `build_backend` and pulls in primer-inference/llamacpp. The GPU variants
+# MUST chain to the base `llamacpp` feature: `build_llamacpp_backend`'s real
+# arm is `#[cfg(feature = "llamacpp")]`-gated, so a GPU-only build that didn't
+# enable the base feature would compile the `not(feature)` stub and return the
+# "rebuild with --features llamacpp" hint at runtime even though the backend is
+# fully built. (primer-inference's own GPU variants chain the same way.)
 llamacpp = ["primer-inference/llamacpp"]
-llamacpp-metal = ["primer-inference/llamacpp-metal"]
-llamacpp-cuda = ["primer-inference/llamacpp-cuda"]
-llamacpp-vulkan = ["primer-inference/llamacpp-vulkan"]
+llamacpp-metal = ["llamacpp", "primer-inference/llamacpp-metal"]
+llamacpp-cuda = ["llamacpp", "primer-inference/llamacpp-cuda"]
+llamacpp-vulkan = ["llamacpp", "primer-inference/llamacpp-vulkan"]

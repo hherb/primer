@@ -444,12 +444,17 @@ struct Cli {
 
     /// llama.cpp: number of model layers to offload to GPU. Default:
     /// all layers (-1) when built with a GPU feature, else CPU (0).
-    /// Only meaningful with `--backend llamacpp`.
+    /// Only meaningful with `--backend llamacpp`. Declared only on a
+    /// `--features llamacpp*` build so `--help` stays uncluttered on the
+    /// default text-REPL build (mirrors the qnn flags).
+    #[cfg(feature = "llamacpp")]
     #[arg(long, value_name = "N")]
     llamacpp_gpu_layers: Option<i32>,
 
     /// llama.cpp: context length (n_ctx). Default: the model's trained
-    /// length. Only meaningful with `--backend llamacpp`.
+    /// length. Only meaningful with `--backend llamacpp`. Declared only on
+    /// a `--features llamacpp*` build (see `--llamacpp-gpu-layers`).
+    #[cfg(feature = "llamacpp")]
     #[arg(long, value_name = "N")]
     llamacpp_n_ctx: Option<u32>,
 }
@@ -919,8 +924,18 @@ async fn async_main() -> anyhow::Result<()> {
         } else {
             None
         },
+        // The `--llamacpp-*` flags are `#[cfg(feature = "llamacpp")]`-gated
+        // declarations (like the qnn flags above), so the fields only exist
+        // on a llamacpp build. On the default build they stay `None`, which
+        // is what `build_llamacpp_backend`'s `not(feature)` stub expects.
+        #[cfg(feature = "llamacpp")]
         llamacpp_gpu_layers: cli.llamacpp_gpu_layers,
+        #[cfg(not(feature = "llamacpp"))]
+        llamacpp_gpu_layers: None,
+        #[cfg(feature = "llamacpp")]
         llamacpp_n_ctx: cli.llamacpp_n_ctx,
+        #[cfg(not(feature = "llamacpp"))]
+        llamacpp_n_ctx: None,
         reasoning_markers: pair_reasoning_markers(cli.reasoning_marker.clone()),
     };
 

@@ -101,11 +101,13 @@ qnn = ["primer-engine/qnn"]
 # GGUF path / gpu-layers / n_ctx config fields are always-present), but
 # selecting it surfaces the "rebuild with --features llamacpp" hint
 # inline — mirroring the qnn pattern. The `-metal` / `-cuda` / `-vulkan`
-# variants enable the corresponding GPU acceleration backend.
+# variants enable the corresponding GPU acceleration backend, and chain to
+# the base `llamacpp` feature so `build_llamacpp_backend`'s real arm activates
+# on GPU-only builds (primer-engine's GPU variants chain the same way).
 llamacpp = ["primer-inference/llamacpp", "primer-engine/llamacpp"]
-llamacpp-metal = ["primer-inference/llamacpp-metal", "primer-engine/llamacpp-metal"]
-llamacpp-cuda = ["primer-inference/llamacpp-cuda", "primer-engine/llamacpp-cuda"]
-llamacpp-vulkan = ["primer-inference/llamacpp-vulkan", "primer-engine/llamacpp-vulkan"]
+llamacpp-metal = ["llamacpp", "primer-inference/llamacpp-metal", "primer-engine/llamacpp-metal"]
+llamacpp-cuda = ["llamacpp", "primer-inference/llamacpp-cuda", "primer-engine/llamacpp-cuda"]
+llamacpp-vulkan = ["llamacpp", "primer-inference/llamacpp-vulkan", "primer-engine/llamacpp-vulkan"]
 
 # Voice mode — pulls every speech backend feature so the GUI binary can
 # drive the LISTEN → LATENT_THINK → SPEAK → LISTEN state machine end-to-
