@@ -33,10 +33,11 @@ use primer_core::inference::InferenceBackend;
 use primer_core::knowledge::KnowledgeBase;
 use primer_core::storage::{LearnerStore, SessionStore};
 use primer_engine::{
-    BackendParams, IN_MEMORY, build_backend, build_classifier, build_comprehension,
-    build_extractor, build_fastembed_embedder, build_ollama_embedder, build_openai_compat_embedder,
-    create_learner_with_id, parse_languages, reconcile_persisted_learner, resolve_session_db_path,
-    should_show_first_run_banner, verify_resume_locale_match,
+    BackendParams, IN_MEMORY, build_classifier, build_comprehension, build_extractor,
+    build_fastembed_embedder, build_main_backend, build_ollama_embedder,
+    build_openai_compat_embedder, create_learner_with_id, parse_languages,
+    reconcile_persisted_learner, resolve_session_db_path, should_show_first_run_banner,
+    verify_resume_locale_match,
 };
 use primer_extractor::{ConceptExtractor, ExtractorSettings};
 use primer_knowledge::SqliteKnowledgeBase;
@@ -82,6 +83,20 @@ struct Cli {
     /// For llamacpp: filesystem path to the .gguf file — required.
     #[arg(long)]
     model: Option<String>,
+
+    /// Opt-in fallback inference backend: "stub", "cloud", "ollama", or
+    /// "openai-compat". When set, a failing/unavailable primary `--backend`
+    /// falls back to this one at startup and before any token streams (never
+    /// mid-stream). Absent ⇒ no fallback ⇒ local-only. Setting cloud here is
+    /// the explicit consent to send a child's turn to the cloud on fallback.
+    #[arg(long)]
+    fallback_backend: Option<String>,
+
+    /// Model for `--fallback-backend`. For cloud, defaults to the standard
+    /// cloud model; for ollama/openai-compat a model is required; stub ignores
+    /// it.
+    #[arg(long)]
+    fallback_model: Option<String>,
 
     /// Ollama server URL (used when --backend ollama).
     #[arg(long, default_value = "http://localhost:11434")]
@@ -937,10 +952,12 @@ async fn async_main() -> anyhow::Result<()> {
         #[cfg(not(feature = "llamacpp"))]
         llamacpp_n_ctx: None,
         reasoning_markers: pair_reasoning_markers(cli.reasoning_marker.clone()),
+        fallback_backend: cli.fallback_backend.clone(),
+        fallback_model: cli.fallback_model.clone(),
     };
 
     let backend: Arc<dyn InferenceBackend> =
-        match build_backend(&cli.backend, main_model.clone(), &backend_params).await {
+        match build_main_backend(&cli.backend, main_model.clone(), &backend_params).await {
             Ok(b) => b,
             Err(e) => {
                 eprintln!("Error constructing backend: {e}");

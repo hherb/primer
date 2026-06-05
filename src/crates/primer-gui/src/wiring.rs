@@ -173,6 +173,10 @@ async fn build_with_strategy(
         reasoning_markers: crate::reasoning_markers::parse_reasoning_markers(
             &backend_config.reasoning_markers,
         ),
+        // GUI fallback wiring is a separate follow-up issue; set to None so the
+        // GUI keeps today's single-backend behavior. CLI exposes the fallback.
+        fallback_backend: None,
+        fallback_model: None,
     };
 
     // ─── Main backend (locale-independent) ───────────────────────────
