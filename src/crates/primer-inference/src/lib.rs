@@ -18,6 +18,7 @@
 //! - `RknnBackend`: (TODO) Rockchip RKNN-LLM for RK1828 NPU.
 
 pub mod cloud;
+pub mod fallback;
 pub mod llamacpp;
 pub mod ollama;
 pub mod openai_compat;
@@ -28,6 +29,7 @@ pub mod stub;
 pub mod qnn;
 
 pub use cloud::CloudBackend;
+pub use fallback::FallbackBackend;
 pub use llamacpp::LlamaCppBackend;
 pub use ollama::OllamaBackend;
 pub use openai_compat::OpenAiCompatBackend;
