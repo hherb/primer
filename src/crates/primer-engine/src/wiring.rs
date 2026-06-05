@@ -214,7 +214,9 @@ pub async fn build_backend(
 /// Otherwise it builds both legs and applies [`plan_main_backend`]:
 /// - `Wrapped` ⇒ `FallbackBackend { primary, secondary }`;
 /// - `SecondaryAlone` ⇒ secondary alone (primary was unavailable at startup);
-/// - `PrimaryAlone` ⇒ primary alone (no fallback, or fallback unbuildable);
+/// - `PrimaryAlone` ⇒ primary alone (no fallback, or the fallback was
+///   unbuildable/misconfigured — a broken opt-in fallback never aborts a
+///   healthy primary);
 /// - `Fail` ⇒ the primary's construction error.
 pub async fn build_main_backend(
     primary_name: &str,
@@ -240,11 +242,17 @@ pub async fn build_main_backend(
         return primary;
     };
 
-    // A fallback IS configured. Resolve the secondary model (may error for a
-    // required-model backend) and try to build it.
-    let fb_model = resolve_fallback_model(&fb_name, params.fallback_model.clone())
-        .map_err(|m| PrimerError::Inference(m.into()))?;
-    let secondary = build_backend(&fb_name, fb_model.unwrap_or_default(), params).await;
+    // A fallback IS configured. Resolve the secondary model (may fail for a
+    // required-model backend like ollama/openai-compat) and try to build it.
+    // A misconfigured or unbuildable *opt-in* fallback must NEVER abort startup
+    // when the primary is healthy — it degrades to `PrimaryAlone` in the match
+    // below — so a resolve error is folded into the `secondary` Result rather
+    // than `?`-propagated. When the primary ALSO failed, `plan_main_backend`
+    // returns `Fail` and the primary's (more actionable) error surfaces.
+    let secondary = match resolve_fallback_model(&fb_name, params.fallback_model.clone()) {
+        Ok(fb_model) => build_backend(&fb_name, fb_model.unwrap_or_default(), params).await,
+        Err(msg) => Err(PrimerError::Inference(msg.into())),
+    };
 
     match plan_main_backend(primary.is_ok(), true, secondary.is_ok()) {
         MainBackendPlan::Wrapped => {
@@ -263,12 +271,14 @@ pub async fn build_main_backend(
             secondary
         }
         MainBackendPlan::PrimaryAlone => {
-            // Reached only when primary built but secondary did not.
+            // Reached only when primary built but the secondary did not — either
+            // unbuildable or misconfigured (e.g. ollama fallback without a
+            // model). The broken opt-in fallback is dropped, not fatal.
             if let Err(ref e) = secondary {
                 tracing::warn!(
                     secondary = %fb_name,
                     error = %e,
-                    "fallback backend failed to construct; using primary alone"
+                    "fallback backend unusable (misconfigured or failed to construct); using primary alone"
                 );
             }
             primary
@@ -1385,12 +1395,31 @@ mod build_main_backend_tests {
         );
     }
 
-    /// Fallback configured as ollama without a model ⇒ resolve error surfaces.
+    /// Fallback misconfigured (ollama without a model) but the primary is
+    /// healthy ⇒ the broken opt-in fallback is dropped and the primary serves
+    /// alone. A misconfigured fallback must NEVER abort startup when the
+    /// primary built fine.
     #[tokio::test]
-    async fn fallback_ollama_without_model_errors() {
+    async fn fallback_misconfigured_keeps_primary() {
         let p = params(Some("ollama"), None);
-        let r = build_main_backend("stub", "m".into(), &p).await;
-        assert!(r.is_err(), "ollama fallback needs a model");
+        let b = build_main_backend("stub", "m".into(), &p).await.unwrap();
+        assert_eq!(b.name(), "stub");
+    }
+
+    /// Primary unbuildable AND fallback misconfigured ⇒ error. The `Fail` arm
+    /// surfaces the PRIMARY's (more actionable) error, not the fallback's
+    /// resolve message.
+    #[tokio::test]
+    async fn primary_unbuildable_and_fallback_misconfigured_errors() {
+        // `ollama` without a model is a resolve error (misconfigured fallback).
+        let p = params(Some("ollama"), None);
+        let r = build_main_backend("unknown-primary", "m".into(), &p).await;
+        let err = r.err().expect("both legs unusable must error");
+        let msg = format!("{err}");
+        assert!(
+            msg.contains("unknown-primary"),
+            "expected the primary's error to surface; got: {msg}"
+        );
     }
 }
 

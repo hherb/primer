@@ -1006,6 +1006,15 @@ async fn async_main() -> anyhow::Result<()> {
         }
     }
 
+    // The banner above names the *requested* primary `--backend`. When an
+    // opt-in fallback is configured, a startup fallback may have swapped in the
+    // secondary — surface the *effective* backend so the banner can't mislead.
+    // `backend.name()` is the primary's name when wrapped or kept alone, and
+    // the secondary's name when the primary was unavailable at startup.
+    if cli.fallback_backend.is_some() {
+        eprintln!("Effective inference backend: {}.", backend.name());
+    }
+
     // Resolve the requested locale. An unknown pack id (e.g. a typo or
     // a build that doesn't include the requested language yet) is a
     // hard error at startup rather than a silent fall-back to English.
