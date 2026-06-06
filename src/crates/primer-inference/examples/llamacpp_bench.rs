@@ -18,7 +18,7 @@
 //! Build with `--features llamacpp` for CPU, or `llamacpp-metal` /
 //! `llamacpp-cuda` / `llamacpp-vulkan` for GPU offload.
 
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 use std::process::ExitCode;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
@@ -28,13 +28,11 @@ use primer_core::inference::{GenerationParams, InferenceBackend};
 use primer_inference::LlamaCppBackend;
 use primer_inference::bench::{
     BENCH_MAX_TOKENS, BenchReport, BenchTargets, DEFAULT_BENCH_SYSTEM_PROMPT,
-    DEFAULT_DURATION_SECS, DEFAULT_PROMPTS_PATH, THERMAL_SAMPLE_INTERVAL, THERMAL_SYSFS_DIR,
-    ThermalSample, evaluate, format_report, load_bench_prompts, measure_prompt, peak_temp_celsius,
-    read_thermal_zones, thermal_csv,
+    DEFAULT_DURATION_SECS, DEFAULT_PROMPTS_PATH, evaluate, format_report, load_bench_prompts,
+    measure_prompt, peak_temp_celsius, spawn_thermal_sampler, thermal_csv,
 };
 use primer_inference::llamacpp::engine::RealLlamaEngine;
 use primer_inference::llamacpp::params::resolve_gpu_layers;
-use tokio::sync::oneshot;
 
 #[derive(Parser, Debug)]
 #[command(about = "llama.cpp backend throughput benchmark")]
@@ -132,8 +130,7 @@ async fn run() -> Result<bool, Box<dyn std::error::Error>> {
     println!("backend ready: {}", backend.name());
 
     let started = Instant::now();
-    let (stop_tx, stop_rx) = oneshot::channel::<()>();
-    let sampler = tokio::spawn(thermal_sampler(started, stop_rx));
+    let (stop_tx, sampler) = spawn_thermal_sampler(started);
 
     let params = GenerationParams {
         max_tokens: args.max_tokens,
@@ -193,22 +190,4 @@ async fn run() -> Result<bool, Box<dyn std::error::Error>> {
         format_report("llama.cpp benchmark", &report, &targets, &verdict)
     );
     Ok(verdict.all_pass())
-}
-
-/// Background thermal sampler. Ticks every [`THERMAL_SAMPLE_INTERVAL`],
-/// reading every `thermal_zone*/temp` under [`THERMAL_SYSFS_DIR`], until the
-/// stop signal fires. Returns all collected samples (empty on macOS).
-async fn thermal_sampler(started: Instant, mut stop: oneshot::Receiver<()>) -> Vec<ThermalSample> {
-    let mut samples = Vec::new();
-    let mut ticker = tokio::time::interval(THERMAL_SAMPLE_INTERVAL);
-    loop {
-        tokio::select! {
-            _ = ticker.tick() => {
-                let elapsed = started.elapsed().as_secs_f64();
-                samples.extend(read_thermal_zones(Path::new(THERMAL_SYSFS_DIR), elapsed));
-            }
-            _ = &mut stop => break,
-        }
-    }
-    samples
 }

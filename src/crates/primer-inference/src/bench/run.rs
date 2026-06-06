@@ -8,14 +8,19 @@
 //! here on the default `cargo test`.
 
 use std::fmt::Write as _;
+use std::path::Path;
 use std::time::{Duration, Instant};
 
 use futures::StreamExt;
 use primer_core::error::Result;
 use primer_core::inference::{GenerationParams, InferenceBackend};
+use tokio::sync::oneshot;
+use tokio::task::JoinHandle;
 
 use super::metrics::{BenchReport, BenchTargets, PromptMeasurement, Verdict};
 use super::prompts::BenchPrompt;
+use super::thermal::{ThermalSample, read_thermal_zones};
+use super::{THERMAL_SAMPLE_INTERVAL, THERMAL_SYSFS_DIR};
 
 /// Measure one prompt: TTFT (issue → first non-empty chunk) and steady-state
 /// decode rate (first token → last token). Generic over the backend. A
@@ -148,6 +153,37 @@ pub fn format_report(
         let _ = writeln!(out, "overall: [{}]", pf(verdict.all_pass()));
     }
     out
+}
+
+/// Spawn the background thermal sampler shared by every backend's benchmark
+/// example.
+///
+/// Returns a stop sender and the sampler's join handle. The task ticks every
+/// [`THERMAL_SAMPLE_INTERVAL`](super::THERMAL_SAMPLE_INTERVAL), reading every
+/// `thermal_zone*/temp` under [`THERMAL_SYSFS_DIR`](super::THERMAL_SYSFS_DIR)
+/// (timestamped relative to `started`), until the stop signal fires or its
+/// sender drops. Awaiting the handle yields every collected sample — empty on
+/// hosts with no sysfs thermal nodes (e.g. macOS), which is a vacuous thermal
+/// pass in [`evaluate`](super::evaluate).
+pub fn spawn_thermal_sampler(
+    started: Instant,
+) -> (oneshot::Sender<()>, JoinHandle<Vec<ThermalSample>>) {
+    let (stop_tx, mut stop_rx) = oneshot::channel::<()>();
+    let handle = tokio::spawn(async move {
+        let mut samples = Vec::new();
+        let mut ticker = tokio::time::interval(THERMAL_SAMPLE_INTERVAL);
+        loop {
+            tokio::select! {
+                _ = ticker.tick() => {
+                    let elapsed = started.elapsed().as_secs_f64();
+                    samples.extend(read_thermal_zones(Path::new(THERMAL_SYSFS_DIR), elapsed));
+                }
+                _ = &mut stop_rx => break,
+            }
+        }
+        samples
+    });
+    (stop_tx, handle)
 }
 
 #[cfg(test)]

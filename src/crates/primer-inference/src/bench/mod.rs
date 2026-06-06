@@ -24,7 +24,7 @@ pub use prompts::{
     BenchPrompt, BenchPromptError, DEFAULT_BENCH_SYSTEM_PROMPT, load_bench_prompts,
     parse_bench_prompts,
 };
-pub use run::{format_report, measure_prompt};
+pub use run::{format_report, measure_prompt, spawn_thermal_sampler};
 pub use thermal::{
     ThermalSample, parse_thermal_millidegrees, peak_temp_celsius, read_thermal_zones, thermal_csv,
 };
