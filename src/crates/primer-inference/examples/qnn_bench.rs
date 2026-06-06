@@ -30,15 +30,15 @@ use std::process::ExitCode;
 use std::time::{Duration, Instant};
 
 use clap::Parser;
-use futures::StreamExt;
 use primer_core::inference::{GenerationParams, InferenceBackend};
 use primer_inference::QnnBackend;
-use primer_inference::qnn::bench::{
+use primer_inference::bench::{
     BENCH_MAX_TOKENS, BenchReport, BenchTargets, DEFAULT_BENCH_SYSTEM_PROMPT,
     DEFAULT_DURATION_SECS, DEFAULT_PROMPTS_PATH, PromptMeasurement, THERMAL_SAMPLE_INTERVAL,
-    THERMAL_SYSFS_DIR, ThermalSample, Verdict, evaluate, load_bench_prompts, peak_temp_celsius,
-    read_thermal_zones, thermal_csv,
+    THERMAL_SYSFS_DIR, ThermalSample, evaluate, format_report, load_bench_prompts, measure_prompt,
+    peak_temp_celsius, read_thermal_zones, thermal_csv,
 };
+use primer_inference::qnn::bench::qnn_targets;
 use tokio::sync::oneshot;
 
 /// Conventional QAIRT lib subdirectory under the bundle's parent, matching
@@ -96,15 +96,15 @@ impl Args {
 
     /// Acceptance targets with any CLI overrides applied.
     fn targets(&self) -> BenchTargets {
-        let mut t = BenchTargets::default();
+        let mut t = qnn_targets();
         if let Some(v) = self.min_decode_tps {
-            t.min_decode_tokens_per_sec = v;
+            t.min_decode_tokens_per_sec = Some(v);
         }
         if let Some(ms) = self.max_ttft_ms {
-            t.max_ttft = Duration::from_millis(ms);
+            t.max_ttft = Some(Duration::from_millis(ms));
         }
         if let Some(c) = self.max_peak_temp_c {
-            t.max_peak_temp_celsius = c;
+            t.max_peak_temp_celsius = Some(c);
         }
         t
     }
@@ -210,56 +210,11 @@ async fn run() -> Result<bool, Box<dyn std::error::Error>> {
     };
     let targets = args.targets();
     let verdict = evaluate(&report, &targets);
-    print_report(&report, &targets, &verdict);
+    println!(
+        "{}",
+        format_report("QNN benchmark", &report, &targets, &verdict)
+    );
     Ok(verdict.all_pass())
-}
-
-/// Measure one prompt: TTFT (issue → first non-empty chunk) and decode
-/// rate (first token → done).
-async fn measure_prompt(
-    backend: &QnnBackend,
-    bp: &primer_inference::qnn::bench::BenchPrompt,
-    params: &GenerationParams,
-) -> Result<PromptMeasurement, Box<dyn std::error::Error>> {
-    let issued = Instant::now();
-    let mut stream = backend.generate_stream(&bp.prompt, params).await?;
-
-    let mut ttft: Option<Duration> = None;
-    let mut first_token_at: Option<Instant> = None;
-    let mut tokens_after_first = 0usize;
-    let mut last_token_at = issued;
-
-    while let Some(chunk) = stream.next().await {
-        let chunk = chunk?;
-        let now = Instant::now();
-        if !chunk.text.is_empty() {
-            if ttft.is_none() {
-                ttft = Some(now.duration_since(issued));
-                first_token_at = Some(now);
-            } else {
-                tokens_after_first += 1;
-            }
-            last_token_at = now;
-        }
-        if chunk.done {
-            break;
-        }
-    }
-
-    let ttft = ttft.unwrap_or_else(|| issued.elapsed());
-    // Decode window: first token → last token. If only one token arrived,
-    // the window is zero and `decode_tokens_per_sec` returns 0.0.
-    let decode_duration = match first_token_at {
-        Some(first) => last_token_at.duration_since(first),
-        None => Duration::ZERO,
-    };
-
-    Ok(PromptMeasurement {
-        label: bp.label.clone(),
-        ttft,
-        decode_tokens: tokens_after_first,
-        decode_duration,
-    })
 }
 
 /// Background thermal sampler. Ticks every [`THERMAL_SAMPLE_INTERVAL`],
@@ -278,37 +233,4 @@ async fn thermal_sampler(started: Instant, mut stop: oneshot::Receiver<()>) -> V
         }
     }
     samples
-}
-
-/// Print the aggregate report and the pass/fail line per criterion.
-fn print_report(report: &BenchReport, targets: &BenchTargets, verdict: &Verdict) {
-    let pf = |ok: bool| if ok { "PASS" } else { "FAIL" };
-    println!(
-        "\n=== QNN benchmark report ({} runs, {} degenerate) ===",
-        report.runs, report.degenerate_runs
-    );
-    println!(
-        "TTFT  p50={:.0}ms  p95={:.0}ms   (target p95 < {:.0}ms)  [{}]",
-        report.ttft_p50.as_secs_f64() * 1000.0,
-        report.ttft_p95.as_secs_f64() * 1000.0,
-        targets.max_ttft.as_secs_f64() * 1000.0,
-        pf(verdict.ttft_pass),
-    );
-    println!(
-        "decode mean={:.2} tok/s  min={:.2} tok/s   (target min >= {:.2})  [{}]",
-        report.decode_mean_tokens_per_sec,
-        report.decode_min_tokens_per_sec,
-        targets.min_decode_tokens_per_sec,
-        pf(verdict.decode_pass),
-    );
-    match report.peak_temp_celsius {
-        Some(t) => println!(
-            "peak temp={:.1}°C   (target <= {:.1}°C)  [{}]",
-            t,
-            targets.max_peak_temp_celsius,
-            pf(verdict.thermal_pass),
-        ),
-        None => println!("peak temp=n/a (no thermal samples)  [PASS — vacuous]"),
-    }
-    println!("overall: [{}]", pf(verdict.all_pass()));
 }

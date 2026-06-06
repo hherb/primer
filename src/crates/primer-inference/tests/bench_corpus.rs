@@ -11,7 +11,7 @@
 use std::collections::HashSet;
 use std::path::PathBuf;
 
-use primer_inference::qnn::bench::{DEFAULT_BENCH_SYSTEM_PROMPT, load_bench_prompts};
+use primer_inference::bench::{DEFAULT_BENCH_SYSTEM_PROMPT, load_bench_prompts};
 
 /// Phase 1.2 plan step 1.2.6 task 1: "30 representative dialogue-continuation
 /// prompts". The corpus may grow but must not shrink below this floor.
