@@ -1,12 +1,13 @@
 //! Backend-agnostic benchmark harness: prompt-corpus loading, timing
-//! aggregation + pass/fail evaluation, and thermal sampling. The shared
-//! run-loop helpers (`measure_prompt`, `format_report`) land in the `run`
-//! submodule in a follow-up task.
+//! aggregation + pass/fail evaluation, thermal sampling, and the shared
+//! run-loop helpers (`measure_prompt`, `format_report`) in the [`run`]
+//! submodule.
 //!
-//! Everything here is pure / data-only, so it is exercised by the default
-//! `cargo test` even though the actual device runs live in feature-gated
-//! example binaries. Backend-specific acceptance targets live next to their
-//! backend (e.g. `qnn::bench::qnn_targets`); this module is target-neutral.
+//! Everything here is pure / generic over `InferenceBackend`, so it is
+//! exercised by the default `cargo test` even though the actual device runs
+//! live in feature-gated example binaries. Backend-specific acceptance targets
+//! live next to their backend (e.g. `qnn::bench::qnn_targets`); this module is
+//! target-neutral.
 
 use std::time::Duration;
 
