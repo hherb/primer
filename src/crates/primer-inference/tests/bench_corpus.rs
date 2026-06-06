@@ -1,20 +1,18 @@
-//! Regression guard for the shipped QNN benchmark corpus.
+//! Regression guard for the shipped benchmark corpus.
 //!
-//! The benchmark example (`examples/qnn_bench.rs`) is a device-only test,
-//! but the prompt corpus it consumes is plain data we can validate on any
-//! host: it must parse, meet the Phase 1.2 plan's 30-prompt floor, and
-//! carry unique labels. Gated on the `qnn` feature so it rides the same
-//! `cargo test -p primer-inference --features qnn` invocation as the rest
-//! of the QNN module.
-#![cfg(feature = "qnn")]
+//! The benchmark examples are device/owner-gated, but the prompt corpus they
+//! consume is plain data we validate on any host: it must parse, meet the
+//! 30-prompt floor, and carry unique labels. The corpus is shared by the QNN
+//! and llama.cpp benches, so this guard rides the DEFAULT `cargo test` via the
+//! always-compiled [`primer_inference::bench`] loader.
 
 use std::collections::HashSet;
 use std::path::PathBuf;
 
 use primer_inference::bench::{DEFAULT_BENCH_SYSTEM_PROMPT, load_bench_prompts};
 
-/// Phase 1.2 plan step 1.2.6 task 1: "30 representative dialogue-continuation
-/// prompts". The corpus may grow but must not shrink below this floor.
+/// 30 representative dialogue-continuation prompts (Phase 1.2 plan step 1.2.6
+/// task 1). The corpus may grow but must not shrink below this floor.
 const MIN_CORPUS_PROMPTS: usize = 30;
 
 fn corpus_path() -> PathBuf {
