@@ -12,6 +12,7 @@ use std::time::Duration;
 
 pub mod metrics;
 pub mod prompts;
+pub mod run;
 pub mod thermal;
 
 pub use metrics::{
@@ -22,6 +23,7 @@ pub use prompts::{
     BenchPrompt, BenchPromptError, DEFAULT_BENCH_SYSTEM_PROMPT, load_bench_prompts,
     parse_bench_prompts,
 };
+pub use run::{format_report, measure_prompt};
 pub use thermal::{
     ThermalSample, parse_thermal_millidegrees, peak_temp_celsius, read_thermal_zones, thermal_csv,
 };
