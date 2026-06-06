@@ -200,6 +200,15 @@ jobs:
         # hybrid retrieval (fastembed) or the supertonic A/B comparison.
         run: cargo check -p primer-embedding --features fastembed
 
+      - name: cargo clippy --features llamacpp
+        # Phase 1.1 drift guard. The embedded llama.cpp backend + its
+        # benchmark example (`examples/llamacpp_bench.rs`,
+        # required-features = llamacpp) are non-default, so they rot
+        # silently. `--all-targets` lints the example too. Compiles
+        # llama.cpp (C++) on first run; the rust-cache layer above keeps
+        # subsequent runs warm.
+        run: cargo clippy -p primer-inference --features llamacpp --all-targets -- -D warnings
+
   # macOS feature-combo drift-guard. The Apple-native speech backends
   # (`macos-native`, `macos-native-26`) and the `voice-loop` state
   # machine they wire into are platform-specific and invisible to the

@@ -17,6 +17,7 @@
 //!   passthrough features). Phase 1.1.
 //! - `RknnBackend`: (TODO) Rockchip RKNN-LLM for RK1828 NPU.
 
+pub mod bench;
 pub mod cloud;
 pub mod fallback;
 pub mod llamacpp;

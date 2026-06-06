@@ -60,3 +60,11 @@ clap.workspace = true
 [[example]]
 name = "qnn_bench"
 required-features = ["qnn"]
+
+# llama.cpp throughput benchmark (Phase 1.1 bullet b). Requires the
+# `llamacpp` feature so `RealLlamaEngine` is in the dep graph; the GPU
+# passthrough features (`llamacpp-metal/-cuda/-vulkan`) activate it
+# transitively. Measurement-first — a flagless run prints numbers and exits 0.
+[[example]]
+name = "llamacpp_bench"
+required-features = ["llamacpp"]

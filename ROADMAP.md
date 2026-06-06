@@ -59,6 +59,7 @@ Status key: ✅ done · 🟡 in progress · [ ] not started.
 
 - [x] `LlamaCppBackend` via `llama-cpp-2` bindings; GGUF loading from a configurable path (behind the non-default `llamacpp` feature; CPU + Metal/CUDA/Vulkan passthrough). Benchmarking (bullet 2) + local→cloud fallback (bullet 3) still open.
 - [ ] Benchmark Qwen3 7B Q4_K_M on MacBook (Metal), DGX (CUDA), RedMagic (Vulkan).
+  - Harness shipped: `examples/llamacpp_bench.rs` + the shared, host-tested `primer-inference::bench` module (extracted from the QNN bench; `BenchTargets` all-`Option`, `evaluate` treats `None` as vacuous pass). Measurement-first — a flagless run is a pure probe; `--min-decode-tps`/`--max-ttft-ms`/`--max-peak-temp-c` opt into a pass/fail gate. **What remains is running it on the three accelerators to collect the actual tok/s + TTFT numbers** (owner-gated device runs — no GGUF is auto-downloaded).
 - [x] Automatic local→cloud fallback (opt-in `--fallback-backend`/`--fallback-model`; `FallbackBackend` decorator falls back at startup + pre-stream, never mid-stream; CLI + GUI both shipped — GUI mirror via Settings → Inference backend, issue #205). 3B constrained-device chain still ahead.
 
 ### 1.2 — Qualcomm NPU (Snapdragon 8 Elite) 🟡

@@ -1,4 +1,4 @@
-//! Loading the QNN benchmark prompt corpus from JSONL.
+//! Loading the benchmark prompt corpus from JSONL.
 //!
 //! Each line of `data/bench/socratic_prompts.jsonl` is a JSON object
 //! describing one dialogue-continuation prompt: a `label`, an optional
