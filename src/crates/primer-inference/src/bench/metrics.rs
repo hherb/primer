@@ -163,8 +163,12 @@ impl BenchReport {
         Some(Self {
             runs: measurements.len(),
             degenerate_runs,
-            ttft_p50: percentile_duration(&ttfts, PERCENTILE_P50).unwrap(),
-            ttft_p95: percentile_duration(&ttfts, PERCENTILE_P95).unwrap(),
+            // Infallible: `ttfts` is non-empty (guarded above), and
+            // `percentile_duration` only returns `None` on an empty slice.
+            ttft_p50: percentile_duration(&ttfts, PERCENTILE_P50)
+                .expect("ttfts is non-empty (measurements guarded above)"),
+            ttft_p95: percentile_duration(&ttfts, PERCENTILE_P95)
+                .expect("ttfts is non-empty (measurements guarded above)"),
             decode_mean_tokens_per_sec: mean,
             decode_min_tokens_per_sec: min,
             peak_temp_celsius,
