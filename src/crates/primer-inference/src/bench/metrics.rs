@@ -335,8 +335,10 @@ mod tests {
     fn report_all_degenerate_yields_zero_and_fails_decode() {
         let measurements = vec![measurement("a", 1000, 0, 0), measurement("b", 1200, 0, 0)];
         let report = BenchReport::from_measurements(&measurements, Some(50.0)).unwrap();
+        assert_eq!(report.runs, 2);
         assert_eq!(report.degenerate_runs, 2);
         assert_eq!(report.decode_min_tokens_per_sec, 0.0);
+        assert_eq!(report.decode_mean_tokens_per_sec, 0.0);
         assert!(!evaluate(&report, &gated()).decode_pass);
     }
 

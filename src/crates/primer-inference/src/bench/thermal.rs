@@ -1,7 +1,7 @@
-//! Thermal sampling helpers for the QNN benchmark harness.
+//! Thermal sampling helpers for the benchmark harness.
 //!
-//! On the target device (RedMagic 11 Pro / Snapdragon 8 Elite Gen 5) the
-//! kernel exposes per-zone temperatures under
+//! On a typical Linux/Android target the kernel exposes per-zone
+//! temperatures under
 //! `/sys/class/thermal/thermal_zone*/temp` as an integer count of
 //! **millidegrees Celsius** (e.g. `48000` ⇒ 48.0 °C). The benchmark
 //! example reads those files on a timer; everything that turns the raw
