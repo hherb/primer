@@ -29,6 +29,22 @@ pub fn validate(cfg: &GuiConfig) -> Result<(), String> {
     validate_subsystem_kind("comprehension", subsystem_override(&cfg.comprehension))?;
     validate_embedder(&cfg.embedder.kind)?;
     validate_breaks(cfg.breaks.after_mins)?;
+    validate_router(&cfg.backend)?;
+    Ok(())
+}
+
+/// A routing mode (`cloud-preferred` / `hybrid`) has nothing to route to
+/// without a configured secondary leg (`fallback_backend`). Catch this at
+/// save time so the modal renders the error inline, matching the CLI's
+/// early `--router-mode` validation rather than waiting for the (otherwise
+/// identical) `build_router_backend` error at `start_session`.
+fn validate_router(backend: &crate::config::BackendConfig) -> Result<(), String> {
+    if backend.router_mode.uses_secondary() && backend.fallback_backend.is_none() {
+        return Err(format!(
+            "router mode '{}' requires a fallback backend (the secondary leg to route to)",
+            backend.router_mode
+        ));
+    }
     Ok(())
 }
 
@@ -140,6 +156,26 @@ mod tests {
         cfg.embedder.kind = "secret-sauce".to_string();
         let err = validate(&cfg).unwrap_err();
         assert!(err.contains("secret-sauce"));
+    }
+
+    #[test]
+    fn routing_mode_without_fallback_rejected() {
+        let mut cfg = GuiConfig::default();
+        cfg.backend.router_mode = primer_core::router::RouterMode::Hybrid;
+        cfg.backend.fallback_backend = None;
+        let err = validate(&cfg).unwrap_err();
+        assert!(
+            err.contains("hybrid") && err.to_lowercase().contains("fallback"),
+            "error must name the mode + the missing secondary: {err}"
+        );
+    }
+
+    #[test]
+    fn routing_mode_with_fallback_accepted() {
+        let mut cfg = GuiConfig::default();
+        cfg.backend.router_mode = primer_core::router::RouterMode::Hybrid;
+        cfg.backend.fallback_backend = Some("cloud".to_string());
+        validate(&cfg).expect("hybrid + a configured secondary is valid");
     }
 
     #[test]
