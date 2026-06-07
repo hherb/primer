@@ -476,5 +476,17 @@ mod tests {
         assert!(W_MSG_LONG > 0.0);
         assert!(W_MSG_QUESTION > 0.0);
         assert_eq!(MSG_QUESTION_CAP, 2);
+        // Latency is a NUDGE, not a circuit-breaker: W_LATENCY alone must not
+        // cross the secondary threshold, so a trivial turn (base score 0.0)
+        // stays local even when the local leg is slow — keeping routine turns
+        // sampling the local TTFT so its EMA self-heals. Tuning W_LATENCY up to
+        // or past the threshold would silently break that (every slow turn
+        // would escalate regardless of complexity), so pin it here.
+        assert!(
+            W_LATENCY > 0.0 && W_LATENCY < ROUTE_SECONDARY_THRESHOLD,
+            "W_LATENCY must be in (0, ROUTE_SECONDARY_THRESHOLD) — nudge invariant"
+        );
+        // EMA smoothing factor must be a valid weight in (0, 1].
+        assert!(TTFT_EMA_ALPHA > 0.0 && TTFT_EMA_ALPHA <= 1.0);
     }
 }
