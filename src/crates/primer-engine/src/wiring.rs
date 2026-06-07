@@ -334,7 +334,11 @@ async fn build_router_backend(
         MainBackendPlan::Wrapped => {
             let primary = primary.expect("Wrapped implies primary built");
             let secondary = secondary.expect("Wrapped implies secondary built");
-            Ok(Arc::new(RouterBackend::new(primary, secondary, params.router_mode)))
+            Ok(Arc::new(RouterBackend::new(
+                primary,
+                secondary,
+                params.router_mode,
+            )))
         }
         MainBackendPlan::SecondaryAlone => {
             tracing::warn!(

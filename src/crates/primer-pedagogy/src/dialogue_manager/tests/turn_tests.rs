@@ -678,7 +678,9 @@ async fn respond_to_streaming_threads_routing_signals() {
     use async_trait::async_trait;
     use futures::stream;
     use primer_core::error::Result as PResult;
-    use primer_core::inference::{GenerationParams, InferenceBackend, Prompt, TokenChunk, TokenStream};
+    use primer_core::inference::{
+        GenerationParams, InferenceBackend, Prompt, TokenChunk, TokenStream,
+    };
 
     struct CapturingBackend {
         last_routing: Arc<Mutex<Option<primer_core::router::RoutingSignals>>>,
@@ -724,7 +726,10 @@ async fn respond_to_streaming_threads_routing_signals() {
     dm.respond_to("why is the sky blue?").await.unwrap();
 
     let routing = captured.lock().unwrap().clone();
-    assert!(routing.is_some(), "DM must populate GenerationParams.routing");
+    assert!(
+        routing.is_some(),
+        "DM must populate GenerationParams.routing"
+    );
     assert_eq!(
         routing.unwrap().retrieved_passages,
         0,

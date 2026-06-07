@@ -254,8 +254,16 @@ mod tests {
         .await
         .unwrap();
         assert_eq!(out, "LOCAL");
-        assert_eq!(scalls.load(Ordering::SeqCst), 1, "secondary attempted first");
-        assert_eq!(pcalls.load(Ordering::SeqCst), 1, "primary served the fallover");
+        assert_eq!(
+            scalls.load(Ordering::SeqCst),
+            1,
+            "secondary attempted first"
+        );
+        assert_eq!(
+            pcalls.load(Ordering::SeqCst),
+            1,
+            "primary served the fallover"
+        );
     }
 
     #[tokio::test]

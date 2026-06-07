@@ -126,7 +126,11 @@ pub fn message_term(prompt: &Prompt) -> f32 {
         0.0
     };
 
-    let extra_questions = text.matches('?').count().saturating_sub(1).min(MSG_QUESTION_CAP);
+    let extra_questions = text
+        .matches('?')
+        .count()
+        .saturating_sub(1)
+        .min(MSG_QUESTION_CAP);
     let question = extra_questions as f32 * W_MSG_QUESTION;
 
     long + question
@@ -158,7 +162,10 @@ pub struct LegOrder {
 /// Map a mode + complexity score to the ordered leg pair. Pure.
 pub fn order_legs(mode: RouterMode, score: f32) -> LegOrder {
     match mode {
-        RouterMode::LocalOnly => LegOrder { first: Leg::Primary, second: None },
+        RouterMode::LocalOnly => LegOrder {
+            first: Leg::Primary,
+            second: None,
+        },
         RouterMode::CloudPreferred => LegOrder {
             first: Leg::Secondary,
             second: Some(Leg::Primary),
@@ -206,14 +213,23 @@ mod tests {
     fn prompt_with_last_user(msg: &str) -> Prompt {
         Prompt {
             system: String::new(),
-            messages: vec![Message { role: Role::User, content: msg.to_string() }],
+            messages: vec![Message {
+                role: Role::User,
+                content: msg.to_string(),
+            }],
         }
     }
 
     #[test]
     fn intent_weight_covers_all_variants_monotonically() {
-        assert!(intent_weight(PedagogicalIntent::Scaffolding) >= intent_weight(PedagogicalIntent::DirectAnswer));
-        assert!(intent_weight(PedagogicalIntent::DirectAnswer) > intent_weight(PedagogicalIntent::SocraticQuestion));
+        assert!(
+            intent_weight(PedagogicalIntent::Scaffolding)
+                >= intent_weight(PedagogicalIntent::DirectAnswer)
+        );
+        assert!(
+            intent_weight(PedagogicalIntent::DirectAnswer)
+                > intent_weight(PedagogicalIntent::SocraticQuestion)
+        );
         assert_eq!(intent_weight(PedagogicalIntent::Encouragement), 0.0);
         assert_eq!(intent_weight(PedagogicalIntent::SessionClose), 0.0);
         assert_eq!(intent_weight(PedagogicalIntent::SuggestBreak), 0.0);
@@ -223,8 +239,14 @@ mod tests {
     fn passage_term_is_capped() {
         use crate::consts::router::{ROUTE_PASSAGE_CAP, W_PASSAGE};
         assert_eq!(passage_term(0), 0.0);
-        assert_eq!(passage_term(ROUTE_PASSAGE_CAP), ROUTE_PASSAGE_CAP as f32 * W_PASSAGE);
-        assert_eq!(passage_term(ROUTE_PASSAGE_CAP + 5), ROUTE_PASSAGE_CAP as f32 * W_PASSAGE);
+        assert_eq!(
+            passage_term(ROUTE_PASSAGE_CAP),
+            ROUTE_PASSAGE_CAP as f32 * W_PASSAGE
+        );
+        assert_eq!(
+            passage_term(ROUTE_PASSAGE_CAP + 5),
+            ROUTE_PASSAGE_CAP as f32 * W_PASSAGE
+        );
     }
 
     #[test]
@@ -239,14 +261,20 @@ mod tests {
 
     #[test]
     fn message_term_zero_when_no_user_message() {
-        let empty = Prompt { system: "x".into(), messages: vec![] };
+        let empty = Prompt {
+            system: "x".into(),
+            messages: vec![],
+        };
         assert_eq!(message_term(&empty), 0.0);
     }
 
     #[test]
     fn complexity_score_routes_hard_turn_above_threshold() {
         use crate::consts::router::ROUTE_SECONDARY_THRESHOLD;
-        let s = RoutingSignals { intent: PedagogicalIntent::Scaffolding, retrieved_passages: 2 };
+        let s = RoutingSignals {
+            intent: PedagogicalIntent::Scaffolding,
+            retrieved_passages: 2,
+        };
         let hard = prompt_with_last_user(&"explain ".repeat(40));
         assert!(complexity_score(&s, &hard) >= ROUTE_SECONDARY_THRESHOLD);
     }
@@ -254,7 +282,10 @@ mod tests {
     #[test]
     fn complexity_score_keeps_routine_turn_below_threshold() {
         use crate::consts::router::ROUTE_SECONDARY_THRESHOLD;
-        let s = RoutingSignals { intent: PedagogicalIntent::Encouragement, retrieved_passages: 0 };
+        let s = RoutingSignals {
+            intent: PedagogicalIntent::Encouragement,
+            retrieved_passages: 0,
+        };
         let easy = prompt_with_last_user("ok");
         assert!(complexity_score(&s, &easy) < ROUTE_SECONDARY_THRESHOLD);
     }
