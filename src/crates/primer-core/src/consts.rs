@@ -407,7 +407,10 @@ pub mod inference {
 /// deliberately gathered here so that tuning never touches logic.
 pub mod router {
     /// Route to the secondary (strong) leg when `complexity_score` reaches
-    /// this value, in `hybrid` mode.
+    /// this value, in `hybrid` mode. Set deliberately above the heaviest
+    /// single-intent weight (`Scaffolding`, 0.45) so no intent alone routes to
+    /// the cloud: a heavy intent must combine with at least one more signal (a
+    /// retrieved passage or a long/multi-question message). Privacy-preferring.
     pub const ROUTE_SECONDARY_THRESHOLD: f32 = 0.5;
 
     /// Retrieved-passage count is clamped to this before scoring, so a large
@@ -444,9 +447,11 @@ mod tests {
     #[allow(clippy::assertions_on_constants)]
     fn router_consts_are_sane() {
         use super::router::*;
-        // Threshold sits between the cheapest and most expensive single-intent
-        // weights so a high-weight intent alone can cross it but a zero-weight
-        // one cannot.
+        // Threshold sits above the heaviest single-intent weight (Scaffolding,
+        // 0.45) by design: in `hybrid` mode no intent ALONE routes to the
+        // cloud — a heavy intent must combine with at least one more signal (a
+        // retrieved passage or a long/multi-question message) to cross it. This
+        // is the privacy-preferring default; fewer turns leave the device.
         assert!(ROUTE_SECONDARY_THRESHOLD > 0.0 && ROUTE_SECONDARY_THRESHOLD < 1.0);
         assert_eq!(ROUTE_PASSAGE_CAP, 3);
         assert!(W_PASSAGE > 0.0);
