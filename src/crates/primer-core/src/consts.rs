@@ -399,6 +399,34 @@ pub mod inference {
     pub const LLAMACPP_DEFAULT_SAMPLER_SEED: u32 = 1234;
 }
 
+/// Tunables for the Phase 1.3 inference router (see
+/// docs/superpowers/specs/2026-06-07-inference-router-design.md).
+///
+/// These weights and the threshold are starting values; they need
+/// calibration against real usage data (like the bench numbers) and are
+/// deliberately gathered here so that tuning never touches logic.
+pub mod router {
+    /// Route to the secondary (strong) leg when `complexity_score` reaches
+    /// this value, in `hybrid` mode.
+    pub const ROUTE_SECONDARY_THRESHOLD: f32 = 0.5;
+
+    /// Retrieved-passage count is clamped to this before scoring, so a large
+    /// retrieval cannot dominate the score.
+    pub const ROUTE_PASSAGE_CAP: usize = 3;
+    /// Per-passage score weight (after the cap).
+    pub const W_PASSAGE: f32 = 0.15;
+
+    /// A child message with more than this many words contributes the long-
+    /// message weight.
+    pub const MSG_LONG_WORDS: usize = 30;
+    /// Weight added for a long child message.
+    pub const W_MSG_LONG: f32 = 0.20;
+    /// Weight added per question mark beyond the first, in the child message.
+    pub const W_MSG_QUESTION: f32 = 0.10;
+    /// Question marks beyond the first are counted up to this cap.
+    pub const MSG_QUESTION_CAP: usize = 2;
+}
+
 #[cfg(test)]
 mod tests {
     #[test]
@@ -410,5 +438,21 @@ mod tests {
         assert_eq!(LLAMACPP_DEFAULT_N_CTX, 0);
         // A fixed seed keeps a given prompt reproducible across runs.
         assert_eq!(LLAMACPP_DEFAULT_SAMPLER_SEED, 1234);
+    }
+
+    #[test]
+    #[allow(clippy::assertions_on_constants)]
+    fn router_consts_are_sane() {
+        use super::router::*;
+        // Threshold sits between the cheapest and most expensive single-intent
+        // weights so a high-weight intent alone can cross it but a zero-weight
+        // one cannot.
+        assert!(ROUTE_SECONDARY_THRESHOLD > 0.0 && ROUTE_SECONDARY_THRESHOLD < 1.0);
+        assert_eq!(ROUTE_PASSAGE_CAP, 3);
+        assert!(W_PASSAGE > 0.0);
+        assert_eq!(MSG_LONG_WORDS, 30);
+        assert!(W_MSG_LONG > 0.0);
+        assert!(W_MSG_QUESTION > 0.0);
+        assert_eq!(MSG_QUESTION_CAP, 2);
     }
 }
