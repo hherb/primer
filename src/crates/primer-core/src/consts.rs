@@ -428,6 +428,20 @@ pub mod router {
     pub const W_MSG_QUESTION: f32 = 0.10;
     /// Question marks beyond the first are counted up to this cap.
     pub const MSG_QUESTION_CAP: usize = 2;
+
+    /// Score added to a turn's complexity when the primary leg's recent
+    /// time-to-first-token EMA exceeds the configured budget, in `hybrid`
+    /// mode. A *weight*, not a threshold — it only contributes when a budget is
+    /// configured (`--primary-ttft-budget-ms` / the GUI field). Sized so a
+    /// slow local leg pushes an otherwise-routine turn (base score below
+    /// `ROUTE_SECONDARY_THRESHOLD = 0.5`) over the line on its own. Starting
+    /// value; the real budget is owner-calibrated from bench numbers.
+    pub const W_LATENCY: f32 = 0.30;
+
+    /// Exponential-moving-average smoothing factor for the rolling primary-leg
+    /// TTFT. Device-independent (a standard EMA alpha in `0..=1`), NOT a
+    /// routing threshold: higher = more weight on the latest sample.
+    pub const TTFT_EMA_ALPHA: f32 = 0.3;
 }
 
 #[cfg(test)]
