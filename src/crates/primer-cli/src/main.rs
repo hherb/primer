@@ -98,6 +98,13 @@ struct Cli {
     #[arg(long)]
     fallback_model: Option<String>,
 
+    /// Inference router mode (Phase 1.3): "local-only" (default; never uses the
+    /// cloud — the privacy default), "cloud-preferred" (always try the
+    /// secondary first), or "hybrid" (route complex turns to the secondary).
+    /// Routing modes require --fallback-backend (the secondary leg).
+    #[arg(long, default_value = "local-only")]
+    router_mode: String,
+
     /// Ollama server URL (used when --backend ollama).
     #[arg(long, default_value = "http://localhost:11434")]
     ollama_url: String,
@@ -906,6 +913,21 @@ async fn async_main() -> anyhow::Result<()> {
         _ => cli.model.clone().unwrap_or_else(|| "stub".to_string()),
     };
 
+    // Parse and validate --router-mode before touching BackendParams.
+    let router_mode: primer_core::router::RouterMode = match cli.router_mode.parse() {
+        Ok(m) => m,
+        Err(msg) => {
+            eprintln!("error: {msg}");
+            std::process::exit(2);
+        }
+    };
+    if router_mode.uses_secondary() && cli.fallback_backend.is_none() {
+        eprintln!(
+            "error: --router-mode {router_mode} requires --fallback-backend (the secondary leg to route to)"
+        );
+        std::process::exit(2);
+    }
+
     // Extract the fields that build_backend / build_classifier need BEFORE
     // any partial moves of other Cli fields (knowledge_db, session_db etc.).
     //
@@ -959,9 +981,8 @@ async fn async_main() -> anyhow::Result<()> {
         reasoning_markers: pair_reasoning_markers(cli.reasoning_marker.clone()),
         fallback_backend: cli.fallback_backend.clone(),
         fallback_model: cli.fallback_model.clone(),
-        // Phase 1.3: router_mode CLI flag is wired in a later task; default
-        // to LocalOnly (today's behaviour) until that flag lands.
-        router_mode: primer_core::router::RouterMode::LocalOnly,
+        // Phase 1.3 inference router; parsed + validated above.
+        router_mode,
     };
 
     let backend: Arc<dyn InferenceBackend> =
