@@ -29,6 +29,10 @@ pub struct GenerationParams {
     pub top_p: f32,
     /// Stop sequences — generation halts when any of these appear.
     pub stop_sequences: Vec<String>,
+    /// Optional per-turn routing signals (Phase 1.3 inference router). Set by
+    /// the dialogue manager; read ONLY by `RouterBackend`. Every other backend
+    /// ignores it. `None` ⇒ no routing context (router scores it 0.0).
+    pub routing: Option<crate::router::RoutingSignals>,
 }
 
 impl Default for GenerationParams {
@@ -38,6 +42,7 @@ impl Default for GenerationParams {
             temperature: 0.7,
             top_p: 0.9,
             stop_sequences: vec![],
+            routing: None,
         }
     }
 }
@@ -134,6 +139,7 @@ pub trait InferenceBackend: Send + Sync {
             temperature: 0.3,
             top_p: 0.9,
             stop_sequences: vec![],
+            routing: None,
         };
         self.generate(&prompt, &params).await
     }
@@ -168,4 +174,15 @@ pub fn build_summarize_prompt(turns: &[Turn], target_chars: usize) -> Prompt {
         })
         .collect();
     Prompt { system, messages }
+}
+
+#[cfg(test)]
+mod gen_params_tests {
+    use super::*;
+
+    #[test]
+    fn default_generation_params_have_no_routing() {
+        let p = GenerationParams::default();
+        assert!(p.routing.is_none());
+    }
 }
