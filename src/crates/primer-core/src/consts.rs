@@ -428,6 +428,23 @@ pub mod router {
     pub const W_MSG_QUESTION: f32 = 0.10;
     /// Question marks beyond the first are counted up to this cap.
     pub const MSG_QUESTION_CAP: usize = 2;
+
+    /// Score added to a turn's complexity when the primary leg's recent
+    /// time-to-first-token EMA exceeds the configured budget, in `hybrid`
+    /// mode. A *weight*, not a threshold — it only contributes when a budget
+    /// is configured (`--primary-ttft-budget-ms` / the GUI field), and it is
+    /// deliberately BELOW `ROUTE_SECONDARY_THRESHOLD` (0.5): latency is a
+    /// NUDGE that tips a borderline-complex turn over the line, not a sole
+    /// trigger. A trivial turn (base score 0) therefore stays local even when
+    /// the local leg is slow — which keeps routine turns sampling the local
+    /// TTFT so the EMA self-heals when local speeds back up. Starting value;
+    /// the real budget is owner-calibrated from bench numbers.
+    pub const W_LATENCY: f32 = 0.30;
+
+    /// Exponential-moving-average smoothing factor for the rolling primary-leg
+    /// TTFT. Device-independent (a standard EMA alpha in `0..=1`), NOT a
+    /// routing threshold: higher = more weight on the latest sample.
+    pub const TTFT_EMA_ALPHA: f32 = 0.3;
 }
 
 #[cfg(test)]
@@ -459,5 +476,17 @@ mod tests {
         assert!(W_MSG_LONG > 0.0);
         assert!(W_MSG_QUESTION > 0.0);
         assert_eq!(MSG_QUESTION_CAP, 2);
+        // Latency is a NUDGE, not a circuit-breaker: W_LATENCY alone must not
+        // cross the secondary threshold, so a trivial turn (base score 0.0)
+        // stays local even when the local leg is slow — keeping routine turns
+        // sampling the local TTFT so its EMA self-heals. Tuning W_LATENCY up to
+        // or past the threshold would silently break that (every slow turn
+        // would escalate regardless of complexity), so pin it here.
+        assert!(
+            W_LATENCY > 0.0 && W_LATENCY < ROUTE_SECONDARY_THRESHOLD,
+            "W_LATENCY must be in (0, ROUTE_SECONDARY_THRESHOLD) — nudge invariant"
+        );
+        // EMA smoothing factor must be a valid weight in (0, 1].
+        assert!(TTFT_EMA_ALPHA > 0.0 && TTFT_EMA_ALPHA <= 1.0);
     }
 }

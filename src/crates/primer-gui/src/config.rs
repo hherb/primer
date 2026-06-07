@@ -141,6 +141,12 @@ pub struct BackendConfig {
     /// `primer_engine::build_main_backend` via `BackendParams.router_mode`.
     #[serde(default)]
     pub router_mode: primer_core::router::RouterMode,
+    /// Phase 1.3 latency-aware routing budget (ms). Mirrors the CLI's
+    /// `--primary-ttft-budget-ms`. `None` (default) ⇒ latency routing OFF.
+    /// Only takes effect with `router_mode == Hybrid` AND a configured
+    /// fallback. `#[serde(default)]` so existing configs load unchanged.
+    #[serde(default)]
+    pub primary_ttft_budget_ms: Option<u64>,
 }
 
 impl Default for BackendConfig {
@@ -161,6 +167,7 @@ impl Default for BackendConfig {
             fallback_backend: None,
             fallback_model: None,
             router_mode: primer_core::router::RouterMode::LocalOnly,
+            primary_ttft_budget_ms: None,
         }
     }
 }
@@ -684,6 +691,9 @@ pub struct BackendConfigView {
     /// Passes through verbatim (not a secret) so the settings form can
     /// re-show the chosen routing mode.
     pub router_mode: String,
+    /// Latency-aware routing budget (ms). Passes through verbatim (not a
+    /// secret) so the settings form can re-show it.
+    pub primary_ttft_budget_ms: Option<u64>,
 }
 
 impl From<&GuiConfig> for GuiConfigView {
@@ -706,6 +716,7 @@ impl From<&GuiConfig> for GuiConfigView {
                 fallback_backend: c.backend.fallback_backend.clone(),
                 fallback_model: c.backend.fallback_model.clone(),
                 router_mode: c.backend.router_mode.name().to_string(),
+                primary_ttft_budget_ms: c.backend.primary_ttft_budget_ms,
             },
             classifier: c.classifier.clone(),
             extractor: c.extractor.clone(),
@@ -791,6 +802,12 @@ pub struct BackendConfigUpdate {
     /// `update_settings` payload (the struct has no `#[serde(default)]`), so
     /// `settings.js::gather()` must always send it. Not a secret.
     pub router_mode: String,
+    /// Latency-aware routing budget (ms). Like every other
+    /// `BackendConfigUpdate` field, this is **mandatory** in the
+    /// `update_settings` payload (the struct has no `#[serde(default)]`), so
+    /// `settings.js::gather()` must always send it (`null` when blank). Not a
+    /// secret.
+    pub primary_ttft_budget_ms: Option<u64>,
 }
 
 impl GuiConfigUpdate {
@@ -832,6 +849,7 @@ impl GuiConfigUpdate {
                         );
                         primer_core::router::RouterMode::default()
                     }),
+                primary_ttft_budget_ms: self.backend.primary_ttft_budget_ms,
             },
             classifier: self.classifier,
             extractor: self.extractor,
@@ -1139,6 +1157,7 @@ mod tests {
                 "llamacpp_n_ctx": null,
                 "fallback_backend": null,
                 "fallback_model": null,
+                "primary_ttft_budget_ms": null,
                 "router_mode": "local-only"
             },
             "classifier": {"match_main": true, "kind": null, "model": null, "timeout_ms": 3000},
@@ -1212,6 +1231,7 @@ mod tests {
                 "llamacpp_n_ctx": null,
                 "fallback_backend": null,
                 "fallback_model": null,
+                "primary_ttft_budget_ms": null,
                 "router_mode": "local-only"
             },
             "classifier": {"match_main": true, "kind": null, "model": null, "timeout_ms": 3000},
@@ -1299,6 +1319,7 @@ mod tests {
                 "llamacpp_n_ctx": null,
                 "fallback_backend": "cloud",
                 "fallback_model": "claude-opus-4-7",
+                "primary_ttft_budget_ms": null,
                 "router_mode": "local-only"
             },
             "classifier": {"match_main": true, "kind": null, "model": null, "timeout_ms": 3000},
@@ -1383,6 +1404,7 @@ mod tests {
                 "llamacpp_n_ctx": null,
                 "fallback_backend": null,
                 "fallback_model": null,
+                "primary_ttft_budget_ms": null,
                 "router_mode": "local-only"
             },
             "classifier": {"match_main": true, "kind": null, "model": null, "timeout_ms": 3000},
@@ -1579,6 +1601,7 @@ mod tests {
                 "llamacpp_n_ctx": null,
                 "fallback_backend": null,
                 "fallback_model": null,
+                "primary_ttft_budget_ms": null,
                 "router_mode": "local-only",
             },
             "classifier": {"match_main": true, "kind": null, "model": null, "timeout_ms": 3000},
@@ -1628,6 +1651,7 @@ mod tests {
                 "reasoning_markers": "",
                 "fallback_backend": null,
                 "fallback_model": null,
+                "primary_ttft_budget_ms": null,
                 "router_mode": "local-only"
             },
             "classifier": {"match_main": true, "kind": null, "model": null, "timeout_ms": 3000},
@@ -1682,6 +1706,7 @@ mod tests {
                 "reasoning_markers": "",
                 "fallback_backend": null,
                 "fallback_model": null,
+                "primary_ttft_budget_ms": null,
                 "router_mode": "local-only"
             },
             "classifier": {"match_main": true, "kind": null, "model": null, "timeout_ms": 3000},
@@ -1779,6 +1804,22 @@ mod tests {
             !json.contains("\"backend\""),
             "legacy backend must not be serialized: {json}"
         );
+    }
+
+    #[test]
+    fn backend_config_carries_ttft_budget() {
+        let mut cfg = BackendConfig::default();
+        assert_eq!(cfg.primary_ttft_budget_ms, None, "OFF by default");
+        cfg.primary_ttft_budget_ms = Some(750);
+        let json = serde_json::to_string(&cfg).unwrap();
+        let back: BackendConfig = serde_json::from_str(&json).unwrap();
+        assert_eq!(back.primary_ttft_budget_ms, Some(750));
+        // Old configs without the field still deserialize (serde default).
+        // Note: `router_mode` uses Rust-enum serde form ("LocalOnly") not the
+        // kebab-case name ("local-only") used by `FromStr`/`name()`.
+        let old = r#"{"kind":"stub","model":null,"ollama_url":"u","openai_compat_url":"u","api_key_source":{"kind":"env"},"openai_compat_api_key_source":{"kind":"env"},"qnn_bundle_dir":null,"qnn_qairt_lib_dir":null,"gguf_path":null,"llamacpp_gpu_layers":null,"llamacpp_n_ctx":null,"reasoning_markers":"","fallback_backend":null,"fallback_model":null,"router_mode":"LocalOnly"}"#;
+        let parsed: BackendConfig = serde_json::from_str(old).unwrap();
+        assert_eq!(parsed.primary_ttft_budget_ms, None);
     }
 
     #[test]

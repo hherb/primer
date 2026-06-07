@@ -68,6 +68,8 @@ const dom = {
       "f-backend-fallback-model-field",
     ),
     backendRouterMode: document.getElementById("f-backend-router-mode"),
+    backendTtftBudget: document.getElementById("f-backend-ttft-budget"),
+    backendTtftBudgetField: document.getElementById("f-backend-ttft-budget-field"),
     apiKeyFieldset: document.getElementById("f-api-key-fieldset"),
     apiKeyEnv: document.getElementById("f-api-key-env"),
     apiKeyInline: document.getElementById("f-api-key-inline"),
@@ -305,6 +307,8 @@ function populate(view) {
   f.backendFallbackBackend.value = view.backend.fallback_backend ?? "";
   f.backendFallbackModel.value = view.backend.fallback_model ?? "";
   f.backendRouterMode.value = view.backend.router_mode ?? "local-only";
+  f.backendTtftBudget.value = view.backend.primary_ttft_budget_ms ?? "";
+  applyRouterModeReveal(f.backendRouterMode.value);
   applyBackendKindReveal(view.backend.kind);
   applyFallbackReveal(f.backendFallbackBackend.value);
 
@@ -525,6 +529,9 @@ function wireFallbackReveal() {
   dom.fields.backendFallbackBackend.addEventListener("change", () => {
     applyFallbackReveal(dom.fields.backendFallbackBackend.value);
   });
+  dom.fields.backendRouterMode.addEventListener("change", () => {
+    applyRouterModeReveal(dom.fields.backendRouterMode.value);
+  });
 }
 
 // The fallback model field only matters once a fallback backend is chosen —
@@ -535,6 +542,10 @@ function wireFallbackReveal() {
 function applyFallbackReveal(fallbackKind) {
   dom.fields.backendFallbackModelField.hidden = !fallbackKind;
   applyCloudKeyEnable();
+}
+
+function applyRouterModeReveal(mode) {
+  dom.fields.backendTtftBudgetField.hidden = mode !== "hybrid";
 }
 
 function applyBackendKindReveal(kind) {
@@ -787,6 +798,13 @@ function gather() {
       // Phase 1.3 router mode — also mandatory (no serde default). Empty
       // selection falls back to "local-only" (today's no-routing behavior).
       router_mode: f.backendRouterMode.value || "local-only",
+      // Latency-aware routing: optional TTFT budget in ms. Blank = null = off.
+      primary_ttft_budget_ms: (() => {
+        const v = f.backendTtftBudget.value.trim();
+        if (!v) return null;
+        const n = Number.parseInt(v, 10);
+        return Number.isFinite(n) && n > 0 ? n : null;
+      })(),
     },
     classifier: gatherSubsystem("classifier"),
     extractor: gatherSubsystem("extractor"),

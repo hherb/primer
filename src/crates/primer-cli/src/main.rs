@@ -105,6 +105,17 @@ struct Cli {
     #[arg(long, default_value = "local-only")]
     router_mode: String,
 
+    /// Phase 1.3 latency-aware routing budget in milliseconds. Absent ⇒ latency
+    /// routing OFF (the default). Only takes effect with `--router-mode hybrid`
+    /// AND `--fallback-backend` set: when the local (primary) leg's recent
+    /// time-to-first-token exceeds this budget, complex-enough turns are nudged
+    /// to the secondary. Set the real value from your accelerator's bench
+    /// numbers. Must be ≥ 1 (0 is rejected — that would mean "always nudge",
+    /// which is what omitting the flag-plus-`local-only` is for); mirrors the
+    /// GUI's `min="1"`.
+    #[arg(long, value_parser = clap::value_parser!(u64).range(1..))]
+    primary_ttft_budget_ms: Option<u64>,
+
     /// Ollama server URL (used when --backend ollama).
     #[arg(long, default_value = "http://localhost:11434")]
     ollama_url: String,
@@ -983,6 +994,7 @@ async fn async_main() -> anyhow::Result<()> {
         fallback_model: cli.fallback_model.clone(),
         // Phase 1.3 inference router; parsed + validated above.
         router_mode,
+        primary_ttft_budget_ms: cli.primary_ttft_budget_ms,
     };
 
     let backend: Arc<dyn InferenceBackend> =
@@ -1824,6 +1836,28 @@ mod tests {
         // 0 is a valid usize value but is meaningless for this flag —
         // clap's range(1..) rejects it with a clear error.
         let result = Cli::try_parse_from(["primer", "--vocab-max-per-prompt", "0"]);
+        assert!(result.is_err(), "0 should be rejected; got: {result:?}");
+    }
+
+    // ─── --primary-ttft-budget-ms parse tests (Phase 1.3) ───────────────
+
+    #[test]
+    fn primary_ttft_budget_defaults_to_none() {
+        let cli = Cli::try_parse_from(["primer"]).unwrap();
+        assert_eq!(cli.primary_ttft_budget_ms, None);
+    }
+
+    #[test]
+    fn primary_ttft_budget_parses_explicit_value() {
+        let cli = Cli::try_parse_from(["primer", "--primary-ttft-budget-ms", "750"]).unwrap();
+        assert_eq!(cli.primary_ttft_budget_ms, Some(750));
+    }
+
+    #[test]
+    fn primary_ttft_budget_zero_is_rejected_at_parse() {
+        // 0 would mean "always nudge"; that's not a budget. Reject it for
+        // parity with the GUI's `min="1"` (clap's range(1..)).
+        let result = Cli::try_parse_from(["primer", "--primary-ttft-budget-ms", "0"]);
         assert!(result.is_err(), "0 should be rejected; got: {result:?}");
     }
 

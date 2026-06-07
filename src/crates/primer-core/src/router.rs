@@ -73,14 +73,13 @@ impl FromStr for RouterMode {
 /// Structured per-turn signals the dialogue manager knows but the bare
 /// `Prompt` does not carry as data. Threaded through
 /// `GenerationParams.routing`; every non-router backend ignores it.
+/// (Latency-aware routing is router-owned — see primer-inference's RouterBackend — so no TTFT field lives here.)
 #[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct RoutingSignals {
     /// The pedagogical intent decided for this turn.
     pub intent: PedagogicalIntent,
     /// How many knowledge passages RAG retrieved for this turn.
     pub retrieved_passages: usize,
-    // Reserved extension point (latency-aware switching, deferred):
-    // pub recent_primary_ttft_ms: Option<u64>,
 }
 
 /// Per-intent routing weight. Higher = more likely to route to the strong
@@ -140,6 +139,29 @@ pub fn message_term(prompt: &Prompt) -> f32 {
 /// secondary (strong) leg in `hybrid` mode.
 pub fn complexity_score(signals: &RoutingSignals, prompt: &Prompt) -> f32 {
     intent_weight(signals.intent) + passage_term(signals.retrieved_passages) + message_term(prompt)
+}
+
+/// O(1) rolling exponential moving average of a TTFT sample, in milliseconds.
+/// `prev == None` ⇒ the sample seeds the average. `alpha` (the smoothing
+/// factor, `0..=1`, `TTFT_EMA_ALPHA` in practice) weights the latest sample.
+/// Pure.
+pub fn update_ema(prev: Option<f64>, sample_ms: f64, alpha: f32) -> f64 {
+    match prev {
+        None => sample_ms,
+        Some(p) => alpha as f64 * sample_ms + (1.0 - alpha as f64) * p,
+    }
+}
+
+/// Latency routing contribution to the complexity score. Returns `W_LATENCY`
+/// only when BOTH a recent primary-leg TTFT and a budget are present AND the
+/// recent TTFT is strictly greater than the budget; otherwise `0.0`. A
+/// `budget_ms` of `None` makes latency routing entirely inert (the OFF
+/// default). Pure.
+pub fn latency_term(recent_ttft_ms: Option<f64>, budget_ms: Option<u64>) -> f32 {
+    match (recent_ttft_ms, budget_ms) {
+        (Some(recent), Some(budget)) if recent > budget as f64 => crate::consts::router::W_LATENCY,
+        _ => 0.0,
+    }
 }
 
 /// Which physical leg the router should use.
@@ -315,5 +337,50 @@ mod tests {
         assert_eq!(below.second, Some(Leg::Secondary));
         assert_eq!(at.first, Leg::Secondary);
         assert_eq!(at.second, Some(Leg::Primary));
+    }
+
+    #[test]
+    fn update_ema_seeds_from_none() {
+        // No prior average → the sample becomes the average verbatim.
+        assert_eq!(update_ema(None, 1200.0, 0.3), 1200.0);
+    }
+
+    #[test]
+    fn update_ema_moves_toward_new_sample() {
+        // alpha 0.5 → halfway between prev and sample.
+        assert_eq!(update_ema(Some(1000.0), 2000.0, 0.5), 1500.0);
+    }
+
+    #[test]
+    fn update_ema_alpha_one_takes_latest() {
+        assert_eq!(update_ema(Some(1000.0), 2000.0, 1.0), 2000.0);
+    }
+
+    #[test]
+    fn update_ema_alpha_zero_keeps_prev() {
+        assert_eq!(update_ema(Some(1000.0), 2000.0, 0.0), 1000.0);
+    }
+
+    #[test]
+    fn latency_term_inert_without_budget() {
+        use crate::consts::router::W_LATENCY;
+        // No budget configured → always 0.0 regardless of how slow local is.
+        assert_eq!(latency_term(Some(9999.0), None), 0.0);
+        // No recent TTFT yet → 0.0.
+        assert_eq!(latency_term(None, Some(500)), 0.0);
+        let _ = W_LATENCY;
+    }
+
+    #[test]
+    fn latency_term_fires_over_budget() {
+        use crate::consts::router::W_LATENCY;
+        assert_eq!(latency_term(Some(800.0), Some(500)), W_LATENCY);
+    }
+
+    #[test]
+    fn latency_term_zero_at_or_under_budget() {
+        // Boundary: recent == budget is NOT over → 0.0.
+        assert_eq!(latency_term(Some(500.0), Some(500)), 0.0);
+        assert_eq!(latency_term(Some(100.0), Some(500)), 0.0);
     }
 }

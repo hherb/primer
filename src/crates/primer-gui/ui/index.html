@@ -475,6 +475,21 @@
                 <strong>cloud</strong>) for them to have any effect.</small
               >
             </label>
+            <label class="field" id="f-backend-ttft-budget-field" hidden>
+              <span>Primary TTFT budget (ms)</span>
+              <input
+                type="number"
+                id="f-backend-ttft-budget"
+                min="1"
+                placeholder="(off)"
+              />
+              <small class="hint muted"
+                >Latency-aware routing (hybrid only). When the local backend's
+                recent time-to-first-token exceeds this many milliseconds,
+                complex-enough turns are routed to the fallback. Blank =
+                off. Set from your device's measured TTFT.</small
+              >
+            </label>
           </div>
 
           <fieldset class="api-key-fieldset" id="f-api-key-fieldset">

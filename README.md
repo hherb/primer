@@ -130,6 +130,15 @@ built, so even a mis-set `hybrid` degrades to local-only. Routing to the cloud
 happens only when you explicitly choose `hybrid`/`cloud-preferred` AND configure
 a cloud secondary — that choice is the consent.
 
+In `hybrid` mode you can also add a **latency nudge**: pass
+`--primary-ttft-budget-ms <ms>` (or set it in the GUI's Settings → Inference) and
+when the local backend's recent time-to-first-token drifts above that budget,
+borderline-complex turns are nudged to the cloud secondary. It is **off by
+default** (no budget, no nudge) and is a *nudge*, not a switch — trivial turns
+stay local even when the local model is slow, so the local backend keeps being
+exercised and the latency estimate recovers on its own once it speeds back up.
+Set the budget from your device's measured TTFT.
+
 ### primer-pedagogy
 
 The Socratic engine — where the Primer's personality lives. Two modules:
@@ -326,6 +335,10 @@ Project-local `.env` wins over the home file. Both are gitignored. See `.env.exa
                                 fallback), or hybrid (local for routine turns, cloud for
                                 complex/knowledge-intensive turns). Requires
                                 --fallback-backend when not local-only.
+--primary-ttft-budget-ms <ms>   Latency nudge for hybrid routing (off by default).
+                                When the local primary's recent time-to-first-token
+                                exceeds this, borderline-complex turns are nudged to
+                                the fallback. Set from your device's measured TTFT.
 --classifier-backend <name>     Backend for the engagement classifier (default: same as --backend;
                                 pass `stub` to force deterministic empty assessments).
 --classifier-model <id>         Model for the engagement classifier (default: same as --model).
