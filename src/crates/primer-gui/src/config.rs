@@ -136,6 +136,11 @@ pub struct BackendConfig {
     /// require an explicit model). Not a secret — crosses IPC verbatim.
     #[serde(default)]
     pub fallback_model: Option<String>,
+    /// Phase 1.3 inference-router mode. Mirrors the CLI's `--router-mode`.
+    /// `LocalOnly` (default) ⇒ no routing (today's behavior). Consumed by
+    /// `primer_engine::build_main_backend` via `BackendParams.router_mode`.
+    #[serde(default)]
+    pub router_mode: primer_core::router::RouterMode,
 }
 
 impl Default for BackendConfig {
@@ -155,6 +160,7 @@ impl Default for BackendConfig {
             reasoning_markers: String::new(),
             fallback_backend: None,
             fallback_model: None,
+            router_mode: primer_core::router::RouterMode::LocalOnly,
         }
     }
 }
@@ -674,6 +680,10 @@ pub struct BackendConfigView {
     /// secrets), so the settings form can re-show the chosen fallback.
     pub fallback_backend: Option<String>,
     pub fallback_model: Option<String>,
+    /// Router mode as its canonical kebab-case name (e.g. "local-only").
+    /// Passes through verbatim (not a secret) so the settings form can
+    /// re-show the chosen routing mode.
+    pub router_mode: String,
 }
 
 impl From<&GuiConfig> for GuiConfigView {
@@ -695,6 +705,7 @@ impl From<&GuiConfig> for GuiConfigView {
                 reasoning_markers: c.backend.reasoning_markers.clone(),
                 fallback_backend: c.backend.fallback_backend.clone(),
                 fallback_model: c.backend.fallback_model.clone(),
+                router_mode: c.backend.router_mode.name().to_string(),
             },
             classifier: c.classifier.clone(),
             extractor: c.extractor.clone(),
@@ -774,6 +785,12 @@ pub struct BackendConfigUpdate {
     /// them (as `null` when unset).
     pub fallback_backend: Option<String>,
     pub fallback_model: Option<String>,
+    /// Router mode kebab-case name. Parsed via `RouterMode::from_str` in
+    /// `into_config` (invalid ⇒ `LocalOnly` with a `tracing::warn!`). Like
+    /// every other `BackendConfigUpdate` field, this is **mandatory** in the
+    /// `update_settings` payload (the struct has no `#[serde(default)]`), so
+    /// `settings.js::gather()` must always send it. Not a secret.
+    pub router_mode: String,
 }
 
 impl GuiConfigUpdate {
@@ -804,6 +821,17 @@ impl GuiConfigUpdate {
                 reasoning_markers: self.backend.reasoning_markers,
                 fallback_backend: self.backend.fallback_backend,
                 fallback_model: self.backend.fallback_model,
+                router_mode: self
+                    .backend
+                    .router_mode
+                    .parse()
+                    .unwrap_or_else(|e: String| {
+                        tracing::warn!(
+                            target: "primer::gui::config",
+                            "invalid router_mode in settings update: {e}; defaulting to local-only",
+                        );
+                        primer_core::router::RouterMode::default()
+                    }),
             },
             classifier: self.classifier,
             extractor: self.extractor,
@@ -1110,7 +1138,8 @@ mod tests {
                 "llamacpp_gpu_layers": null,
                 "llamacpp_n_ctx": null,
                 "fallback_backend": null,
-                "fallback_model": null
+                "fallback_model": null,
+                "router_mode": "local-only"
             },
             "classifier": {"match_main": true, "kind": null, "model": null, "timeout_ms": 3000},
             "extractor": {"match_main": true, "kind": null, "model": null, "timeout_ms": 5000},
@@ -1182,7 +1211,8 @@ mod tests {
                 "llamacpp_gpu_layers": null,
                 "llamacpp_n_ctx": null,
                 "fallback_backend": null,
-                "fallback_model": null
+                "fallback_model": null,
+                "router_mode": "local-only"
             },
             "classifier": {"match_main": true, "kind": null, "model": null, "timeout_ms": 3000},
             "extractor": {"match_main": true, "kind": null, "model": null, "timeout_ms": 5000},
@@ -1268,7 +1298,8 @@ mod tests {
                 "llamacpp_gpu_layers": null,
                 "llamacpp_n_ctx": null,
                 "fallback_backend": "cloud",
-                "fallback_model": "claude-opus-4-7"
+                "fallback_model": "claude-opus-4-7",
+                "router_mode": "local-only"
             },
             "classifier": {"match_main": true, "kind": null, "model": null, "timeout_ms": 3000},
             "extractor": {"match_main": true, "kind": null, "model": null, "timeout_ms": 5000},
@@ -1351,7 +1382,8 @@ mod tests {
                 "llamacpp_gpu_layers": null,
                 "llamacpp_n_ctx": null,
                 "fallback_backend": null,
-                "fallback_model": null
+                "fallback_model": null,
+                "router_mode": "local-only"
             },
             "classifier": {"match_main": true, "kind": null, "model": null, "timeout_ms": 3000},
             "extractor": {"match_main": true, "kind": null, "model": null, "timeout_ms": 5000},
@@ -1547,6 +1579,7 @@ mod tests {
                 "llamacpp_n_ctx": null,
                 "fallback_backend": null,
                 "fallback_model": null,
+                "router_mode": "local-only",
             },
             "classifier": {"match_main": true, "kind": null, "model": null, "timeout_ms": 3000},
             "extractor": {"match_main": true, "kind": null, "model": null, "timeout_ms": 5000},
@@ -1594,7 +1627,8 @@ mod tests {
                 "llamacpp_n_ctx": null,
                 "reasoning_markers": "",
                 "fallback_backend": null,
-                "fallback_model": null
+                "fallback_model": null,
+                "router_mode": "local-only"
             },
             "classifier": {"match_main": true, "kind": null, "model": null, "timeout_ms": 3000},
             "extractor": {"match_main": true, "kind": null, "model": null, "timeout_ms": 5000},
@@ -1647,7 +1681,8 @@ mod tests {
                 "llamacpp_n_ctx": null,
                 "reasoning_markers": "",
                 "fallback_backend": null,
-                "fallback_model": null
+                "fallback_model": null,
+                "router_mode": "local-only"
             },
             "classifier": {"match_main": true, "kind": null, "model": null, "timeout_ms": 3000},
             "extractor": {"match_main": true, "kind": null, "model": null, "timeout_ms": 5000},

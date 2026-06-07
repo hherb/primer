@@ -459,6 +459,22 @@
                 openai-compat require an explicit model name.</small
               >
             </label>
+            <label class="field">
+              <span>Routing mode</span>
+              <select id="f-backend-router-mode">
+                <option value="local-only">local only (no routing)</option>
+                <option value="cloud-preferred">cloud preferred</option>
+                <option value="hybrid">
+                  hybrid (route complex turns to cloud)
+                </option>
+              </select>
+              <small class="hint muted"
+                >Phase 1.3 inference router. <strong>local only</strong> is
+                today's behavior (no routing). The other modes route turns to
+                the fallback backend above — configure a fallback (typically
+                <strong>cloud</strong>) for them to have any effect.</small
+              >
+            </label>
           </div>
 
           <fieldset class="api-key-fieldset" id="f-api-key-fieldset">
