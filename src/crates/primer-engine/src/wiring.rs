@@ -354,6 +354,7 @@ async fn build_router_backend(
             }
             primary
         }
+        // Both legs failed: surface the primary's (most informative) error.
         MainBackendPlan::Fail => primary,
     }
 }
