@@ -431,11 +431,14 @@ pub mod router {
 
     /// Score added to a turn's complexity when the primary leg's recent
     /// time-to-first-token EMA exceeds the configured budget, in `hybrid`
-    /// mode. A *weight*, not a threshold — it only contributes when a budget is
-    /// configured (`--primary-ttft-budget-ms` / the GUI field). Sized so a
-    /// slow local leg pushes an otherwise-routine turn (base score below
-    /// `ROUTE_SECONDARY_THRESHOLD = 0.5`) over the line on its own. Starting
-    /// value; the real budget is owner-calibrated from bench numbers.
+    /// mode. A *weight*, not a threshold — it only contributes when a budget
+    /// is configured (`--primary-ttft-budget-ms` / the GUI field), and it is
+    /// deliberately BELOW `ROUTE_SECONDARY_THRESHOLD` (0.5): latency is a
+    /// NUDGE that tips a borderline-complex turn over the line, not a sole
+    /// trigger. A trivial turn (base score 0) therefore stays local even when
+    /// the local leg is slow — which keeps routine turns sampling the local
+    /// TTFT so the EMA self-heals when local speeds back up. Starting value;
+    /// the real budget is owner-calibrated from bench numbers.
     pub const W_LATENCY: f32 = 0.30;
 
     /// Exponential-moving-average smoothing factor for the rolling primary-leg
