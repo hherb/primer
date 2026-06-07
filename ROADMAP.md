@@ -76,7 +76,8 @@ Steps 1.2.1–1.2.5 landed; 1.2.6's harness is built + host-tested (device numbe
 
 ### 1.3 — Hybrid inference 🟡
 
-- [x] Inference router (`RouterBackend` decorator + `--router-mode local-only|cloud-preferred|hybrid`; pure composite-complexity policy in `primer_core::router`; CLI + GUI). Routes routine turns to the local primary and complex/knowledge-intensive turns to the cloud secondary, self-failing-over at the pre-stream boundary; reuses the `--fallback-*` secondary leg. **Latency-aware switching is a designed extension point, deferred** until the owner-gated bench numbers exist.
+- [x] Inference router (`RouterBackend` decorator + `--router-mode local-only|cloud-preferred|hybrid`; pure composite-complexity policy in `primer_core::router`; CLI + GUI). Routes routine turns to the local primary and complex/knowledge-intensive turns to the cloud secondary, self-failing-over at the pre-stream boundary; reuses the `--fallback-*` secondary leg.
+- [x] Latency-aware routing — **shipped, config-gated and OFF by default** (`--primary-ttft-budget-ms` / GUI "Primary TTFT budget (ms)"). The `RouterBackend` owns a rolling primary-leg TTFT EMA (router-owned for correct leg attribution) and folds a `latency_term` into the `hybrid` complexity score: a slow local leg *nudges* borderline turns to the cloud while trivial turns stay local (self-healing). No magic threshold ships — the budget is owner-calibrated from bench numbers; with no budget set, behaviour is byte-identical to the no-latency router. **Threshold calibration** (picking the real budget) stays gated on the owner-gated llama.cpp/QNN bench numbers.
 
 **Phase 1 exit criteria:** the Phase 0 conversation works offline, <3s to first token on at least one local platform.
 

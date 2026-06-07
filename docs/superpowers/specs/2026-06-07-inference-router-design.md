@@ -249,6 +249,8 @@ changes. `GenerationParams::default()` sets `routing: None`.
 
 ## Latency-aware switching — extension point (deferred)
 
+> **Update 2026-06-07:** shipped — see [2026-06-07-latency-aware-routing-design.md](2026-06-07-latency-aware-routing-design.md). Config-gated, OFF by default; the TTFT is **router-owned** (not DM-owned as sketched below, because the DM can't see which leg the router served), and the latency term is a *nudge* (below threshold), not a switch.
+
 No latency logic ships in this spec. The seam is already shaped for it:
 
 - `RoutingSignals` reserves a future `recent_primary_ttft_ms: Option<u64>`.
