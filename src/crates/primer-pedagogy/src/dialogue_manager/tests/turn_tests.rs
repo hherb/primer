@@ -575,7 +575,7 @@ async fn build_turn_prompt_includes_vocab_section_when_concept_is_overdue() {
         box_level: 1,
     });
 
-    let prompt = dm
+    let (prompt, _passage_count) = dm
         .build_turn_prompt("tell me a story", PedagogicalIntent::SocraticQuestion)
         .await;
 
@@ -624,7 +624,7 @@ async fn build_turn_prompt_omits_vocab_section_when_no_concept_is_due() {
         box_level: 0,
     });
 
-    let prompt = dm
+    let (prompt, _passage_count) = dm
         .build_turn_prompt("what is gravity", PedagogicalIntent::SocraticQuestion)
         .await;
 
@@ -668,6 +668,67 @@ async fn respond_after_threshold_yields_suggest_break_intent() {
     assert!(
         dm.last_break_suggested_at_for_test().is_some(),
         "last_break_suggested_at should be recorded"
+    );
+}
+
+#[tokio::test]
+async fn respond_to_streaming_threads_routing_signals() {
+    use std::sync::{Arc, Mutex};
+
+    use async_trait::async_trait;
+    use futures::stream;
+    use primer_core::error::Result as PResult;
+    use primer_core::inference::{GenerationParams, InferenceBackend, Prompt, TokenChunk, TokenStream};
+
+    struct CapturingBackend {
+        last_routing: Arc<Mutex<Option<primer_core::router::RoutingSignals>>>,
+    }
+
+    #[async_trait]
+    impl InferenceBackend for CapturingBackend {
+        fn name(&self) -> &str {
+            "capture"
+        }
+        async fn is_available(&self) -> bool {
+            true
+        }
+        async fn generate_stream(
+            &self,
+            _p: &Prompt,
+            params: &GenerationParams,
+        ) -> PResult<TokenStream> {
+            *self.last_routing.lock().unwrap() = params.routing.clone();
+            Ok(Box::pin(stream::once(async {
+                Ok(TokenChunk {
+                    text: "ok".into(),
+                    done: true,
+                })
+            })))
+        }
+    }
+
+    let captured = Arc::new(Mutex::new(None));
+    let backend = Arc::new(CapturingBackend {
+        last_routing: captured.clone(),
+    });
+    let knowledge = Arc::new(EmptyKnowledge);
+    let mut dm = DialogueManager::new(
+        test_learner(),
+        backend.clone(),
+        knowledge.clone(),
+        DialogueManagerStores::default(),
+        default_subsystems(),
+        primer_core::config::PedagogyConfig::default(),
+    );
+
+    dm.respond_to("why is the sky blue?").await.unwrap();
+
+    let routing = captured.lock().unwrap().clone();
+    assert!(routing.is_some(), "DM must populate GenerationParams.routing");
+    assert_eq!(
+        routing.unwrap().retrieved_passages,
+        0,
+        "empty KB ⇒ 0 passages"
     );
 }
 
