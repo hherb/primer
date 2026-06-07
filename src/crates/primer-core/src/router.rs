@@ -7,6 +7,12 @@
 
 use std::str::FromStr;
 
+use crate::consts::router::{
+    MSG_LONG_WORDS, MSG_QUESTION_CAP, ROUTE_PASSAGE_CAP, W_MSG_LONG, W_MSG_QUESTION, W_PASSAGE,
+};
+use crate::conversation::PedagogicalIntent;
+use crate::inference::Prompt;
+
 /// How the router chooses between the primary (typically local/small) and
 /// secondary (typically cloud/strong) legs.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, serde::Serialize, serde::Deserialize)]
@@ -63,9 +69,78 @@ impl FromStr for RouterMode {
     }
 }
 
+/// Structured per-turn signals the dialogue manager knows but the bare
+/// `Prompt` does not carry as data. Threaded through
+/// `GenerationParams.routing`; every non-router backend ignores it.
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
+pub struct RoutingSignals {
+    /// The pedagogical intent decided for this turn.
+    pub intent: PedagogicalIntent,
+    /// How many knowledge passages RAG retrieved for this turn.
+    pub retrieved_passages: usize,
+    // Reserved extension point (latency-aware switching, deferred):
+    // pub recent_primary_ttft_ms: Option<u64>,
+}
+
+/// Per-intent routing weight. Higher = more likely to route to the strong
+/// secondary leg. Starting values; tunable via the (documented) intent table.
+/// An exhaustive `match` so a future `PedagogicalIntent` variant forces a
+/// compile error here rather than silently scoring zero.
+pub fn intent_weight(intent: PedagogicalIntent) -> f32 {
+    match intent {
+        PedagogicalIntent::Scaffolding => 0.45,
+        PedagogicalIntent::DirectAnswer => 0.40,
+        PedagogicalIntent::AnswerThenPivot => 0.40,
+        PedagogicalIntent::Extension => 0.30,
+        PedagogicalIntent::ComprehensionCheck => 0.25,
+        PedagogicalIntent::SocraticQuestion => 0.15,
+        PedagogicalIntent::Encouragement => 0.0,
+        PedagogicalIntent::SessionClose => 0.0,
+        PedagogicalIntent::SuggestBreak => 0.0,
+    }
+}
+
+/// Knowledge-intensity term: `min(passages, CAP) * W_PASSAGE`.
+pub fn passage_term(retrieved_passages: usize) -> f32 {
+    retrieved_passages.min(ROUTE_PASSAGE_CAP) as f32 * W_PASSAGE
+}
+
+/// Message-complexity term derived from the last child (`Role::User`) message
+/// in the prompt: a length component plus a (capped) question-depth component.
+/// Pure string analysis — no NLP dependency.
+pub fn message_term(prompt: &Prompt) -> f32 {
+    let Some(last_user) = prompt
+        .messages
+        .iter()
+        .rev()
+        .find(|m| matches!(m.role, crate::inference::Role::User))
+    else {
+        return 0.0;
+    };
+    let text = &last_user.content;
+
+    let long = if text.split_whitespace().count() > MSG_LONG_WORDS {
+        W_MSG_LONG
+    } else {
+        0.0
+    };
+
+    let extra_questions = text.matches('?').count().saturating_sub(1).min(MSG_QUESTION_CAP);
+    let question = extra_questions as f32 * W_MSG_QUESTION;
+
+    long + question
+}
+
+/// Composite turn-complexity score. Higher ⇒ more likely to route to the
+/// secondary (strong) leg in `hybrid` mode.
+pub fn complexity_score(signals: &RoutingSignals, prompt: &Prompt) -> f32 {
+    intent_weight(signals.intent) + passage_term(signals.retrieved_passages) + message_term(prompt)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::inference::{Message, Role};
 
     #[test]
     fn default_is_local_only() {
@@ -89,5 +164,61 @@ mod tests {
         assert!(!RouterMode::LocalOnly.uses_secondary());
         assert!(RouterMode::CloudPreferred.uses_secondary());
         assert!(RouterMode::Hybrid.uses_secondary());
+    }
+
+    fn prompt_with_last_user(msg: &str) -> Prompt {
+        Prompt {
+            system: String::new(),
+            messages: vec![Message { role: Role::User, content: msg.to_string() }],
+        }
+    }
+
+    #[test]
+    fn intent_weight_covers_all_variants_monotonically() {
+        assert!(intent_weight(PedagogicalIntent::Scaffolding) >= intent_weight(PedagogicalIntent::DirectAnswer));
+        assert!(intent_weight(PedagogicalIntent::DirectAnswer) > intent_weight(PedagogicalIntent::SocraticQuestion));
+        assert_eq!(intent_weight(PedagogicalIntent::Encouragement), 0.0);
+        assert_eq!(intent_weight(PedagogicalIntent::SessionClose), 0.0);
+        assert_eq!(intent_weight(PedagogicalIntent::SuggestBreak), 0.0);
+    }
+
+    #[test]
+    fn passage_term_is_capped() {
+        use crate::consts::router::{ROUTE_PASSAGE_CAP, W_PASSAGE};
+        assert_eq!(passage_term(0), 0.0);
+        assert_eq!(passage_term(ROUTE_PASSAGE_CAP), ROUTE_PASSAGE_CAP as f32 * W_PASSAGE);
+        assert_eq!(passage_term(ROUTE_PASSAGE_CAP + 5), ROUTE_PASSAGE_CAP as f32 * W_PASSAGE);
+    }
+
+    #[test]
+    fn message_term_rewards_length_and_questions() {
+        let short = prompt_with_last_user("why?");
+        let long = prompt_with_last_user(&"word ".repeat(40));
+        let many_q = prompt_with_last_user("what? why? how? when?");
+        assert_eq!(message_term(&short), 0.0);
+        assert!(message_term(&long) > 0.0);
+        assert!(message_term(&many_q) > 0.0);
+    }
+
+    #[test]
+    fn message_term_zero_when_no_user_message() {
+        let empty = Prompt { system: "x".into(), messages: vec![] };
+        assert_eq!(message_term(&empty), 0.0);
+    }
+
+    #[test]
+    fn complexity_score_routes_hard_turn_above_threshold() {
+        use crate::consts::router::ROUTE_SECONDARY_THRESHOLD;
+        let s = RoutingSignals { intent: PedagogicalIntent::Scaffolding, retrieved_passages: 2 };
+        let hard = prompt_with_last_user(&"explain ".repeat(40));
+        assert!(complexity_score(&s, &hard) >= ROUTE_SECONDARY_THRESHOLD);
+    }
+
+    #[test]
+    fn complexity_score_keeps_routine_turn_below_threshold() {
+        use crate::consts::router::ROUTE_SECONDARY_THRESHOLD;
+        let s = RoutingSignals { intent: PedagogicalIntent::Encouragement, retrieved_passages: 0 };
+        let easy = prompt_with_last_user("ok");
+        assert!(complexity_score(&s, &easy) < ROUTE_SECONDARY_THRESHOLD);
     }
 }
