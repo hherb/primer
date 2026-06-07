@@ -159,9 +159,7 @@ pub fn update_ema(prev: Option<f64>, sample_ms: f64, alpha: f32) -> f64 {
 /// default). Pure.
 pub fn latency_term(recent_ttft_ms: Option<f64>, budget_ms: Option<u64>) -> f32 {
     match (recent_ttft_ms, budget_ms) {
-        (Some(recent), Some(budget)) if recent > budget as f64 => {
-            crate::consts::router::W_LATENCY
-        }
+        (Some(recent), Some(budget)) if recent > budget as f64 => crate::consts::router::W_LATENCY,
         _ => 0.0,
     }
 }
