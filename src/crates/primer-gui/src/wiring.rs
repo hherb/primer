@@ -205,6 +205,10 @@ async fn build_with_strategy(
         // configured fallback secondary in `build_main_backend`. Mirrors the
         // CLI's `--router-mode`.
         router_mode: backend_config.router_mode,
+        // Phase 1.3 latency-aware routing budget from Settings → Inference
+        // backend. `None` ⇒ latency routing OFF. Mirrors the CLI's
+        // `--primary-ttft-budget-ms`.
+        primary_ttft_budget_ms: backend_config.primary_ttft_budget_ms,
     };
 
     // ─── Main backend (locale-independent) ───────────────────────────
