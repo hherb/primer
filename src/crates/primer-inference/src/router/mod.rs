@@ -170,6 +170,16 @@ impl InferenceBackend for RouterBackend {
 /// Stream adapter that records the wall-clock time to the first non-empty
 /// chunk into a shared TTFT EMA, then passes every item through unchanged.
 /// Records at most once.
+///
+/// **What this measures, precisely:** `start` is stamped in `maybe_time`, i.e.
+/// *after* `generate_stream().await` returned `Ok`, and the sample is taken at
+/// the first non-empty chunk poll. So it captures prompt-eval + first-decode
+/// (the dominant TTFT term for a local backend) but EXCLUDES the pre-stream
+/// `await` (connection / request setup) and INCLUDES any consumer-side
+/// scheduling delay between polls. It is a self-consistent proxy for the local
+/// leg's responsiveness (only the primary leg is ever timed), not strict
+/// wall-clock TTFT — keep that in mind when calibrating `--primary-ttft-budget-ms`
+/// from a bench harness that may define TTFT differently.
 struct TtftTimingStream {
     inner: TokenStream,
     start: Instant,

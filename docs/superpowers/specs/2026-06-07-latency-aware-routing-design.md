@@ -168,6 +168,21 @@ cargo +1.88 test -p primer-inference --features qnn
 cargo +1.88 clippy -p primer-inference --features llamacpp --all-targets -- -D warnings
 ```
 
+## Known limitation: EMA freeze under sustained complex load
+
+The self-healing argument (a slow local leg only *nudges* borderline turns, so
+trivial turns keep sampling the local TTFT and the EMA recovers once local speeds
+back up) relies on the conversation containing some trivial turns. In the
+degenerate case where **every** turn is borderline-or-higher, a once-high EMA
+escalates all of them to the cloud, the primary leg is never re-sampled, and the
+EMA freezes high — latency routing then never reverts even if local recovers.
+This is acceptable in practice: (a) complex turns *should* route to the cloud
+anyway, so the "stuck" behaviour coincides with the desirable one; (b) real child
+conversations interleave trivial turns (encouragement, acknowledgements) that
+re-sample local. If a future need arises, the fix is a periodic forced local
+re-probe (e.g. one in N turns ignores the latency term) — not shipped here to
+keep the OFF-by-default mechanism minimal.
+
 ## Out of scope (deferred, unchanged from predecessor)
 
 - **Calibrating the budget.** The owner sets a real `--primary-ttft-budget-ms`
