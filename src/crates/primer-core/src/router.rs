@@ -8,7 +8,8 @@
 use std::str::FromStr;
 
 use crate::consts::router::{
-    MSG_LONG_WORDS, MSG_QUESTION_CAP, ROUTE_PASSAGE_CAP, W_MSG_LONG, W_MSG_QUESTION, W_PASSAGE,
+    MSG_LONG_WORDS, MSG_QUESTION_CAP, ROUTE_PASSAGE_CAP, ROUTE_SECONDARY_THRESHOLD, W_MSG_LONG,
+    W_MSG_QUESTION, W_PASSAGE,
 };
 use crate::conversation::PedagogicalIntent;
 use crate::inference::Prompt;
@@ -137,6 +138,42 @@ pub fn complexity_score(signals: &RoutingSignals, prompt: &Prompt) -> f32 {
     intent_weight(signals.intent) + passage_term(signals.retrieved_passages) + message_term(prompt)
 }
 
+/// Which physical leg the router should use.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Leg {
+    /// The `--backend` leg (typically local/small).
+    Primary,
+    /// The `--fallback-backend` leg (typically cloud/strong).
+    Secondary,
+}
+
+/// The ordered legs the router will try: `first`, then `second` on a
+/// pre-stream failure. `second` is `None` only for `LocalOnly`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct LegOrder {
+    pub first: Leg,
+    pub second: Option<Leg>,
+}
+
+/// Map a mode + complexity score to the ordered leg pair. Pure.
+pub fn order_legs(mode: RouterMode, score: f32) -> LegOrder {
+    match mode {
+        RouterMode::LocalOnly => LegOrder { first: Leg::Primary, second: None },
+        RouterMode::CloudPreferred => LegOrder {
+            first: Leg::Secondary,
+            second: Some(Leg::Primary),
+        },
+        RouterMode::Hybrid if score >= ROUTE_SECONDARY_THRESHOLD => LegOrder {
+            first: Leg::Secondary,
+            second: Some(Leg::Primary),
+        },
+        RouterMode::Hybrid => LegOrder {
+            first: Leg::Primary,
+            second: Some(Leg::Secondary),
+        },
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -220,5 +257,32 @@ mod tests {
         let s = RoutingSignals { intent: PedagogicalIntent::Encouragement, retrieved_passages: 0 };
         let easy = prompt_with_last_user("ok");
         assert!(complexity_score(&s, &easy) < ROUTE_SECONDARY_THRESHOLD);
+    }
+
+    #[test]
+    fn local_only_never_has_a_second_leg() {
+        let o = order_legs(RouterMode::LocalOnly, 1.0);
+        assert_eq!(o.first, Leg::Primary);
+        assert_eq!(o.second, None);
+    }
+
+    #[test]
+    fn cloud_preferred_is_secondary_first_regardless_of_score() {
+        let lo = order_legs(RouterMode::CloudPreferred, 0.0);
+        let hi = order_legs(RouterMode::CloudPreferred, 1.0);
+        assert_eq!(lo.first, Leg::Secondary);
+        assert_eq!(lo.second, Some(Leg::Primary));
+        assert_eq!(hi.first, Leg::Secondary);
+    }
+
+    #[test]
+    fn hybrid_routes_by_threshold() {
+        use crate::consts::router::ROUTE_SECONDARY_THRESHOLD;
+        let below = order_legs(RouterMode::Hybrid, ROUTE_SECONDARY_THRESHOLD - 0.01);
+        let at = order_legs(RouterMode::Hybrid, ROUTE_SECONDARY_THRESHOLD);
+        assert_eq!(below.first, Leg::Primary);
+        assert_eq!(below.second, Some(Leg::Secondary));
+        assert_eq!(at.first, Leg::Secondary);
+        assert_eq!(at.second, Some(Leg::Primary));
     }
 }
