@@ -105,6 +105,15 @@ struct Cli {
     #[arg(long, default_value = "local-only")]
     router_mode: String,
 
+    /// Phase 1.3 latency-aware routing budget in milliseconds. Absent ⇒ latency
+    /// routing OFF (the default). Only takes effect with `--router-mode hybrid`
+    /// AND `--fallback-backend` set: when the local (primary) leg's recent
+    /// time-to-first-token exceeds this budget, complex-enough turns are nudged
+    /// to the secondary. Set the real value from your accelerator's bench
+    /// numbers.
+    #[arg(long)]
+    primary_ttft_budget_ms: Option<u64>,
+
     /// Ollama server URL (used when --backend ollama).
     #[arg(long, default_value = "http://localhost:11434")]
     ollama_url: String,
@@ -983,6 +992,7 @@ async fn async_main() -> anyhow::Result<()> {
         fallback_model: cli.fallback_model.clone(),
         // Phase 1.3 inference router; parsed + validated above.
         router_mode,
+        primary_ttft_budget_ms: cli.primary_ttft_budget_ms,
     };
 
     let backend: Arc<dyn InferenceBackend> =
