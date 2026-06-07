@@ -91,6 +91,12 @@ pub struct BackendParams {
     /// `build_main_backend` produces a `RouterBackend` over the primary +
     /// secondary legs. Consumed only by [`build_main_backend`].
     pub router_mode: primer_core::router::RouterMode,
+    /// Phase 1.3 latency-aware routing budget (ms). `None` ⇒ latency routing
+    /// OFF (the default). When set AND `router_mode == Hybrid`, the
+    /// `RouterBackend` nudges a turn toward the secondary when its rolling
+    /// primary-leg TTFT EMA exceeds this budget. Consumed only by
+    /// [`build_main_backend`]'s router path.
+    pub primary_ttft_budget_ms: Option<u64>,
 }
 
 /// Conventional default location of the QAIRT runtime libraries
@@ -334,10 +340,11 @@ async fn build_router_backend(
         MainBackendPlan::Wrapped => {
             let primary = primary.expect("Wrapped implies primary built");
             let secondary = secondary.expect("Wrapped implies secondary built");
-            Ok(Arc::new(RouterBackend::new(
+            Ok(Arc::new(RouterBackend::with_ttft_budget(
                 primary,
                 secondary,
                 params.router_mode,
+                params.primary_ttft_budget_ms,
             )))
         }
         MainBackendPlan::SecondaryAlone => {
@@ -801,6 +808,7 @@ mod classifier_construction_tests {
             fallback_backend: None,
             fallback_model: None,
             router_mode: primer_core::router::RouterMode::LocalOnly,
+            primary_ttft_budget_ms: None,
         }
     }
 
@@ -961,6 +969,7 @@ mod extractor_construction_tests {
             fallback_backend: None,
             fallback_model: None,
             router_mode: primer_core::router::RouterMode::LocalOnly,
+            primary_ttft_budget_ms: None,
         }
     }
 
@@ -1077,6 +1086,7 @@ mod comprehension_construction_tests {
             fallback_backend: None,
             fallback_model: None,
             router_mode: primer_core::router::RouterMode::LocalOnly,
+            primary_ttft_budget_ms: None,
         }
     }
 
@@ -1198,6 +1208,7 @@ mod qnn_dispatch_tests {
             fallback_backend: None,
             fallback_model: None,
             router_mode: primer_core::router::RouterMode::LocalOnly,
+            primary_ttft_budget_ms: None,
         }
     }
 
@@ -1425,6 +1436,7 @@ mod build_main_backend_tests {
             fallback_backend: fallback_backend.map(String::from),
             fallback_model: fallback_model.map(String::from),
             router_mode,
+            primary_ttft_budget_ms: None,
         }
     }
 
