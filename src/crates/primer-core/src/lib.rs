@@ -28,6 +28,7 @@ pub mod learner;
 pub mod llm_util;
 pub mod reasoning;
 pub mod retry;
+pub mod router;
 pub mod rrf;
 pub mod session_timing;
 pub mod speech;

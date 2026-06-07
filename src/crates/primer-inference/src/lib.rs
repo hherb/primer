@@ -24,6 +24,7 @@ pub mod llamacpp;
 pub mod ollama;
 pub mod openai_compat;
 mod reasoning_stream;
+pub mod router;
 pub mod stub;
 
 #[cfg(feature = "qnn")]
@@ -34,6 +35,7 @@ pub use fallback::FallbackBackend;
 pub use llamacpp::LlamaCppBackend;
 pub use ollama::OllamaBackend;
 pub use openai_compat::OpenAiCompatBackend;
+pub use router::RouterBackend;
 pub use stub::StubBackend;
 
 #[cfg(feature = "qnn")]

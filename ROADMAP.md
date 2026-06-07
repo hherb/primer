@@ -74,9 +74,9 @@ Steps 1.2.1–1.2.5 landed; 1.2.6's harness is built + host-tested (device numbe
 - [x] Per-backend 4K context budget for small-context backends (12-turn window, 3-passage top-K), keyed off `QNN_NAME_PREFIX`.
 - [x] Benchmark + thermal harness built: `examples/qnn_bench.rs` + 30-prompt `data/bench/socratic_prompts.jsonl` + pure host-tested metrics/thermal/loading modules + Android CI compile guard. Targets (15+ tok/s decode on Qwen3-4B W4A16, TTFT < 3s, peak < 70°C) are encoded as the verdict; **the actual numbers still need a device run** (gated on 1.2.0).
 
-### 1.3 — Hybrid inference
+### 1.3 — Hybrid inference 🟡
 
-- [ ] Inference router (local for routine turns, cloud for complex/knowledge-intensive); latency-aware switching; config-driven local-only / cloud-preferred / hybrid.
+- [x] Inference router (`RouterBackend` decorator + `--router-mode local-only|cloud-preferred|hybrid`; pure composite-complexity policy in `primer_core::router`; CLI + GUI). Routes routine turns to the local primary and complex/knowledge-intensive turns to the cloud secondary, self-failing-over at the pre-stream boundary; reuses the `--fallback-*` secondary leg. **Latency-aware switching is a designed extension point, deferred** until the owner-gated bench numbers exist.
 
 **Phase 1 exit criteria:** the Phase 0 conversation works offline, <3s to first token on at least one local platform.
 

@@ -91,10 +91,12 @@ impl DialogueManager {
             self.last_break_suggested_at = Some(now);
         }
 
-        let prompt = self.build_turn_prompt(child_input, intent).await;
+        let (prompt, passage_count) = self.build_turn_prompt(child_input, intent).await;
 
         // 3. Stream the response, accumulating into a single String.
-        let result = self.stream_inference_response(&prompt, on_chunk).await;
+        let result = self
+            .stream_inference_response(&prompt, intent, passage_count, on_chunk)
+            .await;
 
         // 4. On success, record the Primer turn, update the learner,
         //    and refresh the rolling summary if due.
@@ -146,12 +148,18 @@ impl DialogueManager {
     /// builder along with the active intent. `decide_intent_with_pack`
     /// stays with the caller so the orchestrator can hold the intent
     /// for use in step 4.
+    ///
+    /// Returns `(prompt, passage_count)` where `passage_count` is the
+    /// number of knowledge passages retrieved, used to populate
+    /// `GenerationParams.routing` in step 3 so a `RouterBackend` can
+    /// make complexity-aware routing decisions.
     pub(super) async fn build_turn_prompt(
         &self,
         child_input: &str,
         intent: PedagogicalIntent,
-    ) -> Prompt {
+    ) -> (Prompt, usize) {
         let knowledge_context = self.retrieve_knowledge(child_input).await;
+        let passage_count = knowledge_context.len();
         let (summary, retrieved_older) = self.retrieve_long_term_memory(child_input).await;
         // Compute due-vocab once per turn. Wallclock dependency is
         // `chrono::Utc::now()` here — pure functions stay testable via
@@ -163,7 +171,7 @@ impl DialogueManager {
             chrono::Utc::now(),
             self.vocab_settings.max_per_prompt,
         );
-        prompt_builder::build_prompt_with_pack_and_vocab(
+        let prompt = prompt_builder::build_prompt_with_pack_and_vocab(
             &*self.prompt_pack,
             &self.learner,
             &self.session,
@@ -175,18 +183,36 @@ impl DialogueManager {
                 .effective_context_window_turns(self.inference.name()),
             &due_vocab,
             self.config.break_suggest_after_minutes,
-        )
+        );
+        (prompt, passage_count)
     }
 
     /// Step 3. Drive the inference backend's token stream into
     /// `on_chunk`, accumulating the full text for return. Mid-stream
     /// errors propagate as `Err(_)` — the orchestrator's "Ok-only"
     /// branches downstream then skip recording the Primer turn etc.
-    async fn stream_inference_response<F>(&self, prompt: &Prompt, mut on_chunk: F) -> Result<String>
+    ///
+    /// `intent` and `passage_count` are threaded in from step 2 so that
+    /// `GenerationParams.routing` is populated for every call. A
+    /// `RouterBackend` reads these signals to make complexity-aware
+    /// routing decisions; every other backend ignores them.
+    async fn stream_inference_response<F>(
+        &self,
+        prompt: &Prompt,
+        intent: PedagogicalIntent,
+        passage_count: usize,
+        mut on_chunk: F,
+    ) -> Result<String>
     where
         F: FnMut(&str),
     {
-        let params = GenerationParams::default();
+        let params = GenerationParams {
+            routing: Some(primer_core::router::RoutingSignals {
+                intent,
+                retrieved_passages: passage_count,
+            }),
+            ..GenerationParams::default()
+        };
         let mut stream = self.inference.generate_stream(prompt, &params).await?;
 
         let mut accumulated = String::new();

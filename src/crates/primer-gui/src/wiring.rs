@@ -199,6 +199,12 @@ async fn build_with_strategy(
         // the CLI's `--fallback-backend` / `--fallback-model`.
         fallback_backend: backend_config.fallback_backend.clone(),
         fallback_model: backend_config.fallback_model.clone(),
+        // Phase 1.3 inference-router mode from Settings → Inference backend.
+        // `RouterMode` is `Copy`, so no `.clone()`. `LocalOnly` (the default)
+        // ⇒ today's single-backend behaviour; the other modes route via the
+        // configured fallback secondary in `build_main_backend`. Mirrors the
+        // CLI's `--router-mode`.
+        router_mode: backend_config.router_mode,
     };
 
     // ─── Main backend (locale-independent) ───────────────────────────

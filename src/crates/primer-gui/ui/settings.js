@@ -67,6 +67,7 @@ const dom = {
     backendFallbackModelField: document.getElementById(
       "f-backend-fallback-model-field",
     ),
+    backendRouterMode: document.getElementById("f-backend-router-mode"),
     apiKeyFieldset: document.getElementById("f-api-key-fieldset"),
     apiKeyEnv: document.getElementById("f-api-key-env"),
     apiKeyInline: document.getElementById("f-api-key-inline"),
@@ -303,6 +304,7 @@ function populate(view) {
   f.backendReasoningMarkers.value = view.backend.reasoning_markers ?? "";
   f.backendFallbackBackend.value = view.backend.fallback_backend ?? "";
   f.backendFallbackModel.value = view.backend.fallback_model ?? "";
+  f.backendRouterMode.value = view.backend.router_mode ?? "local-only";
   applyBackendKindReveal(view.backend.kind);
   applyFallbackReveal(f.backendFallbackBackend.value);
 
@@ -782,6 +784,9 @@ function gather() {
       // value and a blank model field map to null via orNull.
       fallback_backend: orNull(f.backendFallbackBackend.value.trim()),
       fallback_model: orNull(f.backendFallbackModel.value.trim()),
+      // Phase 1.3 router mode — also mandatory (no serde default). Empty
+      // selection falls back to "local-only" (today's no-routing behavior).
+      router_mode: f.backendRouterMode.value || "local-only",
     },
     classifier: gatherSubsystem("classifier"),
     extractor: gatherSubsystem("extractor"),

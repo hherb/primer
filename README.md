@@ -112,6 +112,24 @@ Three backends today, all implementing `InferenceBackend::generate_stream()`:
 
 Future backends (not yet implemented): `RknnBackend` (Rockchip RK1828 NPU).
 
+### Inference routing (hybrid local + cloud)
+
+`--router-mode` chooses how turns are routed between your local `--backend` and
+an optional cloud `--fallback-backend`:
+
+- `local-only` (default) — **never** uses the cloud. The runtime works with zero
+  network.
+- `cloud-preferred` — always tries the cloud secondary first, falling back to
+  local if it is unreachable.
+- `hybrid` — routes routine turns to local and complex/knowledge-intensive turns
+  (a struggling child, hard factual questions) to the stronger cloud model.
+
+**For absolute privacy, do nothing:** leave `--router-mode` at its `local-only`
+default and/or never provide an API key. With no API key the cloud leg cannot be
+built, so even a mis-set `hybrid` degrades to local-only. Routing to the cloud
+happens only when you explicitly choose `hybrid`/`cloud-preferred` AND configure
+a cloud secondary — that choice is the consent.
+
 ### primer-pedagogy
 
 The Socratic engine — where the Primer's personality lives. Two modules:
@@ -298,6 +316,16 @@ Project-local `.env` wins over the home file. Both are gitignored. See `.env.exa
 --no-persist                    Run in-memory only — nothing is written to disk and the conversation
                                 evaporates on exit. Mutually exclusive with --resume and --session-db.
 --api-key <key>                 Anthropic API key (or set ANTHROPIC_API_KEY)
+--fallback-backend <name>       Secondary backend used when the primary is unavailable
+                                (e.g. cloud). Off by default — local-only unless you
+                                opt in. Required when --router-mode is not local-only.
+--fallback-model <id>           Model for the fallback backend (cloud default:
+                                claude-sonnet-4-6; required for ollama/openai-compat).
+--router-mode <mode>            Per-turn routing policy: local-only (default, never
+                                touches the cloud), cloud-preferred (cloud first, local
+                                fallback), or hybrid (local for routine turns, cloud for
+                                complex/knowledge-intensive turns). Requires
+                                --fallback-backend when not local-only.
 --classifier-backend <name>     Backend for the engagement classifier (default: same as --backend;
                                 pass `stub` to force deterministic empty assessments).
 --classifier-model <id>         Model for the engagement classifier (default: same as --model).
