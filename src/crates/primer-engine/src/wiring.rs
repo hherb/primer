@@ -86,6 +86,11 @@ pub struct BackendParams {
     /// [`resolve_fallback_model`]. `None` is valid (cloud defaults; stub
     /// ignores it; ollama/openai-compat error).
     pub fallback_model: Option<String>,
+    /// Phase 1.3 inference-router mode. `LocalOnly` (the default) ⇒ today's
+    /// behavior (primary or `FallbackBackend`). `Hybrid`/`CloudPreferred` ⇒
+    /// `build_main_backend` produces a `RouterBackend` over the primary +
+    /// secondary legs. Consumed only by [`build_main_backend`].
+    pub router_mode: primer_core::router::RouterMode,
 }
 
 /// Conventional default location of the QAIRT runtime libraries
@@ -225,6 +230,12 @@ pub async fn build_main_backend(
 ) -> Result<Arc<dyn InferenceBackend>> {
     use primer_inference::FallbackBackend;
 
+    // Routing modes build a RouterBackend over the same two legs the fallback
+    // uses; LocalOnly falls through to today's primary/fallback logic verbatim.
+    if params.router_mode.uses_secondary() {
+        return build_router_backend(primary_name, primary_model, params).await;
+    }
+
     // Warn on a pointless same-backend fallback (still works, just no resilience).
     if let Some(fb) = params.fallback_backend.as_deref() {
         if fb == primary_name {
@@ -287,6 +298,63 @@ pub async fn build_main_backend(
             // Both failed: surface the primary's (most informative) error.
             primary
         }
+    }
+}
+
+/// Construct a `RouterBackend` for a non-`LocalOnly` mode. Requires a
+/// configured secondary leg (`--fallback-backend`); both legs are built and
+/// wrapped. Degrades gracefully if exactly one leg fails to build (mirrors
+/// `plan_main_backend`): primary-only (routing disabled, warn) or
+/// secondary-only (warn); both-fail surfaces the primary's error.
+async fn build_router_backend(
+    primary_name: &str,
+    primary_model: String,
+    params: &BackendParams,
+) -> Result<Arc<dyn InferenceBackend>> {
+    use primer_inference::RouterBackend;
+
+    let Some(fb_name) = params.fallback_backend.clone() else {
+        return Err(PrimerError::Inference(
+            format!(
+                "router mode '{}' requires a secondary leg; set --fallback-backend \
+                 (and --fallback-model where required)",
+                params.router_mode
+            )
+            .into(),
+        ));
+    };
+
+    let primary = build_backend(primary_name, primary_model, params).await;
+    let secondary = match resolve_fallback_model(&fb_name, params.fallback_model.clone()) {
+        Ok(fb_model) => build_backend(&fb_name, fb_model.unwrap_or_default(), params).await,
+        Err(msg) => Err(PrimerError::Inference(msg.into())),
+    };
+
+    match plan_main_backend(primary.is_ok(), true, secondary.is_ok()) {
+        MainBackendPlan::Wrapped => {
+            let primary = primary.expect("Wrapped implies primary built");
+            let secondary = secondary.expect("Wrapped implies secondary built");
+            Ok(Arc::new(RouterBackend::new(primary, secondary, params.router_mode)))
+        }
+        MainBackendPlan::SecondaryAlone => {
+            tracing::warn!(
+                primary = primary_name,
+                secondary = %fb_name,
+                "router: primary unavailable at startup; using secondary alone (no routing)"
+            );
+            secondary
+        }
+        MainBackendPlan::PrimaryAlone => {
+            if let Err(ref e) = secondary {
+                tracing::warn!(
+                    secondary = %fb_name,
+                    error = %e,
+                    "router: secondary unusable; using primary alone (routing disabled)"
+                );
+            }
+            primary
+        }
+        MainBackendPlan::Fail => primary,
     }
 }
 
@@ -727,6 +795,7 @@ mod classifier_construction_tests {
             reasoning_markers: Vec::new(),
             fallback_backend: None,
             fallback_model: None,
+            router_mode: primer_core::router::RouterMode::LocalOnly,
         }
     }
 
@@ -886,6 +955,7 @@ mod extractor_construction_tests {
             reasoning_markers: Vec::new(),
             fallback_backend: None,
             fallback_model: None,
+            router_mode: primer_core::router::RouterMode::LocalOnly,
         }
     }
 
@@ -1001,6 +1071,7 @@ mod comprehension_construction_tests {
             reasoning_markers: Vec::new(),
             fallback_backend: None,
             fallback_model: None,
+            router_mode: primer_core::router::RouterMode::LocalOnly,
         }
     }
 
@@ -1121,6 +1192,7 @@ mod qnn_dispatch_tests {
             reasoning_markers: Vec::new(),
             fallback_backend: None,
             fallback_model: None,
+            router_mode: primer_core::router::RouterMode::LocalOnly,
         }
     }
 
@@ -1321,8 +1393,13 @@ mod main_backend_plan_tests {
 #[cfg(test)]
 mod build_main_backend_tests {
     use super::*;
+    use primer_core::router::RouterMode;
 
-    fn params(fallback_backend: Option<&str>, fallback_model: Option<&str>) -> BackendParams {
+    fn params(
+        fallback_backend: Option<&str>,
+        fallback_model: Option<&str>,
+        router_mode: primer_core::router::RouterMode,
+    ) -> BackendParams {
         BackendParams {
             api_key: None,
             ollama_url: "http://localhost:11434".into(),
@@ -1342,13 +1419,14 @@ mod build_main_backend_tests {
             reasoning_markers: Vec::new(),
             fallback_backend: fallback_backend.map(String::from),
             fallback_model: fallback_model.map(String::from),
+            router_mode,
         }
     }
 
     /// No fallback configured ⇒ primary alone (unchanged behavior).
     #[tokio::test]
     async fn no_fallback_returns_primary() {
-        let p = params(None, None);
+        let p = params(None, None, RouterMode::LocalOnly);
         let b = build_main_backend("stub", "m".into(), &p).await.unwrap();
         assert_eq!(b.name(), "stub");
     }
@@ -1357,7 +1435,7 @@ mod build_main_backend_tests {
     /// `unknown-backend` is an unbuildable backend name, so the primary leg errors.
     #[tokio::test]
     async fn primary_unbuildable_falls_back_to_secondary() {
-        let p = params(Some("stub"), None);
+        let p = params(Some("stub"), None, RouterMode::LocalOnly);
         let b = build_main_backend("unknown-backend", "m".into(), &p)
             .await
             .unwrap();
@@ -1368,7 +1446,7 @@ mod build_main_backend_tests {
     /// Primary builds, fallback fails to build ⇒ primary alone, no error.
     #[tokio::test]
     async fn fallback_unbuildable_keeps_primary() {
-        let p = params(Some("unknown-backend"), Some("m"));
+        let p = params(Some("unknown-backend"), Some("m"), RouterMode::LocalOnly);
         let b = build_main_backend("stub", "m".into(), &p).await.unwrap();
         assert_eq!(b.name(), "stub");
     }
@@ -1376,7 +1454,7 @@ mod build_main_backend_tests {
     /// Both unbuildable ⇒ error (the primary's construction error).
     #[tokio::test]
     async fn both_unbuildable_errors() {
-        let p = params(Some("unknown-fallback"), Some("m"));
+        let p = params(Some("unknown-fallback"), Some("m"), RouterMode::LocalOnly);
         let r = build_main_backend("unknown-primary", "m".into(), &p).await;
         // `Result::err` drops the `Ok` value (`Arc<dyn InferenceBackend>` is
         // not `Debug`, so `expect_err` won't compile here).
@@ -1401,7 +1479,7 @@ mod build_main_backend_tests {
     /// primary built fine.
     #[tokio::test]
     async fn fallback_misconfigured_keeps_primary() {
-        let p = params(Some("ollama"), None);
+        let p = params(Some("ollama"), None, RouterMode::LocalOnly);
         let b = build_main_backend("stub", "m".into(), &p).await.unwrap();
         assert_eq!(b.name(), "stub");
     }
@@ -1412,7 +1490,7 @@ mod build_main_backend_tests {
     #[tokio::test]
     async fn primary_unbuildable_and_fallback_misconfigured_errors() {
         // `ollama` without a model is a resolve error (misconfigured fallback).
-        let p = params(Some("ollama"), None);
+        let p = params(Some("ollama"), None, RouterMode::LocalOnly);
         let r = build_main_backend("unknown-primary", "m".into(), &p).await;
         let err = r.err().expect("both legs unusable must error");
         let msg = format!("{err}");
@@ -1420,6 +1498,36 @@ mod build_main_backend_tests {
             msg.contains("unknown-primary"),
             "expected the primary's error to surface; got: {msg}"
         );
+    }
+
+    /// Hybrid mode + a buildable secondary ⇒ a RouterBackend whose name() is
+    /// the primary's (load-bearing for the small-context budget).
+    #[tokio::test]
+    async fn hybrid_with_secondary_builds_router_named_after_primary() {
+        let p = params(Some("stub"), None, RouterMode::Hybrid);
+        let b = build_main_backend("stub", "m".into(), &p).await.unwrap();
+        assert_eq!(b.name(), "stub");
+    }
+
+    /// Routing mode with NO secondary configured ⇒ a clear error.
+    #[tokio::test]
+    async fn hybrid_without_secondary_errors() {
+        let p = params(None, None, RouterMode::Hybrid);
+        let r = build_main_backend("stub", "m".into(), &p).await;
+        let err = r.err().expect("routing without a secondary must error");
+        let msg = format!("{err}").to_lowercase();
+        assert!(
+            msg.contains("secondary") || msg.contains("fallback"),
+            "expected a 'needs a secondary leg' error; got: {err}"
+        );
+    }
+
+    /// local-only mode is byte-for-byte the existing fallback behavior.
+    #[tokio::test]
+    async fn local_only_with_fallback_is_unchanged_fallback() {
+        let p = params(Some("stub"), None, RouterMode::LocalOnly);
+        let b = build_main_backend("stub", "m".into(), &p).await.unwrap();
+        assert_eq!(b.name(), "stub");
     }
 }
 

@@ -199,6 +199,9 @@ async fn build_with_strategy(
         // the CLI's `--fallback-backend` / `--fallback-model`.
         fallback_backend: backend_config.fallback_backend.clone(),
         fallback_model: backend_config.fallback_model.clone(),
+        // Phase 1.3: router_mode GUI control is wired in a later task; default
+        // to LocalOnly (today's behaviour) until that UI control lands.
+        router_mode: primer_core::router::RouterMode::LocalOnly,
     };
 
     // ─── Main backend (locale-independent) ───────────────────────────

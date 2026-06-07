@@ -959,6 +959,9 @@ async fn async_main() -> anyhow::Result<()> {
         reasoning_markers: pair_reasoning_markers(cli.reasoning_marker.clone()),
         fallback_backend: cli.fallback_backend.clone(),
         fallback_model: cli.fallback_model.clone(),
+        // Phase 1.3: router_mode CLI flag is wired in a later task; default
+        // to LocalOnly (today's behaviour) until that flag lands.
+        router_mode: primer_core::router::RouterMode::LocalOnly,
     };
 
     let backend: Arc<dyn InferenceBackend> =
