@@ -78,6 +78,31 @@ pub fn run() -> Result<(), Box<dyn std::error::Error>> {
         .map_err(|e| Box::new(e) as Box<dyn std::error::Error>)
 }
 
+/// Tauri mobile (Android/iOS) entry point.
+///
+/// The `tauri::mobile_entry_point` macro generates the `extern "C"`
+/// symbol the generated Android `MainActivity` (and a future iOS host)
+/// calls via JNI/FFI. It drives the same [`run`] builder the desktop
+/// `main.rs` shim uses, so mobile and desktop share one app-construction
+/// path. A startup error is logged rather than propagated — there is no
+/// caller to return a `Result` to on the FFI boundary.
+///
+/// Compiled only under the `mobile` cfg (set by `tauri-build` for Android
+/// and iOS targets), so the desktop build is byte-identical to before.
+///
+/// Known gap (tracked for sub-project 2+): `run()` resolves `~/.primer/`
+/// via `$HOME` and the seed corpus via bundled `resources/`, which differ
+/// on Android (app-specific dirs via Tauri's path API). This entry point
+/// only needs to *compile and link* for the scaffold; correct on-device
+/// path resolution is deferred.
+#[cfg(mobile)]
+#[tauri::mobile_entry_point]
+fn mobile_entry_point() {
+    if let Err(e) = run() {
+        eprintln!("primer-gui (mobile) exited with error: {e}");
+    }
+}
+
 fn init_tracing() {
     use tracing_subscriber::EnvFilter;
     let filter = EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("info"));
