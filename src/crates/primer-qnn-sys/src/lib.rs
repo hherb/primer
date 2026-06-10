@@ -129,17 +129,19 @@ pub struct GenieLibrary {
     pub config_free: GenieDialogConfig_free_fn,
     /// `GenieDialog_create` entry point.
     pub dialog_create: GenieDialog_create_fn,
-    /// `GenieDialog_setTokenCallback` entry point.
-    pub dialog_set_token_callback: GenieDialog_setTokenCallback_fn,
-    /// `GenieDialog_query` entry point.
+    /// `GenieDialog_query` entry point. In QAIRT 2.45 this call also
+    /// registers the streaming token callback (see [`GenieDialog_query_fn`]);
+    /// there is no separate `setTokenCallback` symbol.
     pub dialog_query: GenieDialog_query_fn,
     /// `GenieDialog_free` entry point.
     pub dialog_free: GenieDialog_free_fn,
 }
 
 impl GenieLibrary {
-    /// Open `libGenie.so` from `qairt_lib_dir` and resolve the six
-    /// entry points the Primer needs.
+    /// Open `libGenie.so` from `qairt_lib_dir` and resolve the five
+    /// entry points the Primer needs (QAIRT 2.45 — `setTokenCallback` was
+    /// removed; the token callback is now a parameter of
+    /// `GenieDialog_query`).
     ///
     /// On `target_os = "android"`:
     /// - Probes `qairt_lib_dir.join(LIBGENIE_BASENAME)`.
@@ -202,11 +204,6 @@ impl GenieLibrary {
             SYM_GENIE_DIALOG_CREATE,
             "GenieDialog_create",
         )?;
-        let dialog_set_token_callback = resolve_symbol::<GenieDialog_setTokenCallback_fn>(
-            &library,
-            SYM_GENIE_DIALOG_SET_TOKEN_CALLBACK,
-            "GenieDialog_setTokenCallback",
-        )?;
         let dialog_query = resolve_symbol::<GenieDialog_query_fn>(
             &library,
             SYM_GENIE_DIALOG_QUERY,
@@ -223,7 +220,6 @@ impl GenieLibrary {
             config_create_from_json,
             config_free,
             dialog_create,
-            dialog_set_token_callback,
             dialog_query,
             dialog_free,
         })

@@ -8,7 +8,7 @@
 //!    1.2.0 of the plan installs the SDK on a dev box and validates the
 //!    chatapp_android consumer; until that lands and the licence question is
 //!    resolved, vendored headers + `bindgen` are deferred.
-//! 2. The Genie surface the Primer needs is tiny — six functions, three
+//! 2. The Genie surface the Primer needs is tiny — five functions, three
 //!    opaque handle types, one status enum — small enough that hand-rolled
 //!    declarations are easier to audit than `bindgen` output. The Phase 1.2
 //!    plan's risk register explicitly approves this path:
@@ -23,13 +23,25 @@
 //! ## Reference
 //!
 //! Mirrors the Genie API surface documented in:
-//!   - QAIRT 2.29+ `include/Genie/GenieDialog.h`
-//!   - QAIRT 2.29+ `include/Genie/GenieDialogConfig.h`
-//!   - QAIRT 2.29+ `include/Genie/GenieCommon.h`
+//!   - QAIRT 2.45 `include/Genie/GenieDialog.h`
+//!   - QAIRT 2.45 `include/Genie/GenieCommon.h`
 //!
 //! All declarations match the upstream header signatures verbatim; type
 //! aliases are chosen for readability on the Rust side, and the opaque
 //! handle types follow the standard "extern type via empty enum" pattern.
+//!
+//! ## 2.45 API note (device-validated 2026-06-10)
+//!
+//! These declarations were corrected against the QAIRT **Community 2.45**
+//! headers after on-device validation of the Primer's [`crate::GenieLibrary`]
+//! against the chatapp_android v79 bundle surfaced a symbol-resolution
+//! failure: the pre-2.45 scaffold expected a separate
+//! `GenieDialog_setTokenCallback` entry point, but 2.45's `libGenie.so`
+//! does not export it. In 2.45 the streaming token callback is passed
+//! **directly to [`GenieDialog_query`]** as the `callback` + `userData`
+//! parameters (see [`GenieDialog_QueryCallback_t`] and
+//! [`GenieDialog_query_fn`]). The Primer therefore resolves **five**
+//! symbols, not six — `setTokenCallback` is gone.
 
 #![allow(non_camel_case_types)]
 
@@ -89,8 +101,18 @@ pub const GENIE_DIALOG_SENTENCE_COMPLETE: Genie_Dialog_SentenceCode_t = 0;
 // Token callback signature
 // ---------------------------------------------------------------------------
 
-/// Streaming token callback invoked by `GenieDialog_query` for each
-/// generated token (or token chunk, depending on the exporter).
+/// Streaming token callback passed **directly to [`GenieDialog_query_fn`]**
+/// (2.45 API) and invoked for each generated token (or token chunk,
+/// depending on the exporter).
+///
+/// Upstream name: `GenieDialog_QueryCallback_t`. The C ABI signature in
+/// QAIRT 2.45 `GenieDialog.h` is:
+///
+/// ```c
+/// typedef void (*GenieDialog_QueryCallback_t)(const char* response,
+///                                             const GenieDialog_SentenceCode_t sentenceCode,
+///                                             const void* userData);
+/// ```
 ///
 /// Arguments:
 /// - `response_str`: null-terminated UTF-8 token text. Lifetime is bounded
@@ -98,20 +120,23 @@ pub const GENIE_DIALOG_SENTENCE_COMPLETE: Genie_Dialog_SentenceCode_t = 0;
 ///   intends to retain the text beyond return.
 /// - `sentence_code`: matches the `Genie_Dialog_SentenceCode_t` passed to
 ///   `GenieDialog_query`. Currently informational.
-/// - `user_data`: opaque pointer the caller registered via
-///   `GenieDialog_setTokenCallback`. The Primer uses this to forward the
-///   token into a `futures::channel::mpsc::UnboundedSender` (Phase 1.2
-///   design §3 — *"`generate_stream` flow"*).
+/// - `user_data`: the opaque `userData` pointer the caller passed to
+///   `GenieDialog_query` alongside this callback. The Primer uses it to
+///   forward the token into a `futures::channel::mpsc::UnboundedSender`
+///   (Phase 1.2 design §3 — *"`generate_stream` flow"*).
 ///
-/// The C ABI signature is `void (*)(const char*, int32_t, void*)`.
+/// The header types `userData` as `const void*`; we mirror it as
+/// `*mut c_void` for symmetry with the call-site (Genie only ever hands
+/// back the exact pointer we supplied, so const-ness on the callback side
+/// is not ABI-relevant for a pointer-sized argument).
 ///
 /// We treat the callback as non-nullable (bare `unsafe extern "C" fn` rather
 /// than `Option<unsafe extern "C" fn ...>`) because the Primer always
-/// registers a real callback — there is no use case for clearing it. If a
-/// future QAIRT release documents `NULL` as a callback-clear sentinel and
-/// the safe wrapper needs that behaviour, swap this alias for the `Option`
+/// supplies a real callback — there is no use case for a null one. If a
+/// future QAIRT release documents `NULL` as a no-callback sentinel and the
+/// safe wrapper needs that behaviour, swap this alias for the `Option`
 /// form; nullability is the only ABI-relevant difference.
-pub type GenieDialog_TokenCallback_t = unsafe extern "C" fn(
+pub type GenieDialog_QueryCallback_t = unsafe extern "C" fn(
     response_str: *const c_char,
     sentence_code: Genie_Dialog_SentenceCode_t,
     user_data: *mut c_void,
@@ -138,27 +163,32 @@ pub type GenieDialog_create_fn = unsafe extern "C" fn(
     out_dialog: *mut GenieDialog_Handle_t,
 ) -> Genie_Status_t;
 
-/// `GenieDialog_setTokenCallback(dialog_handle, callback, user_data) -> status`
-pub type GenieDialog_setTokenCallback_fn = unsafe extern "C" fn(
-    dialog: GenieDialog_Handle_t,
-    callback: GenieDialog_TokenCallback_t,
-    user_data: *mut c_void,
-) -> Genie_Status_t;
-
-/// `GenieDialog_query(dialog_handle, prompt, sentence_code, response_out) -> status`
+/// `GenieDialog_query(dialog_handle, prompt, sentence_code, callback, user_data) -> status`
 ///
-/// Blocking. The token callback (registered separately via
-/// `GenieDialog_setTokenCallback`) fires once per token until generation
-/// completes; this function returns only after end-of-generation.
+/// Blocking. The `callback` fires once per token (or token chunk) until
+/// generation completes; this function returns only after
+/// end-of-generation. `user_data` is forwarded verbatim to every callback
+/// invocation.
 ///
-/// `response_out` is a Genie-internal sink the upstream API uses when no
-/// callback is registered. The Primer always registers a callback, so it
-/// passes a null pointer here.
+/// 2.45 ABI (QAIRT `GenieDialog.h`):
+///
+/// ```c
+/// Genie_Status_t GenieDialog_query(const GenieDialog_Handle_t dialogHandle,
+///                                  const char* queryStr,
+///                                  const GenieDialog_SentenceCode_t sentenceCode,
+///                                  const GenieDialog_QueryCallback_t callback,
+///                                  const void* userData);
+/// ```
+///
+/// This replaced the pre-2.45 two-call shape (`setTokenCallback` then a
+/// 4-arg `query` with a Genie-internal response sink); 2.45 folds the
+/// callback registration into the query call itself.
 pub type GenieDialog_query_fn = unsafe extern "C" fn(
     dialog: GenieDialog_Handle_t,
     prompt: *const c_char,
     sentence_code: Genie_Dialog_SentenceCode_t,
-    response_out: *mut c_void,
+    callback: GenieDialog_QueryCallback_t,
+    user_data: *mut c_void,
 ) -> Genie_Status_t;
 
 /// `GenieDialog_free(handle) -> status`
@@ -176,9 +206,6 @@ pub const SYM_GENIE_DIALOG_CONFIG_FREE: &[u8] = b"GenieDialogConfig_free\0";
 
 /// `libGenie.so` symbol for `GenieDialog_create`.
 pub const SYM_GENIE_DIALOG_CREATE: &[u8] = b"GenieDialog_create\0";
-
-/// `libGenie.so` symbol for `GenieDialog_setTokenCallback`.
-pub const SYM_GENIE_DIALOG_SET_TOKEN_CALLBACK: &[u8] = b"GenieDialog_setTokenCallback\0";
 
 /// `libGenie.so` symbol for `GenieDialog_query`.
 pub const SYM_GENIE_DIALOG_QUERY: &[u8] = b"GenieDialog_query\0";
@@ -223,7 +250,6 @@ mod tests {
             SYM_GENIE_DIALOG_CONFIG_CREATE_FROM_JSON,
             SYM_GENIE_DIALOG_CONFIG_FREE,
             SYM_GENIE_DIALOG_CREATE,
-            SYM_GENIE_DIALOG_SET_TOKEN_CALLBACK,
             SYM_GENIE_DIALOG_QUERY,
             SYM_GENIE_DIALOG_FREE,
         ] {
