@@ -429,6 +429,23 @@ cd src
 
 See [docs/macos_native_speech.md](docs/macos_native_speech.md) for details.
 
+### Android build (scaffold)
+
+`primer-gui` has a Tauri-mobile scaffold (`gen/android`) that builds a debug
+APK for `aarch64-linux-android` host-side — no device needed to build:
+
+```bash
+cd src/crates/primer-gui
+~/.cargo/bin/cargo-tauri android build --apk --debug --target aarch64 -- --no-default-features
+```
+
+This is the **packaging path to the first on-device QNN NPU token** (the Hexagon
+DSP grant only applies to a normally-launched app, not a sideload). The current
+scaffold builds the GUI BM25-only (no `fastembed`/`ort` on Android, per #157) and
+does **not** yet bundle the QNN backend or model assets, nor run on-device — those
+are the next sub-projects. Full prerequisites, env, and the deferred path:
+[docs/devel/android-build-quickstart.md](docs/devel/android-build-quickstart.md).
+
 ## Building the macOS DMG
 
 Produces a signed and notarized `.dmg` for the desktop GUI, ready to hand to evaluators with no Gatekeeper friction. Apple Silicon only.
