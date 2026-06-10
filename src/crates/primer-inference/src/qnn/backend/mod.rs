@@ -223,8 +223,10 @@ fn fire_smoke_check_query(dialog: &dyn GenieDialog) -> mpsc::UnboundedReceiver<R
 /// Pure inputs/outputs from the caller's perspective: feed in a
 /// receiver, get back `Ok(())` on success or the first `Err` chunk.
 /// Step 1.2.3: a successful smoke check exercises exactly the FFI
-/// sequence (`dialog_set_token_callback` → `dialog_query` →
-/// callback fires → final done chunk) the real conversation will hit.
+/// sequence (`dialog_query` with the token callback → callback fires →
+/// final done chunk) the real conversation will hit. (QAIRT 2.45 folds
+/// callback registration into `dialog_query`; there is no separate
+/// `setTokenCallback` step.)
 async fn drain_smoke_check_receiver(
     mut rx: mpsc::UnboundedReceiver<Result<TokenChunk>>,
 ) -> Result<()> {

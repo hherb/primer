@@ -16,7 +16,7 @@ use primer_core::error::Result as PrimerResult;
 use primer_core::inference::TokenChunk;
 use primer_qnn_sys::{
     GENIE_DIALOG_SENTENCE_COMPLETE, GENIE_STATUS_SUCCESS, Genie_Dialog_SentenceCode_t,
-    GenieDialog_Handle_t, GenieDialog_TokenCallback_t, GenieDialogConfig_Handle_t,
+    GenieDialog_Handle_t, GenieDialog_QueryCallback_t, GenieDialogConfig_Handle_t,
     GenieLibrary as RawGenieLibrary, GenieLibraryError,
 };
 
@@ -61,33 +61,41 @@ fn map_library_error(err: GenieLibraryError) -> GenieCallError {
 
 impl GenieLibrary for RealGenieLibrary {
     fn open_dialog(&self, config_path: &Path) -> Result<Box<dyn GenieDialog>, GenieCallError> {
-        // Genie consumes a NUL-terminated C string for the path. We
-        // do not validate file existence here — Genie will surface a
-        // non-success status if the file is missing — but a path
-        // carrying an embedded NUL is caught at this layer because
-        // `CString::new` would refuse it.
-        let path_bytes = config_path
-            .to_str()
-            .ok_or_else(|| GenieCallError::BadConfigPath {
-                detail: format!("{} is not valid UTF-8", config_path.display()),
+        // QAIRT 2.45: `GenieDialogConfig_createFromJson` consumes the JSON
+        // *content* string, NOT a path (confirmed against the 2.45 header
+        // and chatapp_android's `LoadModelConfig`). Read the bundle's
+        // `genie_config.json` and rewrite its relative ctx-bins /
+        // tokenizer / htp-extensions paths to absolute (resolved against
+        // the bundle directory) so Genie locates them regardless of the
+        // process working directory. Passing the bare path here — as the
+        // pre-2.45 scaffold did — makes Genie try to parse the *path
+        // string* as JSON and fail with INVALID_CONFIG.
+        let bundle_dir = config_path.parent().unwrap_or_else(|| Path::new("."));
+        let raw_json =
+            std::fs::read_to_string(config_path).map_err(|e| GenieCallError::BadConfigPath {
+                detail: format!("failed to read {}: {e}", config_path.display()),
             })?;
-        let c_path = CString::new(path_bytes).map_err(|e| GenieCallError::BadConfigPath {
-            detail: format!("embedded NUL byte at position {}", e.nul_position()),
+        let config_json = absolutize_genie_config(&raw_json, bundle_dir)
+            .map_err(|detail| GenieCallError::BadConfigPath { detail })?;
+        let c_config = CString::new(config_json).map_err(|e| GenieCallError::BadConfigPath {
+            detail: format!(
+                "embedded NUL byte in genie config at position {}",
+                e.nul_position()
+            ),
         })?;
 
-        // SAFETY: We pass a valid C-string pointer and an out-pointer
-        // to a stack local. The Genie API contract is that on
-        // `GENIE_STATUS_SUCCESS`, `out_handle` is written with a
-        // non-null `GenieDialogConfig` pointer; on failure, it is
-        // left untouched (we initialise to `null_mut()` so a buggy
-        // backend that ignores the status code still produces a
-        // benign null we can detect). The `*c_path.as_ptr()`
-        // lifetime is bounded by `c_path` which lives until the end
-        // of this block — well after `config_create_from_json`
-        // returns.
+        // SAFETY: We pass a valid C-string pointer (the rewritten JSON
+        // content) and an out-pointer to a stack local. The Genie API
+        // contract is that on `GENIE_STATUS_SUCCESS`, `out_handle` is
+        // written with a non-null `GenieDialogConfig` pointer; on
+        // failure, it is left untouched (we initialise to `null_mut()`
+        // so a buggy backend that ignores the status code still produces
+        // a benign null we can detect). The `c_config.as_ptr()` lifetime
+        // is bounded by `c_config`, which lives until the end of this
+        // block — well after `config_create_from_json` returns.
         let mut cfg_handle: GenieDialogConfig_Handle_t = ptr::null_mut();
         let status =
-            unsafe { (self.raw.config_create_from_json)(c_path.as_ptr(), &mut cfg_handle) };
+            unsafe { (self.raw.config_create_from_json)(c_config.as_ptr(), &mut cfg_handle) };
         if status != GENIE_STATUS_SUCCESS || cfg_handle.is_null() {
             return Err(GenieCallError::NonSuccess {
                 operation: "GenieDialogConfig_createFromJson",
@@ -179,50 +187,32 @@ impl GenieDialog for RealGenieDialog {
         let raw_sender_ptr = Box::into_raw(boxed_sender);
         let user_data = raw_sender_ptr as *mut c_void;
 
-        // SAFETY: `streaming_token_callback` is `unsafe extern "C"`
-        // and we register it on every query, so the most recently
-        // installed `user_data` is always the live
-        // `Box<UnboundedSender<...>>` for the in-flight query. The C
-        // ABI signature matches `GenieDialog_TokenCallback_t`. The
-        // box address is stable across the call because we hold the
-        // raw pointer and don't touch the box until after
-        // `dialog_query` returns.
-        let callback: GenieDialog_TokenCallback_t = streaming_token_callback;
-        let set_status =
-            unsafe { (self.lib.dialog_set_token_callback)(self.dialog, callback, user_data) };
-        if set_status != GENIE_STATUS_SUCCESS {
-            // No callback ever fires — reclaim the box, send a single
-            // error chunk through the now-reclaimed sender, drop.
-            // SAFETY: `raw_sender_ptr` came from `Box::into_raw` above
-            // and no callback has fired, so nothing else holds the
-            // pointer.
-            let sender = unsafe { reclaim_sender_box(raw_sender_ptr) };
-            let err = GenieCallError::NonSuccess {
-                operation: "GenieDialog_setTokenCallback",
-                status: set_status,
-            };
-            let _ = sender.unbounded_send(Err(err.to_primer_error()));
-            return;
-        }
-
-        // Run the (blocking) query. The C-ABI callback fires N times
-        // during this call, each time forwarding a body chunk into
-        // the sender. Genie's documented contract is that callbacks
-        // are dispatched synchronously inside `dialog_query` and not
-        // retained past its return — that's the load-bearing
-        // assumption that lets us reclaim the box below.
+        // 2.45 API: the streaming token callback + its `user_data` are
+        // passed *directly* to `GenieDialog_query` (there is no separate
+        // `setTokenCallback` step — that symbol does not exist in QAIRT
+        // 2.45's `libGenie.so`; this was confirmed by on-device symbol
+        // resolution).
         //
-        // SAFETY: `self.dialog` is a non-null pointer produced by a
-        // successful `GenieDialog_create` and not yet freed. The
-        // prompt pointer is bounded by `c_prompt`. We pass
-        // `null_mut()` for `response_out` because all output flows
-        // through the callback.
+        // SAFETY: `streaming_token_callback` is `unsafe extern "C"` and
+        // its C ABI signature matches `GenieDialog_QueryCallback_t`. The
+        // `user_data` we hand in is the live `Box<UnboundedSender<...>>`
+        // for the in-flight query; its address is stable across the call
+        // because we hold the raw pointer and don't touch the box until
+        // after `dialog_query` returns. Genie's documented contract is
+        // that callbacks are dispatched synchronously inside
+        // `dialog_query` and not retained past its return — that's the
+        // load-bearing assumption that lets us reclaim the box below.
+        // `self.dialog` is a non-null pointer produced by a successful
+        // `GenieDialog_create` and not yet freed; the prompt pointer is
+        // bounded by `c_prompt`.
+        let callback: GenieDialog_QueryCallback_t = streaming_token_callback;
         let query_status = unsafe {
             (self.lib.dialog_query)(
                 self.dialog,
                 c_prompt.as_ptr(),
                 GENIE_DIALOG_SENTENCE_COMPLETE,
-                ptr::null_mut(),
+                callback,
+                user_data,
             )
         };
 
@@ -382,4 +372,240 @@ unsafe extern "C" fn streaming_token_callback(
         text: token.into_owned(),
         done: false,
     }));
+}
+
+/// Rewrite the relative file paths inside a Genie dialog-config JSON to
+/// absolute paths resolved against `bundle_dir`, returning the rewritten
+/// JSON as a string.
+///
+/// QAIRT 2.45's `GenieDialogConfig_createFromJson` consumes the JSON
+/// *content* (see [`RealGenieLibrary::open_dialog`]), and the
+/// AI-Hub-published `genie_config.json` names its per-shard context
+/// binaries, tokenizer, and HTP-extensions file *relative* to the bundle
+/// directory. Handed to Genie as-is, those relative paths would resolve
+/// against the process working directory and fail to load. This mirrors
+/// chatapp_android's `LoadModelConfig`, which rewrites exactly these three
+/// fields:
+///
+/// - `dialog.tokenizer.path` (string)
+/// - `dialog.engine.backend.extensions` (string)
+/// - `dialog.engine.model.binary.ctx-bins[]` (array of strings)
+///
+/// A path that is already absolute is left untouched (so a pre-absolutised
+/// config round-trips unchanged). `ctx-bins` is required — a config missing
+/// it is a broken bundle and yields an `Err`. The optional `tokenizer.path`
+/// and `extensions` fields are rewritten only when present, so a config
+/// that inlines them (or omits them) is tolerated.
+///
+/// Pure function: no FFI, no I/O. Errors are returned as human-readable
+/// strings for the caller to wrap in [`GenieCallError::BadConfigPath`].
+fn absolutize_genie_config(raw_json: &str, bundle_dir: &Path) -> Result<String, String> {
+    use serde_json::Value;
+
+    let mut config: Value = serde_json::from_str(raw_json)
+        .map_err(|e| format!("genie config is not valid JSON: {e}"))?;
+
+    let dialog = config
+        .get_mut("dialog")
+        .ok_or_else(|| "genie config has no `dialog` object".to_string())?;
+
+    // tokenizer.path — optional, rewrite if present.
+    if let Some(path) = dialog
+        .get_mut("tokenizer")
+        .and_then(|t| t.get_mut("path"))
+        .and_then(|v| v.as_str())
+        .map(|s| s.to_owned())
+    {
+        let abs = absolutize_one(&path, bundle_dir);
+        dialog["tokenizer"]["path"] = Value::String(abs);
+    }
+
+    // engine.backend.extensions — optional, rewrite if present.
+    if let Some(ext) = dialog
+        .get_mut("engine")
+        .and_then(|e| e.get_mut("backend"))
+        .and_then(|b| b.get_mut("extensions"))
+        .and_then(|v| v.as_str())
+        .map(|s| s.to_owned())
+    {
+        let abs = absolutize_one(&ext, bundle_dir);
+        dialog["engine"]["backend"]["extensions"] = Value::String(abs);
+    }
+
+    // engine.model.binary.ctx-bins[] — REQUIRED; the model can't load
+    // without its context binaries.
+    let ctx_bins = dialog
+        .get_mut("engine")
+        .and_then(|e| e.get_mut("model"))
+        .and_then(|m| m.get_mut("binary"))
+        .and_then(|b| b.get_mut("ctx-bins"))
+        .and_then(Value::as_array_mut)
+        .ok_or_else(|| {
+            "genie config has no `dialog.engine.model.binary.ctx-bins` array".to_string()
+        })?;
+    if ctx_bins.is_empty() {
+        return Err("genie config `ctx-bins` array is empty".to_string());
+    }
+    for bin in ctx_bins.iter_mut() {
+        let rel = bin
+            .as_str()
+            .ok_or_else(|| "a `ctx-bins` entry is not a string".to_string())?;
+        *bin = Value::String(absolutize_one(rel, bundle_dir));
+    }
+
+    Ok(config.to_string())
+}
+
+/// Resolve a single config path against `bundle_dir`: absolute paths pass
+/// through unchanged; relative paths are joined onto `bundle_dir`. The
+/// result is rendered with `Path::display`, which is lossless for the
+/// UTF-8 paths a genie config carries.
+fn absolutize_one(path: &str, bundle_dir: &Path) -> String {
+    let p = Path::new(path);
+    if p.is_absolute() {
+        path.to_owned()
+    } else {
+        bundle_dir.join(p).display().to_string()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::{Value, json};
+
+    fn sample_config() -> String {
+        json!({
+            "dialog": {
+                "tokenizer": { "path": "tokenizer.json" },
+                "engine": {
+                    "backend": { "type": "QnnHtp", "extensions": "htp_backend_ext_config.json" },
+                    "model": {
+                        "binary": {
+                            "ctx-bins": [
+                                "model_part_1_of_2.bin",
+                                "model_part_2_of_2.bin"
+                            ]
+                        }
+                    }
+                }
+            }
+        })
+        .to_string()
+    }
+
+    #[test]
+    fn absolutizes_relative_paths_against_bundle_dir() {
+        let out =
+            absolutize_genie_config(&sample_config(), Path::new("/data/local/tmp/bundle")).unwrap();
+        let v: Value = serde_json::from_str(&out).unwrap();
+        assert_eq!(
+            v["dialog"]["tokenizer"]["path"],
+            json!("/data/local/tmp/bundle/tokenizer.json")
+        );
+        assert_eq!(
+            v["dialog"]["engine"]["backend"]["extensions"],
+            json!("/data/local/tmp/bundle/htp_backend_ext_config.json")
+        );
+        assert_eq!(
+            v["dialog"]["engine"]["model"]["binary"]["ctx-bins"],
+            json!([
+                "/data/local/tmp/bundle/model_part_1_of_2.bin",
+                "/data/local/tmp/bundle/model_part_2_of_2.bin"
+            ])
+        );
+    }
+
+    #[test]
+    fn leaves_absolute_paths_unchanged() {
+        let cfg = json!({
+            "dialog": {
+                "tokenizer": { "path": "/abs/tokenizer.json" },
+                "engine": {
+                    "backend": { "extensions": "/abs/htp.json" },
+                    "model": { "binary": { "ctx-bins": ["/abs/part1.bin"] } }
+                }
+            }
+        })
+        .to_string();
+        let out = absolutize_genie_config(&cfg, Path::new("/data/local/tmp/bundle")).unwrap();
+        let v: Value = serde_json::from_str(&out).unwrap();
+        assert_eq!(
+            v["dialog"]["tokenizer"]["path"],
+            json!("/abs/tokenizer.json")
+        );
+        assert_eq!(
+            v["dialog"]["engine"]["backend"]["extensions"],
+            json!("/abs/htp.json")
+        );
+        assert_eq!(
+            v["dialog"]["engine"]["model"]["binary"]["ctx-bins"],
+            json!(["/abs/part1.bin"])
+        );
+    }
+
+    #[test]
+    fn preserves_other_config_fields() {
+        // Non-path fields (context size, sampler, etc.) must survive the
+        // rewrite untouched — the rewrite only changes the three known
+        // path-bearing fields.
+        let cfg = json!({
+            "dialog": {
+                "context": { "size": 4096, "n-vocab": 151936 },
+                "tokenizer": { "path": "tokenizer.json" },
+                "engine": {
+                    "n-threads": 3,
+                    "backend": { "type": "QnnHtp", "extensions": "htp.json", "poll": true },
+                    "model": { "binary": { "ctx-bins": ["a.bin"] } }
+                }
+            }
+        })
+        .to_string();
+        let out = absolutize_genie_config(&cfg, Path::new("/b")).unwrap();
+        let v: Value = serde_json::from_str(&out).unwrap();
+        assert_eq!(v["dialog"]["context"]["size"], json!(4096));
+        assert_eq!(v["dialog"]["context"]["n-vocab"], json!(151936));
+        assert_eq!(v["dialog"]["engine"]["n-threads"], json!(3));
+        assert_eq!(v["dialog"]["engine"]["backend"]["poll"], json!(true));
+        assert_eq!(v["dialog"]["engine"]["backend"]["type"], json!("QnnHtp"));
+    }
+
+    #[test]
+    fn tolerates_missing_optional_fields() {
+        // A config with ctx-bins but no tokenizer/extensions is still
+        // rewritten successfully (only the required ctx-bins matter).
+        let cfg = json!({
+            "dialog": {
+                "engine": { "model": { "binary": { "ctx-bins": ["a.bin"] } } }
+            }
+        })
+        .to_string();
+        let out = absolutize_genie_config(&cfg, Path::new("/b")).unwrap();
+        let v: Value = serde_json::from_str(&out).unwrap();
+        assert_eq!(
+            v["dialog"]["engine"]["model"]["binary"]["ctx-bins"],
+            json!(["/b/a.bin"])
+        );
+    }
+
+    #[test]
+    fn errors_on_invalid_json() {
+        let err = absolutize_genie_config("{not json", Path::new("/b")).unwrap_err();
+        assert!(err.contains("not valid JSON"), "got: {err}");
+    }
+
+    #[test]
+    fn errors_on_missing_ctx_bins() {
+        let cfg = json!({ "dialog": { "tokenizer": { "path": "t.json" } } }).to_string();
+        let err = absolutize_genie_config(&cfg, Path::new("/b")).unwrap_err();
+        assert!(err.contains("ctx-bins"), "got: {err}");
+    }
+
+    #[test]
+    fn errors_on_empty_ctx_bins() {
+        let cfg = json!({ "dialog": { "engine": { "model": { "binary": { "ctx-bins": [] } } } } })
+            .to_string();
+        let err = absolutize_genie_config(&cfg, Path::new("/b")).unwrap_err();
+        assert!(err.contains("empty"), "got: {err}");
+    }
 }

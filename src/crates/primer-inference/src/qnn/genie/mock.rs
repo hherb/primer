@@ -241,9 +241,8 @@ impl GenieDialog for MockGenieDialog {
 
         // One-shot "smoke-check fails" path: emit one Err and close
         // (no body chunks, no done). Mirrors the real impl's behaviour
-        // when `dialog_set_token_callback` or the smoke-check query
-        // itself surfaces a non-success status before any tokens
-        // arrive.
+        // when the smoke-check `dialog_query` surfaces a non-success
+        // status before any tokens arrive.
         if let Some(err) = self
             .inner
             .query_error
