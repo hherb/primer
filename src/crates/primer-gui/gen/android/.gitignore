@@ -24,5 +24,7 @@ keystore.properties
 build/
 app/build/
 app/.cxx/
+# Frontend dist + tauri.conf.json copied into the APK assets on every build.
+app/src/main/assets/
 # Machine-specific SDK path written by Gradle.
 local.properties
