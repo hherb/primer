@@ -8,7 +8,7 @@ Status key: ✅ done · 🟡 in progress · [ ] not started.
 
 ## Phase 0 — Cloud-Backed Proof of Concept
 
-**Goal:** a text-mode Primer that holds a genuine Socratic conversation with a child on any machine with Rust + internet. **Phases 0.1–0.3 complete; 0.4 nearly done.** RedMagic 11 Pro validated 2026-05-26 (cloud REPL usable; on-device CPU Ollama too slow — needs NPU, Phase 1.2).
+**Goal:** a text-mode Primer that holds a genuine Socratic conversation with a child on any machine with Rust + internet. **Phases 0.1–0.3 complete; 0.4 nearly done.** RedMagic 11 Pro validated 2026-05-26 (cloud REPL usable; on-device CPU Ollama too slow — needs NPU, Phase 1.2). **NPU path now unblocked:** the Genie/QNN pipeline was device-validated on the RedMagic 11 Pro 2026-06-09 (Phase 1.2 step 1.2.0 ✅, ~9.4 tok/s on the Hexagon NPU).
 
 ### 0.1 — Cloud backend conversationally useful
 
@@ -64,15 +64,16 @@ Status key: ✅ done · 🟡 in progress · [ ] not started.
 
 ### 1.2 — Qualcomm NPU (Snapdragon 8 Elite) 🟡
 
-Steps 1.2.1–1.2.5 landed; 1.2.6's harness is built + host-tested (device numbers pending); 1.2.0 (QAIRT install + device validation) remains.
+Step 1.2.0 (device validation) ✅ **PASSED on hardware** (RedMagic 11 Pro, 2026-06-09); steps 1.2.1–1.2.5 landed; 1.2.6's harness is built + host-tested (chatapp-proxy numbers captured, the real `qnn_bench` against the Primer's own backend still pending).
 
+- [x] **Step 1.2.0 — device validation (RedMagic 11 Pro / SM8850 / Snapdragon 8 Elite Gen 5).** The Genie/QNN NPU pipeline runs on hardware: Qwen3-4B-Instruct-2507 (w4a16, 4096 ctx) generates coherent Socratic text on the Hexagon NPU at **~9.4 tok/s decode (🟡 borderline 8–14 band → proceed), ~190 ms TTFT (✅), ~57 °C peak (✅, ~13 °C headroom)**, NPU-confirmed via a +11 °C rise on the `nsph*` zones. Validated through the `chatapp_android` proxy (the `qai-hub-apps fetch` fast path + a lean-APK + `adb push` of the v79/sm8750 binaries, which are backward-compatible on the Gen-5 part). The `soc_model` 69→87 patch is perf-neutral; a native sm8850/V81 export was network-abandoned (a pure throughput optimization, not gate-blocking). Full report: [docs/handoffs/2026-06-08-qnn-validation-chatapp.md](docs/handoffs/2026-06-08-qnn-validation-chatapp.md); corrected runbook: [docs/devel/qnn-validation-runbook.md](docs/devel/qnn-validation-runbook.md). **Phase 1.2 is unblocked to exercise `primer-inference::qnn` on-device** via `--backend qnn`.
 - [x] `primer-qnn-sys` FFI scaffold (hand-rolled Genie C API + runtime dlopen).
 - [x] `QnnBackend` safe wrapper: trait-abstracted Genie handle, `primer-meta.json` parser, minijinja template, mutex-serialised dialog, ABI smoke check.
 - [x] Per-token streaming bridge: C-ABI callback → `mpsc::UnboundedSender`, query in `spawn_blocking`.
 - [x] CLI wiring: `--backend qnn`, `--qnn-bundle-dir`, `--qnn-qairt-lib-dir` (+ env fallbacks).
 - [x] GUI wiring: QNN backend + bundle-dir / QAIRT-lib-dir pickers in Settings (always shown; selecting qnn on a non-`qnn`-feature build surfaces the "rebuild with --features qnn" hint inline). Host-tested; runtime still device-unverified.
 - [x] Per-backend 4K context budget for small-context backends (12-turn window, 3-passage top-K), keyed off `QNN_NAME_PREFIX`.
-- [x] Benchmark + thermal harness built: `examples/qnn_bench.rs` + 30-prompt `data/bench/socratic_prompts.jsonl` + pure host-tested metrics/thermal/loading modules + Android CI compile guard. Targets (15+ tok/s decode on Qwen3-4B W4A16, TTFT < 3s, peak < 70°C) are encoded as the verdict; **the actual numbers still need a device run** (gated on 1.2.0).
+- [x] Benchmark + thermal harness built: `examples/qnn_bench.rs` + 30-prompt `data/bench/socratic_prompts.jsonl` + pure host-tested metrics/thermal/loading modules + Android CI compile guard. Targets (15+ tok/s decode on Qwen3-4B W4A16, TTFT < 3s, peak < 70°C) are encoded as the verdict. **Proxy numbers captured during step 1.2.0** (chatapp_android: ~9.4 tok/s / ~190 ms TTFT / ~57 °C on v79-on-Gen5); a real `qnn_bench` run against the Primer's own `QnnBackend` is the remaining piece.
 
 ### 1.3 — Hybrid inference 🟡
 
