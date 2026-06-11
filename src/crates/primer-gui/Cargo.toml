@@ -65,6 +65,12 @@ tokio.workspace = true
 uuid.workspace = true
 chrono.workspace = true
 
+# Android only: route `tracing` to logcat. Rust stdout/stderr is discarded
+# on Android, so without this on-device `tracing` output is invisible to
+# `adb logcat`. Desktop builds never pull this in.
+[target.'cfg(target_os = "android")'.dependencies]
+paranoid-android = { workspace = true }
+
 [dev-dependencies]
 tempfile.workspace = true
 # Compile-time trait-bound assertions. Used to pin the IPC-direction

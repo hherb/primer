@@ -126,8 +126,30 @@ fn mobile_entry_point() {
 fn init_tracing() {
     use tracing_subscriber::EnvFilter;
     let filter = EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("info"));
-    if let Err(e) = tracing_subscriber::fmt().with_env_filter(filter).try_init() {
-        eprintln!("tracing init failed: {e}");
+
+    // Android discards a process's stdout/stderr, so the default
+    // stdout-writing subscriber produces nothing visible in `adb logcat`.
+    // Route `tracing` through a logcat writer (tag "primer") so on-device
+    // diagnostics — backend construction, path resolution, errors — are
+    // observable. ANSI is off because logcat renders escape codes literally.
+    #[cfg(target_os = "android")]
+    {
+        if let Err(e) = tracing_subscriber::fmt()
+            .with_env_filter(filter)
+            .with_writer(paranoid_android::AndroidLogMakeWriter::new(
+                "primer".to_owned(),
+            ))
+            .with_ansi(false)
+            .try_init()
+        {
+            eprintln!("tracing init failed: {e}");
+        }
+    }
+    #[cfg(not(target_os = "android"))]
+    {
+        if let Err(e) = tracing_subscriber::fmt().with_env_filter(filter).try_init() {
+            eprintln!("tracing init failed: {e}");
+        }
     }
 }
 
