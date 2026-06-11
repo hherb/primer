@@ -195,6 +195,110 @@ pub type GenieDialog_query_fn = unsafe extern "C" fn(
 pub type GenieDialog_free_fn = unsafe extern "C" fn(handle: GenieDialog_Handle_t) -> Genie_Status_t;
 
 // ---------------------------------------------------------------------------
+// Genie logging API (QAIRT 2.45 `GenieLog.h`)
+//
+// Used by the Primer to surface the FastRPC/HTP error behind a generic
+// `GENIE_STATUS_ERROR_GENERAL` (-1) from `GenieDialog_create` on Android,
+// where `logcat` is unavailable on some ROMs (e.g. the RedMagic). A
+// user-supplied callback is routed to a file the developer reads via
+// `run-as cat`. These three symbols are resolved **best-effort** (see
+// [`crate::GenieLibrary`]); a `libGenie.so` that does not export them
+// leaves logging disabled rather than failing the whole backend.
+// ---------------------------------------------------------------------------
+
+/// Opaque handle to a `GenieLogConfig` instance.
+///
+/// Upstream typedefs this as `const struct _GenieLogConfig_Handle_t*`; the
+/// Primer only ever passes `NULL` for it (the 2.45 header documents the
+/// config handle as "a placeholder for future logger configurability.
+/// Currently, it must be NULL"), so the empty-enum-pointer alias suffices.
+pub enum GenieLogConfig {}
+
+/// Opaque handle to a `GenieLog` instance (a live logger).
+pub enum GenieLog {}
+
+/// Convenience aliases matching the upstream header typedefs.
+pub type GenieLogConfig_Handle_t = *const GenieLogConfig;
+pub type GenieLog_Handle_t = *const GenieLog;
+
+/// Log level, mirroring the upstream `GenieLog_Level_t` enum (backed by
+/// `int32_t`). Kept as bare `const` items rather than a Rust enum so an
+/// unknown future level value crossing the FFI boundary cannot trigger
+/// undefined behaviour.
+pub type GenieLog_Level_t = i32;
+
+/// Error-level log message.
+pub const GENIE_LOG_LEVEL_ERROR: GenieLog_Level_t = 1;
+/// Warning-level log message.
+pub const GENIE_LOG_LEVEL_WARN: GenieLog_Level_t = 2;
+/// Info-level log message.
+pub const GENIE_LOG_LEVEL_INFO: GenieLog_Level_t = 3;
+/// Verbose-level log message (the most detailed level; what the Primer
+/// requests so DSP-init diagnostics are not filtered out).
+pub const GENIE_LOG_LEVEL_VERBOSE: GenieLog_Level_t = 4;
+
+/// User-supplied logging callback (upstream `GenieLog_Callback_t`).
+///
+/// The C ABI signature in QAIRT 2.45 `GenieLog.h` is:
+///
+/// ```c
+/// typedef void (*GenieLog_Callback_t)(const GenieLog_Handle_t handle,
+///                                     const char* fmt,
+///                                     GenieLog_Level_t level,
+///                                     uint64_t timestamp,
+///                                     va_list args);
+/// ```
+///
+/// Note there is **no `userData` parameter** — Genie cannot hand back a
+/// per-instance pointer, so the safe wrapper routes messages to a
+/// process-global sink (see `primer_inference::qnn::genie::log`).
+///
+/// The final `args` parameter is a C `va_list`. On the AArch64 (Android)
+/// ABI a `va_list` is `struct __va_list[1]`, which decays to a pointer
+/// when passed as a function argument — so we model it as `*mut c_void`
+/// (the pointer to the caller's `va_list` struct) and forward it verbatim
+/// to `vsnprintf`, whose own `va_list` parameter decays the same way. This
+/// is the standard way to forward a `va_list` callback on AArch64 without
+/// the unstable `core::ffi::VaList`.
+///
+/// The backend warns that this callback "may be called from multiple
+/// threads, and expects that it is re-entrant" — the global sink is
+/// `Mutex`-guarded and never re-enters Genie, so that contract holds.
+///
+/// The callback is treated as non-nullable (we always supply a real one).
+pub type GenieLog_Callback_t = unsafe extern "C" fn(
+    handle: GenieLog_Handle_t,
+    fmt: *const c_char,
+    level: GenieLog_Level_t,
+    timestamp: u64,
+    args: *mut c_void,
+);
+
+/// `GenieLog_create(config_handle, callback, log_level, out_handle) -> status`
+///
+/// `config_handle` must be `NULL` in 2.45. A non-null `callback` installs
+/// the user logger; `log_level` is the maximum level emitted.
+pub type GenieLog_create_fn = unsafe extern "C" fn(
+    config: GenieLogConfig_Handle_t,
+    callback: GenieLog_Callback_t,
+    log_level: GenieLog_Level_t,
+    out_handle: *mut GenieLog_Handle_t,
+) -> Genie_Status_t;
+
+/// `GenieLog_free(handle) -> status`
+pub type GenieLog_free_fn = unsafe extern "C" fn(handle: GenieLog_Handle_t) -> Genie_Status_t;
+
+/// `GenieDialogConfig_bindLogger(config_handle, log_handle) -> status`
+///
+/// Binds a logger to a dialog config; the logger is inherited by any
+/// dialog created from that config, so logs fire during the
+/// `GenieDialog_create` model-load/DSP-init path.
+pub type GenieDialogConfig_bindLogger_fn = unsafe extern "C" fn(
+    config: GenieDialogConfig_Handle_t,
+    log_handle: GenieLog_Handle_t,
+) -> Genie_Status_t;
+
+// ---------------------------------------------------------------------------
 // Symbol names (the strings passed to `Library::get`)
 // ---------------------------------------------------------------------------
 
@@ -212,6 +316,16 @@ pub const SYM_GENIE_DIALOG_QUERY: &[u8] = b"GenieDialog_query\0";
 
 /// `libGenie.so` symbol for `GenieDialog_free`.
 pub const SYM_GENIE_DIALOG_FREE: &[u8] = b"GenieDialog_free\0";
+
+/// `libGenie.so` symbol for `GenieLog_create` (optional — logging path).
+pub const SYM_GENIE_LOG_CREATE: &[u8] = b"GenieLog_create\0";
+
+/// `libGenie.so` symbol for `GenieLog_free` (optional — logging path).
+pub const SYM_GENIE_LOG_FREE: &[u8] = b"GenieLog_free\0";
+
+/// `libGenie.so` symbol for `GenieDialogConfig_bindLogger` (optional —
+/// logging path).
+pub const SYM_GENIE_DIALOG_CONFIG_BIND_LOGGER: &[u8] = b"GenieDialogConfig_bindLogger\0";
 
 /// Default basename of the QAIRT Genie shared library. The actual filesystem
 /// path is composed by [`crate::GenieLibrary::open`] from a caller-supplied
@@ -237,6 +351,14 @@ mod tests {
             size_of::<GenieDialog_Handle_t>(),
             size_of::<*mut core::ffi::c_void>()
         );
+        assert_eq!(
+            size_of::<GenieLogConfig_Handle_t>(),
+            size_of::<*mut core::ffi::c_void>()
+        );
+        assert_eq!(
+            size_of::<GenieLog_Handle_t>(),
+            size_of::<*mut core::ffi::c_void>()
+        );
     }
 
     #[test]
@@ -252,6 +374,9 @@ mod tests {
             SYM_GENIE_DIALOG_CREATE,
             SYM_GENIE_DIALOG_QUERY,
             SYM_GENIE_DIALOG_FREE,
+            SYM_GENIE_LOG_CREATE,
+            SYM_GENIE_LOG_FREE,
+            SYM_GENIE_DIALOG_CONFIG_BIND_LOGGER,
         ] {
             assert_eq!(
                 name.last().copied(),

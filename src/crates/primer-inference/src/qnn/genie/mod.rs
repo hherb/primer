@@ -31,6 +31,8 @@ use primer_core::error::Result as PrimerResult;
 use primer_core::inference::TokenChunk;
 use thiserror::Error;
 
+mod config;
+mod log;
 mod real;
 pub use real::RealGenieLibrary;
 
