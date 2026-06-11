@@ -1,5 +1,24 @@
 # QAIRT / Genie native libraries — manual staging required
 
+> ℹ️ **On-device status (2026-06-11, RedMagic 11 Pro / SM8850 / "canoe").** With
+> these V79 libs + the V79 model bundle staged into the app's *internal* storage
+> (`/data/user/0/<pkg>/files/qnn-bundle` — the app cannot read `/sdcard/Android/data/<pkg>`
+> files written by `adb`, Android scoped storage), the full GUI software stack
+> works on-device: boot → path resolution → `dlopen libGenie.so` by basename →
+> Genie config parse + path absolutization → reaches **`GenieDialog_create`**,
+> which then fails with **status -1**. The device firmware ships only
+> `libQnnHtpV81Skel.so` — but **V79 is confirmed to run on this Gen-5 part** (the
+> step-1.2.0 chatapp validation hit ~9.4 tok/s with these same V79 binaries), so
+> the arch is **not** the blocker. The leading suspect is **`ADSP_LIBRARY_PATH`
+> not being set**: the Hexagon DSP loads the *bundled* v79 skel
+> (`libQnnHtpV79Skel.so`) only if that env var points at the dir containing it
+> (the app's `nativeLibraryDir`), exactly the runbook's "skel not found" failure
+> mode — and `logcat` is dead on this ROM so the underlying error can't be read.
+> Next step: have the app set `ADSP_LIBRARY_PATH` to its `nativeLibraryDir`
+> before `GenieDialog_create` (derivable via `dladdr` on a resolved `libGenie`
+> symbol). A native V81 export remains a *throughput* optimization, not a
+> correctness gate.
+
 This directory is where the **QNN-on-Android** build (`--features qnn`) expects
 the Qualcomm QAIRT / Genie runtime shared libraries. Android Gradle Plugin
 auto-bundles every `*.so` here into `lib/arm64-v8a/` of the APK, and the app
@@ -21,10 +40,11 @@ will succeed at the cargo+gradle level but the resulting APK will be missing the
 
 ## Which libraries (9 files)
 
-Sourced from the QAIRT **2.45** SDK, HTP **V79** skel (Snapdragon 8 Elite /
-SM8850-class Hexagon NPU — the dev/demo device is a RedMagic 11 Pro). The
-sha256 manifest below pins the exact build validated against the Primer's
-`QnnBackend` (PR #213, device-validated FFI):
+Sourced from the QAIRT **2.45** SDK, HTP **V79** skel. **NOTE: these are V79;
+the SM8850 dev device is actually V81** (see the mismatch callout above) — these
+V79 libs are kept as the as-staged record but need replacing with V81 for the
+RedMagic. The sha256 manifest below pins the exact V79 build whose FFI was
+validated against the Primer's `QnnBackend` (PR #213):
 
 ```
 5cebceb9f7866e9f5cd5841c6ed73312afbfba5c165a19e75a66cb4343160667  libGenie.so
