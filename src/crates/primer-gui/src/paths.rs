@@ -29,6 +29,59 @@ pub fn mobile_seed_dir(app_data: &Path) -> PathBuf {
     app_data.join(MOBILE_SEED_SUBDIR)
 }
 
+/// System directories appended (after the app's own native-lib dir) to
+/// `ADSP_LIBRARY_PATH` as fallbacks. The bundled QAIRT skel must win, so
+/// these come *after* the app dir; non-existent entries are harmless
+/// (FastRPC skips them). `/vendor/lib/rfsa/adsp` is where the device
+/// firmware keeps its own Hexagon skels.
+const ADSP_SYSTEM_FALLBACK_DIRS: &[&str] = &["/vendor/lib/rfsa/adsp", "/vendor/dsp/cdsp", "/dsp"];
+
+/// Parse `/proc/self/maps` content and return the directory of the first
+/// mapping whose file path ends in `lib_basename`. Pure helper — the
+/// caller reads `/proc/self/maps`.
+///
+/// Used on Android to discover the app's `nativeLibraryDir` (where the
+/// APK's `lib/arm64-v8a/*.so` are extracted, including the bundled QAIRT
+/// Hexagon skel) by anchoring on a library known to be loaded from there
+/// (the app's own `libprimer_gui.so`). Each maps line is
+/// `addr perms offset dev inode  path`; the path is everything after the
+/// 5th whitespace-delimited field, so paths containing spaces survive.
+pub fn native_lib_dir_from_maps(maps: &str, lib_basename: &str) -> Option<PathBuf> {
+    for line in maps.lines() {
+        // Split off the 5 leading numeric/columns; the remainder (trimmed)
+        // is the mapped path. `splitn(6, …)` keeps any spaces in the path.
+        let mut fields = line.splitn(6, char::is_whitespace);
+        let path = match (
+            fields.next(),
+            fields.next(),
+            fields.next(),
+            fields.next(),
+            fields.next(),
+            fields.next(),
+        ) {
+            (Some(_), Some(_), Some(_), Some(_), Some(_), Some(rest)) => rest.trim(),
+            _ => continue,
+        };
+        if path.is_empty() {
+            continue;
+        }
+        let p = Path::new(path);
+        if p.file_name().and_then(|n| n.to_str()) == Some(lib_basename) {
+            return p.parent().map(Path::to_path_buf);
+        }
+    }
+    None
+}
+
+/// Build the `ADSP_LIBRARY_PATH` value: the app's native-lib dir (so the
+/// bundled QAIRT skel wins) followed by the system DSP fallback dirs,
+/// `;`-separated per Qualcomm's FastRPC convention. Pure helper.
+pub fn compose_adsp_library_path(native_lib_dir: &Path) -> String {
+    let mut parts = vec![native_lib_dir.to_string_lossy().into_owned()];
+    parts.extend(ADSP_SYSTEM_FALLBACK_DIRS.iter().map(|s| s.to_string()));
+    parts.join(";")
+}
+
 /// If the current executable is running inside a macOS `.app` bundle,
 /// resolve the directory under `Contents/Resources/` that holds the
 /// bundled seed `*.jsonl` files. Returns `None` otherwise.
@@ -102,7 +155,56 @@ pub fn init_mobile_state(app: &tauri::App) -> Result<(), Box<dyn std::error::Err
     app.manage(crate::state::AppState::new(home.clone(), config));
 
     set_mobile_seed_dir_if_present(&home);
+    set_adsp_library_path_if_present();
     Ok(())
+}
+
+/// Point the Hexagon DSP's FastRPC at the QAIRT skel libraries bundled in
+/// the APK by setting `ADSP_LIBRARY_PATH` to the app's `nativeLibraryDir`
+/// (where `lib/arm64-v8a/*.so` — including `libQnnHtpV*Skel.so` — are
+/// extracted at install) plus the system DSP fallback dirs.
+///
+/// Without this, `GenieDialog_create` fails (status -1) because the DSP
+/// cannot locate the bundled skel — the device firmware only ships its own
+/// native-arch skel. The dir is discovered from `/proc/self/maps` by
+/// anchoring on the app's own `libprimer_gui.so` (always mapped from
+/// `nativeLibraryDir`); no Android `Context`/JNI is needed.
+///
+/// No-op when `ADSP_LIBRARY_PATH` is already set, or when the lib dir
+/// can't be determined (logged) — in the latter case `GenieDialog_create`
+/// will surface the skel-not-found failure as before.
+#[cfg(mobile)]
+pub fn set_adsp_library_path_if_present() {
+    const ADSP_ENV: &str = "ADSP_LIBRARY_PATH";
+    if std::env::var_os(ADSP_ENV).is_some() {
+        return;
+    }
+    let maps = match std::fs::read_to_string("/proc/self/maps") {
+        Ok(m) => m,
+        Err(e) => {
+            tracing::warn!(target: "primer-gui::startup", "reading /proc/self/maps failed: {e}; ADSP_LIBRARY_PATH unset");
+            return;
+        }
+    };
+    let Some(dir) = native_lib_dir_from_maps(&maps, "libprimer_gui.so") else {
+        tracing::warn!(
+            target: "primer-gui::startup",
+            "could not locate libprimer_gui.so in /proc/self/maps; ADSP_LIBRARY_PATH unset \
+             (QNN GenieDialog_create may fail to find the bundled Hexagon skel)"
+        );
+        return;
+    };
+    let value = compose_adsp_library_path(&dir);
+    // SAFETY: called from the Tauri `setup` hook on the main thread, before
+    // the webview event loop dispatches any command and before any
+    // session/background task is spawned, so no other thread is calling
+    // getenv concurrently. Mirrors the `set_mobile_seed_dir_if_present`
+    // justification. The value must be set before the first FastRPC session
+    // (GenieDialog_create), which only happens later at session start.
+    unsafe {
+        std::env::set_var(ADSP_ENV, &value);
+    }
+    tracing::info!(target: "primer-gui::startup", adsp_library_path = %value, "set ADSP_LIBRARY_PATH for Hexagon DSP skel discovery");
 }
 
 /// If a staged seed corpus exists under [`mobile_seed_dir`], point
@@ -183,6 +285,61 @@ mod tests {
     use super::*;
     use std::fs;
     use tempfile::TempDir;
+
+    #[test]
+    fn native_lib_dir_from_maps_extracts_dir_of_matching_lib() {
+        // A representative /proc/self/maps excerpt. The app's own cdylib is
+        // always mapped from its nativeLibraryDir; we anchor on its basename
+        // and return the containing directory so ADSP_LIBRARY_PATH can point
+        // the Hexagon DSP at the bundled QAIRT skel that lives there too.
+        let maps = "\
+12c00000-12c80000 r--p 00000000 fd:03 1234 /data/app/~~AbC==/org.theprimer.gui-XyZ==/lib/arm64/libprimer_gui.so
+12c80000-12d00000 r-xp 00080000 fd:03 1234 /data/app/~~AbC==/org.theprimer.gui-XyZ==/lib/arm64/libprimer_gui.so
+70aa000-70ab000 r--p 00000000 fd:03 9999 /apex/com.android.runtime/lib64/bionic/libc.so
+";
+        let dir = native_lib_dir_from_maps(maps, "libprimer_gui.so");
+        assert_eq!(
+            dir,
+            Some(PathBuf::from(
+                "/data/app/~~AbC==/org.theprimer.gui-XyZ==/lib/arm64"
+            ))
+        );
+    }
+
+    #[test]
+    fn native_lib_dir_from_maps_returns_none_when_absent() {
+        let maps =
+            "70aa000-70ab000 r--p 0 fd:03 1 /apex/com.android.runtime/lib64/bionic/libc.so\n";
+        assert_eq!(native_lib_dir_from_maps(maps, "libprimer_gui.so"), None);
+    }
+
+    #[test]
+    fn native_lib_dir_from_maps_handles_spaces_in_path() {
+        // Mapped paths can (rarely) contain spaces; the path is everything
+        // after the 5th whitespace-delimited field, so a naive split on the
+        // last token would truncate it. Pin the whole-remainder behaviour.
+        let maps = "a-b r-xp 0 fd:03 7 /data/app/My App/lib/arm64/libprimer_gui.so\n";
+        assert_eq!(
+            native_lib_dir_from_maps(maps, "libprimer_gui.so"),
+            Some(PathBuf::from("/data/app/My App/lib/arm64"))
+        );
+    }
+
+    #[test]
+    fn compose_adsp_library_path_puts_app_dir_first_then_system_fallbacks() {
+        // The bundled v79 skel must win over the device firmware's v81 skel,
+        // so the app's nativeLibraryDir comes first; system DSP dirs follow
+        // as fallbacks. ADSP_LIBRARY_PATH is ';'-separated (Qualcomm).
+        let v = compose_adsp_library_path(Path::new("/data/app/x/lib/arm64"));
+        assert!(
+            v.starts_with("/data/app/x/lib/arm64;"),
+            "app dir must come first: {v}"
+        );
+        for sys in ADSP_SYSTEM_FALLBACK_DIRS {
+            assert!(v.contains(sys), "missing system fallback {sys}: {v}");
+        }
+        assert!(!v.contains(','), "must use ';' not ',': {v}");
+    }
 
     #[test]
     fn mobile_seed_dir_is_seed_subdir_of_app_data() {
