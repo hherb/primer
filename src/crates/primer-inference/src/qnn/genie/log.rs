@@ -44,6 +44,7 @@ use std::fs::OpenOptions;
 use std::io::Write;
 use std::path::Path;
 use std::sync::Mutex;
+use std::sync::atomic::{AtomicI32, Ordering};
 
 use primer_qnn_sys::{
     GENIE_LOG_LEVEL_ERROR, GENIE_LOG_LEVEL_INFO, GENIE_LOG_LEVEL_VERBOSE, GENIE_LOG_LEVEL_WARN,
@@ -102,6 +103,59 @@ fn level_label(level: GenieLog_Level_t) -> String {
         GENIE_LOG_LEVEL_VERBOSE => "VERBOSE".to_string(),
         other => format!("LVL{other}"),
     }
+}
+
+/// Env var selecting Genie log verbosity. Unset ⇒ [`DEFAULT_GENIE_LOG_LEVEL`].
+pub(crate) const GENIE_LOG_LEVEL_ENV: &str = "PRIMER_GENIE_LOG_LEVEL";
+
+/// Default Genie log level when [`GENIE_LOG_LEVEL_ENV`] is unset or
+/// unrecognised. `WARN` keeps the *failure-cause* lines (the DSP-init `-1`
+/// diagnosis hinged on a WARN-level `dlopen failed: …Stub.so not found` and an
+/// ERROR-level `loadRemoteSymbols failed`) while dropping the per-token
+/// INFO/VERBOSE firehose a real generation emits — one short reply logged
+/// ≈1.4M lines at `VERBOSE` and made the app unresponsive on I/O. Set
+/// `PRIMER_GENIE_LOG_LEVEL=verbose` to restore the full trace for deep
+/// DSP-bring-up debugging.
+pub(crate) const DEFAULT_GENIE_LOG_LEVEL: GenieLog_Level_t = GENIE_LOG_LEVEL_WARN;
+
+/// Active emission threshold: a message is written only when its level is at
+/// or below this (lower numeric = more severe; ERROR=1 … VERBOSE=4). Belt and
+/// suspenders alongside the level handed to `GenieLog_create` — Genie *should*
+/// gate emission itself, but filtering here guarantees the firehose is capped
+/// regardless of how faithfully a given `libGenie.so` honours that argument.
+static GENIE_LOG_THRESHOLD: AtomicI32 = AtomicI32::new(DEFAULT_GENIE_LOG_LEVEL);
+
+/// Map a [`GENIE_LOG_LEVEL_ENV`] string to a Genie level. Case-insensitive,
+/// whitespace-trimmed; accepts `error | warn[ing] | info | verbose|debug|trace`.
+/// Unset or unrecognised ⇒ [`DEFAULT_GENIE_LOG_LEVEL`]. Pure — host-tested.
+pub(crate) fn parse_genie_log_level(value: Option<&str>) -> GenieLog_Level_t {
+    match value.map(|s| s.trim().to_ascii_lowercase()).as_deref() {
+        Some("error") => GENIE_LOG_LEVEL_ERROR,
+        Some("warn") | Some("warning") => GENIE_LOG_LEVEL_WARN,
+        Some("info") => GENIE_LOG_LEVEL_INFO,
+        Some("verbose") | Some("debug") | Some("trace") => GENIE_LOG_LEVEL_VERBOSE,
+        _ => DEFAULT_GENIE_LOG_LEVEL,
+    }
+}
+
+/// Resolve the configured Genie log level from [`GENIE_LOG_LEVEL_ENV`].
+pub(crate) fn genie_log_level_from_env() -> GenieLog_Level_t {
+    parse_genie_log_level(std::env::var(GENIE_LOG_LEVEL_ENV).ok().as_deref())
+}
+
+/// Install the callback-side emission threshold (see [`GENIE_LOG_THRESHOLD`]).
+pub(crate) fn set_genie_log_threshold(level: GenieLog_Level_t) {
+    GENIE_LOG_THRESHOLD.store(level, Ordering::Relaxed);
+}
+
+/// Whether a message at `level` should be written given the active `threshold`.
+/// Genie levels are *lower-is-more-severe* (ERROR=1 … VERBOSE=4), so a message
+/// is emitted only when its level is at or below the threshold. Pure — this is
+/// the per-callback gate that caps the per-token firehose, factored out of the
+/// `unsafe extern "C"` callback so it can be host-tested. Used by
+/// [`genie_log_callback`].
+pub(crate) fn should_emit(level: GenieLog_Level_t, threshold: GenieLog_Level_t) -> bool {
+    level <= threshold
 }
 
 /// Format one log line: `[LEVEL ts=<timestamp>] <message>`. The message is
@@ -218,6 +272,11 @@ pub(crate) unsafe extern "C" fn genie_log_callback(
     if fmt.is_null() {
         return;
     }
+    // Drop messages more verbose than the configured threshold before paying
+    // the `vsnprintf` render cost — this is what caps the per-token firehose.
+    if !should_emit(level, GENIE_LOG_THRESHOLD.load(Ordering::Relaxed)) {
+        return;
+    }
     // SAFETY: forwarded straight from the callback contract; `render_message`
     // documents its own requirements and never retains the pointers.
     let message = unsafe { render_message(fmt, args) };
@@ -321,5 +380,62 @@ mod tests {
                 std::ptr::null_mut(),
             );
         }
+    }
+
+    #[test]
+    fn parse_genie_log_level_maps_known_strings_case_insensitively() {
+        assert_eq!(parse_genie_log_level(Some("error")), GENIE_LOG_LEVEL_ERROR);
+        assert_eq!(parse_genie_log_level(Some("WARN")), GENIE_LOG_LEVEL_WARN);
+        assert_eq!(parse_genie_log_level(Some("warning")), GENIE_LOG_LEVEL_WARN);
+        assert_eq!(parse_genie_log_level(Some("  Info ")), GENIE_LOG_LEVEL_INFO);
+        assert_eq!(
+            parse_genie_log_level(Some("verbose")),
+            GENIE_LOG_LEVEL_VERBOSE
+        );
+        assert_eq!(
+            parse_genie_log_level(Some("debug")),
+            GENIE_LOG_LEVEL_VERBOSE
+        );
+    }
+
+    #[test]
+    fn parse_genie_log_level_defaults_to_warn_when_unset_or_unknown() {
+        // The firehose-avoiding default: a fresh session (no env override)
+        // captures failure-cause lines without the per-token VERBOSE flood.
+        assert_eq!(parse_genie_log_level(None), DEFAULT_GENIE_LOG_LEVEL);
+        assert_eq!(parse_genie_log_level(Some("")), DEFAULT_GENIE_LOG_LEVEL);
+        assert_eq!(parse_genie_log_level(Some("loud")), DEFAULT_GENIE_LOG_LEVEL);
+        assert_eq!(DEFAULT_GENIE_LOG_LEVEL, GENIE_LOG_LEVEL_WARN);
+    }
+
+    #[test]
+    fn should_emit_gates_on_lower_is_more_severe_ordering() {
+        // At the default WARN threshold: ERROR/WARN pass, INFO/VERBOSE drop.
+        let threshold = GENIE_LOG_LEVEL_WARN;
+        assert!(should_emit(GENIE_LOG_LEVEL_ERROR, threshold));
+        assert!(should_emit(GENIE_LOG_LEVEL_WARN, threshold));
+        assert!(!should_emit(GENIE_LOG_LEVEL_INFO, threshold));
+        assert!(!should_emit(GENIE_LOG_LEVEL_VERBOSE, threshold));
+    }
+
+    #[test]
+    fn should_emit_at_verbose_threshold_passes_every_level() {
+        // The deep-debug opt-in (PRIMER_GENIE_LOG_LEVEL=verbose) lets the full
+        // firehose through — nothing is dropped at the most-verbose threshold.
+        let threshold = GENIE_LOG_LEVEL_VERBOSE;
+        assert!(should_emit(GENIE_LOG_LEVEL_ERROR, threshold));
+        assert!(should_emit(GENIE_LOG_LEVEL_WARN, threshold));
+        assert!(should_emit(GENIE_LOG_LEVEL_INFO, threshold));
+        assert!(should_emit(GENIE_LOG_LEVEL_VERBOSE, threshold));
+    }
+
+    #[test]
+    fn should_emit_at_error_threshold_passes_only_error() {
+        // The strictest threshold keeps only the most-severe line.
+        let threshold = GENIE_LOG_LEVEL_ERROR;
+        assert!(should_emit(GENIE_LOG_LEVEL_ERROR, threshold));
+        assert!(!should_emit(GENIE_LOG_LEVEL_WARN, threshold));
+        assert!(!should_emit(GENIE_LOG_LEVEL_INFO, threshold));
+        assert!(!should_emit(GENIE_LOG_LEVEL_VERBOSE, threshold));
     }
 }
