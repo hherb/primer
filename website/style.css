@@ -159,6 +159,8 @@ h3 { font-size: 1.15rem; font-weight: normal; margin: 0 0 8px; }
   grid-template-columns: repeat(auto-fit, minmax(260px, 1fr));
 }
 
+.prose + .grid { margin-top: 24px; }
+
 .card {
   background: var(--card);
   border: 1px solid var(--hairline);
@@ -217,7 +219,7 @@ h3 { font-size: 1.15rem; font-weight: normal; margin: 0 0 8px; }
 }
 
 .badge-done { background: #e4efe4; color: #2e5d2e; border: 1px solid #bcd6bc; }
-.badge-progress { background: #fdf3dc; color: #8a6d1f; border: 1px solid #ecd9a4; }
+.badge-progress { background: #fdf3dc; color: #80651d; border: 1px solid #ecd9a4; }
 .badge-ahead { background: #eef0f5; color: #555c6e; border: 1px solid #d8dce6; }
 
 .phase {
