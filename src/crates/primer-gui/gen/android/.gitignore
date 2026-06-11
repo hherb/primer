@@ -1,0 +1,30 @@
+*.iml
+.gradle
+/local.properties
+/.idea/caches
+/.idea/libraries
+/.idea/modules.xml
+/.idea/workspace.xml
+/.idea/navEditor.xml
+/.idea/assetWizardSettings.xml
+.DS_Store
+build
+/captures
+.externalNativeBuild
+.cxx
+local.properties
+key.properties
+keystore.properties
+
+/.tauri
+/tauri.settings.gradle
+
+# Gradle / NDK build outputs — regenerated on every build.
+.gradle/
+build/
+app/build/
+app/.cxx/
+# Frontend dist + tauri.conf.json copied into the APK assets on every build.
+app/src/main/assets/
+# Machine-specific SDK path written by Gradle.
+local.properties

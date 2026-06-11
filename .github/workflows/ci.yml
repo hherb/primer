@@ -384,12 +384,13 @@ jobs:
           } >> "$GITHUB_ENV"
 
       - name: Cross-compile primer binary
-        # NB: `--bin primer` only (no `--workspace`). The `primer-gui`
-        # crate's Tauri 2.x deps don't cross-compile to Android (webkit2gtk
-        # etc.) and GUI on Android is explicitly out-of-scope for Phase 0
-        # — see docs/superpowers/specs/2026-05-26-redmagic-termux-port-design.md.
-        # `cargo build --bin primer` builds only that binary's dep graph,
-        # which excludes `primer-gui` (sibling crate, not a dep).
+        # NB: `--bin primer` only (no `--workspace`). On the *desktop*
+        # feature set the `primer-gui` crate's Tauri deps don't cross-compile
+        # to Android (webkit2gtk etc.); `cargo build --bin primer` builds only
+        # that binary's dep graph, which excludes `primer-gui` (sibling crate,
+        # not a dep). The Android-*mobile* build of `primer-gui` (Tauri's
+        # android webview, not webkit2gtk) IS now in scope and is guarded by
+        # its own step below — see "Cross-compile primer-gui (Tauri mobile)".
         #
         # `--no-default-features`: hybrid retrieval is default-on for the
         # host CLI, but the aarch64-linux-android ort-runtime download from
@@ -397,6 +398,28 @@ jobs:
         # ships BM25-only by guidance (`--embedder-backend none`), so the
         # cross-compile guard builds without the `embedding` feature.
         run: cargo build --target aarch64-linux-android --no-default-features --bin primer
+
+      - name: Cross-compile primer-gui (Tauri mobile)
+        # Drift-guard for the Android packaging scaffold (PR #214). The GUI
+        # ships a `#[cfg(mobile)] #[tauri::mobile_entry_point]` and a
+        # `[lib] crate-type = [..., "cdylib", ...]` so `cargo-tauri android
+        # build`'s inner cargo invocation links the app as the native shared
+        # library Android's `MainActivity` loads. Neither is exercised by any
+        # other CI job: the desktop `test` job builds primer-gui for the host
+        # (mobile cfg OFF, no cdylib needed), and the `--bin primer` step
+        # above excludes primer-gui entirely. Without this guard, dropping
+        # `rlib`/`cdylib` from `[lib]`, or any transitive-dep break on the
+        # android-mobile Tauri path (tao/wry android backend), would stay
+        # green in CI and only surface during a manual APK build.
+        #
+        # This compiles the cdylib and the mobile entry point (the target is
+        # aarch64-linux-android, so tauri-build sets `mobile`); it does NOT
+        # run Gradle or produce an APK — a full `tauri android build` needs
+        # JDK+SDK+Gradle and is the deferred follow-up. `--no-default-features`
+        # keeps it BM25-only, matching the Android posture (issue #157) and
+        # the documented build invocation. NDK env vars are inherited from
+        # the earlier "Export NDK toolchain env" step.
+        run: cargo build --target aarch64-linux-android --no-default-features -p primer-gui
 
       - name: Cross-compile primer-qnn-sys
         # The Phase 1.2 Genie/QNN FFI crate is `target_os = "android"`-gated
@@ -440,3 +463,21 @@ jobs:
         # 11 Pro via Termux). NDK env vars are inherited from the earlier
         # "Export NDK toolchain env" step.
         run: cargo build --target aarch64-linux-android -p primer-inference --features qnn --example qnn_bench
+
+  # Gradle wrapper supply-chain guard. The Android packaging scaffold
+  # (PR #214) commits `gen/android/gradle/wrapper/gradle-wrapper.jar` — a
+  # binary blob that `./gradlew` executes with full build privileges.
+  # Standard Tauri practice is to commit it, but a committed executable jar
+  # is a supply-chain surface: a tampered wrapper could run arbitrary code
+  # during any Android build. This job validates the jar's checksum against
+  # Gradle's published known-good hashes (the action maintains the list), so
+  # a swapped or corrupted wrapper fails CI rather than silently shipping.
+  # Cheap (checkout + checksum, no build), and it only has teeth while the
+  # committed jar exists. Mirrors Gradle's own recommended hardening.
+  gradle-wrapper-validation:
+    name: validate gradle wrapper
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Validate Gradle wrapper
+        uses: gradle/actions/wrapper-validation@v4

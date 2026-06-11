@@ -8,6 +8,14 @@ edition.workspace = true
 name = "primer-gui"
 path = "src/main.rs"
 
+# Tauri mobile loads the app as a native shared library (MainActivity →
+# loadLibrary), so the Android APK build requires this crate to build as a
+# `cdylib`. `rlib` keeps the existing [[bin]] target and the unit tests
+# building; `staticlib` matches Tauri's mobile template.
+[lib]
+name = "primer_gui"
+crate-type = ["staticlib", "cdylib", "rlib"]
+
 [build-dependencies]
 tauri-build = { workspace = true }
 
