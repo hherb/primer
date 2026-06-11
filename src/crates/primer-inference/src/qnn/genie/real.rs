@@ -15,10 +15,9 @@ use futures::channel::mpsc::UnboundedSender;
 use primer_core::error::Result as PrimerResult;
 use primer_core::inference::TokenChunk;
 use primer_qnn_sys::{
-    GENIE_DIALOG_SENTENCE_COMPLETE, GENIE_LOG_LEVEL_VERBOSE, GENIE_STATUS_SUCCESS,
-    Genie_Dialog_SentenceCode_t, GenieDialog_Handle_t, GenieDialog_QueryCallback_t,
-    GenieDialogConfig_Handle_t, GenieLibrary as RawGenieLibrary, GenieLibraryError,
-    GenieLog_Handle_t, GenieLog_free_fn,
+    GENIE_DIALOG_SENTENCE_COMPLETE, GENIE_STATUS_SUCCESS, Genie_Dialog_SentenceCode_t,
+    GenieDialog_Handle_t, GenieDialog_QueryCallback_t, GenieDialogConfig_Handle_t,
+    GenieLibrary as RawGenieLibrary, GenieLibraryError, GenieLog_Handle_t, GenieLog_free_fn,
 };
 
 use super::config::absolutize_genie_config;
@@ -200,6 +199,12 @@ fn setup_logger(
         return None;
     }
 
+    // Resolve verbosity from PRIMER_GENIE_LOG_LEVEL (default WARN); both hand
+    // it to Genie *and* install it as the callback-side threshold so the
+    // per-token firehose is capped regardless of how Genie honours the arg.
+    let log_level = super::log::genie_log_level_from_env();
+    super::log::set_genie_log_threshold(log_level);
+
     let mut log_handle: GenieLog_Handle_t = ptr::null();
     // SAFETY: config handle is NULL (required by the 2.45 API), the
     // callback is a valid `unsafe extern "C"` matching `GenieLog_Callback_t`,
@@ -209,7 +214,7 @@ fn setup_logger(
         log_create(
             ptr::null(),
             super::log::genie_log_callback,
-            GENIE_LOG_LEVEL_VERBOSE,
+            log_level,
             &mut log_handle,
         )
     };

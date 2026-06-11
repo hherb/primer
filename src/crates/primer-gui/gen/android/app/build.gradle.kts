@@ -30,7 +30,24 @@ android {
             isDebuggable = true
             isJniDebuggable = true
             isMinifyEnabled = false
-            packaging {                jniLibs.keepDebugSymbols.add("*/arm64-v8a/*.so")
+            packaging {
+                // Extract native libs to the app's real nativeLibraryDir at install
+                // time (extractNativeLibs=true). The Hexagon DSP loads the bundled
+                // QAIRT skel (libQnnHtpV81Skel.so) over FastRPC, which needs a real
+                // on-disk file reachable via ADSP_LIBRARY_PATH — it cannot push a
+                // skel that lives only inside the APK (base.apk!/lib/...). Modern AGP
+                // defaults this to false (libs mmap'd from the APK), which left the
+                // real lib dir empty and failed DSP bring-up with `Failed to load
+                // skel, error: 1002` after `First connection to QNN stub established`
+                // (read from the on-device genie.log). The manifest extractNativeLibs
+                // attribute is overridden by AGP, so this gradle knob is authoritative.
+                //
+                // NB: this lives in the `debug` build type only — the QNN APK is
+                // built `--debug` today. A future `release` QNN build must set the
+                // same `jniLibs.useLegacyPackaging = true` or DSP bring-up will
+                // regress to `Failed to load skel, error: 1002`.
+                jniLibs.useLegacyPackaging = true
+                jniLibs.keepDebugSymbols.add("*/arm64-v8a/*.so")
                 jniLibs.keepDebugSymbols.add("*/armeabi-v7a/*.so")
                 jniLibs.keepDebugSymbols.add("*/x86/*.so")
                 jniLibs.keepDebugSymbols.add("*/x86_64/*.so")
