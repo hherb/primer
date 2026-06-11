@@ -175,7 +175,7 @@ h3 { font-size: 1.15rem; font-weight: normal; margin: 0 0 8px; }
 .band .eyebrow { color: var(--gold-bright); }
 .band h2 { color: #fff; }
 .band a { color: var(--gold-bright); }
-.band .section-pad { padding: 56px 0; }
+.band .section-pad { padding-top: 56px; padding-bottom: 56px; }
 
 .stats {
   display: grid;
