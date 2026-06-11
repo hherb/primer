@@ -429,7 +429,7 @@ cd src
 
 See [docs/macos_native_speech.md](docs/macos_native_speech.md) for details.
 
-### Android build (scaffold)
+### Android build
 
 `primer-gui` has a Tauri-mobile scaffold (`gen/android`) that builds a debug
 APK for `aarch64-linux-android` host-side — no device needed to build:
@@ -440,10 +440,24 @@ cd src/crates/primer-gui
 ```
 
 This is the **packaging path to the first on-device QNN NPU token** (the Hexagon
-DSP grant only applies to a normally-launched app, not a sideload). The current
-scaffold builds the GUI BM25-only (no `fastembed`/`ort` on Android, per #157) and
-does **not** yet bundle the QNN backend or model assets, nor run on-device — those
-are the next sub-projects. Full prerequisites, env, and the deferred path:
+DSP grant only applies to a normally-launched app, not a sideload). Two flavours
+build today:
+
+- **BM25-only** (sub-project 1): the GUI, no NPU — the command above (~196 MB).
+- **QNN-on-Android** (sub-project 2): add `--features qnn` to compile the
+  Qualcomm NPU backend into the APK and bundle the 9 QAIRT / Genie runtime `.so`s
+  into `lib/arm64-v8a/`. The libs are proprietary (Qualcomm licence) and
+  git-ignored — stage them into `jniLibs/arm64-v8a` first (`adb pull` from the
+  device staging area or copy from a QAIRT SDK; see the
+  [jniLibs staging README](src/crates/primer-gui/gen/android/app/src/main/jniLibs/arm64-v8a/README.md)),
+  then `… --target aarch64 -- --no-default-features --features qnn` produces a
+  ~406 MB APK carrying the libs (verified 2026-06-11 with the v79 bundle staged
+  from the RedMagic 11 Pro).
+
+Both flavours stay BM25-only (no `fastembed`/`ort` on Android, per #157). Still
+ahead: bundling the multi-GB model assets (sub-project 3) and the first
+on-device NPU token (sub-project 4, device-gated). Full prerequisites, env, and
+the QNN build steps:
 [docs/devel/android-build-quickstart.md](docs/devel/android-build-quickstart.md).
 
 ## Building the macOS DMG

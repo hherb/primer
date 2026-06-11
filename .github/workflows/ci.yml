@@ -421,6 +421,23 @@ jobs:
         # the earlier "Export NDK toolchain env" step.
         run: cargo build --target aarch64-linux-android --no-default-features -p primer-gui
 
+      - name: Cross-compile primer-gui --features qnn (Tauri mobile)
+        # Drift-guard for sub-project 2 of the Android-packaging effort: the
+        # QNN-on-Android APK builds `primer-gui` with `--features qnn` (which
+        # chains to `primer-engine/qnn`, pulling QnnBackend + primer-qnn-sys
+        # into the GUI's android-mobile dep graph). The plain primer-gui step
+        # above is qnn-OFF, and the `primer-cli --features qnn` step below
+        # exercises the CLI's dep graph, not the GUI's Tauri-mobile one. This
+        # combination — the qnn FFI seam reaching through `build_qnn_backend`
+        # into the mobile cdylib — is otherwise invisible to CI and would
+        # only surface during a manual `cargo-tauri android build … --features
+        # qnn`. Compiles the cdylib + mobile entry point with qnn active; it
+        # does NOT run Gradle, bundle the (proprietary, git-ignored) QAIRT
+        # `.so`s, or produce an APK. `--no-default-features` keeps it BM25-only
+        # (issue #157), matching the documented build invocation. NDK env vars
+        # are inherited from the earlier "Export NDK toolchain env" step.
+        run: cargo build --target aarch64-linux-android --no-default-features -p primer-gui --features qnn
+
       - name: Cross-compile primer-qnn-sys
         # The Phase 1.2 Genie/QNN FFI crate is `target_os = "android"`-gated
         # for its real-dlopen path; on every other target `GenieLibrary::open`
