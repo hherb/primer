@@ -135,6 +135,20 @@ pub struct GenieLibrary {
     pub dialog_query: GenieDialog_query_fn,
     /// `GenieDialog_free` entry point.
     pub dialog_free: GenieDialog_free_fn,
+
+    /// `GenieLog_create` entry point — **optional**. `None` when the loaded
+    /// `libGenie.so` does not export the logging API. The Primer uses this
+    /// (with [`Self::config_bind_logger`]) to route DSP-init diagnostics to
+    /// a file on Android, where some ROMs have a dead `logcat`. Logging is
+    /// best-effort: an absent symbol leaves the streaming path untouched.
+    pub log_create: Option<GenieLog_create_fn>,
+    /// `GenieLog_free` entry point — **optional** (paired with
+    /// [`Self::log_create`]).
+    pub log_free: Option<GenieLog_free_fn>,
+    /// `GenieDialogConfig_bindLogger` entry point — **optional**. Binds a
+    /// logger to a dialog config so the logger is inherited by dialogs
+    /// created from it. `None` when the loaded library lacks the symbol.
+    pub config_bind_logger: Option<GenieDialogConfig_bindLogger_fn>,
 }
 
 impl GenieLibrary {
@@ -215,6 +229,18 @@ impl GenieLibrary {
             "GenieDialog_free",
         )?;
 
+        // Logging symbols are optional: a `libGenie.so` that doesn't export
+        // them must not fail the whole backend (which already reaches
+        // `GenieDialog_create` without them). Resolve best-effort; `None`
+        // simply disables the file-logging diagnostic.
+        let log_create =
+            resolve_optional_symbol::<GenieLog_create_fn>(&library, SYM_GENIE_LOG_CREATE);
+        let log_free = resolve_optional_symbol::<GenieLog_free_fn>(&library, SYM_GENIE_LOG_FREE);
+        let config_bind_logger = resolve_optional_symbol::<GenieDialogConfig_bindLogger_fn>(
+            &library,
+            SYM_GENIE_DIALOG_CONFIG_BIND_LOGGER,
+        );
+
         Ok(Self {
             _library: library,
             config_create_from_json,
@@ -222,6 +248,9 @@ impl GenieLibrary {
             dialog_create,
             dialog_query,
             dialog_free,
+            log_create,
+            log_free,
+            config_bind_logger,
         })
     }
 
@@ -285,6 +314,25 @@ fn resolve_symbol<T: Copy>(
             })?
     };
     Ok(*symbol)
+}
+
+/// Resolve an **optional** function-shaped symbol, returning `None` when
+/// the loaded library does not export it.
+///
+/// Unlike [`resolve_symbol`], a missing symbol is not an error: the Genie
+/// logging entry points (`GenieLog_create`, `GenieLog_free`,
+/// `GenieDialogConfig_bindLogger`) are a best-effort diagnostic that must
+/// never regress the core streaming path, which a `libGenie.so` without
+/// these symbols still supports. Same `T: Copy` function-pointer
+/// flattening as [`resolve_symbol`].
+#[cfg(target_os = "android")]
+fn resolve_optional_symbol<T: Copy>(library: &Library, name: &[u8]) -> Option<T> {
+    // SAFETY: identical contract to `resolve_symbol` — `name` is
+    // NUL-terminated and `T` matches the upstream typedef. The only
+    // difference is that a resolution failure maps to `None` rather than
+    // an error, so an older library degrades gracefully.
+    let symbol = unsafe { library.get::<T>(name) }.ok()?;
+    Some(*symbol)
 }
 
 #[cfg(test)]

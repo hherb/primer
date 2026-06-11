@@ -36,6 +36,27 @@ pub fn mobile_seed_dir(app_data: &Path) -> PathBuf {
 /// firmware keeps its own Hexagon skels.
 const ADSP_SYSTEM_FALLBACK_DIRS: &[&str] = &["/vendor/lib/rfsa/adsp", "/vendor/dsp/cdsp", "/dsp"];
 
+/// Filename under `<app_data>/.primer/` to which the Genie logging
+/// callback is routed (read on-device via `run-as cat`).
+const GENIE_LOG_FILENAME: &str = "genie.log";
+
+/// Environment variable the inference layer reads to enable Genie file
+/// logging (see `primer_inference::qnn::genie`'s `GENIE_LOG_PATH_ENV`).
+/// Only set on mobile, so the const is mobile-gated to avoid a desktop
+/// dead-code warning.
+#[cfg(mobile)]
+const GENIE_LOG_PATH_ENV: &str = "PRIMER_GENIE_LOG_PATH";
+
+/// The on-device path of the Genie diagnostics log: `<app_data>/.primer/
+/// genie.log`. Pure helper — no filesystem access. Sits next to the GUI
+/// config so a developer reads it with the same `run-as cat .primer/...`
+/// idiom used for the config.
+pub fn mobile_genie_log_path(app_data: &Path) -> PathBuf {
+    app_data
+        .join(primer_engine::paths::PRIMER_HOME_DIR)
+        .join(GENIE_LOG_FILENAME)
+}
+
 /// Parse `/proc/self/maps` content and return the directory of the first
 /// mapping whose file path ends in `lib_basename`. Pure helper — the
 /// caller reads `/proc/self/maps`.
@@ -156,7 +177,43 @@ pub fn init_mobile_state(app: &tauri::App) -> Result<(), Box<dyn std::error::Err
 
     set_mobile_seed_dir_if_present(&home);
     set_adsp_library_path_if_present();
+    set_genie_log_path(&home);
     Ok(())
+}
+
+/// Point the Genie logging callback at `<app_data>/.primer/genie.log` by
+/// setting `PRIMER_GENIE_LOG_PATH`, so the cause behind a generic
+/// `GenieDialog_create` -1 (a catch-all that `logcat` would normally show,
+/// but which is dead on some ROMs) is written to a file the developer reads
+/// via `run-as cat`.
+///
+/// Best-effort: creates the `.primer` parent directory if missing and
+/// no-ops when the env var is already set (so an explicit override wins).
+/// When `PRIMER_GENIE_LOG_PATH` is unset the inference layer leaves Genie
+/// logging disabled, so a failure here only forgoes the diagnostic — it
+/// never breaks the backend.
+#[cfg(mobile)]
+pub fn set_genie_log_path(app_data: &Path) {
+    if std::env::var_os(GENIE_LOG_PATH_ENV).is_some() {
+        return;
+    }
+    let log_path = mobile_genie_log_path(app_data);
+    if let Some(parent) = log_path.parent() {
+        // Best-effort; the inference layer's file open will surface a real
+        // error path if this didn't take.
+        let _ = std::fs::create_dir_all(parent);
+    }
+    // SAFETY: called from the Tauri `setup` hook on the main thread before
+    // any session/background task is spawned, so no other thread reads the
+    // environment concurrently. Mirrors `set_adsp_library_path_if_present`.
+    unsafe {
+        std::env::set_var(GENIE_LOG_PATH_ENV, &log_path);
+    }
+    tracing::info!(
+        target: "primer-gui::startup",
+        genie_log_path = %log_path.display(),
+        "routed Genie logging callback to file (logcat is unavailable on some ROMs)"
+    );
 }
 
 /// Point the Hexagon DSP's FastRPC at the QAIRT skel libraries bundled in
@@ -339,6 +396,22 @@ mod tests {
             assert!(v.contains(sys), "missing system fallback {sys}: {v}");
         }
         assert!(!v.contains(','), "must use ';' not ',': {v}");
+    }
+
+    #[test]
+    fn mobile_genie_log_path_is_under_dot_primer() {
+        // The Genie diagnostics log sits next to the GUI config under
+        // `<app_data>/.primer/`, so the same `run-as cat .primer/...`
+        // idiom reads both. Pin the layout the staging/read steps assume.
+        let app_data = Path::new("/data/data/org.theprimer.gui/files");
+        let p = mobile_genie_log_path(app_data);
+        assert_eq!(
+            p,
+            app_data
+                .join(primer_engine::paths::PRIMER_HOME_DIR)
+                .join(GENIE_LOG_FILENAME)
+        );
+        assert!(p.ends_with(".primer/genie.log"), "got {p:?}");
     }
 
     #[test]

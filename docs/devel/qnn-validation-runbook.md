@@ -234,6 +234,31 @@ Either `QAIRT_SDK_ROOT` isn't exported in the shell Android Studio inherited fro
 ### App installs but crashes on launch
 Almost always a missing `.so` in the QAIRT lib dir referenced by the build, **or the SoC allowlist rejecting SM8850** (correction #5 — patch `MainActivity.java`). **Note `logcat` is dead on this ROM** (correction #7), so a `dlopen failed: library "libQnnHtpV79Skel.so" not found` won't surface there — infer it from the app immediately `finish()`ing or failing `loadModel`. Ensure all Hexagon skel libs are packaged into the APK — `app/build.gradle` has a `jniLibs` section that selects which `.so`s to bundle.
 
+### `GenieDialog_create` returns -1 (`GENIE_STATUS_ERROR_GENERAL`) — read behind it with the Genie log file
+
+`-1` is a catch-all (`GENIE_STATUS_ERROR_GENERAL`) that hides the real FastRPC/HTP cause, and **`logcat` is dead on this ROM** (correction #7) so the detail is otherwise invisible. The Primer wires Genie's own logging callback to a **file**: set `PRIMER_GENIE_LOG_PATH` (the GUI does this automatically on Android → `<app_data>/.primer/genie.log`) and read it after a failed session:
+
+```bash
+adb shell run-as org.theprimer.gui cat .primer/genie.log
+```
+
+This routes Genie's `GenieLog_create` + `GenieDialogConfig_bindLogger` diagnostics (incl. the `QnnDsp <E>` lines from the HTP backend) to the file. Mechanism lives in `primer-qnn-sys` (the 3 optional logging symbols) + `primer-inference/src/qnn/genie/log.rs` (process-global file sink + the AArch64 `va_list`→`vsnprintf` bridge).
+
+**The 2026-06-11 finding (overturns the prior "v79 runs on this V81 part" note):** the log showed
+
+```
+Failed in loading stub: dlopen failed: library "libQnnHtpV81Stub.so" not found
+loadRemoteSymbols failed with err 4000
+Failed to load skel, error: 4000
+Transport layer setup failed: 14001
+Failed to parse platform info: 14001
+qnn-api initialization failed!
+```
+
+Our bundle is **QAIRT 2.45** (`libQnnHtp.so` = `v2.45.41.260507231357`) but was staged with only the **V79** per-arch HTP libs. The 2.45 runtime correctly identifies the SM8850 (8 Elite Gen 5) as **V81** and `dlopen`s the host-side `libQnnHtpV81Stub.so` — which was never staged. The HTP arch **is** the blocker (`unsigned PD` is the default here, so unsigned-PD denial was *not* the cause). The device firmware *has* `libQnnHtpV81.so` / `libQnnHtpV81Stub.so` in `/vendor/lib64/` and `libQnnHtpV81Skel.so` in `/vendor/dsp/cdsp/`, but non-root `adb pull` of `/vendor/lib64` is permission-denied, and a firmware lib may be a different QAIRT version than our 2.45 set.
+
+**Fix:** stage the **V81** HTP libs from the *same QAIRT 2.45 SDK* the v79 libs came from — `libQnnHtpV81.so` + `libQnnHtpV81Stub.so` (host, `lib/aarch64-android/`) + `libQnnHtpV81Skel.so` (DSP, `lib/hexagon-v81/unsigned/`) — into `jniLibs/arm64-v8a/` alongside the v79 set, then rebuild + reinstall. The DSP skel is also reachable via the system `ADSP_LIBRARY_PATH` fallback (`/vendor/dsp/cdsp`), but bundling our own keeps it self-contained.
+
 ### Streaming response is gibberish or empty
 Tokenizer mismatch or wrong genie_config.json. Confirm all three files (`*.bin`, `tokenizer.json`, `genie_config.json`) came from the **same export run** — mixing files from different runs is a common foot-gun.
 
