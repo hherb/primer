@@ -164,7 +164,12 @@ impl GenieLibrary for RealGenieLibrary {
 ///
 /// All failure modes are non-fatal (a `tracing::warn!` and `None`): the
 /// dialog is still created without logging, exactly as before this path
-/// existed.
+/// existed. Failures that happen *after* the log file is open (logger
+/// create / bind) are *also* written into the log file via
+/// [`super::log::write_diagnostic`] — on the target ROM `logcat` is dead,
+/// so the file is the only channel where the developer can read why
+/// logging didn't engage (otherwise they'd see a marker-only `genie.log`
+/// with no explanation).
 fn setup_logger(
     lib: &Arc<RawGenieLibrary>,
     cfg_handle: GenieDialogConfig_Handle_t,
@@ -214,6 +219,11 @@ fn setup_logger(
             status,
             "GenieLog_create failed; Genie file logging disabled",
         );
+        // The file is open but no logger is bound; record why here so the
+        // marker-only file isn't a silent dead end on a dead-logcat ROM.
+        super::log::write_diagnostic(&format!(
+            "GenieLog_create failed (status {status}); Genie file logging disabled"
+        ));
         return None;
     }
 
@@ -226,6 +236,14 @@ fn setup_logger(
             status = bind_status,
             "GenieDialogConfig_bindLogger failed; freeing the log handle",
         );
+        // The file is open but the logger never bound, so the Genie
+        // callback will never fire; record why here so the developer
+        // reading `genie.log` (logcat is dead on the target ROM) knows the
+        // diagnostic itself failed rather than the DSP init.
+        super::log::write_diagnostic(&format!(
+            "GenieDialogConfig_bindLogger failed (status {bind_status}); \
+             Genie file logging disabled"
+        ));
         // SAFETY: `log_handle` was just created and not bound; free it.
         unsafe {
             let _ = log_free(log_handle);

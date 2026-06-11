@@ -30,10 +30,13 @@
 //! it as `*mut c_void` and forwards it verbatim to `vsnprintf`, whose own
 //! `va_list` parameter decays the same way. This is the standard
 //! AArch64 `va_list`-forwarding pattern and avoids the unstable
-//! `core::ffi::VaList`. The bridge is `target_os = "android"`-gated; on
-//! the host (where Genie never runs) the callback falls back to recording
-//! the bare `fmt` so the module still compiles and its pure helpers stay
-//! testable.
+//! `core::ffi::VaList`. The bridge is `target_os = "android"`-gated, which
+//! also covers the x86_64 Android emulator: on x86-64 SysV a `va_list` is
+//! `__va_list_tag[1]`, an array that likewise decays to a pointer as an
+//! argument, so the same pass-through is ABI-correct there too (production
+//! hardware is arm64). On the host (where Genie never runs) the callback
+//! falls back to recording the bare `fmt` so the module still compiles and
+//! its pure helpers stay testable.
 
 #[cfg(not(target_os = "android"))]
 use std::ffi::CStr;
@@ -124,11 +127,29 @@ fn write_to_sink(level: GenieLog_Level_t, timestamp: u64, message: &str) {
     }
 }
 
+/// Append a Primer-originated diagnostic line to the sink, prefixed so it
+/// is distinguishable from Genie's own callback output. No-op when no file
+/// is installed. Never panics (poison-recovering lock; write errors
+/// ignored).
+///
+/// This is the channel for reporting logger-setup failures (e.g.
+/// `GenieLog_create` or `GenieDialogConfig_bindLogger` returning
+/// non-success) once the sink file is already open: on the target ROM
+/// `logcat` is dead, so a `tracing::warn!` is invisible and the log file
+/// is the only place the developer can read *why* logging didn't engage.
+pub(crate) fn write_diagnostic(message: &str) {
+    let mut guard = lock_sink();
+    if let Some(file) = guard.as_mut() {
+        let _ = writeln!(file, "[primer] {message}");
+        let _ = file.flush();
+    }
+}
+
 #[cfg(target_os = "android")]
 unsafe extern "C" {
-    /// libc `vsnprintf`. On AArch64 the trailing `va_list` decays to a
-    /// pointer, so we model it as `*mut c_void` and pass the callback's
-    /// own decayed `va_list` pointer straight through.
+    /// libc `vsnprintf`. On AArch64 (and x86-64 SysV) the trailing
+    /// `va_list` decays to a pointer, so we model it as `*mut c_void` and
+    /// pass the callback's own decayed `va_list` pointer straight through.
     fn vsnprintf(buf: *mut c_char, size: usize, fmt: *const c_char, args: *mut c_void) -> i32;
 }
 
@@ -242,8 +263,10 @@ mod tests {
     fn set_genie_log_file_writes_callback_output_to_file() {
         // End-to-end through the global sink: install a temp file, drive
         // the host render path via the callback, and confirm the line
-        // lands. Serialised implicitly because each test installs its own
-        // file path; the marker + appended line are both expected.
+        // lands. This is the only test that installs a sink, so the global
+        // `GENIE_LOG_SINK` mutation does not race another test today — if a
+        // second sink-using test is ever added, both must serialise (e.g.
+        // a shared `Mutex` test guard) since the sink is process-global.
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("genie.log");
         set_genie_log_file(&path).unwrap();
@@ -261,6 +284,10 @@ mod tests {
             );
         }
 
+        // A Primer-originated diagnostic line lands too, prefixed so it is
+        // distinguishable from Genie's own callback output.
+        write_diagnostic("GenieLog_create failed (status -1)");
+
         let contents = std::fs::read_to_string(&path).unwrap();
         assert!(
             contents.contains("=== genie log session start ==="),
@@ -270,6 +297,10 @@ mod tests {
         assert!(
             contents.contains("[WARN ts=42] hello %s"),
             "missing rendered line: {contents:?}"
+        );
+        assert!(
+            contents.contains("[primer] GenieLog_create failed (status -1)"),
+            "missing diagnostic line: {contents:?}"
         );
 
         // Reset the global sink so this test doesn't leak a file handle
