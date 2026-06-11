@@ -58,7 +58,7 @@ The learner model (what the child knows, how deeply they understand it, what top
 
 **Validated platforms (2026-05-26):** Phase 0 text REPL runs end-to-end on a RedMagic 11 Pro (Snapdragon 8 Elite, 24 GB RAM) via Termux — cloud backend against Anthropic, session persistence, full classifier/extractor/comprehension chain. See [docs/devel/redmagic-termux-quickstart.md](docs/devel/redmagic-termux-quickstart.md). On-device Ollama at 4B Q4 on CPU is functionally correct but **too slow for conversational use** — the standalone-phone path is dependent on Phase 1.2 (`QnnBackend` for the Hexagon NPU).
 
-**NPU validated (2026-06-09):** the Qualcomm Genie/QNN inference pipeline was proven on the same RedMagic 11 Pro (SM8850 / Snapdragon 8 Elite Gen 5) — Qwen3-4B-Instruct-2507 (w4a16, 4096 ctx) runs on the Hexagon NPU at **~9.4 tok/s decode, ~190 ms time-to-first-token, ~57 °C peak** (NPU-confirmed). This is **Phase 1.2 step 1.2.0** (device-validation gate) **passed**, via the `chatapp_android` proxy; the remaining piece is exercising the Primer's own `QnnBackend` (`--backend qnn`) on-device. Full report: [docs/handoffs/2026-06-08-qnn-validation-chatapp.md](docs/handoffs/2026-06-08-qnn-validation-chatapp.md).
+**NPU validated (2026-06-09):** the Qualcomm Genie/QNN inference pipeline was proven on the same RedMagic 11 Pro (SM8850 / Snapdragon 8 Elite Gen 5) — Qwen3-4B-Instruct-2507 (w4a16, 4096 ctx) runs on the Hexagon NPU at **~9.4 tok/s decode, ~190 ms time-to-first-token, ~57 °C peak** (NPU-confirmed). This is **Phase 1.2 step 1.2.0** (device-validation gate) **passed**, via the `chatapp_android` proxy. The Primer's *own* `QnnBackend` then **generated tokens on the Hexagon NPU on 2026-06-12** (PR #218) through the Android APK — see the on-device status section below. Full report: [docs/handoffs/2026-06-08-qnn-validation-chatapp.md](docs/handoffs/2026-06-08-qnn-validation-chatapp.md).
 
 ## Architecture
 
@@ -110,7 +110,7 @@ Three backends today, all implementing `InferenceBackend::generate_stream()`:
 
 - **LlamaCppBackend** *(behind the non-default `llamacpp` cargo feature; `llamacpp-metal`/`-cuda`/`-vulkan` add GPU offload)* — embedded llama.cpp inference from a local GGUF via `llama-cpp-2`, fully in-process (no server). The CLI reuses `--model` as the GGUF path, with `--llamacpp-gpu-layers` / `--llamacpp-n-ctx` to tune offload and context. The GGUF's embedded chat template is applied at prompt time. Reasoning-token stripping runs over the raw token stream just like the other backends. A measurement-first throughput benchmark (`cargo run --example llamacpp_bench --features llamacpp -- --model <gguf>`) reports p50/p95 TTFT + mean/min tok/s; on-device numbers are still pending. An optional local→cloud fallback (`--fallback-backend cloud --fallback-model <id>`) keeps a session alive when a local backend is unavailable at startup or fails before streaming a turn; it is off by default so a local-only setup never silently uses the cloud. The desktop GUI mirrors it (Settings → Inference backend → "Fallback backend" picker + "Fallback model" field; default "no fallback — local only").
 
-- **QnnBackend** *(behind the `qnn` cargo feature on `primer-inference`; wired into `primer-cli` behind matching `--features qnn`)* — Qualcomm Hexagon NPU via the Genie SDK, lazy-dlopened from `primer-qnn-sys`. Steps 1.2.2–1.2.5 of the Phase 1.2 plan land the safe wrapper, CLI wiring, and the 4K context budget: `primer-meta.json` parsing, chat-template renderer via `minijinja`, mutex-serialised `GenieDialog` session, ABI smoke check at construction, per-token streaming via a `Box::into_raw` C-ABI callback feeding an `mpsc` channel (the receiver is wrapped as a `TokenStream` and the `GenieDialog_query` call runs inside `tokio::task::spawn_blocking` so the runtime stays healthy under multi-second decode latencies), and `--backend qnn --qnn-bundle-dir <path>` on the REPL with env-var fallbacks (`PRIMER_QNN_BUNDLE_DIR`, `PRIMER_QNN_QAIRT_LIB_DIR`) and a startup warning when every subsystem (classifier / extractor / comprehension) inherits the NPU backend — that configuration serialises all background LLM work behind the chat turn through the dialog mutex. Step 1.2.5 adds a per-backend context budget: because the QnnBackend's `name()` begins `qnn:`, the dialogue manager automatically shrinks the recent-turn window (20 → 12) and the KB retrieval top-K (5 → 3) so the assembled prompt fits a 4K-token model. Step 1.2.6 ships the device benchmark harness — `cargo run --release --example qnn_bench --features qnn` loops a 30-prompt Socratic corpus, measures TTFT and steady-state decode tok/s, samples `/sys/class/thermal`, and emits a pass/fail verdict against the targets (≥ 15 tok/s sustained decode, < 3 s TTFT, ≤ 70 °C); its aggregation logic is host-tested while a real `qnn_bench` run against this backend awaits a device session. **Step 1.2.0 (the device-validation gate) PASSED on the RedMagic 11 Pro (SM8850) on 2026-06-09** via the `chatapp_android` proxy — Qwen3-4B on the Hexagon NPU at ~9.4 tok/s / ~190 ms TTFT / ~57 °C, NPU-confirmed (see [docs/handoffs/2026-06-08-qnn-validation-chatapp.md](docs/handoffs/2026-06-08-qnn-validation-chatapp.md)). So `primer-inference::qnn` is now validated to run on hardware. The Android APK (sub-projects 1–3) installs/boots/renders on the RedMagic and drives a QNN session onto the NPU as far as `GenieDialog_create`; a Genie logging callback wired to a file (PR #217) read behind that call's generic -1 and found the concrete blocker: the QAIRT **2.45** runtime (`libQnnHtp.so v2.45.41…`) detects the SM8850 as a **V81** SoC and `dlopen`s the host-side `libQnnHtpV81Stub.so`, but the bundle was staged with only **V79** per-arch HTP libs (overturning the earlier "v79 runs on this part" assumption). The next milestone (first on-device token) is staging the matching V81 libs into the APK.
+- **QnnBackend** *(behind the `qnn` cargo feature on `primer-inference`; wired into `primer-cli` behind matching `--features qnn`)* — Qualcomm Hexagon NPU via the Genie SDK, lazy-dlopened from `primer-qnn-sys`. Steps 1.2.2–1.2.5 of the Phase 1.2 plan land the safe wrapper, CLI wiring, and the 4K context budget: `primer-meta.json` parsing, chat-template renderer via `minijinja`, mutex-serialised `GenieDialog` session, ABI smoke check at construction, per-token streaming via a `Box::into_raw` C-ABI callback feeding an `mpsc` channel (the receiver is wrapped as a `TokenStream` and the `GenieDialog_query` call runs inside `tokio::task::spawn_blocking` so the runtime stays healthy under multi-second decode latencies), and `--backend qnn --qnn-bundle-dir <path>` on the REPL with env-var fallbacks (`PRIMER_QNN_BUNDLE_DIR`, `PRIMER_QNN_QAIRT_LIB_DIR`) and a startup warning when every subsystem (classifier / extractor / comprehension) inherits the NPU backend — that configuration serialises all background LLM work behind the chat turn through the dialog mutex. Step 1.2.5 adds a per-backend context budget: because the QnnBackend's `name()` begins `qnn:`, the dialogue manager automatically shrinks the recent-turn window (20 → 12) and the KB retrieval top-K (5 → 3) so the assembled prompt fits a 4K-token model. Step 1.2.6 ships the device benchmark harness — `cargo run --release --example qnn_bench --features qnn` loops a 30-prompt Socratic corpus, measures TTFT and steady-state decode tok/s, samples `/sys/class/thermal`, and emits a pass/fail verdict against the targets (≥ 15 tok/s sustained decode, < 3 s TTFT, ≤ 70 °C); its aggregation logic is host-tested while a real `qnn_bench` run against this backend awaits a device session. **Step 1.2.0 (the device-validation gate) PASSED on the RedMagic 11 Pro (SM8850) on 2026-06-09** via the `chatapp_android` proxy — Qwen3-4B on the Hexagon NPU at ~9.4 tok/s / ~190 ms TTFT / ~57 °C, NPU-confirmed (see [docs/handoffs/2026-06-08-qnn-validation-chatapp.md](docs/handoffs/2026-06-08-qnn-validation-chatapp.md)). So `primer-inference::qnn` is now validated to run on hardware. The Android APK (sub-projects 1–5) installs/boots/renders on the RedMagic and, as of 2026-06-12 (PR #218), **generates tokens on the Hexagon NPU** — the Phase 1.2 finish line. Reaching it cleared three DSP-bring-up blockers read behind generic statuses via the PR #217 log-to-file path: staging the coherent QAIRT `2.45.0.260326` **V81** HTP libs (the runtime detects the SM8850 as V81 and demands `libQnnHtpV81Stub.so`, overturning the earlier "v79 runs on this part" assumption); a `<uses-native-library libcdsprpc.so>` manifest declaration so API-31+ permits FastRPC's vendor lib; and `jniLibs.useLegacyPackaging = true` so the DSP skel extracts to a real file FastRPC can push (`extractNativeLibs` defaulted false). A *stable* token across reboots is still gated on contiguous DSP memory (the 4th weight-shared context binary's ~698 MB NSP buffers vs ~374 MB free CMA) — a memory-optimized model export or CMA tuning is the next step. See the on-device status section below.
 
 Future backends (not yet implemented): `RknnBackend` (Rockchip RK1828 NPU).
 
@@ -458,21 +458,30 @@ Both flavours stay BM25-only (no `fastembed`/`ort` on Android, per #157). Full
 prerequisites, env, and the QNN build steps:
 [docs/devel/android-build-quickstart.md](docs/devel/android-build-quickstart.md).
 
-**On-device status (2026-06-11, RedMagic 11 Pro / SM8850).** The QNN APK now
-**installs, boots, and renders** on-device — the Android path-resolution fix
-makes `primer-gui` resolve config/session-DB/cache from the app data dir (Tauri
-`app_data_dir()`, not `$HOME`) and the seed corpus from a staged on-device dir
-(the APK asset namespace isn't `std::fs`-readable). Starting a QNN session drives
-the full stack onto the NPU: `dlopen libGenie.so` by basename → Genie config
-parse + path absolutization → **`GenieDialog_create`** (model load + Hexagon DSP
-init). That last call currently returns **status -1**. The model bundle must be
-staged into the app's *internal* storage (`/data/user/0/<pkg>/files/qnn-bundle`)
-— Android scoped storage hides `adb`-written `/sdcard/Android/data/<pkg>` files
-from the app. `ADSP_LIBRARY_PATH` is now set to the app's `nativeLibraryDir` so
-the DSP can find the bundled v79 skel, but the -1 persists (deeper cause —
-likely DSP signing / unsigned-PD; `logcat` is dead on this ROM, so capturing the
-error behind -1 needs a Genie log callback). v79 binaries are confirmed to run
-on this Gen-5 part (step 1.2.0), so the HTP arch is not the blocker.
+**On-device status (2026-06-12, RedMagic 11 Pro / SM8850).** The Primer's own
+`QnnBackend` **generated tokens on the Hexagon NPU** — the Phase 1.2 finish line.
+Qwen3-4B-w4a16 ran on the DSP and emitted logits/tokens, confirmed in
+`genie.log` (`logcat` is dead on this ROM). Getting there cleared three
+DSP-bring-up blockers, each read behind a generic status via the PR #217
+log-to-file path (PR #218): (1) **missing V81 host stub** → `GenieDialog_create`
+-1 — staged a coherent QAIRT `2.45.0.260326` V81 set (host stub + DSP skel +
+matching `libGenie`/`libQnnHtp` from the *same* build, no version skew; the
+no-login direct-download path is documented in the [jniLibs README](src/crates/primer-gui/gen/android/app/src/main/jniLibs/arm64-v8a/README.md));
+(2) **`libcdsprpc.so` not found in namespace** → added a
+`<uses-native-library>` declaration so API-31+ permits the public FastRPC vendor
+lib; (3) **DSP skel had no real file to push** → `jniLibs.useLegacyPackaging =
+true` extracts native libs to the real `nativeLibraryDir` that `ADSP_LIBRARY_PATH`
+points at (default `extractNativeLibs=false` left the skel only inside the APK).
+The model bundle must be staged into the app's *internal* storage
+(`/data/user/0/<pkg>/files/qnn-bundle`) — Android scoped storage hides
+`adb`-written `/sdcard/Android/data/<pkg>` files from the app. **A *stable* token
+across reboots is still gated on contiguous DSP memory:** the 4th weight-shared
+context binary's NSP buffers (~698 MB) exceed available CMA (~374 MB free on a
+settled boot), so allocation fails after a reboot even though the first run after
+a fresh launch succeeded. The fix (next session) is a memory-optimized model
+export or CMA tuning — `spill-fill-bufsize` and a reduced context `size` were
+tried on-device and don't help (Genie initializes every graph in the binary
+regardless of `size`).
 
 ## Building the macOS DMG
 
