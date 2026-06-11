@@ -10,6 +10,25 @@
 
 use std::path::{Path, PathBuf};
 
+/// Subdirectory under the app's data directory where the seed corpus is
+/// staged on Android. The APK asset namespace (`resource_dir()` →
+/// `asset://localhost/`) is not `std::fs`-readable, so the bundled
+/// `resources/seed/*.jsonl` cannot be discovered the way the desktop
+/// `.app` bundle is; instead a real, app-readable directory is staged
+/// here (e.g. via `adb push`) and pointed at by `PRIMER_SEED_DIR`.
+const MOBILE_SEED_SUBDIR: &str = "seed";
+
+/// The conventional on-device location of the staged seed corpus, given
+/// the app's data directory. Pure helper — no filesystem access.
+///
+/// On Android the seed `*.jsonl` are staged under
+/// `<app_data_dir>/seed/` rather than bundled into the APK assets, since
+/// the asset namespace is not directly readable with `std::fs`. See
+/// [`set_mobile_seed_dir_if_present`] for the discovery + env wiring.
+pub fn mobile_seed_dir(app_data: &Path) -> PathBuf {
+    app_data.join(MOBILE_SEED_SUBDIR)
+}
+
 /// If the current executable is running inside a macOS `.app` bundle,
 /// resolve the directory under `Contents/Resources/` that holds the
 /// bundled seed `*.jsonl` files. Returns `None` otherwise.
@@ -50,6 +69,83 @@ pub fn set_packaged_seed_dir_if_present() {
     tracing::info!(seed_dir = %dir.display(), "resolved packaged seed dir");
 }
 
+/// Initialise the Tauri-managed [`crate::state::AppState`] on mobile,
+/// resolving the data directory from Tauri's path API instead of `$HOME`.
+///
+/// On Android `$HOME` is unset (or points somewhere unwritable), so the
+/// desktop [`crate::resolve_home`] path is wrong. `app.path().app_data_dir()`
+/// resolves to the app-private `/data/data/<bundle-id>/files`, which the
+/// rest of the stack uses as the single base directory: the GUI config
+/// (`<data>/.primer/gui-config.json`), the per-learner session DB
+/// (`<data>/.primer/<slug>.db`), and the voice-asset cache
+/// (`<data>/.cache/primer/models/`) all derive from it via parameters —
+/// `primer-engine` never reads `$HOME` directly. Keeping a single knob is
+/// what makes the desktop path byte-identical (the value is just `$HOME`
+/// there) while Android gets correct app-private storage.
+///
+/// Called from the Tauri `setup` hook because `app.path()` needs the
+/// constructed `App`; the desktop build manages `AppState` before the
+/// builder runs (where `$HOME` is already available without an `App`).
+#[cfg(mobile)]
+pub fn init_mobile_state(app: &tauri::App) -> Result<(), Box<dyn std::error::Error>> {
+    use tauri::Manager;
+
+    let home = app.path().app_data_dir()?;
+    tracing::info!(app_data_dir = %home.display(), "resolved Android app data dir");
+
+    let config = crate::config::load(&home).unwrap_or_else(|e| {
+        // A malformed on-disk config must not keep the app from booting —
+        // mirror the desktop posture in `crate::run`.
+        tracing::error!("loading gui-config.json failed: {e}; using defaults");
+        crate::config::GuiConfig::default()
+    });
+    app.manage(crate::state::AppState::new(home.clone(), config));
+
+    set_mobile_seed_dir_if_present(&home);
+    Ok(())
+}
+
+/// If a staged seed corpus exists under [`mobile_seed_dir`], point
+/// `PRIMER_SEED_DIR` at the directory that actually holds the `*.jsonl`
+/// files so the engine's `auto_seed_if_empty` discovers them. No-op (with
+/// a one-line warning) when nothing is staged — the knowledge base then
+/// starts empty and retrieval gracefully returns no passages, exactly as
+/// on a desktop run with no seed files.
+///
+/// Android cannot reuse the desktop `.app`-bundle mechanism: Tauri's
+/// `resource_dir()` resolves to `asset://localhost/`, which is not a
+/// `std::fs`-readable path, so bundled APK assets can't be enumerated
+/// with `read_dir`. The staging convention is therefore a real on-device
+/// directory (see [`mobile_seed_dir`]).
+#[cfg(mobile)]
+pub fn set_mobile_seed_dir_if_present(app_data: &Path) {
+    if std::env::var_os("PRIMER_SEED_DIR").is_some() {
+        return;
+    }
+    let seed_root = mobile_seed_dir(app_data);
+    match find_jsonl_dir(&seed_root, 0, 8) {
+        Some(dir) => {
+            // SAFETY: called from the Tauri `setup` hook, which runs on the
+            // main thread before the webview event loop dispatches any
+            // command and before any session/background task is spawned, so
+            // no other thread is calling getenv concurrently. Mirrors the
+            // desktop `set_packaged_seed_dir_if_present` justification.
+            unsafe {
+                std::env::set_var("PRIMER_SEED_DIR", &dir);
+            }
+            tracing::info!(seed_dir = %dir.display(), "resolved staged seed dir (Android)");
+        }
+        None => {
+            tracing::warn!(
+                target: "primer-gui::startup",
+                "no staged seed corpus under {}; the knowledge base will start \
+                 empty. Stage seed JSONL there (e.g. `adb push`) to populate it.",
+                seed_root.display()
+            );
+        }
+    }
+}
+
 /// Depth-first search for the first directory under `dir` (inclusive)
 /// containing at least one `*.jsonl` file. Bounded at `max_depth` to
 /// keep startup latency negligible. Subdirs are visited in sorted
@@ -87,6 +183,17 @@ mod tests {
     use super::*;
     use std::fs;
     use tempfile::TempDir;
+
+    #[test]
+    fn mobile_seed_dir_is_seed_subdir_of_app_data() {
+        // On Android the seed corpus cannot be read from the APK asset
+        // namespace (`resource_dir()` is `asset://localhost/`, not a
+        // std::fs path). The convention is a real, app-readable staged
+        // directory under the app's data dir; document + pin it here so
+        // the `adb push` staging step and the resolver agree.
+        let app_data = Path::new("/data/data/com.primer.app/files");
+        assert_eq!(mobile_seed_dir(app_data), app_data.join(MOBILE_SEED_SUBDIR));
+    }
 
     /// Build a fake .app layout under `temp` with an exe at
     /// `Primer.app/Contents/MacOS/primer-gui`. If `jsonl_depth > 0`,

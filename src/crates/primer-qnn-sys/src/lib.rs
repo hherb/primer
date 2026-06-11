@@ -174,7 +174,7 @@ impl GenieLibrary {
 
     #[cfg(target_os = "android")]
     fn open_impl(qairt_lib_dir: &Path) -> Result<Self, GenieLibraryError> {
-        let lib_path = qairt_lib_dir.join(LIBGENIE_BASENAME);
+        let lib_path = genie_load_target(qairt_lib_dir);
 
         // SAFETY: `Library::new` is sound when the path identifies a
         // platform-native shared library and the underlying dynamic loader
@@ -231,6 +231,28 @@ impl GenieLibrary {
     }
 }
 
+/// Resolve the dlopen target for `libGenie.so` from the QAIRT lib dir.
+///
+/// An **empty** `qairt_lib_dir` yields the bare basename `libGenie.so`.
+/// `libloading::Library::new` passes that to `dlopen` verbatim, and a
+/// name with no path separator is resolved through the dynamic linker's
+/// namespace search rather than as a filesystem path. On Android that
+/// namespace includes the app's `nativeLibraryDir`, where an APK's
+/// bundled `lib/arm64-v8a/*.so` are extracted at install time — so the
+/// QAIRT runtime (and its DT_NEEDED dependencies) load without any
+/// caller-supplied path. A non-empty dir is joined with the basename for
+/// an explicit-path load (desktop / staged-SDK layouts).
+///
+/// Pure helper — no filesystem access. Always compiled (and host-tested)
+/// even though it is only *called* on the Android `open_impl` path.
+pub fn genie_load_target(qairt_lib_dir: &Path) -> PathBuf {
+    if qairt_lib_dir.as_os_str().is_empty() {
+        PathBuf::from(LIBGENIE_BASENAME)
+    } else {
+        qairt_lib_dir.join(LIBGENIE_BASENAME)
+    }
+}
+
 /// Resolve a function-shaped symbol from a `libloading::Library` and
 /// flatten the borrow/lifetime layer into a bare `fn` pointer.
 ///
@@ -268,6 +290,30 @@ fn resolve_symbol<T: Copy>(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn genie_load_target_empty_dir_uses_bare_basename_for_linker_search() {
+        // An empty QAIRT lib dir means "let the dynamic linker find it":
+        // a bare basename (no path separator) is what `dlopen` resolves
+        // through its namespace search. On Android that namespace includes
+        // the app's nativeLibraryDir, where the APK's bundled
+        // `lib/arm64-v8a/libGenie.so` is extracted at install time.
+        let target = genie_load_target(Path::new(""));
+        assert_eq!(target, PathBuf::from(LIBGENIE_BASENAME));
+        // It must NOT contain a path separator, or dlopen would treat it
+        // as a path and skip the namespace search.
+        assert!(
+            target.parent().is_none_or(|p| p.as_os_str().is_empty()),
+            "basename load target must have no directory component: {target:?}"
+        );
+    }
+
+    #[test]
+    fn genie_load_target_nonempty_dir_joins_explicit_path() {
+        let dir = Path::new("/opt/qairt/lib/aarch64-android");
+        let target = genie_load_target(dir);
+        assert_eq!(target, dir.join(LIBGENIE_BASENAME));
+    }
 
     /// On the host (macOS/Linux), `GenieLibrary::open` must reject without
     /// any filesystem probe. The exact directory passed does not exist;
