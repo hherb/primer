@@ -61,8 +61,9 @@ The PR #213 on-device validation left the libs at `/data/local/tmp/primer-qnn/qa
 ADB="$HOME/Library/Android/sdk/platform-tools/adb"   # or just `adb` if on PATH
 JNI="src/crates/primer-gui/gen/android/app/src/main/jniLibs/arm64-v8a"
 "$ADB" pull /data/local/tmp/primer-qnn/qairt/. "$JNI/"
-# verify you got the right build:
-( cd "$JNI" && shasum -a 256 -c <(grep -E 'lib.*\.so' README.md | awk '{print $1"  "$2}') )
+# verify you got the right build (the grep anchors on the 64-hex-digit manifest
+# rows so prose mentions of *.so don't leak malformed lines into shasum -c):
+( cd "$JNI" && shasum -a 256 -c <(grep -E '^[0-9a-f]{64}  lib' README.md) )
 ```
 
 ### Option B — copy from a QAIRT SDK install
