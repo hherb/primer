@@ -454,11 +454,25 @@ build today:
   ~406 MB APK carrying the libs (verified 2026-06-11 with the v79 bundle staged
   from the RedMagic 11 Pro).
 
-Both flavours stay BM25-only (no `fastembed`/`ort` on Android, per #157). Still
-ahead: bundling the multi-GB model assets (sub-project 3) and the first
-on-device NPU token (sub-project 4, device-gated). Full prerequisites, env, and
-the QNN build steps:
+Both flavours stay BM25-only (no `fastembed`/`ort` on Android, per #157). Full
+prerequisites, env, and the QNN build steps:
 [docs/devel/android-build-quickstart.md](docs/devel/android-build-quickstart.md).
+
+**On-device status (2026-06-11, RedMagic 11 Pro / SM8850).** The QNN APK now
+**installs, boots, and renders** on-device — the Android path-resolution fix
+makes `primer-gui` resolve config/session-DB/cache from the app data dir (Tauri
+`app_data_dir()`, not `$HOME`) and the seed corpus from a staged on-device dir
+(the APK asset namespace isn't `std::fs`-readable). Starting a QNN session drives
+the full stack onto the NPU: `dlopen libGenie.so` by basename → Genie config
+parse + path absolutization → **`GenieDialog_create`** (model load + Hexagon DSP
+init). That last call currently returns **status -1**. The model bundle must be
+staged into the app's *internal* storage (`/data/user/0/<pkg>/files/qnn-bundle`)
+— Android scoped storage hides `adb`-written `/sdcard/Android/data/<pkg>` files
+from the app. `ADSP_LIBRARY_PATH` is now set to the app's `nativeLibraryDir` so
+the DSP can find the bundled v79 skel, but the -1 persists (deeper cause —
+likely DSP signing / unsigned-PD; `logcat` is dead on this ROM, so capturing the
+error behind -1 needs a Genie log callback). v79 binaries are confirmed to run
+on this Gen-5 part (step 1.2.0), so the HTP arch is not the blocker.
 
 ## Building the macOS DMG
 

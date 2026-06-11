@@ -40,39 +40,58 @@ pub fn resolve_home() -> PathBuf {
 /// the unconfigured default subscriber, the same posture the CLI takes.
 pub fn run() -> Result<(), Box<dyn std::error::Error>> {
     init_tracing();
-    paths::set_packaged_seed_dir_if_present();
-    // Must run before Tauri spawns any worker threads — `set_var` is
-    // unsafe under concurrent libc-getenv on Unix. The Piper TTS in
-    // voice mode needs the system `espeak-ng-data` directory; without
-    // it, phoneme lookup fails at synthesis time (the `espeak-rs-sys`
-    // bundled subset ships without `phontab` and other core files).
-    // Mirrors the CLI's `probe_espeak_ng_data` at primer-cli/src/main.rs.
+
+    // Desktop: resolve `$HOME`-based paths and manage `AppState` BEFORE
+    // the builder runs (byte-identical to the pre-mobile behaviour).
     //
-    // Skipped when `macos-native` is active: the macOS-native path uses
-    // AVSpeechSynthesizer (not Piper), so espeak-ng is structurally unused
-    // and the warning would be unactionable noise for evaluators.
-    #[cfg(all(
-        feature = "speech",
-        not(all(
-            target_os = "macos",
-            any(feature = "macos-native", feature = "macos-native-26")
-        ))
-    ))]
-    probe_espeak_ng_data();
+    // Mobile (Android/iOS): `$HOME` is wrong and `app.path()` needs the
+    // constructed `App`, so the equivalent setup is deferred into the
+    // `.setup()` hook below via `paths::init_mobile_state`. The builder
+    // therefore starts un-managed on mobile.
+    #[cfg(not(mobile))]
+    let builder = {
+        paths::set_packaged_seed_dir_if_present();
+        // Must run before Tauri spawns any worker threads — `set_var` is
+        // unsafe under concurrent libc-getenv on Unix. The Piper TTS in
+        // voice mode needs the system `espeak-ng-data` directory; without
+        // it, phoneme lookup fails at synthesis time (the `espeak-rs-sys`
+        // bundled subset ships without `phontab` and other core files).
+        // Mirrors the CLI's `probe_espeak_ng_data` at primer-cli/src/main.rs.
+        //
+        // Skipped when `macos-native` is active: the macOS-native path uses
+        // AVSpeechSynthesizer (not Piper), so espeak-ng is structurally unused
+        // and the warning would be unactionable noise for evaluators.
+        #[cfg(all(
+            feature = "speech",
+            not(all(
+                target_os = "macos",
+                any(feature = "macos-native", feature = "macos-native-26")
+            ))
+        ))]
+        probe_espeak_ng_data();
 
-    let home = resolve_home();
-    let config = config::load(&home).unwrap_or_else(|e| {
-        // A malformed on-disk config shouldn't keep the GUI from
-        // booting — the user needs an interface to fix it. Log and
-        // start with defaults; `update_settings` will overwrite on
-        // first save.
-        tracing::error!("loading gui-config.json failed: {e}; using defaults");
-        config::GuiConfig::default()
-    });
-    let state = state::AppState::new(home, config);
+        let home = resolve_home();
+        let config = config::load(&home).unwrap_or_else(|e| {
+            // A malformed on-disk config shouldn't keep the GUI from
+            // booting — the user needs an interface to fix it. Log and
+            // start with defaults; `update_settings` will overwrite on
+            // first save.
+            tracing::error!("loading gui-config.json failed: {e}; using defaults");
+            config::GuiConfig::default()
+        });
+        tauri::Builder::default().manage(state::AppState::new(home, config))
+    };
+    #[cfg(mobile)]
+    let builder = tauri::Builder::default();
 
-    let builder = tauri::Builder::default().manage(state);
     let builder = commands::register(builder);
+
+    // Mobile: construct + manage `AppState` here, where `app.path()` is
+    // available. Desktop already managed it above, so no setup hook is
+    // added there (keeps the desktop builder chain unchanged).
+    #[cfg(mobile)]
+    let builder = builder.setup(|app| paths::init_mobile_state(app));
+
     builder
         .run(tauri::generate_context!())
         .map_err(|e| Box::new(e) as Box<dyn std::error::Error>)
@@ -90,11 +109,12 @@ pub fn run() -> Result<(), Box<dyn std::error::Error>> {
 /// Compiled only under the `mobile` cfg (set by `tauri-build` for Android
 /// and iOS targets), so the desktop build is byte-identical to before.
 ///
-/// Known gap (tracked for sub-project 2+): `run()` resolves `~/.primer/`
-/// via `$HOME` and the seed corpus via bundled `resources/`, which differ
-/// on Android (app-specific dirs via Tauri's path API). This entry point
-/// only needs to *compile and link* for the scaffold; correct on-device
-/// path resolution is deferred.
+/// On-device path resolution is handled by [`run`]'s `.setup()` hook via
+/// [`paths::init_mobile_state`], which resolves the app data dir from
+/// Tauri's path API (not `$HOME`) and stages the seed corpus from an
+/// app-readable directory (the APK asset namespace is not `std::fs`-
+/// readable). Config, session DB, and the voice cache all derive from
+/// that single app-data base.
 #[cfg(mobile)]
 #[tauri::mobile_entry_point]
 fn mobile_entry_point() {
@@ -106,8 +126,30 @@ fn mobile_entry_point() {
 fn init_tracing() {
     use tracing_subscriber::EnvFilter;
     let filter = EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("info"));
-    if let Err(e) = tracing_subscriber::fmt().with_env_filter(filter).try_init() {
-        eprintln!("tracing init failed: {e}");
+
+    // Android discards a process's stdout/stderr, so the default
+    // stdout-writing subscriber produces nothing visible in `adb logcat`.
+    // Route `tracing` through a logcat writer (tag "primer") so on-device
+    // diagnostics — backend construction, path resolution, errors — are
+    // observable. ANSI is off because logcat renders escape codes literally.
+    #[cfg(target_os = "android")]
+    {
+        if let Err(e) = tracing_subscriber::fmt()
+            .with_env_filter(filter)
+            .with_writer(paranoid_android::AndroidLogMakeWriter::new(
+                "primer".to_owned(),
+            ))
+            .with_ansi(false)
+            .try_init()
+        {
+            eprintln!("tracing init failed: {e}");
+        }
+    }
+    #[cfg(not(target_os = "android"))]
+    {
+        if let Err(e) = tracing_subscriber::fmt().with_env_filter(filter).try_init() {
+            eprintln!("tracing init failed: {e}");
+        }
     }
 }
 

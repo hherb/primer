@@ -120,6 +120,41 @@ pub fn default_qairt_lib_dir(bundle_dir: &Path) -> PathBuf {
         .unwrap_or_else(|| PathBuf::from("qairt/lib/aarch64-android"))
 }
 
+/// Resolve the QAIRT runtime-library directory to hand the QNN backend,
+/// given the user's optional override and the bundle dir.
+///
+/// Platform-aware (delegates to the pure [`resolve_qairt_lib_dir_for`]):
+///
+/// - **Android:** the 9 QAIRT `.so`s ship inside the APK's
+///   `lib/arm64-v8a/` and are extracted to the app's `nativeLibraryDir`,
+///   which the system linker already searches. An absent override
+///   therefore resolves to an **empty** path, signalling
+///   [`primer_inference::QnnBackend`] to dlopen `libGenie.so` by
+///   *basename* (so the linker finds it and its DT_NEEDED deps in
+///   nativeLibraryDir). `qnn_qairt_lib_dir` is thus unnecessary on-device.
+/// - **Desktop / non-Android:** an absent override falls back to the
+///   conventional bundle-relative [`default_qairt_lib_dir`] layout.
+///
+/// An explicit override always wins on every platform.
+pub fn resolve_qairt_lib_dir(explicit: Option<PathBuf>, bundle_dir: &Path) -> PathBuf {
+    resolve_qairt_lib_dir_for(explicit, bundle_dir, cfg!(target_os = "android"))
+}
+
+/// Pure core of [`resolve_qairt_lib_dir`] with the platform decision
+/// lifted to an explicit `is_android` parameter so both branches are
+/// host-testable. See [`resolve_qairt_lib_dir`] for the rationale.
+fn resolve_qairt_lib_dir_for(
+    explicit: Option<PathBuf>,
+    bundle_dir: &Path,
+    is_android: bool,
+) -> PathBuf {
+    match explicit {
+        Some(dir) => dir,
+        None if is_android => PathBuf::new(),
+        None => default_qairt_lib_dir(bundle_dir),
+    }
+}
+
 /// Outcome of the main-backend construction decision. See the truth table
 /// in docs/superpowers/specs/2026-06-05-local-cloud-fallback-design.md.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -397,10 +432,7 @@ async fn build_qnn_backend(params: &BackendParams) -> Result<Arc<dyn InferenceBa
                 .into(),
         )
     })?;
-    let qairt_lib_dir = params
-        .qnn_qairt_lib_dir
-        .clone()
-        .unwrap_or_else(|| default_qairt_lib_dir(bundle_dir));
+    let qairt_lib_dir = resolve_qairt_lib_dir(params.qnn_qairt_lib_dir.clone(), bundle_dir);
     let backend = primer_inference::QnnBackend::new(bundle_dir.clone(), qairt_lib_dir).await?;
     Ok(Arc::new(backend))
 }
@@ -1237,6 +1269,48 @@ mod qnn_dispatch_tests {
         // On `/`, `.parent()` is `None`, so we fall back to the bare
         // relative path. Exact form is documented in the helper.
         assert_eq!(lib, PathBuf::from("qairt/lib/aarch64-android"));
+    }
+
+    #[test]
+    fn resolve_qairt_lib_dir_passes_explicit_through_on_every_platform() {
+        // An explicit override always wins, regardless of platform — the
+        // user knows exactly where their QAIRT libs are.
+        let bundle = PathBuf::from("/home/user/bundles/qwen3-4b");
+        let explicit = PathBuf::from("/opt/qairt/lib/aarch64-android");
+        for is_android in [false, true] {
+            assert_eq!(
+                resolve_qairt_lib_dir_for(Some(explicit.clone()), &bundle, is_android),
+                explicit,
+                "explicit override must pass through (is_android={is_android})"
+            );
+        }
+    }
+
+    #[test]
+    fn resolve_qairt_lib_dir_android_absent_yields_empty_for_basename_load() {
+        // On Android the 9 QAIRT `.so`s ship inside the APK's
+        // `lib/arm64-v8a/` (extracted to nativeLibraryDir). An absent
+        // override must resolve to an EMPTY path, which signals the QNN
+        // backend to dlopen `libGenie.so` by basename so the system
+        // linker resolves it (and its DT_NEEDED deps) from that dir.
+        let bundle = PathBuf::from("/data/local/bundles/qwen3-4b");
+        assert_eq!(
+            resolve_qairt_lib_dir_for(None, &bundle, true),
+            PathBuf::new(),
+            "Android + no override must yield empty (basename load)"
+        );
+    }
+
+    #[test]
+    fn resolve_qairt_lib_dir_desktop_absent_falls_back_to_bundle_relative() {
+        // On desktop an absent override keeps today's behaviour: the
+        // conventional `<bundle>/../qairt/lib/aarch64-android` layout.
+        let bundle = PathBuf::from("/home/user/bundles/qwen3-4b");
+        assert_eq!(
+            resolve_qairt_lib_dir_for(None, &bundle, false),
+            default_qairt_lib_dir(&bundle),
+            "desktop + no override must use the bundle-relative default"
+        );
     }
 
     /// Without the `qnn` feature, the dispatch arm hands back a build
