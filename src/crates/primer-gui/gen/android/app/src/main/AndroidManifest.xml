@@ -10,6 +10,18 @@
         android:label="@string/app_name"
         android:theme="@style/Theme.primer_gui"
         android:usesCleartextTraffic="${usesCleartextTraffic}">
+        <!--
+          QNN/Genie on the Hexagon NPU reaches the DSP through FastRPC. The HTP
+          backend's per-arch stub (libQnnHtpV81Stub.so) dlopen's libcdsprpc.so,
+          a vendor library listed in /vendor/etc/public.libraries.txt. On API
+          31+ an app's linker namespace refuses even public vendor libs unless
+          they are declared here, so without this the DSP transport fails with
+          `dlopen failed: library "libcdsprpc.so" not found ... in namespace
+          clns-9` -> loadRemoteSymbols err 4000 -> Transport layer setup failed
+          (read from the on-device genie.log). required=false so non-Qualcomm
+          devices (and the default non-qnn build) still install.
+        -->
+        <uses-native-library android:name="libcdsprpc.so" android:required="false" />
         <activity
             android:configChanges="orientation|keyboardHidden|keyboard|screenSize|locale|smallestScreenSize|screenLayout|uiMode"
             android:launchMode="singleTask"
