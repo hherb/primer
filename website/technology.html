@@ -1,0 +1,116 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Technology — The Primer</title>
+<meta name="description" content="The Primer's local-first architecture: private by design, swappable inference backends from cloud to a phone's neural processor, and a working voice loop — all open source.">
+<link rel="canonical" href="https://primer-ai.org/technology">
+<link rel="icon" type="image/png" href="assets/emblem.png">
+<meta property="og:title" content="Technology — The Primer">
+<meta property="og:description" content="Private by architecture: fully offline operation, swappable inference backends from cloud to a phone's neural processor, and a working voice loop.">
+<meta property="og:image" content="https://primer-ai.org/assets/banner.png">
+<meta property="og:url" content="https://primer-ai.org/technology">
+<meta property="og:type" content="article">
+<meta name="twitter:card" content="summary_large_image">
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+
+<header class="site-header">
+  <div class="header-inner">
+    <a class="brand" href="index.html"><img class="brand-mark" src="assets/emblem.png" alt=""><span>The Primer</span></a>
+    <nav class="site-nav">
+      <a href="vision.html">Vision</a>
+      <a href="technology.html" aria-current="page">Technology</a>
+      <a href="roadmap.html">Roadmap</a>
+      <a href="get-involved.html">Get involved</a>
+    </nav>
+  </div>
+</header>
+
+<main class="container">
+
+<div class="page-hero">
+  <p class="eyebrow">Technology</p>
+  <h1>Private by architecture</h1>
+  <p class="lede">The Primer's privacy promises aren't policy — they're structure. The system is designed so that learner data physically cannot leave the device, and so that the entire experience works with the network cable cut.</p>
+</div>
+
+<section class="section">
+  <h2>Local-first, cloud-optional</h2>
+  <div class="prose">
+    <p>The Primer runs airgapped: language model, speech recognition, speech synthesis, knowledge base, and the child's learning record all live and execute on the device. Families who choose cloud inference for better conversation quality send individual conversation turns per request — nothing is stored server-side, and the learner model never travels at all.</p>
+    <p>This is the inverse of the usual ed-tech architecture, where the child's data lives on the company's servers and the product stops working when the subscription does.</p>
+  </div>
+</section>
+
+<section class="section">
+  <h2>One engine, many brains</h2>
+  <div class="prose">
+    <p>The pedagogical engine — the part that decides whether this moment calls for a guiding question, scaffolding, or a comprehension probe — is completely decoupled from the language model behind it. Swapping the model is a configuration choice, not a rewrite. The same engine runs against:</p>
+  </div>
+  <div class="grid" style="margin-top: 24px;">
+    <div class="card">
+      <h3>Cloud models</h3>
+      <p>Anthropic's Claude or any OpenAI-compatible provider, for the highest conversation quality where connectivity and trust allow.</p>
+    </div>
+    <div class="card">
+      <h3>Local models</h3>
+      <p>Open-weight models running in-process on a laptop or desktop — CPU or GPU — with no network at all.</p>
+    </div>
+    <div class="card">
+      <h3>Phone neural processors</h3>
+      <p>A 4-billion-parameter model on a Snapdragon phone's Hexagon NPU: ~9.4 tokens/s, first token in ~190&nbsp;ms, validated on hardware in June&nbsp;2026.</p>
+    </div>
+    <div class="card">
+      <h3>Hybrid routing</h3>
+      <p>An optional per-turn router keeps routine conversation local and escalates only complex turns to a cloud model — opt-in, never default.</p>
+    </div>
+  </div>
+</section>
+
+<section class="section">
+  <h2>What works today</h2>
+  <div class="prose">
+    <p>This is running software, demonstrable end-to-end on a developer laptop and (text mode) on an Android phone:</p>
+    <ul>
+      <li><strong>Streaming Socratic conversation</strong> with session persistence, resume, and long-term memory that spans hours of dialogue without losing the thread.</li>
+      <li><strong>A live learner model</strong> — an engagement classifier, a concept extractor, and a comprehension assessor run quietly behind every exchange, recording what the child encountered and how deeply they understood it.</li>
+      <li><strong>Spaced-repetition vocabulary</strong> woven passively into conversation at expanding intervals — no drilling, no quizzes.</li>
+      <li><strong>A curated children's knowledge base</strong> — hand-drafted passages plus licensed children's-encyclopedia layers in English and German, searched with hybrid lexical + semantic retrieval, with full source attribution.</li>
+      <li><strong>A complete offline voice loop</strong> — voice activity detection, on-device transcription, generation, and natural speech synthesis, with strict turn-taking: the Primer never speaks over the child, and never lets itself be trained to interrupt.</li>
+      <li><strong>A desktop app and CLI</strong> — including a developer-facing view of every pedagogical decision the engine makes, per turn.</li>
+      <li><strong>Multilingual prompt packs</strong> — English and German production-ready, Hindi in preview; the architecture keeps every user-facing string out of the code so new languages are data, not development.</li>
+      <li><strong>Safety plumbing</strong> — chain-of-thought from reasoning models is stripped before it can reach a child, and inference failures degrade to friendly, age-appropriate messages.</li>
+    </ul>
+  </div>
+</section>
+
+<section class="section">
+  <h2>Validated platforms</h2>
+  <div class="prose">
+    <ul>
+      <li><strong>macOS and Linux</strong> — full experience: desktop app, CLI, and voice loop (with native Apple speech engines on macOS).</li>
+      <li><strong>Android (Snapdragon 8 Elite)</strong> — text conversation validated on-device May&nbsp;2026; the neural-processor inference pipeline validated June&nbsp;2026 at ~9.4 tokens/s, ~190&nbsp;ms to first token, 57&nbsp;°C peak — comfortably inside thermal limits.</li>
+    </ul>
+    <p>The path to a dedicated, child-friendly device — the Primer as an object a child holds, not an app on a parent's laptop — runs through this phone-class silicon. See the <a href="roadmap.html">roadmap</a>.</p>
+  </div>
+</section>
+
+<section class="section">
+  <h2>Built to be inspected</h2>
+  <div class="prose">
+    <p>The Primer is written in Rust — a single codebase from the pedagogy engine down to the device integration — and licensed under the AGPL. For a product whose users are children, "trust us" is not an acceptable privacy model; the only honest answer is source code anyone can read, build, and verify. The knowledge corpus ships with per-passage licensing and attribution, and every claim on this page corresponds to code you can run from the <a href="https://github.com/hherb/primer">public repository</a>.</p>
+  </div>
+</section>
+
+</main>
+
+<footer class="site-footer">
+  <p><a href="mailto:contact@primer-ai.org">contact@primer-ai.org</a> · <a href="https://github.com/hherb/primer">GitHub</a></p>
+  <p class="fineprint">© 2026 The Primer project · Code licensed <a href="https://www.gnu.org/licenses/agpl-3.0.html">AGPL-3.0</a> · This site sets no cookies and loads nothing from third parties.</p>
+</footer>
+
+</body>
+</html>
