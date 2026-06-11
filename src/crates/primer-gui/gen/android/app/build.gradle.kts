@@ -41,6 +41,11 @@ android {
                 // skel, error: 1002` after `First connection to QNN stub established`
                 // (read from the on-device genie.log). The manifest extractNativeLibs
                 // attribute is overridden by AGP, so this gradle knob is authoritative.
+                //
+                // NB: this lives in the `debug` build type only — the QNN APK is
+                // built `--debug` today. A future `release` QNN build must set the
+                // same `jniLibs.useLegacyPackaging = true` or DSP bring-up will
+                // regress to `Failed to load skel, error: 1002`.
                 jniLibs.useLegacyPackaging = true
                 jniLibs.keepDebugSymbols.add("*/arm64-v8a/*.so")
                 jniLibs.keepDebugSymbols.add("*/armeabi-v7a/*.so")

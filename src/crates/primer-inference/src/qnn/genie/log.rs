@@ -148,6 +148,16 @@ pub(crate) fn set_genie_log_threshold(level: GenieLog_Level_t) {
     GENIE_LOG_THRESHOLD.store(level, Ordering::Relaxed);
 }
 
+/// Whether a message at `level` should be written given the active `threshold`.
+/// Genie levels are *lower-is-more-severe* (ERROR=1 … VERBOSE=4), so a message
+/// is emitted only when its level is at or below the threshold. Pure — this is
+/// the per-callback gate that caps the per-token firehose, factored out of the
+/// `unsafe extern "C"` callback so it can be host-tested. Used by
+/// [`genie_log_callback`].
+pub(crate) fn should_emit(level: GenieLog_Level_t, threshold: GenieLog_Level_t) -> bool {
+    level <= threshold
+}
+
 /// Format one log line: `[LEVEL ts=<timestamp>] <message>`. The message is
 /// trimmed of a trailing newline so the writer's own `writeln!` is the
 /// single line terminator. Pure — host-tested.
@@ -264,7 +274,7 @@ pub(crate) unsafe extern "C" fn genie_log_callback(
     }
     // Drop messages more verbose than the configured threshold before paying
     // the `vsnprintf` render cost — this is what caps the per-token firehose.
-    if level > GENIE_LOG_THRESHOLD.load(Ordering::Relaxed) {
+    if !should_emit(level, GENIE_LOG_THRESHOLD.load(Ordering::Relaxed)) {
         return;
     }
     // SAFETY: forwarded straight from the callback contract; `render_message`
@@ -396,5 +406,36 @@ mod tests {
         assert_eq!(parse_genie_log_level(Some("")), DEFAULT_GENIE_LOG_LEVEL);
         assert_eq!(parse_genie_log_level(Some("loud")), DEFAULT_GENIE_LOG_LEVEL);
         assert_eq!(DEFAULT_GENIE_LOG_LEVEL, GENIE_LOG_LEVEL_WARN);
+    }
+
+    #[test]
+    fn should_emit_gates_on_lower_is_more_severe_ordering() {
+        // At the default WARN threshold: ERROR/WARN pass, INFO/VERBOSE drop.
+        let threshold = GENIE_LOG_LEVEL_WARN;
+        assert!(should_emit(GENIE_LOG_LEVEL_ERROR, threshold));
+        assert!(should_emit(GENIE_LOG_LEVEL_WARN, threshold));
+        assert!(!should_emit(GENIE_LOG_LEVEL_INFO, threshold));
+        assert!(!should_emit(GENIE_LOG_LEVEL_VERBOSE, threshold));
+    }
+
+    #[test]
+    fn should_emit_at_verbose_threshold_passes_every_level() {
+        // The deep-debug opt-in (PRIMER_GENIE_LOG_LEVEL=verbose) lets the full
+        // firehose through — nothing is dropped at the most-verbose threshold.
+        let threshold = GENIE_LOG_LEVEL_VERBOSE;
+        assert!(should_emit(GENIE_LOG_LEVEL_ERROR, threshold));
+        assert!(should_emit(GENIE_LOG_LEVEL_WARN, threshold));
+        assert!(should_emit(GENIE_LOG_LEVEL_INFO, threshold));
+        assert!(should_emit(GENIE_LOG_LEVEL_VERBOSE, threshold));
+    }
+
+    #[test]
+    fn should_emit_at_error_threshold_passes_only_error() {
+        // The strictest threshold keeps only the most-severe line.
+        let threshold = GENIE_LOG_LEVEL_ERROR;
+        assert!(should_emit(GENIE_LOG_LEVEL_ERROR, threshold));
+        assert!(!should_emit(GENIE_LOG_LEVEL_WARN, threshold));
+        assert!(!should_emit(GENIE_LOG_LEVEL_INFO, threshold));
+        assert!(!should_emit(GENIE_LOG_LEVEL_VERBOSE, threshold));
     }
 }
