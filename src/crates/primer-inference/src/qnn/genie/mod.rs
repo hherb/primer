@@ -214,6 +214,49 @@ pub(crate) fn classify_query_status(status: Genie_Status_t) -> QueryOutcome {
     }
 }
 
+/// Emit the terminal stream item for a classified `GenieDialog_query`
+/// outcome on `sender`. Extracted from the FFI path in [`real`] so the
+/// graceful-vs-error emission is host-tested without an FFI round-trip
+/// (the real path is `#[cfg(target_os = "android")]`-effective only).
+///
+/// - [`QueryOutcome::Complete`] / [`QueryOutcome::ContextLimit`]: the reply
+///   already streamed in full via the token callback, so both close the
+///   turn with a done chunk. `ContextLimit` additionally warns so the
+///   small-context prompt budget (`primer-pedagogy`) can be tuned against
+///   the overflow. (A context-limit reply can stop mid-sentence — softening
+///   that for children is tracked in
+///   <https://github.com/hherb/primer/issues/224>.)
+/// - [`QueryOutcome::Error`]: surface the failure and emit **no** done
+///   chunk — a genuine fault must drop the partial turn (see the
+///   [`GenieDialog::query_streaming`] trait docs for the rationale).
+pub(crate) fn emit_query_outcome(
+    outcome: QueryOutcome,
+    status: Genie_Status_t,
+    sender: &UnboundedSender<PrimerResult<TokenChunk>>,
+) {
+    match outcome {
+        QueryOutcome::Complete | QueryOutcome::ContextLimit => {
+            if outcome == QueryOutcome::ContextLimit {
+                tracing::warn!(
+                    target: "primer::qnn",
+                    "GenieDialog_query hit the context limit (status {status}); completing the turn with the streamed reply"
+                );
+            }
+            let _ = sender.unbounded_send(Ok(TokenChunk {
+                text: String::new(),
+                done: true,
+            }));
+        }
+        QueryOutcome::Error => {
+            let err = GenieCallError::NonSuccess {
+                operation: "GenieDialog_query",
+                status,
+            };
+            let _ = sender.unbounded_send(Err(err.to_primer_error()));
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -246,6 +289,61 @@ mod tests {
                 "status {status} should be an error"
             );
         }
+    }
+
+    #[test]
+    fn emit_complete_outcome_sends_one_done_chunk() {
+        use futures::StreamExt;
+        use futures::executor::block_on;
+        let (tx, mut rx) = futures::channel::mpsc::unbounded::<PrimerResult<TokenChunk>>();
+        emit_query_outcome(QueryOutcome::Complete, GENIE_STATUS_SUCCESS, &tx);
+        drop(tx); // close the channel so the second `next()` resolves to None
+        let chunk = block_on(rx.next())
+            .expect("a terminal item")
+            .expect("complete is Ok, not Err");
+        assert!(chunk.done, "complete must emit a done chunk");
+        assert_eq!(chunk.text, "", "the done chunk carries no text");
+        assert!(
+            block_on(rx.next()).is_none(),
+            "exactly one terminal item, then the channel closes"
+        );
+    }
+
+    #[test]
+    fn emit_context_limit_outcome_completes_gracefully() {
+        // The reply already streamed via the token callback, so a
+        // context-limit return closes the turn with a done chunk (NOT an
+        // error) — the same shape as Complete.
+        use futures::StreamExt;
+        use futures::executor::block_on;
+        let (tx, mut rx) = futures::channel::mpsc::unbounded::<PrimerResult<TokenChunk>>();
+        emit_query_outcome(
+            QueryOutcome::ContextLimit,
+            GENIE_STATUS_CONTEXT_LIMIT_EXCEEDED,
+            &tx,
+        );
+        drop(tx);
+        let chunk = block_on(rx.next())
+            .expect("a terminal item")
+            .expect("context-limit completes gracefully (Ok), not Err");
+        assert!(chunk.done, "context limit must still emit a done chunk");
+    }
+
+    #[test]
+    fn emit_error_outcome_sends_err_and_no_done_chunk() {
+        // A genuine fault surfaces an Err and emits NO done chunk, so the
+        // dialogue manager drops the partial turn.
+        use futures::StreamExt;
+        use futures::executor::block_on;
+        let (tx, mut rx) = futures::channel::mpsc::unbounded::<PrimerResult<TokenChunk>>();
+        emit_query_outcome(QueryOutcome::Error, -1, &tx);
+        drop(tx);
+        let item = block_on(rx.next()).expect("a terminal item");
+        assert!(item.is_err(), "error outcome must surface an Err");
+        assert!(
+            block_on(rx.next()).is_none(),
+            "no done chunk follows a genuine error"
+        );
     }
 
     #[test]

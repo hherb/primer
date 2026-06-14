@@ -97,6 +97,10 @@ pub const GENIE_STATUS_SUCCESS: Genie_Status_t = 0;
 /// 2.45, RedMagic 11 Pro, cl2048 bundle): `~/qnn-export-2048/`
 /// `genie-status4-diagnosis.txt`. All other non-success codes stay hard
 /// errors so a genuine ABI mismatch is never masked.
+///
+/// The value is reverse-engineered from `genie.log`, not read from a
+/// header (the QAIRT SDK is developer-portal-gated and unvendorable).
+/// Tracked for header confirmation in <https://github.com/hherb/primer/issues/223>.
 pub const GENIE_STATUS_CONTEXT_LIMIT_EXCEEDED: Genie_Status_t = 4;
 
 /// Sentence-completion mode for `GenieDialog_query`.
