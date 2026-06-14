@@ -9,6 +9,7 @@
 
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
+use std::time::Instant;
 
 use async_trait::async_trait;
 use futures::StreamExt;
@@ -21,6 +22,7 @@ use tokio::sync::Mutex;
 
 use super::genie::{GenieDialog, GenieLibrary, RealGenieLibrary};
 use super::meta::PrimerMeta;
+use super::metrics::{MeteredStream, metrics_path_from_env, record_timing};
 use super::template::{ChatTemplate, TemplateError};
 
 /// Filename of the Genie dialog config inside a `genie_bundle` directory.
@@ -79,6 +81,13 @@ pub struct QnnBackend {
     /// concurrent `generate_stream` callers; Genie does not support
     /// concurrent queries on the same dialog handle.
     dialog: Arc<Mutex<Box<dyn GenieDialog>>>,
+    /// Optional per-turn throughput metrics file (TTFT + decode tok/s), set
+    /// from [`QNN_METRICS_PATH_ENV`](super::metrics::QNN_METRICS_PATH_ENV).
+    /// `None` ⇒ recording disabled (the no-overhead default off-device).
+    /// This is the only on-device channel for real NPU throughput numbers,
+    /// because the standalone `qnn_bench` harness cannot reach the DSP from a
+    /// sideloaded/Termux process on the target ROM.
+    metrics_path: Option<PathBuf>,
 }
 
 impl std::fmt::Debug for QnnBackend {
@@ -158,11 +167,19 @@ impl QnnBackend {
         }
 
         let name = format!("{QNN_NAME_PREFIX}{}", meta.model_id);
+        let metrics_path = metrics_path_from_env();
+        if let Some(path) = &metrics_path {
+            tracing::info!(
+                target: "primer::qnn::metrics",
+                "QNN per-turn throughput metrics enabled; appending to {path:?}"
+            );
+        }
         Ok(Self {
             name,
             meta,
             template,
             dialog: Arc::new(Mutex::new(dialog)),
+            metrics_path,
         })
     }
 
@@ -290,6 +307,10 @@ impl InferenceBackend for QnnBackend {
         prompt: &Prompt,
         _params: &GenerationParams,
     ) -> Result<TokenStream> {
+        // Stamp the issue instant up front so a metrics TTFT captures the full
+        // perceived latency (render + dialog reset + prefill → first token).
+        let issued = Instant::now();
+
         // Render once on the calling task — pure CPU, cheap.
         let rendered = self.template.render(prompt).map_err(|e| {
             PrimerError::Inference(format!("chat template render failed: {e}").into())
@@ -332,7 +353,21 @@ impl InferenceBackend for QnnBackend {
             guard.query_streaming(&rendered, tx);
             // Sender dropped on guard drop / fn return → channel closes.
         });
-        Ok(Box::pin(rx))
+
+        // When metrics are enabled, wrap the receiver so each turn's TTFT +
+        // decode rate is appended to the JSONL file when the stream ends. The
+        // consumer drives the stream identically either way.
+        match &self.metrics_path {
+            Some(path) => {
+                let path = path.clone();
+                Ok(Box::pin(MeteredStream::new(
+                    Box::pin(rx),
+                    issued,
+                    Box::new(move |timing| record_timing(&path, &timing)),
+                )))
+            }
+            None => Ok(Box::pin(rx)),
+        }
     }
 }
 

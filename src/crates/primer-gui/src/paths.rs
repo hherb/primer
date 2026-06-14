@@ -47,6 +47,18 @@ const GENIE_LOG_FILENAME: &str = "genie.log";
 #[cfg(mobile)]
 const GENIE_LOG_PATH_ENV: &str = "PRIMER_GENIE_LOG_PATH";
 
+/// Filename under `<app_data>/.primer/` to which the QNN backend appends its
+/// per-turn throughput metrics (JSONL: TTFT + decode tok/s). Read on-device
+/// via `run-as cat`, like `genie.log`.
+const QNN_METRICS_FILENAME: &str = "qnn_metrics.jsonl";
+
+/// Environment variable the inference layer reads to enable QNN per-turn
+/// throughput metrics (see `primer_inference::qnn`'s `QNN_METRICS_PATH_ENV`).
+/// Mobile-only, so the const is mobile-gated to avoid a desktop dead-code
+/// warning.
+#[cfg(mobile)]
+const QNN_METRICS_PATH_ENV: &str = "PRIMER_QNN_METRICS_PATH";
+
 /// The on-device path of the Genie diagnostics log: `<app_data>/.primer/
 /// genie.log`. Pure helper — no filesystem access. Sits next to the GUI
 /// config so a developer reads it with the same `run-as cat .primer/...`
@@ -55,6 +67,16 @@ pub fn mobile_genie_log_path(app_data: &Path) -> PathBuf {
     app_data
         .join(primer_engine::paths::PRIMER_HOME_DIR)
         .join(GENIE_LOG_FILENAME)
+}
+
+/// The on-device path of the QNN per-turn metrics log: `<app_data>/.primer/
+/// qnn_metrics.jsonl`. Pure helper — no filesystem access. Sits next to
+/// `genie.log` so a developer reads it with the same `run-as cat .primer/...`
+/// idiom.
+pub fn mobile_qnn_metrics_path(app_data: &Path) -> PathBuf {
+    app_data
+        .join(primer_engine::paths::PRIMER_HOME_DIR)
+        .join(QNN_METRICS_FILENAME)
 }
 
 /// Parse `/proc/self/maps` content and return the directory of the first
@@ -178,6 +200,7 @@ pub fn init_mobile_state(app: &tauri::App) -> Result<(), Box<dyn std::error::Err
     set_mobile_seed_dir_if_present(&home);
     set_adsp_library_path_if_present();
     set_genie_log_path(&home);
+    set_qnn_metrics_path(&home);
     Ok(())
 }
 
@@ -213,6 +236,41 @@ pub fn set_genie_log_path(app_data: &Path) {
         target: "primer-gui::startup",
         genie_log_path = %log_path.display(),
         "routed Genie logging callback to file (logcat is unavailable on some ROMs)"
+    );
+}
+
+/// Enable QNN per-turn throughput metrics by pointing `PRIMER_QNN_METRICS_PATH`
+/// at `<app_data>/.primer/qnn_metrics.jsonl`, so the backend appends a TTFT +
+/// decode-tok/s record per turn to a file the developer reads via `run-as cat`.
+///
+/// This is the only on-device channel for real NPU throughput numbers on the
+/// target ROM: the standalone `qnn_bench` example cannot reach the Hexagon DSP
+/// from a sideloaded/Termux process, so the measurement must happen inside the
+/// running APK.
+///
+/// Best-effort, mirroring [`set_genie_log_path`]: creates the `.primer` parent
+/// if missing and no-ops when the env var is already set (an explicit override
+/// wins). When unset the inference layer leaves metrics recording disabled, so
+/// a failure here only forgoes the measurement — it never breaks the backend.
+#[cfg(mobile)]
+pub fn set_qnn_metrics_path(app_data: &Path) {
+    if std::env::var_os(QNN_METRICS_PATH_ENV).is_some() {
+        return;
+    }
+    let metrics_path = mobile_qnn_metrics_path(app_data);
+    if let Some(parent) = metrics_path.parent() {
+        let _ = std::fs::create_dir_all(parent);
+    }
+    // SAFETY: called from the Tauri `setup` hook on the main thread before any
+    // session/background task is spawned, so no other thread reads the
+    // environment concurrently. Mirrors `set_genie_log_path`.
+    unsafe {
+        std::env::set_var(QNN_METRICS_PATH_ENV, &metrics_path);
+    }
+    tracing::info!(
+        target: "primer-gui::startup",
+        qnn_metrics_path = %metrics_path.display(),
+        "enabled QNN per-turn throughput metrics (read on-device via run-as cat)"
     );
 }
 
@@ -412,6 +470,22 @@ mod tests {
                 .join(GENIE_LOG_FILENAME)
         );
         assert!(p.ends_with(".primer/genie.log"), "got {p:?}");
+    }
+
+    #[test]
+    fn mobile_qnn_metrics_path_is_under_dot_primer() {
+        // The QNN throughput metrics file sits next to genie.log so the same
+        // `run-as cat .primer/...` idiom reads it. Pin the layout the device
+        // read step assumes.
+        let app_data = Path::new("/data/data/org.theprimer.gui/files");
+        let p = mobile_qnn_metrics_path(app_data);
+        assert_eq!(
+            p,
+            app_data
+                .join(primer_engine::paths::PRIMER_HOME_DIR)
+                .join(QNN_METRICS_FILENAME)
+        );
+        assert!(p.ends_with(".primer/qnn_metrics.jsonl"), "got {p:?}");
     }
 
     #[test]

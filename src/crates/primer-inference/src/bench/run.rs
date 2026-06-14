@@ -9,7 +9,7 @@
 
 use std::fmt::Write as _;
 use std::path::Path;
-use std::time::{Duration, Instant};
+use std::time::Instant;
 
 use futures::StreamExt;
 use primer_core::error::Result;
@@ -17,7 +17,7 @@ use primer_core::inference::{GenerationParams, InferenceBackend};
 use tokio::sync::oneshot;
 use tokio::task::JoinHandle;
 
-use super::metrics::{BenchReport, BenchTargets, PromptMeasurement, Verdict};
+use super::metrics::{BenchReport, BenchTargets, PromptMeasurement, StreamTimer, Verdict};
 use super::prompts::BenchPrompt;
 use super::thermal::{ThermalSample, read_thermal_zones};
 use super::{THERMAL_SAMPLE_INTERVAL, THERMAL_SYSFS_DIR};
@@ -33,39 +33,21 @@ pub async fn measure_prompt(
     let issued = Instant::now();
     let mut stream = backend.generate_stream(&prompt.prompt, params).await?;
 
-    let mut ttft: Option<Duration> = None;
-    let mut first_token_at: Option<Instant> = None;
-    let mut tokens_after_first = 0usize;
-    let mut last_token_at = issued;
-
+    let mut timer = StreamTimer::start(issued);
     while let Some(chunk) = stream.next().await {
         let chunk = chunk?;
-        let now = Instant::now();
-        if !chunk.text.is_empty() {
-            if ttft.is_none() {
-                ttft = Some(now.duration_since(issued));
-                first_token_at = Some(now);
-            } else {
-                tokens_after_first += 1;
-            }
-            last_token_at = now;
-        }
+        timer.observe(!chunk.text.is_empty(), Instant::now());
         if chunk.done {
             break;
         }
     }
-
-    let ttft = ttft.unwrap_or_else(|| issued.elapsed());
-    let decode_duration = match first_token_at {
-        Some(first) => last_token_at.duration_since(first),
-        None => Duration::ZERO,
-    };
+    let timing = timer.finish(Instant::now());
 
     Ok(PromptMeasurement {
         label: prompt.label.clone(),
-        ttft,
-        decode_tokens: tokens_after_first,
-        decode_duration,
+        ttft: timing.ttft,
+        decode_tokens: timing.decode_tokens,
+        decode_duration: timing.decode_duration,
     })
 }
 
@@ -193,6 +175,7 @@ mod tests {
     use async_trait::async_trait;
     use futures::channel::mpsc;
     use primer_core::inference::{Prompt, TokenChunk, TokenStream};
+    use std::time::Duration;
 
     /// A backend that emits `chunks` as non-empty token chunks, sleeping
     /// `gap` before each chunk after the first, then a final empty done chunk.
