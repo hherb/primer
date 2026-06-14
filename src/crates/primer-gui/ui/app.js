@@ -509,11 +509,17 @@ function setupSidebarToggle() {
     dom.drawerBackdrop.addEventListener("click", () => setSidebarOpen(false));
   }
 
-  // Escape closes the drawer — scoped to mobile + open so it never
-  // competes with the native <dialog> modals (which own Escape via the
-  // browser's cancel event when one is showing).
+  // Escape closes the drawer — scoped to mobile + open, and skipped while
+  // a native <dialog> is showing so it never competes with the modal's own
+  // Escape handling (the browser fires the dialog's cancel event; letting
+  // this also run would dismiss the drawer underneath in the same keypress).
   document.addEventListener("keydown", (event) => {
-    if (event.key === "Escape" && mobileQuery.matches && isSidebarOpen()) {
+    if (
+      event.key === "Escape" &&
+      mobileQuery.matches &&
+      isSidebarOpen() &&
+      !document.querySelector("dialog[open]")
+    ) {
       setSidebarOpen(false);
     }
   });

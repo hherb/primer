@@ -189,6 +189,23 @@ mod tests {
         );
     }
 
+    /// The Escape-to-dismiss handler must defer to an open native
+    /// `<dialog>`: when a modal is showing, the browser fires the
+    /// dialog's own cancel event for Escape, and the drawer handler must
+    /// not also run or a single keypress would dismiss both. Pin the
+    /// `dialog[open]` guard so a future refactor can't quietly drop it.
+    #[test]
+    fn app_js_escape_handler_defers_to_open_dialog() {
+        let code = strip_js_comments(APP_JS);
+        assert!(
+            code.contains("dialog[open]"),
+            "ui/app.js's Escape-to-close-drawer handler must skip while a \
+             native `<dialog>` is open (guard on \
+             `document.querySelector(\"dialog[open]\")`) so Escape doesn't \
+             dismiss the drawer and the modal in the same keypress."
+        );
+    }
+
     /// The named breakpoint constant lives in JS (not an inline literal)
     /// so the magic number has one home, per the project's
     /// no-magic-numbers convention.
@@ -211,15 +228,23 @@ mod tests {
     fn mobile_breakpoint_is_consistent_between_css_and_js() {
         let value = MOBILE_BREAKPOINT_PX.to_string();
         let code = strip_js_comments(APP_JS);
+        // CSS: anchor to the media-query form `max-width: 940px` rather than
+        // a bare `940`, which could coincidentally match a colour, z-index,
+        // or unrelated dimension elsewhere in the stylesheet.
+        let css_needle = format!("max-width: {value}px");
         assert!(
-            STYLES_CSS.contains(&value),
-            "ui/styles.css must reference the breakpoint value {value}."
+            STYLES_CSS.contains(&css_needle),
+            "ui/styles.css must declare the breakpoint as `{css_needle}`."
         );
+        // JS: anchor to the named-constant assignment `MOBILE_BREAKPOINT_PX
+        // = 940` rather than a bare `940` for the same reason. The matchMedia
+        // string is built from the constant (`max-width: ${...}px`), so the
+        // literal media-query form never appears in the JS source to match.
+        let js_needle = format!("MOBILE_BREAKPOINT_PX = {value}");
         assert!(
-            code.contains(&value),
-            "ui/app.js must reference the breakpoint value {value} (via \
-             the MOBILE_BREAKPOINT_PX constant) so it matches the \
-             stylesheet's media query."
+            code.contains(&js_needle),
+            "ui/app.js must define `const {js_needle}` so its matchMedia \
+             string matches the stylesheet's media query."
         );
     }
 
