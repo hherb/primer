@@ -32,9 +32,11 @@
           class="header-btn"
           id="switch-session"
           title="Return to the session picker to switch or start fresh"
+          aria-label="Sessions"
           disabled
         >
-          Sessions
+          <span class="btn-icon" aria-hidden="true">🗂</span>
+          <span class="btn-label">Sessions</span>
         </button>
         <button
           type="button"
@@ -43,8 +45,10 @@
           aria-haspopup="dialog"
           aria-controls="settings-modal"
           title="Settings"
+          aria-label="Settings"
         >
-          Settings
+          <span class="btn-icon" aria-hidden="true">⚙</span>
+          <span class="btn-label">Settings</span>
         </button>
         <button
           type="button"
@@ -53,8 +57,10 @@
           aria-pressed="true"
           aria-controls="sidebar"
           title="Show or hide the evaluation sidebar"
+          aria-label="Show or hide the evaluation sidebar"
         >
-          Hide Sidebar
+          <span class="btn-icon" aria-hidden="true">☰</span>
+          <span class="btn-label">Hide Sidebar</span>
         </button>
       </div>
     </header>
@@ -268,6 +274,14 @@
         ></ol>
       </section>
     </aside>
+
+    <!-- Dims the chat behind the evaluation sidebar when it slides in as
+         an overlay drawer on phone widths. Visibility is purely CSS-driven
+         (shown only under the mobile breakpoint when `body.sidebar-open`
+         is set), so resizing across the breakpoint can never strand a
+         visible backdrop over the desktop two-column layout. A click
+         dismisses the drawer (wired in app.js). -->
+    <div class="drawer-backdrop" id="drawer-backdrop"></div>
 
     <dialog
       class="modal"
