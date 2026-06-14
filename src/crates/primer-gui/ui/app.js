@@ -107,7 +107,14 @@ const state = {
   spotlightTimer: null,
 };
 
-main();
+// NOTE: `main()` is invoked at the END of this IIFE (just before the
+// closing `})();`), not here. It calls `setupSidebarToggle()`, which
+// references the `const mobileQuery` declared lower in the file; invoking
+// main() at the top would hit that const in its temporal dead zone
+// ("Cannot access 'mobileQuery' before initialization"), which — because
+// main() is async — surfaces as an unhandled rejection that aborts boot
+// after the sidebar toggle is wired but before `showPicker()` runs (so the
+// session picker never appears). Keep the call last.
 
 async function main() {
   setupChunkListener();
@@ -1110,5 +1117,9 @@ window.primerAppendPrimerChunk  = appendPrimerChunk;
 window.primerRefreshSidebar     = refreshSidebar;
 window.primerShowError          = showError;
 window.primerShowToast          = showToast;
+
+// Boot. Invoked last so every module-level `const` (notably `mobileQuery`,
+// used by `setupSidebarToggle`) is initialised before `main()` runs.
+main();
 
 })();

@@ -2,7 +2,13 @@
 <html lang="en">
   <head>
     <meta charset="utf-8" />
-    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <!-- viewport-fit=cover is required for env(safe-area-inset-*) to report
+         non-zero values; without it the Android WebView draws edge-to-edge
+         and the system status/navigation bars occlude the header + composer. -->
+    <meta
+      name="viewport"
+      content="width=device-width, initial-scale=1, viewport-fit=cover"
+    />
     <title>Primer</title>
     <link rel="stylesheet" href="styles.css" />
   </head>

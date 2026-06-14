@@ -7,7 +7,7 @@
 //! every inference backend's benchmark; backend-specific acceptance targets
 //! live next to that backend (e.g. `qnn::bench::qnn_targets`).
 
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 /// Percentile selector for the typical-case TTFT figure.
 pub const PERCENTILE_P50: f64 = 50.0;
@@ -81,11 +81,115 @@ impl PromptMeasurement {
     /// decode time elapsed (a degenerate single-token or zero-token run) so
     /// callers never divide by zero.
     pub fn decode_tokens_per_sec(&self) -> f64 {
-        let secs = self.decode_duration.as_secs_f64();
-        if secs <= 0.0 {
-            return 0.0;
+        decode_tokens_per_sec(self.decode_tokens, self.decode_duration)
+    }
+}
+
+/// Steady-state decode rate in tokens per second. Returns `0.0` when no decode
+/// time elapsed (a degenerate single-token or zero-token run) so callers never
+/// divide by zero. The single source of truth for the rate formula shared by
+/// [`PromptMeasurement`] and [`StreamTiming`].
+pub fn decode_tokens_per_sec(decode_tokens: usize, decode_duration: Duration) -> f64 {
+    let secs = decode_duration.as_secs_f64();
+    if secs <= 0.0 {
+        return 0.0;
+    }
+    decode_tokens as f64 / secs
+}
+
+/// Label-less timing produced by [`StreamTimer`]: the same three quantities
+/// [`PromptMeasurement`] reports, without a prompt label. Used wherever a
+/// `generate_stream` call is timed in-flight (e.g. the QNN per-turn metrics
+/// log) rather than driven by the benchmark loop.
+///
+/// **`decode_tokens` counts non-empty *chunks*, not tokens.** For the QNN
+/// backend a chunk is one token (its per-token C-ABI callback fires once per
+/// generated token), so `decode_tokens_per_sec` is a true tokens/sec there. A
+/// backend that batches multiple tokens into a chunk would report a chunk rate
+/// instead — interpret the figure per backend.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct StreamTiming {
+    /// Time from issuing `generate_stream` to the first non-empty chunk.
+    pub ttft: Duration,
+    /// Non-empty chunks received after the first (one token per chunk on the
+    /// QNN backend; a chunk rather than a token in general — see the type doc).
+    pub decode_tokens: usize,
+    /// Wall-clock from first token to the last token.
+    pub decode_duration: Duration,
+}
+
+impl StreamTiming {
+    /// Steady-state decode rate (tokens after the first / decode window).
+    pub fn decode_tokens_per_sec(&self) -> f64 {
+        decode_tokens_per_sec(self.decode_tokens, self.decode_duration)
+    }
+}
+
+/// Incremental timer for one `generate_stream` call.
+///
+/// Mirrors the per-prompt timing the benchmark loop does, but as a small
+/// caller-driven state machine so it can also observe a stream *in flight*
+/// (the consumer drives the stream; the producer can't). It reads no clock
+/// itself — every instant is supplied by the caller — which keeps it pure and
+/// host-testable with synthetic instants. The first non-empty chunk is
+/// attributed to [`StreamTiming::ttft`] (prefill + first decode); subsequent
+/// non-empty chunks count toward `decode_tokens`, and the decode window spans
+/// first-token → last-token so the rate is not diluted by prefill latency.
+#[derive(Debug)]
+pub struct StreamTimer {
+    issued: Instant,
+    ttft: Option<Duration>,
+    first_token_at: Option<Instant>,
+    tokens_after_first: usize,
+    last_token_at: Instant,
+}
+
+impl StreamTimer {
+    /// Begin timing at the instant the `generate_stream` call was issued.
+    pub fn start(issued: Instant) -> Self {
+        Self {
+            issued,
+            ttft: None,
+            first_token_at: None,
+            tokens_after_first: 0,
+            last_token_at: issued,
         }
-        self.decode_tokens as f64 / secs
+    }
+
+    /// Observe one chunk. `nonempty` is whether the chunk carried any text;
+    /// `now` is the instant it was received. Empty chunks (e.g. the final
+    /// `done` sentinel the stub and some backends emit) do not count toward
+    /// decode tokens and do not move the decode clock.
+    pub fn observe(&mut self, nonempty: bool, now: Instant) {
+        if !nonempty {
+            return;
+        }
+        if self.ttft.is_none() {
+            self.ttft = Some(now.duration_since(self.issued));
+            self.first_token_at = Some(now);
+        } else {
+            self.tokens_after_first += 1;
+        }
+        self.last_token_at = now;
+    }
+
+    /// Finish timing into a [`StreamTiming`]. When no non-empty chunk ever
+    /// arrived, TTFT falls back to `issued → fallback_now` (matching
+    /// `measure_prompt`'s degenerate-stream behaviour) and the decode window
+    /// is zero.
+    pub fn finish(self, fallback_now: Instant) -> StreamTiming {
+        let ttft = self
+            .ttft
+            .unwrap_or_else(|| fallback_now.duration_since(self.issued));
+        let decode_duration = match self.first_token_at {
+            Some(first) => self.last_token_at.duration_since(first),
+            None => Duration::ZERO,
+        };
+        StreamTiming {
+            ttft,
+            decode_tokens: self.tokens_after_first,
+            decode_duration,
+        }
     }
 }
 
@@ -255,6 +359,52 @@ mod tests {
     fn decode_rate_is_zero_when_no_decode_time() {
         let m = measurement("x", 500, 0, 0);
         assert_eq!(m.decode_tokens_per_sec(), 0.0);
+    }
+
+    #[test]
+    fn stream_timer_times_multi_chunk_stream() {
+        // Four non-empty chunks at 0/100/200/300ms after an issue at t0+50ms:
+        // ttft = 50ms (first chunk), decode window = 300ms over 3 later tokens.
+        let issued = Instant::now();
+        let mut timer = StreamTimer::start(issued);
+        timer.observe(true, issued + Duration::from_millis(50));
+        timer.observe(true, issued + Duration::from_millis(150));
+        timer.observe(true, issued + Duration::from_millis(250));
+        timer.observe(true, issued + Duration::from_millis(350));
+        let timing = timer.finish(issued + Duration::from_millis(400));
+        assert_eq!(timing.ttft, Duration::from_millis(50));
+        assert_eq!(timing.decode_tokens, 3);
+        assert_eq!(timing.decode_duration, Duration::from_millis(300));
+        assert!((timing.decode_tokens_per_sec() - 10.0).abs() < EPS);
+    }
+
+    #[test]
+    fn stream_timer_ignores_empty_chunks() {
+        // A trailing empty done-sentinel must not count as a token or move
+        // the decode clock past the last real token.
+        let issued = Instant::now();
+        let mut timer = StreamTimer::start(issued);
+        timer.observe(true, issued + Duration::from_millis(20));
+        timer.observe(true, issued + Duration::from_millis(120));
+        timer.observe(false, issued + Duration::from_millis(500)); // empty done
+        let timing = timer.finish(issued + Duration::from_millis(500));
+        assert_eq!(timing.ttft, Duration::from_millis(20));
+        assert_eq!(timing.decode_tokens, 1);
+        assert_eq!(timing.decode_duration, Duration::from_millis(100));
+    }
+
+    #[test]
+    fn stream_timer_degenerate_stream_falls_back_to_elapsed_ttft() {
+        // No non-empty chunk ever arrives: ttft falls back to issued →
+        // fallback_now, decode window is zero (a degenerate run).
+        let issued = Instant::now();
+        let mut timer = StreamTimer::start(issued);
+        timer.observe(false, issued + Duration::from_millis(10));
+        let timing = timer.finish(issued + Duration::from_millis(80));
+        assert_eq!(timing.ttft, Duration::from_millis(80));
+        assert_eq!(timing.decode_tokens, 0);
+        assert_eq!(timing.decode_duration, Duration::ZERO);
+        assert_eq!(timing.decode_tokens_per_sec(), 0.0);
     }
 
     #[test]

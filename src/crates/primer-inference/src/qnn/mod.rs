@@ -26,9 +26,11 @@ pub mod backend;
 pub mod bench;
 pub mod genie;
 pub mod meta;
+pub mod metrics;
 pub mod template;
 
 pub use backend::{QNN_NAME_PREFIX, QnnBackend};
 pub use genie::{GenieCallError, GenieDialog, GenieLibrary};
 pub use meta::{MetaError, PRIMER_META_FILENAME, PrimerMeta};
+pub use metrics::QNN_METRICS_PATH_ENV;
 pub use template::{ChatTemplate, TemplateError};
