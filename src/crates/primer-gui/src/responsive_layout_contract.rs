@@ -326,6 +326,100 @@ mod tests {
         );
     }
 
+    /// Extract the opening `<aside …>` tag of the evaluation sidebar so
+    /// attribute assertions are scoped to that one element rather than the
+    /// whole document (where e.g. `tabindex="-1"` could match an unrelated
+    /// element).
+    fn sidebar_open_tag(html: &str) -> &str {
+        let start = html
+            .find("<aside")
+            .expect("ui/index.html must contain the `<aside>` sidebar element");
+        let rest = &html[start..];
+        let end = rest
+            .find('>')
+            .expect("the sidebar `<aside>` tag must be closed with `>`");
+        &rest[..=end]
+    }
+
+    /// The drawer receives programmatic focus on open, so the `#sidebar`
+    /// `<aside>` must be focusable without joining the tab order — i.e.
+    /// carry `tabindex="-1"`. Without it `dom.sidebar.focus()` is a no-op
+    /// and the open drawer leaves focus stranded on the (now-inert) chat.
+    #[test]
+    fn index_html_sidebar_is_programmatically_focusable() {
+        let tag = sidebar_open_tag(INDEX_HTML);
+        assert!(
+            tag.contains("id=\"sidebar\""),
+            "the first `<aside>` in ui/index.html must be the `#sidebar` \
+             evaluation drawer."
+        );
+        assert!(
+            tag.contains("tabindex=\"-1\""),
+            "ui/index.html's `#sidebar` <aside> must carry `tabindex=\"-1\"` \
+             so the mobile drawer can receive programmatic focus on open \
+             without entering the tab order. See responsive_layout_contract \
+             (a11y focus management)."
+        );
+    }
+
+    /// Opening the drawer moves focus into it and closing restores focus
+    /// to the toggle; the mobile-only modality is centralised in a named
+    /// `applyDrawerModality` helper so the focus + inert handling can't be
+    /// split across the open/close paths and drift.
+    #[test]
+    fn app_js_centralises_drawer_modality() {
+        let code = strip_js_comments(APP_JS);
+        assert!(
+            code.contains("applyDrawerModality"),
+            "ui/app.js must drive the mobile drawer's focus + inert handling \
+             through an `applyDrawerModality(open)` helper so opening moves \
+             focus into the drawer and closing restores it to \
+             `#sidebar-toggle`."
+        );
+        assert!(
+            code.contains(".focus("),
+            "ui/app.js's drawer modality must call `.focus(...)` to move \
+             focus into the drawer on open and back to the toggle on close."
+        );
+    }
+
+    /// While the mobile drawer is open the chat behind it must be `inert`
+    /// (unfocusable + hidden from the a11y tree) so the composer textarea
+    /// and conversation behind the dim backdrop can't be tabbed to or read
+    /// by assistive tech. Pin the `inert` attribute toggle.
+    #[test]
+    fn app_js_inerts_chat_behind_open_drawer() {
+        let code = strip_js_comments(APP_JS);
+        assert!(
+            code.contains("setAttribute(\"inert\""),
+            "ui/app.js must mark the chat `<main>` `inert` while the mobile \
+             drawer is open (`setAttribute(\"inert\", …)`), so the content \
+             behind the backdrop is neither focusable nor exposed to \
+             assistive technology."
+        );
+        assert!(
+            code.contains("removeAttribute(\"inert\""),
+            "ui/app.js must clear the `inert` attribute when the drawer \
+             closes (and when crossing back to the desktop layout) so the \
+             two-column view is never left with an inert chat."
+        );
+    }
+
+    /// The chat scroll behind the open drawer must be frozen so a
+    /// touch-scroll on the dimmed area doesn't move the conversation
+    /// underneath. Scoped to `body.sidebar-open` inside the mobile media
+    /// query, so it never affects the desktop column and auto-releases
+    /// when the window crosses back above the breakpoint.
+    #[test]
+    fn stylesheet_scroll_locks_chat_behind_open_drawer() {
+        assert!(
+            STYLES_CSS.contains("body.sidebar-open .chat-scroll"),
+            "ui/styles.css must scroll-lock the chat behind the open mobile \
+             drawer with a `body.sidebar-open .chat-scroll {{ overflow: \
+             hidden }}` rule (inside the `@media (max-width: 940px)` block)."
+        );
+    }
+
     #[test]
     fn strip_js_comments_removes_line_and_block_comments() {
         let src = "// sidebar-open in a comment\n/* matchMedia here */ real();";

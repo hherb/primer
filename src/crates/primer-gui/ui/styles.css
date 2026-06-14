@@ -1786,4 +1786,15 @@ code {
   body.sidebar-open .drawer-backdrop {
     display: block;
   }
+
+  /* Freeze the chat scroll behind the open drawer so a touch-scroll on the
+     dimmed backdrop doesn't move the conversation underneath. Scoped to
+     `body.sidebar-open` inside this mobile media query, so it never touches
+     the desktop column layout and auto-releases the moment the window
+     crosses back above the breakpoint (the rule simply stops applying).
+     Pairs with the `inert` attribute app.js sets on the chat <main>, which
+     handles focus + a11y-tree removal; this handles scroll. */
+  body.sidebar-open .chat-scroll {
+    overflow: hidden;
+  }
 }

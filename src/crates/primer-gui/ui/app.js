@@ -26,6 +26,8 @@ const dom = {
   input: document.getElementById("input"),
   send: document.getElementById("send"),
   sidebarToggle: document.getElementById("sidebar-toggle"),
+  sidebar: document.getElementById("sidebar"),
+  chatMain: document.querySelector("main.chat"),
   drawerBackdrop: document.getElementById("drawer-backdrop"),
   settingsOpen: document.getElementById("settings-open"),
   switchSession: document.getElementById("switch-session"),
@@ -494,14 +496,52 @@ function syncSidebarToggle(open) {
   }
 }
 
+/// The element to restore focus to when the drawer closes. Captured on
+/// open (the toggle, in practice) so a programmatic close — backdrop tap,
+/// Escape, or the toggle itself — returns the user to a sensible spot
+/// rather than dropping focus to `<body>`.
+let drawerReturnFocus = null;
+
+/// Apply or release the mobile drawer's modal semantics. On open: focus
+/// moves into the drawer (`#sidebar` carries `tabindex="-1"` so it accepts
+/// programmatic focus without joining the tab order) and the chat `<main>`
+/// behind the dim backdrop is marked `inert` — unfocusable and hidden from
+/// the accessibility tree, so the composer and conversation can't be
+/// tabbed to or read by assistive tech while the drawer is up. On close:
+/// the `inert` is cleared and focus is restored to the toggle.
+///
+/// No-op on desktop, where the same `#sidebar` element is a persistent
+/// two-column-layout column rather than a modal overlay; the breakpoint
+/// guard is what keeps the desktop behaviour untouched. Scroll-lock is
+/// handled separately and purely in CSS (`body.sidebar-open .chat-scroll`
+/// inside the mobile media query).
+function applyDrawerModality(open) {
+  if (!mobileQuery.matches) {
+    return;
+  }
+  if (open) {
+    drawerReturnFocus = dom.sidebarToggle;
+    dom.chatMain.setAttribute("inert", "");
+    dom.sidebar.focus({ preventScroll: true });
+  } else {
+    dom.chatMain.removeAttribute("inert");
+    if (drawerReturnFocus) {
+      drawerReturnFocus.focus({ preventScroll: true });
+      drawerReturnFocus = null;
+    }
+  }
+}
+
 /// Open or close the evaluation panel, writing to whichever class the
-/// current breakpoint mode uses.
+/// current breakpoint mode uses, then (on mobile) applying/releasing the
+/// drawer's focus + inert modality.
 function setSidebarOpen(open) {
   if (mobileQuery.matches) {
     dom.body.classList.toggle("sidebar-open", open);
   } else {
     dom.body.classList.toggle("sidebar-collapsed", !open);
   }
+  applyDrawerModality(open);
   syncSidebarToggle(open);
 }
 
@@ -535,8 +575,14 @@ function setupSidebarToggle() {
   // toggle's label/aria so it describes the new mode's state. Entering
   // mobile lands on the drawer's default-closed state; entering desktop
   // restores the collapse-class semantics. The CSS-driven backdrop
-  // visibility means no backdrop cleanup is needed here.
+  // visibility and scroll-lock auto-release across the breakpoint, but the
+  // `inert` attribute is a DOM attribute (not media-scoped), so an open
+  // drawer that's resized up to desktop would otherwise strand an inert
+  // chat behind the two-column layout — clear it (and any pending focus
+  // restore) unconditionally here.
   mobileQuery.addEventListener("change", () => {
+    dom.chatMain.removeAttribute("inert");
+    drawerReturnFocus = null;
     syncSidebarToggle(isSidebarOpen());
   });
 
