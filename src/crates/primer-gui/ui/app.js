@@ -520,9 +520,15 @@ function applyDrawerModality(open) {
     return;
   }
   if (open) {
+    // Idempotent re-open: if the drawer is already modal (chat already
+    // inert) a redundant `setSidebarOpen(true)` must not yank focus back to
+    // the `#sidebar` container after it has moved deeper into the drawer.
+    const alreadyOpen = dom.chatMain.hasAttribute("inert");
     drawerReturnFocus = dom.sidebarToggle;
     dom.chatMain.setAttribute("inert", "");
-    dom.sidebar.focus({ preventScroll: true });
+    if (!alreadyOpen) {
+      dom.sidebar.focus({ preventScroll: true });
+    }
   } else {
     dom.chatMain.removeAttribute("inert");
     if (drawerReturnFocus) {

@@ -377,9 +377,34 @@ mod tests {
              `#sidebar-toggle`."
         );
         assert!(
-            code.contains(".focus("),
-            "ui/app.js's drawer modality must call `.focus(...)` to move \
-             focus into the drawer on open and back to the toggle on close."
+            code.contains("dom.sidebar.focus("),
+            "ui/app.js's drawer modality must call `dom.sidebar.focus(...)` to \
+             move focus INTO the drawer on open (a bare `.focus(` anywhere is \
+             too loose — pin the sidebar as the focus target)."
+        );
+        assert!(
+            code.contains("drawerReturnFocus"),
+            "ui/app.js must capture the element to restore focus to on close \
+             in `drawerReturnFocus` and call `.focus(...)` on it, so closing \
+             the drawer returns focus to `#sidebar-toggle` rather than \
+             dropping it to `<body>`."
+        );
+    }
+
+    /// The drawer-modality helper marks the chat `<main>` `inert`, reached
+    /// via `dom.chatMain = document.querySelector("main.chat")`. If that
+    /// element is ever renamed, `dom.chatMain` is `null` and the very first
+    /// `setAttribute("inert", …)` throws, breaking drawer-open entirely.
+    /// Pin the selector target so a rename in `index.html` fails `cargo test`
+    /// here rather than silently at runtime on a phone.
+    #[test]
+    fn index_html_has_chat_main_for_inert_target() {
+        assert!(
+            INDEX_HTML.contains("<main class=\"chat\">"),
+            "ui/index.html must contain `<main class=\"chat\">` — app.js's \
+             `dom.chatMain = document.querySelector(\"main.chat\")` depends on \
+             it as the `inert` target for the mobile drawer; a rename would \
+             make `dom.chatMain` null and throw on drawer open."
         );
     }
 
