@@ -504,6 +504,9 @@ context-limit return. The **responsive mobile GUI layout has since landed**: bel
 a 940px breakpoint the chat goes full-width, the evaluation sidebar becomes a
 slide-in overlay drawer (backdrop tap / Esc to dismiss), and the header condenses
 its action buttons to icons so nothing runs off-screen in portrait or landscape.
+The drawer is now a proper modal for keyboard/assistive-tech users — opening moves
+focus into it and closing restores it to the toggle, while the chat behind the dim
+backdrop is made `inert` and scroll-locked (all mobile-only; desktop is unchanged).
 Remaining: pedagogy/answer-quality tuning on the 4B NPU model.
 
 ## Building the macOS DMG
