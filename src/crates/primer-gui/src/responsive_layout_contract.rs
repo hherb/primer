@@ -295,6 +295,37 @@ mod tests {
         );
     }
 
+    /// Boot ordering: `main()` must be invoked AFTER the module-level
+    /// `const mobileQuery` is initialized. `main()` calls
+    /// `setupSidebarToggle()`, which references `mobileQuery`; invoking
+    /// `main()` above that `const` hits it in its temporal dead zone, and
+    /// because `main()` is `async` the throw surfaces as an unhandled
+    /// rejection that aborts boot *after* the sidebar toggle is wired but
+    /// *before* `showPicker()` runs — the session picker silently never
+    /// appears. This pins the call-last ordering so that regression can't
+    /// return undetected (it shipped once in PR #225 and only surfaced when
+    /// the GUI JS first ran on a device).
+    #[test]
+    fn app_js_invokes_main_after_mobilequery_is_initialized() {
+        let code = strip_js_comments(APP_JS);
+        let mobilequery_pos = code
+            .find("const mobileQuery")
+            .expect("ui/app.js must declare `const mobileQuery`");
+        // The bare `main();` invocation (not the `async function main()`
+        // declaration, which has no trailing `;`).
+        let main_call_pos = code
+            .rfind("main();")
+            .expect("ui/app.js must invoke `main();`");
+        assert!(
+            main_call_pos > mobilequery_pos,
+            "ui/app.js must call `main();` AFTER `const mobileQuery` is \
+             initialized — otherwise setupSidebarToggle() reads mobileQuery in \
+             its temporal dead zone and the async main() rejects before \
+             showPicker() runs (the boot regression that hid the picker). See \
+             responsive_layout_contract."
+        );
+    }
+
     #[test]
     fn strip_js_comments_removes_line_and_block_comments() {
         let src = "// sidebar-open in a comment\n/* matchMedia here */ real();";
