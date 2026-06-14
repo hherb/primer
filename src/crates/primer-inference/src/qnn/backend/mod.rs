@@ -309,6 +309,10 @@ impl InferenceBackend for QnnBackend {
     ) -> Result<TokenStream> {
         // Stamp the issue instant up front so a metrics TTFT captures the full
         // perceived latency (render + dialog reset + prefill → first token).
+        // Note: the dialog is mutex-serialised, so a query queued behind an
+        // in-flight one (e.g. a background subsystem call behind the chat turn)
+        // folds that wait into its measured TTFT — that is the true perceived
+        // latency, but it inflates a queued call's TTFT above its pure prefill.
         let issued = Instant::now();
 
         // Render once on the calling task — pure CPU, cheap.

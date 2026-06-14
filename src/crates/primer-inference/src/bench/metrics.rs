@@ -101,11 +101,18 @@ pub fn decode_tokens_per_sec(decode_tokens: usize, decode_duration: Duration) ->
 /// [`PromptMeasurement`] reports, without a prompt label. Used wherever a
 /// `generate_stream` call is timed in-flight (e.g. the QNN per-turn metrics
 /// log) rather than driven by the benchmark loop.
+///
+/// **`decode_tokens` counts non-empty *chunks*, not tokens.** For the QNN
+/// backend a chunk is one token (its per-token C-ABI callback fires once per
+/// generated token), so `decode_tokens_per_sec` is a true tokens/sec there. A
+/// backend that batches multiple tokens into a chunk would report a chunk rate
+/// instead — interpret the figure per backend.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct StreamTiming {
     /// Time from issuing `generate_stream` to the first non-empty chunk.
     pub ttft: Duration,
-    /// Chunks received after the first.
+    /// Non-empty chunks received after the first (one token per chunk on the
+    /// QNN backend; a chunk rather than a token in general — see the type doc).
     pub decode_tokens: usize,
     /// Wall-clock from first token to the last token.
     pub decode_duration: Duration,
