@@ -29,6 +29,7 @@ use std::path::Path;
 use futures::channel::mpsc::UnboundedSender;
 use primer_core::error::Result as PrimerResult;
 use primer_core::inference::TokenChunk;
+use primer_qnn_sys::{GENIE_STATUS_CONTEXT_LIMIT_EXCEEDED, GENIE_STATUS_SUCCESS, Genie_Status_t};
 use thiserror::Error;
 
 mod config;
@@ -93,6 +94,20 @@ pub trait GenieDialog: Send {
     /// returns essentially instantly and is safe to call from any
     /// context.
     fn query_streaming(&self, prompt: &str, sender: UnboundedSender<PrimerResult<TokenChunk>>);
+
+    /// Reset the dialog's accumulated conversation/KV context to empty.
+    ///
+    /// **Load-bearing for the Primer's stateless prompt model.** The engine
+    /// re-sends the *entire* prompt (system + recent history) on every query,
+    /// and one dialog handle is shared by the chat turn AND the three
+    /// background subsystems (classifier / extractor / comprehension). Genie
+    /// otherwise *appends* every query to the same KV context, so without a
+    /// reset before each query the 2048-token window saturates within a turn
+    /// or two — the on-device "Context limit exceeded" failure. The backend
+    /// calls this before every `generate_stream` query; the result surfaces a
+    /// non-success status as an error so a broken reset doesn't silently let
+    /// context leak between queries.
+    fn reset(&self) -> PrimerResult<()>;
 }
 
 /// Errors produced by [`GenieLibrary`] or [`GenieDialog`] calls.
@@ -170,9 +185,166 @@ impl GenieCallError {
     }
 }
 
+/// Classification of a `GenieDialog_query` return status — drives whether
+/// the real streaming path closes the turn gracefully or surfaces an error.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum QueryOutcome {
+    /// Generation finished cleanly (`GENIE_STATUS_SUCCESS`).
+    Complete,
+    /// The context window filled mid-generation
+    /// ([`GENIE_STATUS_CONTEXT_LIMIT_EXCEEDED`]). The reply already streamed
+    /// in full via the token callback, so the turn completes with what was
+    /// generated rather than being dropped.
+    ContextLimit,
+    /// A genuine failure (ABI mismatch, invalid handle, …) — propagate so a
+    /// real fault is never masked as a successful turn.
+    Error,
+}
+
+/// Pure classification of a raw `GenieDialog_query` status. Kept separate
+/// from the FFI call in [`real`] so the graceful-vs-error decision is
+/// unit-testable on any host without a device. Only the specific
+/// context-limit code is treated as a graceful completion; every other
+/// non-success code stays an error.
+pub(crate) fn classify_query_status(status: Genie_Status_t) -> QueryOutcome {
+    match status {
+        GENIE_STATUS_SUCCESS => QueryOutcome::Complete,
+        GENIE_STATUS_CONTEXT_LIMIT_EXCEEDED => QueryOutcome::ContextLimit,
+        _ => QueryOutcome::Error,
+    }
+}
+
+/// Emit the terminal stream item for a classified `GenieDialog_query`
+/// outcome on `sender`. Extracted from the FFI path in [`real`] so the
+/// graceful-vs-error emission is host-tested without an FFI round-trip
+/// (the real path is `#[cfg(target_os = "android")]`-effective only).
+///
+/// - [`QueryOutcome::Complete`] / [`QueryOutcome::ContextLimit`]: the reply
+///   already streamed in full via the token callback, so both close the
+///   turn with a done chunk. `ContextLimit` additionally warns so the
+///   small-context prompt budget (`primer-pedagogy`) can be tuned against
+///   the overflow. (A context-limit reply can stop mid-sentence — softening
+///   that for children is tracked in
+///   <https://github.com/hherb/primer/issues/224>.)
+/// - [`QueryOutcome::Error`]: surface the failure and emit **no** done
+///   chunk — a genuine fault must drop the partial turn (see the
+///   [`GenieDialog::query_streaming`] trait docs for the rationale).
+pub(crate) fn emit_query_outcome(
+    outcome: QueryOutcome,
+    status: Genie_Status_t,
+    sender: &UnboundedSender<PrimerResult<TokenChunk>>,
+) {
+    match outcome {
+        QueryOutcome::Complete | QueryOutcome::ContextLimit => {
+            if outcome == QueryOutcome::ContextLimit {
+                tracing::warn!(
+                    target: "primer::qnn",
+                    "GenieDialog_query hit the context limit (status {status}); completing the turn with the streamed reply"
+                );
+            }
+            let _ = sender.unbounded_send(Ok(TokenChunk {
+                text: String::new(),
+                done: true,
+            }));
+        }
+        QueryOutcome::Error => {
+            let err = GenieCallError::NonSuccess {
+                operation: "GenieDialog_query",
+                status,
+            };
+            let _ = sender.unbounded_send(Err(err.to_primer_error()));
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn classify_success_status_is_complete() {
+        assert_eq!(
+            classify_query_status(GENIE_STATUS_SUCCESS),
+            QueryOutcome::Complete
+        );
+    }
+
+    #[test]
+    fn classify_context_limit_status_is_graceful() {
+        assert_eq!(
+            classify_query_status(GENIE_STATUS_CONTEXT_LIMIT_EXCEEDED),
+            QueryOutcome::ContextLimit
+        );
+    }
+
+    #[test]
+    fn classify_other_nonsuccess_statuses_are_errors() {
+        // -1 (general), -2/-3 (invalid arg / mem), and arbitrary non-4
+        // positives must all stay hard errors so a real ABI fault is never
+        // silently treated as a completed turn.
+        for status in [-1, -2, -3, 1, 2, 3, 5, 99] {
+            assert_eq!(
+                classify_query_status(status),
+                QueryOutcome::Error,
+                "status {status} should be an error"
+            );
+        }
+    }
+
+    #[test]
+    fn emit_complete_outcome_sends_one_done_chunk() {
+        use futures::StreamExt;
+        use futures::executor::block_on;
+        let (tx, mut rx) = futures::channel::mpsc::unbounded::<PrimerResult<TokenChunk>>();
+        emit_query_outcome(QueryOutcome::Complete, GENIE_STATUS_SUCCESS, &tx);
+        drop(tx); // close the channel so the second `next()` resolves to None
+        let chunk = block_on(rx.next())
+            .expect("a terminal item")
+            .expect("complete is Ok, not Err");
+        assert!(chunk.done, "complete must emit a done chunk");
+        assert_eq!(chunk.text, "", "the done chunk carries no text");
+        assert!(
+            block_on(rx.next()).is_none(),
+            "exactly one terminal item, then the channel closes"
+        );
+    }
+
+    #[test]
+    fn emit_context_limit_outcome_completes_gracefully() {
+        // The reply already streamed via the token callback, so a
+        // context-limit return closes the turn with a done chunk (NOT an
+        // error) — the same shape as Complete.
+        use futures::StreamExt;
+        use futures::executor::block_on;
+        let (tx, mut rx) = futures::channel::mpsc::unbounded::<PrimerResult<TokenChunk>>();
+        emit_query_outcome(
+            QueryOutcome::ContextLimit,
+            GENIE_STATUS_CONTEXT_LIMIT_EXCEEDED,
+            &tx,
+        );
+        drop(tx);
+        let chunk = block_on(rx.next())
+            .expect("a terminal item")
+            .expect("context-limit completes gracefully (Ok), not Err");
+        assert!(chunk.done, "context limit must still emit a done chunk");
+    }
+
+    #[test]
+    fn emit_error_outcome_sends_err_and_no_done_chunk() {
+        // A genuine fault surfaces an Err and emits NO done chunk, so the
+        // dialogue manager drops the partial turn.
+        use futures::StreamExt;
+        use futures::executor::block_on;
+        let (tx, mut rx) = futures::channel::mpsc::unbounded::<PrimerResult<TokenChunk>>();
+        emit_query_outcome(QueryOutcome::Error, -1, &tx);
+        drop(tx);
+        let item = block_on(rx.next()).expect("a terminal item");
+        assert!(item.is_err(), "error outcome must surface an Err");
+        assert!(
+            block_on(rx.next()).is_none(),
+            "no done chunk follows a genuine error"
+        );
+    }
 
     #[test]
     fn real_library_open_returns_platform_unsupported_on_host() {

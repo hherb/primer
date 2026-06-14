@@ -180,10 +180,12 @@ async fn resume_session_triggers_summary_refresh_when_above_window() {
 #[tokio::test]
 async fn resume_session_uses_small_context_window_for_qnn_backend() {
     // Step 1.2.5: a small-context backend (name starts with "qnn:") uses
-    // the constrained recent-turn window (12) instead of the global
-    // default (20). The summary boundary lands at `total - window`, so
-    // 25 turns under a window of 12 must summarize through index 13 —
-    // not the index 5 that the 20-turn default would produce.
+    // the constrained recent-turn window instead of the global default
+    // (20). The summary boundary lands at `total - window`, so for a
+    // 25-turn session the boundary is `25 - window` — not the index 5
+    // that the 20-turn default would produce. Reference the const so the
+    // expectation tracks the value, not a stale literal.
+    use primer_core::consts::pedagogy::DEFAULT_CONTEXT_WINDOW_TURNS_SMALL_CONTEXT as SMALL_WINDOW;
     let backend = std::sync::Arc::new(
         ScriptedBackend::new(vec![Ok(chunk("", true))]).with_name("qnn:test-model"),
     );
@@ -196,11 +198,13 @@ async fn resume_session_uses_small_context_window_for_qnn_backend() {
         default_subsystems(),
         PedagogyConfig::default(),
     );
-    let loaded = make_test_session_with_turns(25, dm.learner.profile.id);
+    let total = 25usize;
+    let loaded = make_test_session_with_turns(total, dm.learner.profile.id);
     dm.resume_session(loaded).await.unwrap();
     assert_eq!(
-        dm.session.summary_through_turn_index, 13,
-        "qnn backend should use the 12-turn window: boundary at total(25) - 12 = 13"
+        dm.session.summary_through_turn_index,
+        total - SMALL_WINDOW,
+        "qnn backend should use the small-context window: boundary at total({total}) - {SMALL_WINDOW}"
     );
 }
 

@@ -73,11 +73,31 @@ async fn smoke_check_runs_one_query_at_construction() {
         .await
         .unwrap();
     let events = arc_lib.events();
-    // OpenDialog (1) + Query with SMOKE_CHECK_PROMPT (2) — no drop yet
-    // since _backend is still alive.
+    // OpenDialog (1) + Query (2) — no drop yet since _backend is alive.
+    // The smoke-check query is rendered THROUGH the chat template (not the
+    // raw `SMOKE_CHECK_PROMPT`), so it carries ChatML turn structure and
+    // the model emits its stop token promptly instead of rambling to
+    // context-full (the status-4 "context limit exceeded" failure).
     assert!(matches!(events[0], MockEvent::OpenDialog { .. }));
     match &events[1] {
-        MockEvent::Query { prompt } => assert_eq!(prompt, SMOKE_CHECK_PROMPT),
+        MockEvent::Query { prompt } => {
+            assert_ne!(
+                prompt, SMOKE_CHECK_PROMPT,
+                "smoke check must NOT pass the raw prompt — it must be chat-templated"
+            );
+            assert!(
+                prompt.contains("<|im_start|>"),
+                "smoke-check query must carry ChatML structure, got: {prompt}"
+            );
+            assert!(
+                prompt.contains(SMOKE_CHECK_PROMPT),
+                "smoke-check query must contain the minimal user content, got: {prompt}"
+            );
+            assert!(
+                prompt.contains("<|im_start|>assistant"),
+                "smoke-check query must open the assistant turn so the model can stop at <|im_end|>, got: {prompt}"
+            );
+        }
         other => panic!("expected smoke-check Query, got {other:?}"),
     }
 }
@@ -319,6 +339,40 @@ async fn generate_stream_renders_prompt_through_chat_template() {
     assert!(
         last_query.contains("<|im_start|>system\nYou are a helpful Socratic tutor.<|im_end|>"),
         "rendered prompt should include the system message: {last_query}",
+    );
+}
+
+#[tokio::test]
+async fn generate_stream_resets_dialog_before_querying() {
+    // The Primer re-sends the full prompt every query and shares one dialog
+    // with the background subsystems, so each query must reset the dialog's
+    // accumulated context first or the 2048-token window saturates (the
+    // on-device "Context limit exceeded" failure). Pin that a Reset event is
+    // recorded immediately before the Query within a single generate_stream.
+    let dir = tempdir().unwrap();
+    write_genie_config(dir.path());
+    write_primer_meta(dir.path());
+    let arc_lib: Arc<MockGenieLibrary> = Arc::new(MockGenieLibrary::new_with_response("ack"));
+    let lib: Arc<dyn GenieLibrary> = Arc::clone(&arc_lib) as Arc<dyn GenieLibrary>;
+    // Smoke check OFF so the only events are from generate_stream itself.
+    let backend = QnnBackend::new_with_library(dir.path().to_path_buf(), lib, false)
+        .await
+        .unwrap();
+    let prompt = user_prompt("hello primer");
+    let mut stream = backend
+        .generate_stream(&prompt, &GenerationParams::default())
+        .await
+        .unwrap();
+    while stream.next().await.is_some() {}
+
+    let events = arc_lib.events();
+    let query_idx = events
+        .iter()
+        .position(|e| matches!(e, MockEvent::Query { .. }))
+        .expect("a Query event");
+    assert!(
+        query_idx >= 1 && matches!(events[query_idx - 1], MockEvent::Reset),
+        "expected a Reset immediately before the Query, got: {events:?}"
     );
 }
 

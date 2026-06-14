@@ -14,7 +14,9 @@ use async_trait::async_trait;
 use futures::StreamExt;
 use futures::channel::mpsc;
 use primer_core::error::{PrimerError, Result};
-use primer_core::inference::{GenerationParams, InferenceBackend, Prompt, TokenChunk, TokenStream};
+use primer_core::inference::{
+    GenerationParams, InferenceBackend, Message, Prompt, Role, TokenChunk, TokenStream,
+};
 use tokio::sync::Mutex;
 
 use super::genie::{GenieDialog, GenieLibrary, RealGenieLibrary};
@@ -140,7 +142,18 @@ impl QnnBackend {
             // satisfies the Tauri-command Send bound in `primer-gui`)
             // even though `dyn GenieDialog` deliberately omits the
             // `Sync` bound per the trait-design comment.
-            let rx = fire_smoke_check_query(&*dialog);
+            // Render the smoke prompt THROUGH the chat template so the
+            // query carries ChatML turn structure. A RAW "." bypasses the
+            // template, the model never sees a turn boundary, and it
+            // generates until the context fills (status-4 "context limit
+            // exceeded"). Templated, the model emits its stop token
+            // (`<|im_end|>`) promptly — bounding the smoke check while
+            // still exercising the full FFI path (render → query →
+            // callback → done).
+            let rendered = template.render(&smoke_check_prompt()).map_err(|e| {
+                PrimerError::Inference(format!("smoke-check render failed: {e}").into())
+            })?;
+            let rx = fire_smoke_check_query(&*dialog, &rendered);
             drain_smoke_check_receiver(rx).await?;
         }
 
@@ -201,12 +214,35 @@ pub fn validate_bundle_dir(
 /// force `&dyn GenieDialog: Send`, which in turn forces
 /// `dyn GenieDialog: Sync` — a contract the C-side cannot legally
 /// provide.
-fn fire_smoke_check_query(dialog: &dyn GenieDialog) -> mpsc::UnboundedReceiver<Result<TokenChunk>> {
+fn fire_smoke_check_query(
+    dialog: &dyn GenieDialog,
+    rendered_prompt: &str,
+) -> mpsc::UnboundedReceiver<Result<TokenChunk>> {
     let (tx, rx) = mpsc::unbounded::<Result<TokenChunk>>();
-    dialog.query_streaming(SMOKE_CHECK_PROMPT, tx);
+    dialog.query_streaming(rendered_prompt, tx);
     // `query_streaming` consumed the sender; the channel closes when
     // it returns. The caller drains.
     rx
+}
+
+/// Minimal chat prompt for the construction smoke check: a single user
+/// turn carrying [`SMOKE_CHECK_PROMPT`], no system prompt. Rendered
+/// through the model's chat template before it reaches Genie so the query
+/// carries ChatML turn structure and the model emits its stop token
+/// (`<|im_end|>`) promptly. A raw, un-templated "." bypasses the turn
+/// boundary, so the model never stops and generates until the context
+/// fills — the status-4 "context limit exceeded" failure this avoids.
+///
+/// Pure helper so the smoke-prompt shape is unit-testable without a
+/// dialog handle.
+fn smoke_check_prompt() -> Prompt {
+    Prompt {
+        system: String::new(),
+        messages: vec![Message {
+            role: Role::User,
+            content: SMOKE_CHECK_PROMPT.to_string(),
+        }],
+    }
 }
 
 /// Drain the smoke-check receiver, surfacing the first `Err` chunk
@@ -281,6 +317,18 @@ impl InferenceBackend for QnnBackend {
             // current-thread runtime even if the runtime has no idle
             // worker.
             let guard = dialog.blocking_lock();
+            // Reset the dialog's accumulated context BEFORE querying. The
+            // Primer re-sends the whole prompt each turn and this one dialog
+            // is shared with the background subsystems, so without a reset
+            // every query appends to the same KV context and the 2048-token
+            // window saturates within a turn or two (the on-device "Context
+            // limit exceeded" failure). A reset failure is surfaced through
+            // the stream as an error and the query is skipped — better than
+            // querying a dirty context.
+            if let Err(e) = guard.reset() {
+                let _ = tx.unbounded_send(Err(e));
+                return;
+            }
             guard.query_streaming(&rendered, tx);
             // Sender dropped on guard drop / fn return → channel closes.
         });

@@ -159,6 +159,8 @@ impl DialogueManager {
         intent: PedagogicalIntent,
     ) -> (Prompt, usize) {
         let knowledge_context = self.retrieve_knowledge(child_input).await;
+        // Reflects what retrieval matched (the routing complexity signal),
+        // independent of any small-context truncation/budget drop below.
         let passage_count = knowledge_context.len();
         let (summary, retrieved_older) = self.retrieve_long_term_memory(child_input).await;
         // Compute due-vocab once per turn. Wallclock dependency is
@@ -171,19 +173,50 @@ impl DialogueManager {
             chrono::Utc::now(),
             self.vocab_settings.max_per_prompt,
         );
-        let prompt = prompt_builder::build_prompt_with_pack_and_vocab(
-            &*self.prompt_pack,
-            &self.learner,
-            &self.session,
-            intent,
-            &knowledge_context,
-            &summary,
-            &retrieved_older,
-            self.config
-                .effective_context_window_turns(self.inference.name()),
-            &due_vocab,
-            self.config.break_suggest_after_minutes,
-        );
+        let backend_name = self.inference.name();
+        let context_turns = self.config.effective_context_window_turns(backend_name);
+        let break_minutes = self.config.break_suggest_after_minutes;
+
+        // Small-context backends (the Qualcomm NPU `QnnBackend` runs a
+        // 2048-token Genie context) get a token-budgeted assembly: each KB
+        // passage is truncated to its relevant lead, and the prompt builder
+        // drops the lowest-value optional sections to keep the system prompt
+        // under budget — leaving room for the reply. The pedagogical core
+        // (Socratic base prompt + intent) is never trimmed. Large-context
+        // backends keep the unbounded path, byte-for-byte as before.
+        let prompt = if primer_core::backend::is_small_context_backend(backend_name) {
+            use primer_core::consts::prompt_budget as pb;
+            let truncated = prompt_builder::truncate_passages(
+                &knowledge_context,
+                pb::KB_PASSAGE_MAX_TOKENS_SMALL_CONTEXT,
+            );
+            prompt_builder::build_prompt_within_budget_with_pack_and_vocab(
+                &*self.prompt_pack,
+                &self.learner,
+                &self.session,
+                intent,
+                &truncated,
+                &summary,
+                &retrieved_older,
+                context_turns,
+                &due_vocab,
+                break_minutes,
+                pb::SYSTEM_PROMPT_BUDGET_TOKENS_SMALL_CONTEXT,
+            )
+        } else {
+            prompt_builder::build_prompt_with_pack_and_vocab(
+                &*self.prompt_pack,
+                &self.learner,
+                &self.session,
+                intent,
+                &knowledge_context,
+                &summary,
+                &retrieved_older,
+                context_turns,
+                &due_vocab,
+                break_minutes,
+            )
+        };
         (prompt, passage_count)
     }
 

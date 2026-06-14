@@ -635,6 +635,77 @@ async fn build_turn_prompt_omits_vocab_section_when_no_concept_is_due() {
     );
 }
 
+#[tokio::test]
+async fn build_turn_prompt_budgets_system_prompt_for_small_context_backend() {
+    use primer_core::consts::prompt_budget::SYSTEM_PROMPT_BUDGET_TOKENS_SMALL_CONTEXT;
+    use primer_core::conversation::PedagogicalIntent;
+    use primer_core::prompt_budget::estimate_tokens;
+
+    // A small-context ("qnn:") backend with a knowledge base that would
+    // otherwise flood the prompt with 5 huge passages (200 marker words
+    // each ≈ 750 tokens apiece). The budgeted assembly must keep the
+    // system prompt under the small-context ceiling.
+    let backend = std::sync::Arc::new(
+        ScriptedBackend::new(vec![Ok(chunk("", true))]).with_name("qnn:test-model"),
+    );
+    let knowledge = std::sync::Arc::new(BigPassageKnowledge::new(5, 200));
+    let dm = DialogueManager::new(
+        test_learner(),
+        backend.clone(),
+        knowledge.clone(),
+        DialogueManagerStores::default(),
+        default_subsystems(),
+        PedagogyConfig::default(),
+    );
+
+    let (prompt, _passage_count) = dm
+        .build_turn_prompt("why is the sky blue", PedagogicalIntent::SocraticQuestion)
+        .await;
+
+    assert!(
+        estimate_tokens(&prompt.system) <= SYSTEM_PROMPT_BUDGET_TOKENS_SMALL_CONTEXT,
+        "qnn system prompt must stay within the small-context budget ({SYSTEM_PROMPT_BUDGET_TOKENS_SMALL_CONTEXT}), got {}",
+        estimate_tokens(&prompt.system)
+    );
+    // The Socratic core always survives.
+    assert!(
+        prompt.system.contains("Socratic"),
+        "pedagogical core must be present: {}",
+        prompt.system
+    );
+}
+
+#[tokio::test]
+async fn build_turn_prompt_leaves_large_context_backend_unbudgeted() {
+    use primer_core::consts::prompt_budget::SYSTEM_PROMPT_BUDGET_TOKENS_SMALL_CONTEXT;
+    use primer_core::conversation::PedagogicalIntent;
+    use primer_core::prompt_budget::estimate_tokens;
+
+    // The same flood of passages on a NON-small-context (default-named)
+    // backend keeps the unbounded path: the system prompt is free to blow
+    // past the small-context ceiling and the full passage bodies appear.
+    let backend = std::sync::Arc::new(ScriptedBackend::new(vec![Ok(chunk("", true))]));
+    let knowledge = std::sync::Arc::new(BigPassageKnowledge::new(5, 200));
+    let dm = DialogueManager::new(
+        test_learner(),
+        backend.clone(),
+        knowledge.clone(),
+        DialogueManagerStores::default(),
+        default_subsystems(),
+        PedagogyConfig::default(),
+    );
+
+    let (prompt, _passage_count) = dm
+        .build_turn_prompt("why is the sky blue", PedagogicalIntent::SocraticQuestion)
+        .await;
+
+    assert!(
+        estimate_tokens(&prompt.system) > SYSTEM_PROMPT_BUDGET_TOKENS_SMALL_CONTEXT,
+        "large-context prompt should be unbounded (the flood is included), got {}",
+        estimate_tokens(&prompt.system)
+    );
+}
+
 // ─── Break-gate end-to-end tests ────────────────────────────────────────
 
 #[tokio::test]

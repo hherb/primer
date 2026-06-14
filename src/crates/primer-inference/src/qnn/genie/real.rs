@@ -21,7 +21,7 @@ use primer_qnn_sys::{
 };
 
 use super::config::absolutize_genie_config;
-use super::{GenieCallError, GenieDialog, GenieLibrary};
+use super::{GenieCallError, GenieDialog, GenieLibrary, classify_query_status, emit_query_outcome};
 
 /// Environment variable naming a file to which Genie's logging callback is
 /// routed. When set (typically by `primer-gui` on Android to
@@ -300,6 +300,22 @@ struct RealGenieDialog {
 unsafe impl Send for RealGenieDialog {}
 
 impl GenieDialog for RealGenieDialog {
+    fn reset(&self) -> PrimerResult<()> {
+        // SAFETY: `self.dialog` is a non-null handle produced by a
+        // successful `GenieDialog_create` and not yet freed; `dialog_reset`
+        // is the resolved `GenieDialog_reset` entry point. The call has no
+        // pointer-aliasing concerns — it takes only the opaque handle.
+        let status = unsafe { (self.lib.dialog_reset)(self.dialog) };
+        if status != GENIE_STATUS_SUCCESS {
+            return Err(GenieCallError::NonSuccess {
+                operation: "GenieDialog_reset",
+                status,
+            }
+            .to_primer_error());
+        }
+        Ok(())
+    }
+
     fn query_streaming(&self, prompt: &str, sender: UnboundedSender<PrimerResult<TokenChunk>>) {
         // Genie's query takes a NUL-terminated UTF-8 prompt. An
         // embedded NUL in the prompt is operator error (the Primer's
@@ -362,20 +378,11 @@ impl GenieDialog for RealGenieDialog {
         // owner of `raw_sender_ptr`.
         let sender = unsafe { reclaim_sender_box(raw_sender_ptr) };
 
-        if query_status != GENIE_STATUS_SUCCESS {
-            let err = GenieCallError::NonSuccess {
-                operation: "GenieDialog_query",
-                status: query_status,
-            };
-            let _ = sender.unbounded_send(Err(err.to_primer_error()));
-            // No done chunk after an error — see the trait
-            // documentation for the rationale.
-        } else {
-            let _ = sender.unbounded_send(Ok(TokenChunk {
-                text: String::new(),
-                done: true,
-            }));
-        }
+        // Classify the return status and emit the terminal chunk. The
+        // graceful-vs-error decision and its emission are both host-tested
+        // pure helpers in the parent module — see `classify_query_status`
+        // and `emit_query_outcome`.
+        emit_query_outcome(classify_query_status(query_status), query_status, &sender);
         // sender drops here, closing the channel.
     }
 }
