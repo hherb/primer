@@ -7,7 +7,8 @@
 //! - Raw `extern "C"` type aliases and symbol names matching the Genie
 //!   C API (module [`bindings`]).
 //! - [`GenieLibrary`], a thin `libloading::Library` wrapper that
-//!   lazy-resolves the six Genie functions the Primer needs.
+//!   lazy-resolves the core Genie functions the Primer needs (six required
+//!   entry points + three best-effort logging symbols).
 //!
 //! ## Why dlopen instead of `#[link]`?
 //!
@@ -91,7 +92,7 @@ pub enum GenieLibraryError {
     ///
     /// This means the dlopen succeeded but the resolved library is the
     /// wrong version or a stub — `libGenie.so` is present but
-    /// `GenieDialog_create` (or one of the other five entry points) is
+    /// `GenieDialog_create` (or one of the other required entry points) is
     /// not exported. Usually a QAIRT version skew between what the user
     /// installed and what the Primer expects.
     #[error("Genie symbol {symbol} could not be resolved from libGenie.so: {source}")]
@@ -135,6 +136,11 @@ pub struct GenieLibrary {
     pub dialog_query: GenieDialog_query_fn,
     /// `GenieDialog_free` entry point.
     pub dialog_free: GenieDialog_free_fn,
+    /// `GenieDialog_reset` entry point. Clears the dialog's accumulated
+    /// conversation/KV context. Called before every query so the Primer's
+    /// stateless full-prompt model doesn't let the shared dialog (chat +
+    /// the three background subsystems) saturate the context window.
+    pub dialog_reset: GenieDialog_reset_fn,
 
     /// `GenieLog_create` entry point — **optional**. `None` when the loaded
     /// `libGenie.so` does not export the logging API. The Primer uses this
@@ -152,10 +158,10 @@ pub struct GenieLibrary {
 }
 
 impl GenieLibrary {
-    /// Open `libGenie.so` from `qairt_lib_dir` and resolve the five
-    /// entry points the Primer needs (QAIRT 2.45 — `setTokenCallback` was
-    /// removed; the token callback is now a parameter of
-    /// `GenieDialog_query`).
+    /// Open `libGenie.so` from `qairt_lib_dir` and resolve the six
+    /// required entry points the Primer needs (QAIRT 2.45 — `setTokenCallback`
+    /// was removed; the token callback is now a parameter of
+    /// `GenieDialog_query`; `GenieDialog_reset` clears the per-query context).
     ///
     /// On `target_os = "android"`:
     /// - Probes `qairt_lib_dir.join(LIBGENIE_BASENAME)`.
@@ -228,6 +234,11 @@ impl GenieLibrary {
             SYM_GENIE_DIALOG_FREE,
             "GenieDialog_free",
         )?;
+        let dialog_reset = resolve_symbol::<GenieDialog_reset_fn>(
+            &library,
+            SYM_GENIE_DIALOG_RESET,
+            "GenieDialog_reset",
+        )?;
 
         // Logging symbols are optional: a `libGenie.so` that doesn't export
         // them must not fail the whole backend (which already reaches
@@ -248,6 +259,7 @@ impl GenieLibrary {
             dialog_create,
             dialog_query,
             dialog_free,
+            dialog_reset,
             log_create,
             log_free,
             config_bind_logger,

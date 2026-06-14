@@ -39,6 +39,7 @@ use super::{GenieCallError, GenieDialog, GenieLibrary};
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum MockEvent {
     OpenDialog { config_path: PathBuf },
+    Reset,
     Query { prompt: String },
     DropDialog,
 }
@@ -230,6 +231,15 @@ pub struct MockGenieDialog {
 }
 
 impl GenieDialog for MockGenieDialog {
+    fn reset(&self) -> PrimerResult<()> {
+        self.inner
+            .events
+            .lock()
+            .expect("mock events mutex poisoned")
+            .push(MockEvent::Reset);
+        Ok(())
+    }
+
     fn query_streaming(&self, prompt: &str, sender: UnboundedSender<PrimerResult<TokenChunk>>) {
         self.inner
             .events

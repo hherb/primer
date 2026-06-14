@@ -86,6 +86,19 @@ pub type Genie_Status_t = i32;
 /// Operation completed successfully.
 pub const GENIE_STATUS_SUCCESS: Genie_Status_t = 0;
 
+/// `GenieDialog_query` ran out of context window mid-generation: the
+/// prompt plus the generated reply exceeded the model's context length
+/// (`Context limit exceeded (PROMPT + GEN > CTX)` in `genie.log`).
+///
+/// This is NOT an ABI/setup failure — the reply already streamed in full
+/// via the token callback before the limit was hit, so the Primer treats
+/// it as a graceful completion (the turn keeps what was generated) rather
+/// than dropping the turn. See the on-device diagnosis (status 4 on QAIRT
+/// 2.45, RedMagic 11 Pro, cl2048 bundle): `~/qnn-export-2048/`
+/// `genie-status4-diagnosis.txt`. All other non-success codes stay hard
+/// errors so a genuine ABI mismatch is never masked.
+pub const GENIE_STATUS_CONTEXT_LIMIT_EXCEEDED: Genie_Status_t = 4;
+
 /// Sentence-completion mode for `GenieDialog_query`.
 ///
 /// The upstream `Genie_Dialog_SentenceCode_t` enum is currently a single-
@@ -193,6 +206,27 @@ pub type GenieDialog_query_fn = unsafe extern "C" fn(
 
 /// `GenieDialog_free(handle) -> status`
 pub type GenieDialog_free_fn = unsafe extern "C" fn(handle: GenieDialog_Handle_t) -> Genie_Status_t;
+
+/// `GenieDialog_reset(handle) -> status`
+///
+/// Resets the dialog to its initial state — clears the accumulated
+/// conversation/KV context so the next `GenieDialog_query` starts from an
+/// empty context window. **Load-bearing for the Primer's stateless prompt
+/// model:** the engine re-sends the *entire* prompt (system + history) on
+/// every query, and the chat turn shares one dialog handle with the three
+/// background subsystems (classifier / extractor / comprehension). Without
+/// a reset before each query, every query appends to the same KV context
+/// and the 2048-token window saturates within a turn or two (the on-device
+/// "Context limit exceeded" failure). Resetting before each query keeps
+/// every query independent.
+///
+/// 2.45 ABI (QAIRT `GenieDialog.h`):
+///
+/// ```c
+/// Genie_Status_t GenieDialog_reset(const GenieDialog_Handle_t dialogHandle);
+/// ```
+pub type GenieDialog_reset_fn =
+    unsafe extern "C" fn(handle: GenieDialog_Handle_t) -> Genie_Status_t;
 
 // ---------------------------------------------------------------------------
 // Genie logging API (QAIRT 2.45 `GenieLog.h`)
@@ -316,6 +350,9 @@ pub const SYM_GENIE_DIALOG_QUERY: &[u8] = b"GenieDialog_query\0";
 
 /// `libGenie.so` symbol for `GenieDialog_free`.
 pub const SYM_GENIE_DIALOG_FREE: &[u8] = b"GenieDialog_free\0";
+
+/// `libGenie.so` symbol for `GenieDialog_reset`.
+pub const SYM_GENIE_DIALOG_RESET: &[u8] = b"GenieDialog_reset\0";
 
 /// `libGenie.so` symbol for `GenieLog_create` (optional — logging path).
 pub const SYM_GENIE_LOG_CREATE: &[u8] = b"GenieLog_create\0";

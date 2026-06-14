@@ -93,6 +93,89 @@ pub fn build_system_prompt_with_pack_and_vocab(
     due_vocab: &[&ConceptState],
     break_minutes: u32,
 ) -> String {
+    assemble_system_prompt(
+        pack,
+        learner,
+        intent,
+        knowledge_context,
+        summary,
+        retrieved_older,
+        due_vocab,
+        break_minutes,
+        None,
+    )
+}
+
+/// Like [`build_system_prompt_with_pack_and_vocab`] but caps the system
+/// prompt at `system_budget` tokens (estimated via
+/// [`primer_core::prompt_budget::estimate_tokens`]).
+///
+/// Used by the dialogue manager for small-context backends (the Qualcomm
+/// NPU `QnnBackend` runs a 2048-token Genie context). The **pedagogical
+/// core** — base prompt + intent instruction + engagement note + break
+/// suggestion — is always kept; the optional sections are dropped to fit,
+/// in ascending pedagogical value (vocab review first, then retrieved
+/// turns, then the rolling summary, then knowledge passages). Knowledge
+/// passages should already be truncated by the caller (see
+/// [`primer_core::prompt_budget::truncate_to_tokens`]); this function only
+/// decides which whole sections fit.
+#[allow(clippy::too_many_arguments)]
+pub fn build_system_prompt_within_budget_with_pack_and_vocab(
+    pack: &dyn PromptPack,
+    learner: &LearnerModel,
+    intent: PedagogicalIntent,
+    knowledge_context: &[Passage],
+    summary: &str,
+    retrieved_older: &[Turn],
+    due_vocab: &[&ConceptState],
+    break_minutes: u32,
+    system_budget: usize,
+) -> String {
+    assemble_system_prompt(
+        pack,
+        learner,
+        intent,
+        knowledge_context,
+        summary,
+        retrieved_older,
+        due_vocab,
+        break_minutes,
+        Some(system_budget),
+    )
+}
+
+/// Truncate each passage's body to at most `max_tokens` tokens
+/// (sentence-boundary aware, via
+/// [`primer_core::prompt_budget::truncate_to_tokens`]), leaving the id,
+/// source, and score untouched. Used by the dialogue manager to shrink
+/// whole wiki/seed passages to their relevant lead before injecting them
+/// into a small-context system prompt.
+pub fn truncate_passages(passages: &[Passage], max_tokens: usize) -> Vec<Passage> {
+    passages
+        .iter()
+        .map(|p| Passage {
+            text: primer_core::prompt_budget::truncate_to_tokens(&p.text, max_tokens),
+            ..p.clone()
+        })
+        .collect()
+}
+
+/// Shared implementation behind the budgeted and unbudgeted system-prompt
+/// builders. `system_budget = None` reproduces the original unbounded
+/// behaviour byte-for-byte; `Some(budget)` drops optional sections to fit
+/// (see [`build_system_prompt_within_budget_with_pack_and_vocab`]).
+#[allow(clippy::too_many_arguments)]
+fn assemble_system_prompt(
+    pack: &dyn PromptPack,
+    learner: &LearnerModel,
+    intent: PedagogicalIntent,
+    knowledge_context: &[Passage],
+    summary: &str,
+    retrieved_older: &[Turn],
+    due_vocab: &[&ConceptState],
+    break_minutes: u32,
+    system_budget: Option<usize>,
+) -> String {
     let age = learner.profile.age;
     let name = &learner.profile.name;
 
@@ -175,10 +258,43 @@ pub fn build_system_prompt_with_pack_and_vocab(
         format!("\n\n{intro}\n\n{lines}")
     };
 
-    format!(
-        "{base}\n\n{intent_instruction}{engagement_note}{break_suggestion_section}\
-         {summary_section}{retrieved_section}{vocab_section}{knowledge_section}"
-    )
+    // The pedagogical core is never dropped — only the optional
+    // memory/knowledge/vocab sections are gated by the budget.
+    let core = format!("{base}\n\n{intent_instruction}{engagement_note}{break_suggestion_section}");
+
+    let (summary_section, retrieved_section, vocab_section, knowledge_section) = match system_budget
+    {
+        None => (
+            summary_section,
+            retrieved_section,
+            vocab_section,
+            knowledge_section,
+        ),
+        Some(budget) => {
+            use primer_core::prompt_budget::{estimate_tokens, select_sections};
+            let remaining = budget.saturating_sub(estimate_tokens(&core));
+            // Value order (most valuable first): knowledge grounds the
+            // answer, the summary carries cross-window memory, retrieved
+            // turns add session context, vocab hints are the least
+            // critical. `select_sections` keeps the prefix that fits.
+            let costs = [
+                estimate_tokens(&knowledge_section),
+                estimate_tokens(&summary_section),
+                estimate_tokens(&retrieved_section),
+                estimate_tokens(&vocab_section),
+            ];
+            let keep = select_sections(remaining, &costs);
+            let gate = |keep: bool, s: String| if keep { s } else { String::new() };
+            (
+                gate(keep[1], summary_section),
+                gate(keep[2], retrieved_section),
+                gate(keep[3], vocab_section),
+                gate(keep[0], knowledge_section),
+            )
+        }
+    };
+
+    format!("{core}{summary_section}{retrieved_section}{vocab_section}{knowledge_section}")
 }
 
 /// Render `now - last` as integer days, floored, non-negative.
@@ -282,6 +398,43 @@ pub fn build_prompt_with_pack_and_vocab(
             retrieved_older,
             due_vocab,
             break_minutes,
+        ),
+        messages: build_messages(session, context_turns),
+    }
+}
+
+/// Like [`build_prompt_with_pack_and_vocab`] but caps the *system prompt*
+/// at `system_budget` tokens for small-context backends (the Qualcomm NPU
+/// `QnnBackend` runs a 2048-token Genie context). The chat `messages`
+/// list is unchanged — it is already bounded by `context_turns` (which
+/// the dialogue manager shrinks for small-context backends via
+/// [`primer_core::config::PedagogyConfig::effective_context_window_turns`]).
+/// Knowledge passages should already be truncated by the caller.
+#[allow(clippy::too_many_arguments)]
+pub fn build_prompt_within_budget_with_pack_and_vocab(
+    pack: &dyn PromptPack,
+    learner: &LearnerModel,
+    session: &Session,
+    intent: PedagogicalIntent,
+    knowledge_context: &[Passage],
+    summary: &str,
+    retrieved_older: &[Turn],
+    context_turns: usize,
+    due_vocab: &[&ConceptState],
+    break_minutes: u32,
+    system_budget: usize,
+) -> Prompt {
+    Prompt {
+        system: build_system_prompt_within_budget_with_pack_and_vocab(
+            pack,
+            learner,
+            intent,
+            knowledge_context,
+            summary,
+            retrieved_older,
+            due_vocab,
+            break_minutes,
+            system_budget,
         ),
         messages: build_messages(session, context_turns),
     }
@@ -1706,6 +1859,182 @@ speak_hint = "x"
         assert!(
             !prompt.contains("phrase it as their choice"),
             "non-SuggestBreak intent should NOT include the break section: {prompt:?}"
+        );
+    }
+
+    // ─── Small-context token-budget assembly ──────────────────────────
+
+    #[test]
+    fn truncate_passages_shrinks_body_keeps_metadata() {
+        let long = vec!["word"; 200].join(" ");
+        let passages = [Passage {
+            id: "kb:x".to_string(),
+            source: "wiki:x".to_string(),
+            text: long,
+            score: 0.42,
+        }];
+        let out = truncate_passages(&passages, 20);
+        assert_eq!(out.len(), 1);
+        // Body shrunk to the budget…
+        assert!(primer_core::prompt_budget::estimate_tokens(&out[0].text) <= 20);
+        // …metadata preserved verbatim.
+        assert_eq!(out[0].id, "kb:x");
+        assert_eq!(out[0].source, "wiki:x");
+        assert_eq!(out[0].score, 0.42);
+    }
+
+    #[test]
+    fn truncate_passages_leaves_short_passages_untouched() {
+        let passages = [Passage {
+            id: "kb:y".to_string(),
+            source: "wiki:y".to_string(),
+            text: "Short body.".to_string(),
+            score: 1.0,
+        }];
+        let out = truncate_passages(&passages, 100);
+        assert_eq!(out[0].text, "Short body.");
+    }
+
+    /// A knowledge passage whose body is a distinctive repeated marker so
+    /// `contains()` checks are unambiguous, sized by word count.
+    fn marker_passage(words: usize) -> Passage {
+        let text = vec!["KNOWLEDGEMARKER"; words].join(" ");
+        Passage {
+            id: "kb:marker".to_string(),
+            text,
+            source: "kb:marker".to_string(),
+            score: 1.0,
+        }
+    }
+
+    #[test]
+    fn budget_unbounded_matches_plain_builder() {
+        // A generous budget reproduces the no-budget builder byte-for-byte:
+        // the budget path only *drops* sections, never reorders or rewords.
+        let learner = learner_with(EngagementState::Engaged, vec![]);
+        let passages = [marker_passage(5)];
+        let due = [vocab_concept(
+            "physics:gravity",
+            UnderstandingDepth::Recall,
+            5,
+        )];
+        let due_refs: Vec<&ConceptState> = due.iter().collect();
+        let plain = build_system_prompt_with_pack_and_vocab(
+            english_pack(),
+            &learner,
+            PedagogicalIntent::SocraticQuestion,
+            &passages,
+            "earlier we talked",
+            &[],
+            &due_refs,
+            0,
+        );
+        let budgeted = build_system_prompt_within_budget_with_pack_and_vocab(
+            english_pack(),
+            &learner,
+            PedagogicalIntent::SocraticQuestion,
+            &passages,
+            "earlier we talked",
+            &[],
+            &due_refs,
+            0,
+            usize::MAX,
+        );
+        assert_eq!(plain, budgeted);
+    }
+
+    #[test]
+    fn budget_too_tight_keeps_core_drops_all_optional() {
+        let learner = learner_with(EngagementState::Engaged, vec![]);
+        let passages = [marker_passage(50)];
+        let due = [vocab_concept(
+            "physics:gravity",
+            UnderstandingDepth::Recall,
+            5,
+        )];
+        let due_refs: Vec<&ConceptState> = due.iter().collect();
+        // Budget that leaves no room beyond the pedagogical core.
+        let core_only = build_system_prompt_within_budget_with_pack_and_vocab(
+            english_pack(),
+            &learner,
+            PedagogicalIntent::SocraticQuestion,
+            &[],
+            "",
+            &[],
+            &[],
+            0,
+            usize::MAX,
+        );
+        let budget = primer_core::prompt_budget::estimate_tokens(&core_only) + 1;
+        let prompt = build_system_prompt_within_budget_with_pack_and_vocab(
+            english_pack(),
+            &learner,
+            PedagogicalIntent::SocraticQuestion,
+            &passages,
+            "earlier we talked about photosynthesis in detail at length",
+            &[],
+            &due_refs,
+            0,
+            budget,
+        );
+        // Pedagogical core survives.
+        assert!(
+            prompt.contains("Socratic"),
+            "core base prompt must survive: {prompt}"
+        );
+        // Every optional section is dropped.
+        assert!(!prompt.contains("KNOWLEDGEMARKER"), "KB dropped: {prompt}");
+        assert!(!prompt.contains("topically relevant"), "vocab dropped");
+        assert!(
+            !prompt.contains("earlier we talked"),
+            "summary dropped: {prompt}"
+        );
+    }
+
+    #[test]
+    fn budget_keeps_knowledge_over_vocab() {
+        let learner = learner_with(EngagementState::Engaged, vec![]);
+        let passages = [marker_passage(5)];
+        let due = [vocab_concept(
+            "physics:gravity",
+            UnderstandingDepth::Recall,
+            5,
+        )];
+        let due_refs: Vec<&ConceptState> = due.iter().collect();
+        // Budget that fits core + the rendered knowledge section but not
+        // the (lower-value) vocab section on top. Derive it from the
+        // actually-rendered core+knowledge size so the test is robust to
+        // section-intro overhead.
+        let core_plus_kb = build_system_prompt_within_budget_with_pack_and_vocab(
+            english_pack(),
+            &learner,
+            PedagogicalIntent::SocraticQuestion,
+            &passages,
+            "",
+            &[],
+            &[],
+            0,
+            usize::MAX,
+        );
+        let budget = primer_core::prompt_budget::estimate_tokens(&core_plus_kb) + 2;
+        let prompt = build_system_prompt_within_budget_with_pack_and_vocab(
+            english_pack(),
+            &learner,
+            PedagogicalIntent::SocraticQuestion,
+            &passages,
+            "",
+            &[],
+            &due_refs,
+            0,
+            budget,
+        );
+        assert!(
+            prompt.contains("KNOWLEDGEMARKER"),
+            "knowledge is higher value and must be kept: {prompt}"
+        );
+        assert!(
+            !prompt.contains("topically relevant"),
+            "vocab is lower value and must be dropped: {prompt}"
         );
     }
 }

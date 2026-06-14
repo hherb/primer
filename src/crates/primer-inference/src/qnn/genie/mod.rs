@@ -29,6 +29,7 @@ use std::path::Path;
 use futures::channel::mpsc::UnboundedSender;
 use primer_core::error::Result as PrimerResult;
 use primer_core::inference::TokenChunk;
+use primer_qnn_sys::{GENIE_STATUS_CONTEXT_LIMIT_EXCEEDED, GENIE_STATUS_SUCCESS, Genie_Status_t};
 use thiserror::Error;
 
 mod config;
@@ -93,6 +94,20 @@ pub trait GenieDialog: Send {
     /// returns essentially instantly and is safe to call from any
     /// context.
     fn query_streaming(&self, prompt: &str, sender: UnboundedSender<PrimerResult<TokenChunk>>);
+
+    /// Reset the dialog's accumulated conversation/KV context to empty.
+    ///
+    /// **Load-bearing for the Primer's stateless prompt model.** The engine
+    /// re-sends the *entire* prompt (system + recent history) on every query,
+    /// and one dialog handle is shared by the chat turn AND the three
+    /// background subsystems (classifier / extractor / comprehension). Genie
+    /// otherwise *appends* every query to the same KV context, so without a
+    /// reset before each query the 2048-token window saturates within a turn
+    /// or two — the on-device "Context limit exceeded" failure. The backend
+    /// calls this before every `generate_stream` query; the result surfaces a
+    /// non-success status as an error so a broken reset doesn't silently let
+    /// context leak between queries.
+    fn reset(&self) -> PrimerResult<()>;
 }
 
 /// Errors produced by [`GenieLibrary`] or [`GenieDialog`] calls.
@@ -170,9 +185,68 @@ impl GenieCallError {
     }
 }
 
+/// Classification of a `GenieDialog_query` return status — drives whether
+/// the real streaming path closes the turn gracefully or surfaces an error.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum QueryOutcome {
+    /// Generation finished cleanly (`GENIE_STATUS_SUCCESS`).
+    Complete,
+    /// The context window filled mid-generation
+    /// ([`GENIE_STATUS_CONTEXT_LIMIT_EXCEEDED`]). The reply already streamed
+    /// in full via the token callback, so the turn completes with what was
+    /// generated rather than being dropped.
+    ContextLimit,
+    /// A genuine failure (ABI mismatch, invalid handle, …) — propagate so a
+    /// real fault is never masked as a successful turn.
+    Error,
+}
+
+/// Pure classification of a raw `GenieDialog_query` status. Kept separate
+/// from the FFI call in [`real`] so the graceful-vs-error decision is
+/// unit-testable on any host without a device. Only the specific
+/// context-limit code is treated as a graceful completion; every other
+/// non-success code stays an error.
+pub(crate) fn classify_query_status(status: Genie_Status_t) -> QueryOutcome {
+    match status {
+        GENIE_STATUS_SUCCESS => QueryOutcome::Complete,
+        GENIE_STATUS_CONTEXT_LIMIT_EXCEEDED => QueryOutcome::ContextLimit,
+        _ => QueryOutcome::Error,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn classify_success_status_is_complete() {
+        assert_eq!(
+            classify_query_status(GENIE_STATUS_SUCCESS),
+            QueryOutcome::Complete
+        );
+    }
+
+    #[test]
+    fn classify_context_limit_status_is_graceful() {
+        assert_eq!(
+            classify_query_status(GENIE_STATUS_CONTEXT_LIMIT_EXCEEDED),
+            QueryOutcome::ContextLimit
+        );
+    }
+
+    #[test]
+    fn classify_other_nonsuccess_statuses_are_errors() {
+        // -1 (general), -2/-3 (invalid arg / mem), and arbitrary non-4
+        // positives must all stay hard errors so a real ABI fault is never
+        // silently treated as a completed turn.
+        for status in [-1, -2, -3, 1, 2, 3, 5, 99] {
+            assert_eq!(
+                classify_query_status(status),
+                QueryOutcome::Error,
+                "status {status} should be an error"
+            );
+        }
+    }
 
     #[test]
     fn real_library_open_returns_platform_unsupported_on_host() {

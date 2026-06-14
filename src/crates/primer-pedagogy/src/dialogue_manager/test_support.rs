@@ -169,6 +169,39 @@ impl KnowledgeBase for EmptyKnowledge {
     }
 }
 
+// ─── BigPassageKnowledge ─────────────────────────────────────────────
+
+/// Knowledge base that always returns `count` long passages (each body is
+/// `words` repetitions of a distinctive marker), so a test can prove the
+/// dialogue manager truncates and budgets them on a small-context backend.
+pub(super) struct BigPassageKnowledge {
+    count: usize,
+    words: usize,
+}
+
+impl BigPassageKnowledge {
+    pub(super) fn new(count: usize, words: usize) -> Self {
+        Self { count, words }
+    }
+    /// The repeated marker token used in every passage body.
+    pub(super) const MARKER: &'static str = "KNOWLEDGEMARKER";
+}
+
+#[async_trait]
+impl KnowledgeBase for BigPassageKnowledge {
+    async fn retrieve(&self, _query: &str, params: &RetrievalParams) -> Result<Vec<Passage>> {
+        let body = vec![Self::MARKER; self.words].join(" ");
+        Ok((0..self.count.min(params.top_k))
+            .map(|i| Passage {
+                id: format!("kb:big:{i}"),
+                source: format!("wiki:big:{i}"),
+                text: body.clone(),
+                score: 1.0 - (i as f64) * 0.01,
+            })
+            .collect())
+    }
+}
+
 // ─── TopKRecordingKnowledge ──────────────────────────────────────────
 
 /// Knowledge base that records the `top_k` of the most recent BM25-only
