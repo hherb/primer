@@ -106,6 +106,7 @@ const dom = {
     speechSupertonicUnavailableHint: document.getElementById(
       "f-speech-supertonic-unavailable-hint",
     ),
+    diagnosticsQnnMetrics: document.getElementById("f-diagnostics-qnn-metrics"),
   },
 };
 
@@ -398,6 +399,10 @@ function populate(view) {
       : "Voice mode is off — toggle it on via the header button";
     speechBlock.insertBefore(status, speechBlock.firstChild);
   }
+
+  // Diagnostics (OFF by default). `?? false` keeps the box unchecked when an
+  // older view lacks the section, mirroring the serde default.
+  f.diagnosticsQnnMetrics.checked = view.diagnostics?.qnn_metrics_enabled === true;
 }
 
 function populateSpeechOverrides(overrides) {
@@ -851,6 +856,13 @@ function gather() {
       // default only on the (defensive) never-populated path.
       download_timeout_secs: state.lastDownloadTimeoutSecs ?? undefined,
       overrides: gatherSpeechOverrides(),
+    },
+    // Developer/eval diagnostics. OFF by default (issue #228); the checkbox
+    // persists the QNN-throughput-metrics opt-in. The Rust DTO carries a
+    // field-level serde default, so omitting this would be safe (resolves
+    // OFF), but we send it so flipping the toggle round-trips.
+    diagnostics: {
+      qnn_metrics_enabled: dom.fields.diagnosticsQnnMetrics.checked,
     },
   };
 }

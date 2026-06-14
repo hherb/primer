@@ -13,6 +13,7 @@ compile_error!(
 pub mod commands;
 pub mod config;
 pub mod csp;
+pub mod diagnostics_toggle_contract;
 pub mod modal_dialog_contract;
 pub mod paths;
 pub mod reasoning_markers;
