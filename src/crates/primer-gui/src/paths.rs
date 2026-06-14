@@ -195,12 +195,19 @@ pub fn init_mobile_state(app: &tauri::App) -> Result<(), Box<dyn std::error::Err
         tracing::error!("loading gui-config.json failed: {e}; using defaults");
         crate::config::GuiConfig::default()
     });
+    // Capture the opt-in diagnostics flag before `config` moves into AppState.
+    let qnn_metrics_opt_in = config.diagnostics.qnn_metrics_enabled;
     app.manage(crate::state::AppState::new(home.clone(), config));
 
     set_mobile_seed_dir_if_present(&home);
     set_adsp_library_path_if_present();
     set_genie_log_path(&home);
-    set_qnn_metrics_path(&home);
+    // QNN throughput metrics are opt-in (issue #228): only enable the on-device
+    // recording when the developer has flipped the Settings → Diagnostics
+    // toggle. A child's device records nothing by default.
+    if qnn_metrics_opt_in {
+        set_qnn_metrics_path(&home);
+    }
     Ok(())
 }
 

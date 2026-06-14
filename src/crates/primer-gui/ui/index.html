@@ -829,6 +829,22 @@
             </div>
           </div>
         </details>
+
+        <details class="settings-group" id="diagnostics-settings-group">
+          <summary>Diagnostics (developer)</summary>
+          <label class="check field-full">
+            <input type="checkbox" id="f-diagnostics-qnn-metrics" />
+            <span>Record QNN per-turn throughput metrics (TTFT + decode tok/s)</span>
+          </label>
+          <p class="hint muted">
+            Developer/eval only. When on, the QNN (NPU) backend appends a
+            per-turn record to <code>.primer/qnn_metrics.jsonl</code> on the
+            device (read via <code>run-as cat</code>). The file is size-capped
+            and rotated, so it can't grow without bound. <strong>Off by
+            default</strong> — a child's device records nothing unless you tick
+            this. No effect on desktop or non-QNN backends.
+          </p>
+        </details>
       </form>
 
       <footer class="modal-footer">

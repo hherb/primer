@@ -42,6 +42,7 @@ pub struct GuiConfig {
     pub persistence: PersistenceConfig,
     pub ui: UiConfig,
     pub speech: SpeechSettings,
+    pub diagnostics: DiagnosticsConfig,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -399,6 +400,26 @@ impl Default for UiConfig {
     }
 }
 
+/// Developer/eval diagnostics. Every field defaults OFF so a production
+/// child device records no telemetry of any kind (issue #228).
+///
+/// Not a secret, so this section passes through the IPC View/Update DTOs
+/// verbatim (like [`UiConfig`]).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(default)]
+pub struct DiagnosticsConfig {
+    /// When `true`, the Android startup hook enables the on-device QNN
+    /// per-turn throughput metrics file (`<app_data>/.primer/
+    /// qnn_metrics.jsonl`: TTFT + decode tok/s, read via `run-as cat`).
+    ///
+    /// **OFF by default.** Only a developer running a throughput-capture
+    /// session flips it on; a child's device never records by default. The
+    /// file itself is size-capped and single-backup rotated
+    /// (`primer_inference::qnn::metrics`) so even when enabled it cannot grow
+    /// without bound. No effect on desktop (the metrics path is mobile-only).
+    pub qnn_metrics_enabled: bool,
+}
+
 /// Which speech backend stack to use. `WhisperPiper` is the default and
 /// works on every supported OS. `MacosNative` is macOS-only and requires
 /// building with `--features primer-gui/macos-native`.
@@ -661,6 +682,7 @@ pub struct GuiConfigView {
     pub persistence: PersistenceConfig,
     pub ui: UiConfig,
     pub speech: SpeechSettings,
+    pub diagnostics: DiagnosticsConfig,
 }
 
 /// Frontend-safe projection of [`BackendConfig`] (read path).
@@ -735,6 +757,7 @@ impl From<&GuiConfig> for GuiConfigView {
                     ..c.speech.clone()
                 }
             },
+            diagnostics: c.diagnostics.clone(),
         }
     }
 }
@@ -757,6 +780,15 @@ pub struct GuiConfigUpdate {
     pub persistence: PersistenceConfig,
     pub ui: UiConfig,
     pub speech: SpeechSettings,
+    /// Developer/eval diagnostics. Unlike the backend fields, this carries a
+    /// field-level `#[serde(default)]` so an update payload that omits it (an
+    /// older `settings.js`, or a hand-written fixture) deserializes to the
+    /// OFF default rather than failing — the default is the *safe* privacy
+    /// direction (no recording), so a silent revert here can never enable
+    /// telemetry. `settings.js::gather()` still sends it so the toggle
+    /// persists when flipped.
+    #[serde(default)]
+    pub diagnostics: DiagnosticsConfig,
 }
 
 /// Update intent for [`BackendConfig`] (write path).
@@ -860,6 +892,7 @@ impl GuiConfigUpdate {
             persistence: self.persistence,
             ui: self.ui,
             speech: self.speech,
+            diagnostics: self.diagnostics,
         }
     }
 }
@@ -1267,6 +1300,118 @@ mod tests {
         save(dir.path(), &cfg).unwrap();
         let round_trip = load(dir.path()).unwrap();
         assert_eq!(round_trip, cfg);
+    }
+
+    #[test]
+    fn diagnostics_defaults_off() {
+        // The privacy posture: a fresh install records nothing (issue #228).
+        assert!(!GuiConfig::default().diagnostics.qnn_metrics_enabled);
+    }
+
+    #[test]
+    fn diagnostics_round_trips_through_disk() {
+        let dir = TempDir::new().unwrap();
+        let mut cfg = GuiConfig::default();
+        cfg.diagnostics.qnn_metrics_enabled = true;
+        save(dir.path(), &cfg).unwrap();
+        let round_trip = load(dir.path()).unwrap();
+        assert!(round_trip.diagnostics.qnn_metrics_enabled);
+        assert_eq!(round_trip, cfg);
+    }
+
+    #[test]
+    fn older_config_without_diagnostics_loads_off() {
+        // A `gui-config.json` written before #228 has no `diagnostics` key. The
+        // struct-level `#[serde(default)]` on GuiConfig must fill it with the
+        // OFF default rather than erroring — the on-disk mirror of
+        // `update_without_diagnostics_keeps_off_default` (which covers the
+        // IPC Update path). Mirrors `older_config_without_fallback_fields_*`.
+        let dir = TempDir::new().unwrap();
+        let path = config_path(dir.path());
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        let legacy = r#"{
+            "learner": {"name": "Ada", "age": 7, "locale": "en"},
+            "backend": {"kind": "stub", "model": null, "ollama_url": "http://localhost:11434"}
+        }"#;
+        std::fs::write(&path, legacy).unwrap();
+        let cfg = load(dir.path()).unwrap();
+        assert!(!cfg.diagnostics.qnn_metrics_enabled);
+    }
+
+    #[test]
+    fn diagnostics_passes_through_view_verbatim() {
+        let mut cfg = GuiConfig::default();
+        cfg.diagnostics.qnn_metrics_enabled = true;
+        let view: GuiConfigView = (&cfg).into();
+        assert!(view.diagnostics.qnn_metrics_enabled);
+    }
+
+    #[test]
+    fn update_without_diagnostics_keeps_off_default() {
+        // An older settings.js (pre-#228) sends no `diagnostics` block. The
+        // field-level `#[serde(default)]` must accept that and resolve to OFF
+        // — never erroring, never silently enabling recording.
+        let current = GuiConfig::default();
+        let update_json = r#"{
+            "learner": {"name": "Ada", "age": 7, "locale": "en"},
+            "backend": {
+                "kind": "stub", "model": null,
+                "ollama_url": "http://localhost:11434",
+                "openai_compat_url": "http://localhost:8000",
+                "api_key_source": {"kind": "keep"},
+                "openai_compat_api_key_source": {"kind": "keep"},
+                "reasoning_markers": "",
+                "qnn_bundle_dir": null, "qnn_qairt_lib_dir": null,
+                "gguf_path": null, "llamacpp_gpu_layers": null, "llamacpp_n_ctx": null,
+                "fallback_backend": null, "fallback_model": null,
+                "primary_ttft_budget_ms": null, "router_mode": "local-only"
+            },
+            "classifier": {"match_main": true, "kind": null, "model": null, "timeout_ms": 3000},
+            "extractor": {"match_main": true, "kind": null, "model": null, "timeout_ms": 5000},
+            "comprehension": {"match_main": true, "kind": null, "model": null, "timeout_ms": 5000},
+            "embedder": {"kind": "none", "model": null, "ollama_url": null, "openai_compat_url": null},
+            "vocab": {"max_per_prompt": null},
+            "breaks": {"after_mins": 30},
+            "persistence": {"session_db": null, "knowledge_db": null, "no_persist": false},
+            "ui": {"sidebar_open": true, "last_section": "current_turn"},
+            "speech": {"voice_mode_enabled": false, "disable_auto_download": false, "mic_silence_ms": 600, "overrides": {}}
+        }"#;
+        let update: GuiConfigUpdate = serde_json::from_str(update_json).unwrap();
+        let resolved = update.into_config(&current);
+        assert!(!resolved.diagnostics.qnn_metrics_enabled);
+    }
+
+    #[test]
+    fn update_with_diagnostics_enables_recording() {
+        let current = GuiConfig::default();
+        let update_json = r#"{
+            "learner": {"name": "Ada", "age": 7, "locale": "en"},
+            "backend": {
+                "kind": "stub", "model": null,
+                "ollama_url": "http://localhost:11434",
+                "openai_compat_url": "http://localhost:8000",
+                "api_key_source": {"kind": "keep"},
+                "openai_compat_api_key_source": {"kind": "keep"},
+                "reasoning_markers": "",
+                "qnn_bundle_dir": null, "qnn_qairt_lib_dir": null,
+                "gguf_path": null, "llamacpp_gpu_layers": null, "llamacpp_n_ctx": null,
+                "fallback_backend": null, "fallback_model": null,
+                "primary_ttft_budget_ms": null, "router_mode": "local-only"
+            },
+            "classifier": {"match_main": true, "kind": null, "model": null, "timeout_ms": 3000},
+            "extractor": {"match_main": true, "kind": null, "model": null, "timeout_ms": 5000},
+            "comprehension": {"match_main": true, "kind": null, "model": null, "timeout_ms": 5000},
+            "embedder": {"kind": "none", "model": null, "ollama_url": null, "openai_compat_url": null},
+            "vocab": {"max_per_prompt": null},
+            "breaks": {"after_mins": 30},
+            "persistence": {"session_db": null, "knowledge_db": null, "no_persist": false},
+            "ui": {"sidebar_open": true, "last_section": "current_turn"},
+            "speech": {"voice_mode_enabled": false, "disable_auto_download": false, "mic_silence_ms": 600, "overrides": {}},
+            "diagnostics": {"qnn_metrics_enabled": true}
+        }"#;
+        let update: GuiConfigUpdate = serde_json::from_str(update_json).unwrap();
+        let resolved = update.into_config(&current);
+        assert!(resolved.diagnostics.qnn_metrics_enabled);
     }
 
     #[test]

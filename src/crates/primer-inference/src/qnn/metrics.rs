@@ -33,10 +33,16 @@ use std::task::{Context, Poll};
 use std::time::Instant;
 
 use futures::Stream;
+use primer_core::consts::qnn::METRICS_FILE_MAX_BYTES;
 use primer_core::error::Result;
 use primer_core::inference::{TokenChunk, TokenStream};
 
 use crate::bench::metrics::{StreamTimer, StreamTiming};
+
+/// Suffix appended to the live metrics file name when it is rotated out.
+/// Single-backup rotation: the live file becomes `<name>.1`, replacing any
+/// prior backup, so the on-disk footprint stays bounded at ~2× the cap.
+const ROTATED_SUFFIX: &str = ".1";
 
 /// Env var carrying the path of the per-turn QNN metrics JSONL file.
 ///
@@ -85,13 +91,67 @@ pub fn format_metric_line(ts_unix_ms: u64, timing: &StreamTiming) -> String {
     .to_string()
 }
 
-/// Append `line` (one JSONL record) to `path`, creating the file if missing.
+/// The path the live metrics file is rotated to: its name with
+/// [`ROTATED_SUFFIX`] appended (e.g. `qnn_metrics.jsonl` →
+/// `qnn_metrics.jsonl.1`). Pure — host-tested.
+pub fn rotated_metrics_path(path: &Path) -> PathBuf {
+    let mut name = path
+        .file_name()
+        .map(|n| n.to_os_string())
+        .unwrap_or_default();
+    name.push(ROTATED_SUFFIX);
+    path.with_file_name(name)
+}
+
+/// Whether a metrics file of `current_len` bytes should be rotated before the
+/// next append, given the cap `max_bytes`. Pure — host-tested. The check is
+/// `>=` so the file never grows past the cap by more than a single trailing
+/// record (the one appended after the check).
+pub fn should_rotate(current_len: u64, max_bytes: u64) -> bool {
+    current_len >= max_bytes
+}
+
+/// Rotate the live metrics file to [`rotated_metrics_path`] when it has reached
+/// `max_bytes`, replacing any prior backup. Best-effort and never-panic: a
+/// missing/unreadable file is a no-op, and a rename failure is logged and
+/// swallowed (the subsequent append simply continues on the over-cap file —
+/// degraded, never broken).
+fn rotate_if_oversize(path: &Path, max_bytes: u64) {
+    let len = match std::fs::metadata(path) {
+        Ok(meta) => meta.len(),
+        // No file yet (or unreadable) — nothing to rotate.
+        Err(_) => return,
+    };
+    if !should_rotate(len, max_bytes) {
+        return;
+    }
+    let rotated = rotated_metrics_path(path);
+    if let Err(e) = std::fs::rename(path, &rotated) {
+        tracing::warn!(
+            target: "primer::qnn::metrics",
+            "failed to rotate QNN metrics file {path:?} -> {rotated:?}: {e}"
+        );
+    }
+}
+
+/// Append `line` (one JSONL record) to `path`, creating the file if missing and
+/// rotating it first when it has reached [`METRICS_FILE_MAX_BYTES`].
 ///
-/// Best-effort and never-panic: an open or write failure is logged via
-/// `tracing::warn!` and swallowed, mirroring the `genie::log` sink — a metrics
-/// write must never break a child's turn.
+/// Thin wrapper over [`append_metric_line_capped`] using the production cap.
+/// Best-effort and never-panic: a rotation, open, or write failure is logged
+/// via `tracing::warn!` and swallowed, mirroring the `genie::log` sink — a
+/// metrics write must never break a child's turn.
 pub fn append_metric_line(path: &Path, line: &str) {
+    append_metric_line_capped(path, line, METRICS_FILE_MAX_BYTES);
+}
+
+/// As [`append_metric_line`] but with an explicit size cap (so the rotation
+/// behaviour is host-testable with a tiny cap). Rotates the existing file when
+/// it is at or over `max_bytes`, then appends — bounding the on-disk footprint
+/// at roughly `2 × max_bytes` (one live file plus one rotated backup).
+pub fn append_metric_line_capped(path: &Path, line: &str, max_bytes: u64) {
     use std::io::Write as _;
+    rotate_if_oversize(path, max_bytes);
     match std::fs::OpenOptions::new()
         .create(true)
         .append(true)
@@ -256,6 +316,90 @@ mod tests {
         assert_eq!(lines.len(), 2);
         assert_eq!(lines[0], r#"{"a":1}"#);
         assert_eq!(lines[1], r#"{"a":2}"#);
+    }
+
+    #[test]
+    fn should_rotate_is_inclusive_at_the_cap() {
+        // `>=`: at-or-over the cap rotates; strictly under does not. The
+        // boundary matters — the cap is the largest the live file may be
+        // *before* an append, so it can exceed the cap by at most one record.
+        assert!(!should_rotate(99, 100));
+        assert!(should_rotate(100, 100));
+        assert!(should_rotate(101, 100));
+    }
+
+    #[test]
+    fn rotated_metrics_path_appends_suffix_to_file_name() {
+        assert_eq!(
+            rotated_metrics_path(Path::new("/data/x/qnn_metrics.jsonl")),
+            PathBuf::from("/data/x/qnn_metrics.jsonl.1")
+        );
+    }
+
+    #[test]
+    fn append_rotates_when_file_reaches_cap() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("qnn_metrics.jsonl");
+        let rotated = rotated_metrics_path(&path);
+        let cap = 50u64;
+
+        // A line longer than the cap so the file is over-cap after one write.
+        let big = format!("first-{}", "a".repeat(60));
+        // First write: the file does not exist yet (len 0 < cap) ⇒ no rotation,
+        // just appended.
+        append_metric_line_capped(&path, &big, cap);
+        assert!(
+            !rotated.exists(),
+            "no rotation before the file reaches the cap"
+        );
+
+        // Second write: the existing file is now over the cap ⇒ rotate first,
+        // then append into a fresh live file.
+        append_metric_line_capped(&path, "second", cap);
+        assert!(rotated.exists(), "rotated backup must be created");
+
+        // The live file holds only the post-rotation line.
+        let live = std::fs::read_to_string(&path).unwrap();
+        assert_eq!(live.lines().collect::<Vec<_>>(), vec!["second"]);
+        // The backup holds the pre-rotation content.
+        let backup = std::fs::read_to_string(&rotated).unwrap();
+        assert!(
+            backup.contains("first-"),
+            "backup should hold the first line"
+        );
+    }
+
+    #[test]
+    fn append_rotation_replaces_an_existing_backup() {
+        // Single-backup rotation: a later rotation overwrites the prior `.1`
+        // so the footprint stays bounded at ~2× cap rather than accumulating
+        // .1/.2/.3 forever. Each line here is itself over the cap, so every
+        // append after the first rotates the previous (single-line) live file.
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("qnn_metrics.jsonl");
+        let rotated = rotated_metrics_path(&path);
+        let cap = 30u64;
+        let big = |tag: &str| format!("{tag}-{}", "z".repeat(40));
+
+        append_metric_line_capped(&path, &big("one"), cap); // file created
+        append_metric_line_capped(&path, &big("two"), cap); // rotates "one" out
+        append_metric_line_capped(&path, &big("three"), cap); // rotates "two" out
+        append_metric_line_capped(&path, &big("four"), cap); // rotates "three" out
+
+        // The single backup holds only the most-recent rotation ("three"),
+        // never the older ones — proving the `.1` is replaced, not chained.
+        let backup = std::fs::read_to_string(&rotated).unwrap();
+        assert!(
+            backup.contains("three-"),
+            "backup must hold the most recent rotated content, got: {backup:?}"
+        );
+        assert!(
+            !backup.contains("one-") && !backup.contains("two-"),
+            "older rotations must be gone, got: {backup:?}"
+        );
+        let live = std::fs::read_to_string(&path).unwrap();
+        assert_eq!(live.lines().count(), 1);
+        assert!(live.contains("four-"));
     }
 
     /// Build a `TokenStream` that emits `texts` as non-empty chunks then a
