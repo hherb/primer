@@ -474,14 +474,22 @@ true` extracts native libs to the real `nativeLibraryDir` that `ADSP_LIBRARY_PAT
 points at (default `extractNativeLibs=false` left the skel only inside the APK).
 The model bundle must be staged into the app's *internal* storage
 (`/data/user/0/<pkg>/files/qnn-bundle`) — Android scoped storage hides
-`adb`-written `/sdcard/Android/data/<pkg>` files from the app. **A *stable* token
-across reboots is still gated on contiguous DSP memory:** the 4th weight-shared
-context binary's NSP buffers (~698 MB) exceed available CMA (~374 MB free on a
-settled boot), so allocation fails after a reboot even though the first run after
-a fresh launch succeeded. The fix (next session) is a memory-optimized model
-export or CMA tuning — `spill-fill-bufsize` and a reduced context `size` were
-tried on-device and don't help (Genie initializes every graph in the binary
-regardless of `size`).
+`adb`-written `/sdcard/Android/data/<pkg>` files from the app.
+
+**Update (2026-06-14): the CMA blocker is resolved and the Primer now generates
+coherent replies on the NPU, stable across a reboot.** The original failure was
+contiguous DSP memory — the 4K-context bundle's 4th weight-shared context binary
+needed a ~698 MB NSP buffer that exceeded available CMA (~637 MB even right after
+a reboot). The fix was a **memory-optimized model re-export at `--context-length
+2048`** (a single value, so the cl3072/cl4096 graphs that drive the large buffers
+are never generated — reducing the runtime config `size` can't help because Genie
+initializes every graph baked into the binary). With the cl2048 bundle, all 4
+context binaries load, all 8 graphs execute, and a real templated turn streams a
+coherent multi-token reply on the Hexagon NPU. Three small follow-ups remain (see
+[NEXT_SESSION.md](NEXT_SESSION.md)): the QNN prompt budget needs a tighter tier
+for 2K context (a 1814-token prompt + reply overruns 2048 → a "context limit
+exceeded" status), that status should complete the turn gracefully rather than
+drop it, and the mobile-portrait GUI layout needs the debug sidebar to collapse.
 
 ## Building the macOS DMG
 
