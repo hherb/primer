@@ -1,0 +1,121 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Roadmap &amp; status — The Primer</title>
+<meta name="description" content="Where the Primer stands: the cloud-backed proof of pedagogy is complete, local and on-device NPU inference are in progress, and a dedicated child-friendly device is the goal.">
+<link rel="canonical" href="https://primer-ai.org/roadmap">
+<link rel="icon" type="image/png" href="assets/emblem.png">
+<meta property="og:title" content="Roadmap &amp; status — The Primer">
+<meta property="og:description" content="The proof of pedagogy is complete; local inference and speech are landing now; a dedicated child-friendly device is the goal.">
+<meta property="og:image" content="https://primer-ai.org/assets/banner.png">
+<meta property="og:url" content="https://primer-ai.org/roadmap">
+<meta property="og:type" content="article">
+<meta name="twitter:card" content="summary_large_image">
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+
+<header class="site-header">
+  <div class="header-inner">
+    <a class="brand" href="index.html"><img class="brand-mark" src="assets/emblem.png" alt=""><span>The Primer</span></a>
+    <nav class="site-nav">
+      <a href="vision.html">Vision</a>
+      <a href="technology.html">Technology</a>
+      <a href="roadmap.html" aria-current="page">Roadmap</a>
+      <a href="get-involved.html">Get involved</a>
+    </nav>
+  </div>
+</header>
+
+<main class="container">
+
+<div class="page-hero">
+  <p class="eyebrow">Roadmap &amp; status</p>
+  <h1>Working software first, then deeper</h1>
+  <p class="lede">The strategy: get a genuine Socratic conversation working end-to-end fast, then improve every layer — inference, speech, hardware, pedagogy — independently. Each phase below produces something a child can actually use.</p>
+</div>
+
+<section class="section">
+  <h2>The phases</h2>
+  <div class="phase">
+    <h3>Phase 0 — Proof of pedagogy <span class="badge badge-done">Complete</span></h3>
+    <p>A text-mode Primer that holds a genuine Socratic conversation on any computer. The exit test — a 15-minute conversation that asks more than it answers, catches parroting, suggests breaks, and remembers last time — is met.</p>
+    <ul>
+      <li>Streaming conversation with session persistence, resume, and long-term memory</li>
+      <li>Curated, licensed children's knowledge corpus (English + German) with tuned hybrid retrieval</li>
+      <li>Engagement, concept, and comprehension classifiers feeding a persistent learner model</li>
+      <li>Spaced-repetition vocabulary and session-break suggestions</li>
+      <li>Desktop app, multilingual prompt packs (English/German production, Hindi preview)</li>
+    </ul>
+  </div>
+
+  <div class="phase">
+    <h3>Phase 1 — Local inference <span class="badge badge-progress">In progress</span></h3>
+    <p>Run the conversation loop offline on hardware families own. Target: under three seconds to first token on at least one local platform.</p>
+    <ul>
+      <li>Embedded local inference on laptop/desktop — landed; device benchmarking under way</li>
+      <li>Qualcomm NPU backend — pipeline validated on a Snapdragon 8 Elite phone at ~9.4 tokens/s (June 2026); final integration rides with app packaging</li>
+      <li>Per-turn hybrid routing between a local model and an optional cloud model — landed, opt-in</li>
+    </ul>
+  </div>
+
+  <div class="phase">
+    <h3>Phase 2 — Speech <span class="badge badge-progress">In progress</span></h3>
+    <p>Talk to the Primer instead of typing. Much of this landed ahead of schedule.</p>
+    <ul>
+      <li>Offline voice loop (voice detection → transcription → response → synthesis) — working today</li>
+      <li>Strict turn-taking: no barge-in either direction, by pedagogical design</li>
+      <li>Native Apple speech engines on macOS; multilingual synthesis incl. Hindi in evaluation</li>
+      <li>Ahead: ambient-noise robustness, echo cancellation, voice-profile selection</li>
+    </ul>
+  </div>
+
+  <div class="phase">
+    <h3>Phase 3 — A device a child can hold <span class="badge badge-progress">Started</span></h3>
+    <p>The Primer as a physical object: turn it on and talk, no other equipment. Android app packaging — the deployment path to phone-class hardware — has begun.</p>
+    <ul>
+      <li>Android app build working; on-device NPU bring-up in final debugging</li>
+      <li>Ahead: display (colour e-ink or repurposed tablet), microphone array and speaker, battery and drop-resistant enclosure</li>
+    </ul>
+  </div>
+
+  <div class="phase">
+    <h3>Phase 4 — Pedagogical depth <span class="badge badge-ahead">Ahead</span></h3>
+    <p>From a Socratic chatbot to a genuinely effective long-term learning companion.</p>
+    <ul>
+      <li>Curriculum alignment (Australian Curriculum, IB PYP)</li>
+      <li>Multi-session learning arcs that build over weeks</li>
+      <li>Read-only parental insight — never surveillance</li>
+      <li>Collaborative mode: two children sharing one Primer</li>
+      <li>Opt-in, parent-consented, anonymised language corpus to improve child-calibrated models — with on-device scrubbing before anything leaves</li>
+    </ul>
+  </div>
+</section>
+
+<section class="section">
+  <h2>Dated milestones</h2>
+  <div class="milestone">
+    <time datetime="2026-05-26">26 May 2026</time>
+    <p>Full text-mode Primer validated end-to-end on an Android phone (Snapdragon 8 Elite) — conversation, persistence, and the complete classifier chain.</p>
+  </div>
+  <div class="milestone">
+    <time datetime="2026-06-09">9 June 2026</time>
+    <p>On-device NPU inference validated: a 4-billion-parameter model on the phone's Hexagon neural processor at ~9.4 tokens/s, ~190 ms to first token, 57 °C peak.</p>
+  </div>
+  <div class="milestone">
+    <time datetime="2026-06-11">11 June 2026</time>
+    <p>Android app packaging landed: the Primer's desktop app builds and runs as an Android APK, carrying the NPU runtime — the path to the first fully self-contained phone deployment.</p>
+  </div>
+</section>
+
+</main>
+
+<footer class="site-footer">
+  <p><a href="mailto:contact@primer-ai.org">contact@primer-ai.org</a> · <a href="https://github.com/hherb/primer">GitHub</a></p>
+  <p class="fineprint">© 2026 The Primer project · Code licensed <a href="https://www.gnu.org/licenses/agpl-3.0.html">AGPL-3.0</a> · This site sets no cookies and loads nothing from third parties.</p>
+</footer>
+
+</body>
+</html>
