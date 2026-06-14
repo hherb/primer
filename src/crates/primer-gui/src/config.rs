@@ -1320,6 +1320,25 @@ mod tests {
     }
 
     #[test]
+    fn older_config_without_diagnostics_loads_off() {
+        // A `gui-config.json` written before #228 has no `diagnostics` key. The
+        // struct-level `#[serde(default)]` on GuiConfig must fill it with the
+        // OFF default rather than erroring — the on-disk mirror of
+        // `update_without_diagnostics_keeps_off_default` (which covers the
+        // IPC Update path). Mirrors `older_config_without_fallback_fields_*`.
+        let dir = TempDir::new().unwrap();
+        let path = config_path(dir.path());
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        let legacy = r#"{
+            "learner": {"name": "Ada", "age": 7, "locale": "en"},
+            "backend": {"kind": "stub", "model": null, "ollama_url": "http://localhost:11434"}
+        }"#;
+        std::fs::write(&path, legacy).unwrap();
+        let cfg = load(dir.path()).unwrap();
+        assert!(!cfg.diagnostics.qnn_metrics_enabled);
+    }
+
+    #[test]
     fn diagnostics_passes_through_view_verbatim() {
         let mut cfg = GuiConfig::default();
         cfg.diagnostics.qnn_metrics_enabled = true;
