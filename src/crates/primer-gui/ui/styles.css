@@ -15,6 +15,20 @@
   --error-border: #fecaca;
   --shadow-sm: 0 1px 2px rgba(0, 0, 0, 0.04);
 
+  /* ─── Responsive shell tokens ─────────────────────────────────────
+     Used by the phone layout (the `@media (max-width: 940px)` block at
+     the foot of this file). Named here so the drawer width, the header
+     height the drawer offsets below, and the overlay stacking order are
+     all single-sourced rather than scattered as literals. The 940px
+     breakpoint itself can't live in a custom property (CSS forbids
+     var() in media queries) — it is mirrored by `MOBILE_BREAKPOINT_PX`
+     in app.js and pinned by the responsive_layout_contract tests. */
+  --drawer-width: min(340px, 86vw);
+  --header-h: 3.25rem;
+  --z-drawer-backdrop: 70;
+  --z-drawer: 80;
+  --z-header-mobile: 85;
+
   /* Depth-pill palette — one stop per UnderstandingDepth variant.
      Light-mode foreground is the saturated end so the pill text stays
      legible on a 18%-mixed background. Keep variant names in sync with
@@ -960,6 +974,20 @@ body.sidebar-collapsed .sidebar {
   background: color-mix(in oklab, var(--accent) 8%, var(--bg));
 }
 
+/* Header action buttons carry both an icon span and a text-label span.
+   On desktop the label is the affordance and the icon is hidden; the
+   mobile breakpoint flips this (see the foot-of-file media block) so the
+   header condenses to a single tidy row of icons. The voice toggle keeps
+   its own `voice-toggle-icon`/`voice-toggle-label` pair (icon shown on
+   desktop too), so these rules deliberately don't touch it. */
+.btn-icon {
+  display: none;
+}
+
+.btn-label {
+  display: inline;
+}
+
 /* ─── Settings + voice-consent modals ──────────────────────────────
    Both surfaces are native <dialog> elements opened via showModal()
    (see issue #81). The browser supplies the focus trap and Escape-
@@ -1637,4 +1665,100 @@ code {
 .voice-toggle:disabled {
   opacity: 0.5;
   cursor: not-allowed;
+}
+
+/* ─── Drawer backdrop ────────────────────────────────────────────────
+   Hidden on desktop entirely. The mobile media block below reveals it
+   only while `body.sidebar-open` is set, so it can never strand a dim
+   layer over the two-column desktop view when the window is resized
+   across the breakpoint. */
+.drawer-backdrop {
+  display: none;
+}
+
+/* ─── Phone layout (overlay drawer + condensed header) ───────────────
+   Breakpoint mirrors `MOBILE_BREAKPOINT_PX` in app.js — keep in sync
+   (pinned by responsive_layout_contract). Below ~940px there isn't room
+   for a usable chat (~620px) beside the sidebar (~320px), so the chat
+   goes full-width and the evaluation sidebar becomes a right-edge
+   overlay drawer. The header condenses its action buttons to icons. */
+@media (max-width: 940px) {
+  /* Single column: chat owns the full width. The sidebar leaves the
+     grid (it's `position: fixed` below), so the `sidebar-collapsed`
+     desktop state is irrelevant here — both map to the same one-column
+     template so a desktop-collapsed body that's resized down still gets
+     a full-width chat. */
+  body,
+  body.sidebar-collapsed {
+    grid-template-columns: 1fr;
+    grid-template-areas:
+      "header"
+      "chat";
+  }
+
+  /* Keep the header a fixed-height single row above the drawer so the
+     drawer can offset cleanly below it and the toggle stays on top of
+     the overlay (reachable to close). */
+  .app-header {
+    position: relative;
+    z-index: var(--z-header-mobile);
+    height: var(--header-h);
+  }
+
+  /* Status text yields space to the always-visible action icons rather
+     than pushing them off-screen. */
+  .session-info {
+    min-width: 0;
+    overflow: hidden;
+  }
+
+  /* Condense the action buttons to icons. */
+  .btn-label,
+  .voice-toggle-label {
+    display: none;
+  }
+
+  .btn-icon {
+    display: inline;
+  }
+
+  /* The sidebar becomes an off-canvas drawer pinned to the right edge,
+     below the header. `display: flex` overrides the desktop
+     `body.sidebar-collapsed .sidebar { display: none }` rule (this block
+     is later in the source, so equal specificity resolves here) — on
+     mobile the drawer's visibility is governed by the transform, not by
+     display. */
+  body.sidebar-collapsed .sidebar,
+  .sidebar {
+    display: flex;
+    position: fixed;
+    top: var(--header-h);
+    right: 0;
+    bottom: 0;
+    width: var(--drawer-width);
+    z-index: var(--z-drawer);
+    border-left: 1px solid var(--border);
+    transform: translateX(100%);
+    transition: transform 200ms ease;
+  }
+
+  /* Shadow only while open — on a closed (off-canvas) drawer the
+     left-pointing shadow would otherwise bleed back across the right
+     viewport edge. */
+  body.sidebar-open .sidebar {
+    transform: translateX(0);
+    box-shadow: -8px 0 24px rgba(0, 0, 0, 0.18);
+  }
+
+  /* Dim the chat behind the open drawer; a tap dismisses (wired in JS). */
+  .drawer-backdrop {
+    position: fixed;
+    inset: 0;
+    z-index: var(--z-drawer-backdrop);
+    background: color-mix(in oklab, #000 35%, transparent);
+  }
+
+  body.sidebar-open .drawer-backdrop {
+    display: block;
+  }
 }

@@ -26,6 +26,7 @@ const dom = {
   input: document.getElementById("input"),
   send: document.getElementById("send"),
   sidebarToggle: document.getElementById("sidebar-toggle"),
+  drawerBackdrop: document.getElementById("drawer-backdrop"),
   settingsOpen: document.getElementById("settings-open"),
   switchSession: document.getElementById("switch-session"),
   signals: {
@@ -454,15 +455,87 @@ function setupTurnCompleteListener() {
   });
 }
 
+/// Phone breakpoint in CSS pixels. The single source of truth shared
+/// with the stylesheet's `@media (max-width: …px)` query — keep the two
+/// in lockstep (pinned by `responsive_layout_contract`). Below this
+/// width the evaluation sidebar behaves as a slide-in overlay drawer;
+/// at or above it, as a desktop column that collapses in place.
+const MOBILE_BREAKPOINT_PX = 940;
+const mobileQuery = window.matchMedia(`(max-width: ${MOBILE_BREAKPOINT_PX}px)`);
+
+/// Is the evaluation panel currently visible? The "open" state lives in
+/// a different class on each side of the breakpoint: desktop uses the
+/// `sidebar-collapsed` class (absent = open, the default), mobile uses
+/// the `sidebar-open` class (absent = closed, the default). Reading from
+/// the active mode's class is what makes both defaults fall out with no
+/// init-time class juggling.
+function isSidebarOpen() {
+  return mobileQuery.matches
+    ? dom.body.classList.contains("sidebar-open")
+    : !dom.body.classList.contains("sidebar-collapsed");
+}
+
+/// Mirror the open state onto the toggle button: `aria-pressed` for
+/// screen readers, and the visible `.btn-label` text for sighted users
+/// (the icon span is left untouched so condensing to icons on mobile
+/// still works).
+function syncSidebarToggle(open) {
+  dom.sidebarToggle.setAttribute("aria-pressed", String(open));
+  const label = dom.sidebarToggle.querySelector(".btn-label");
+  if (label) {
+    label.textContent = open ? "Hide Sidebar" : "Show Sidebar";
+  }
+}
+
+/// Open or close the evaluation panel, writing to whichever class the
+/// current breakpoint mode uses.
+function setSidebarOpen(open) {
+  if (mobileQuery.matches) {
+    dom.body.classList.toggle("sidebar-open", open);
+  } else {
+    dom.body.classList.toggle("sidebar-collapsed", !open);
+  }
+  syncSidebarToggle(open);
+}
+
 function setupSidebarToggle() {
   dom.sidebarToggle.addEventListener("click", () => {
-    const collapsed = dom.body.classList.toggle("sidebar-collapsed");
-    dom.sidebarToggle.setAttribute("aria-pressed", String(!collapsed));
-    // Flip the label too: a screen reader user gets the state from
-    // aria-pressed, but sighted users only see the button text. Keep
-    // both surfaces in sync.
-    dom.sidebarToggle.textContent = collapsed ? "Show Sidebar" : "Hide Sidebar";
+    setSidebarOpen(!isSidebarOpen());
   });
+
+  // On mobile the drawer floats over the chat behind a dim backdrop;
+  // tapping the backdrop dismisses it.
+  if (dom.drawerBackdrop) {
+    dom.drawerBackdrop.addEventListener("click", () => setSidebarOpen(false));
+  }
+
+  // Escape closes the drawer — scoped to mobile + open, and skipped while
+  // a native <dialog> is showing so it never competes with the modal's own
+  // Escape handling (the browser fires the dialog's cancel event; letting
+  // this also run would dismiss the drawer underneath in the same keypress).
+  document.addEventListener("keydown", (event) => {
+    if (
+      event.key === "Escape" &&
+      mobileQuery.matches &&
+      isSidebarOpen() &&
+      !document.querySelector("dialog[open]")
+    ) {
+      setSidebarOpen(false);
+    }
+  });
+
+  // Crossing the breakpoint flips which class defines "open"; re-sync the
+  // toggle's label/aria so it describes the new mode's state. Entering
+  // mobile lands on the drawer's default-closed state; entering desktop
+  // restores the collapse-class semantics. The CSS-driven backdrop
+  // visibility means no backdrop cleanup is needed here.
+  mobileQuery.addEventListener("change", () => {
+    syncSidebarToggle(isSidebarOpen());
+  });
+
+  // The markup ships the desktop "open" label; correct it on first load
+  // when we boot straight into the mobile (default-closed) layout.
+  syncSidebarToggle(isSidebarOpen());
 }
 
 /// Refresh every sidebar section in parallel. One IPC round-trip per
