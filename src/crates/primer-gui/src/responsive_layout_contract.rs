@@ -248,6 +248,53 @@ mod tests {
         );
     }
 
+    /// The viewport meta must opt into `viewport-fit=cover`, without which
+    /// the Android/iOS WebView never reports non-zero `env(safe-area-inset-*)`
+    /// values and the system bars occlude the header + composer. Pin it so a
+    /// future meta-tag edit can't silently re-break edge-to-edge handling.
+    #[test]
+    fn index_html_viewport_opts_into_safe_area() {
+        assert!(
+            INDEX_HTML.contains("viewport-fit=cover"),
+            "ui/index.html's viewport meta must include `viewport-fit=cover` \
+             so env(safe-area-inset-*) reports the device insets — otherwise \
+             the status/navigation bars cover the header and composer."
+        );
+    }
+
+    /// The app grid must pad itself by the device safe-area insets (top for
+    /// the status bar, bottom for the navigation bar) so the header and
+    /// composer are never occluded on a phone. Pin both the top and bottom
+    /// insets — the two edges the owner reported as clipped.
+    #[test]
+    fn stylesheet_insets_app_grid_by_safe_area() {
+        assert!(
+            STYLES_CSS.contains("env(safe-area-inset-top"),
+            "ui/styles.css must inset the app by `env(safe-area-inset-top, …)` \
+             so the header clears the status bar/notch."
+        );
+        assert!(
+            STYLES_CSS.contains("env(safe-area-inset-bottom"),
+            "ui/styles.css must inset the app by \
+             `env(safe-area-inset-bottom, …)` so the composer clears the \
+             Android navigation bar."
+        );
+    }
+
+    /// The mobile drawer is `position: fixed` (viewport-relative) and so
+    /// ignores the body safe-area padding; it must fold the top inset into
+    /// its own `top` offset, or it would tuck under the status-bar strip.
+    #[test]
+    fn stylesheet_drawer_accounts_for_top_inset() {
+        assert!(
+            STYLES_CSS.contains("env(safe-area-inset-top, 0px) + var(--header-h)"),
+            "ui/styles.css must offset the fixed mobile drawer below the \
+             *visual* header bottom (`calc(env(safe-area-inset-top, 0px) + \
+             var(--header-h))`), since position:fixed ignores the body \
+             safe-area padding."
+        );
+    }
+
     #[test]
     fn strip_js_comments_removes_line_and_block_comments() {
         let src = "// sidebar-open in a comment\n/* matchMedia here */ real();";

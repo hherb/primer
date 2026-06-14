@@ -113,6 +113,19 @@ body {
     "header header"
     "chat sidebar";
   transition: grid-template-columns 180ms ease;
+  /* Inset the whole app grid inside the device safe area so the header
+     clears the status bar/notch (top) and the composer clears the
+     navigation bar (bottom) on Android/iOS — the "strip top and bottom".
+     `* { box-sizing: border-box }` keeps the padding inside `height: 100vh`,
+     so the grid never overflows. env() is 0 on desktop, so this is a no-op
+     there. Fixed-position overlays (the mobile drawer, the picker) are
+     viewport-relative and ignore this padding, so they carry their own
+     insets below. */
+  padding:
+    env(safe-area-inset-top, 0px)
+    env(safe-area-inset-right, 0px)
+    env(safe-area-inset-bottom, 0px)
+    env(safe-area-inset-left, 0px);
 }
 
 body.sidebar-collapsed {
@@ -1355,7 +1368,14 @@ code {
   display: flex;
   align-items: center;
   justify-content: center;
-  padding: 3vh 2vw;
+  /* Fixed + inset:0 ignores the body safe-area padding, so fold the device
+     insets into the picker's own padding — keeps the shell (and its footer
+     buttons) clear of the status/navigation bars on phones. */
+  padding:
+    calc(3vh + env(safe-area-inset-top, 0px))
+    calc(2vw + env(safe-area-inset-right, 0px))
+    calc(3vh + env(safe-area-inset-bottom, 0px))
+    calc(2vw + env(safe-area-inset-left, 0px));
   overflow-y: auto;
 }
 
@@ -1732,10 +1752,15 @@ code {
   .sidebar {
     display: flex;
     position: fixed;
-    top: var(--header-h);
+    /* The drawer is viewport-fixed (ignores the body safe-area padding),
+       so offset it below the *visual* header bottom = top inset + header
+       height, and pad its own bottom so the last section clears the nav
+       bar. */
+    top: calc(env(safe-area-inset-top, 0px) + var(--header-h));
     right: 0;
     bottom: 0;
     width: var(--drawer-width);
+    padding-bottom: env(safe-area-inset-bottom, 0px);
     z-index: var(--z-drawer);
     border-left: 1px solid var(--border);
     transform: translateX(100%);
