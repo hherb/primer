@@ -178,6 +178,17 @@ impl Stream for MeteredStream {
                 if let Some(timer) = this.timer.as_mut() {
                     timer.observe(!chunk.text.is_empty(), Instant::now());
                 }
+                // Finalize on the terminal `done` chunk, not only on the inner
+                // stream's `None`: the dialogue manager's consume loop breaks
+                // out as soon as it sees `chunk.done` and never polls again, so
+                // the wrapped stream is dropped before yielding `None`. Without
+                // this the sink would never fire for the real chat path.
+                // `finalize` is idempotent, so the later `None`/error arms (for
+                // consumers that DO drain to completion, e.g. backends that
+                // close without a done sentinel) stay correct.
+                if chunk.done {
+                    this.finalize();
+                }
                 Poll::Ready(Some(Ok(chunk)))
             }
             Poll::Ready(Some(Err(e))) => {
@@ -285,6 +296,40 @@ mod tests {
         let recorded = captured.lock().unwrap();
         assert_eq!(recorded.len(), 1);
         assert_eq!(recorded[0].decode_tokens, 3);
+    }
+
+    #[tokio::test]
+    async fn metered_stream_records_when_consumer_breaks_on_done() {
+        // The real chat consumer (dialogue manager) breaks out of its loop on
+        // the first `done` chunk and never polls again, so the wrapped stream
+        // is dropped before yielding `None`. The metric must still be recorded
+        // from the `done` chunk passing through — this is the regression that
+        // produced zero metric lines despite working turns on-device.
+        let captured: Arc<Mutex<Vec<StreamTiming>>> = Arc::new(Mutex::new(Vec::new()));
+        let sink_buf = Arc::clone(&captured);
+        let mut metered = MeteredStream::new(
+            stream_of(&["a", "b", "c"]),
+            Instant::now(),
+            Box::new(move |timing| sink_buf.lock().unwrap().push(timing)),
+        );
+
+        // Drive exactly like turn.rs: pull chunks, break on the first `done`,
+        // then drop the stream without polling for `None`.
+        while let Some(item) = metered.next().await {
+            let chunk = item.unwrap();
+            if chunk.done {
+                break;
+            }
+        }
+        drop(metered);
+
+        let recorded = captured.lock().unwrap();
+        assert_eq!(
+            recorded.len(),
+            1,
+            "metric must be recorded on the done chunk"
+        );
+        assert_eq!(recorded[0].decode_tokens, 2); // 3 body chunks ⇒ 2 after first
     }
 
     #[tokio::test]
