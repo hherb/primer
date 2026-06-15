@@ -445,6 +445,105 @@ mod tests {
         );
     }
 
+    /// The mobile drawer is a functional modal, so it must be *announced*
+    /// as one: `applyDrawerModality` toggles `role="dialog"` +
+    /// `aria-modal="true"` on the `#sidebar` element on open and clears them
+    /// on close. Toggled in JS (not static HTML) and mobile-only, because the
+    /// same `#sidebar` is the persistent desktop column — a dialog role there
+    /// would wrongly announce a modal over the two-column layout. The
+    /// element's existing `aria-label="Evaluation sidebar"` names the dialog.
+    #[test]
+    fn app_js_announces_open_drawer_as_modal_dialog() {
+        let code = strip_js_comments(APP_JS);
+        assert!(
+            code.contains("setAttribute(\"role\", \"dialog\")"),
+            "ui/app.js must set `role=\"dialog\"` on the `#sidebar` drawer \
+             while it is the mobile modal (`setAttribute(\"role\", \
+             \"dialog\")`), so assistive tech announces it as a dialog."
+        );
+        assert!(
+            code.contains("setAttribute(\"aria-modal\", \"true\")"),
+            "ui/app.js must set `aria-modal=\"true\"` on the open mobile \
+             drawer so assistive tech treats the background as inert."
+        );
+        assert!(
+            code.contains("removeAttribute(\"role\")")
+                && code.contains("removeAttribute(\"aria-modal\")"),
+            "ui/app.js must remove the `role`/`aria-modal` attributes when \
+             the drawer closes (and on the breakpoint-change cleanup) so the \
+             desktop two-column `#sidebar` column never announces a dialog."
+        );
+    }
+
+    /// Strict focus trap: while the mobile drawer is open every interactive
+    /// header control EXCEPT the close toggle is made `inert`. Combined with
+    /// the already-inert chat `<main>`, the only tabbable elements are the
+    /// drawer's contents and `#sidebar-toggle`, so `Tab`/`Shift+Tab` wrap
+    /// naturally between them — no manual keydown handler. The toggle stays
+    /// live because it is the close affordance. Pin both the helper and the
+    /// toggle-exclusion so a refactor can't silently let header chrome leak
+    /// back into the tab order (re-breaking the `aria-modal` promise).
+    #[test]
+    fn app_js_strict_trap_inerts_header_except_toggle() {
+        let code = strip_js_comments(APP_JS);
+        assert!(
+            code.contains("setHeaderChromeInert"),
+            "ui/app.js must drive the strict focus trap through a \
+             `setHeaderChromeInert(inert)` helper that inerts the non-toggle \
+             header controls while the mobile drawer is open."
+        );
+        assert!(
+            code.contains("!== dom.sidebarToggle"),
+            "ui/app.js's header-chrome trap must EXCLUDE the close toggle \
+             (`el !== dom.sidebarToggle`) — it is the drawer's close \
+             affordance and must remain reachable while everything else in \
+             the header is inert."
+        );
+    }
+
+    /// The breakpoint-change handler must tear down ALL of the drawer's modal
+    /// DOM state — chat inert, header-chrome inert, and `role`/`aria-modal` —
+    /// not just the chat inert, since none of those are media-scoped (unlike
+    /// the CSS scroll-lock + backdrop, which auto-release). Both the close
+    /// path and this handler funnel teardown through one
+    /// `releaseDrawerModality()` so they can't drift. Pin that the change
+    /// handler delegates to it.
+    #[test]
+    fn app_js_clears_modal_state_on_breakpoint_change() {
+        let code = strip_js_comments(APP_JS);
+        let change_pos = code
+            .find("mobileQuery.addEventListener(\"change\"")
+            .expect("ui/app.js must register a mobileQuery `change` handler");
+        let end = code[change_pos..]
+            .find("});")
+            .map(|e| change_pos + e)
+            .unwrap_or(code.len());
+        let handler = &code[change_pos..end];
+        assert!(
+            handler.contains("releaseDrawerModality"),
+            "ui/app.js's mobileQuery `change` handler must delegate teardown \
+             to `releaseDrawerModality()` so a drawer resized up to desktop \
+             clears its inert chat, inert header chrome, AND \
+             `role=\"dialog\"`/`aria-modal` — none of which are media-scoped."
+        );
+    }
+
+    /// The strict trap inerts the header's non-toggle controls, reached via
+    /// `dom.header = document.querySelector("header.app-header")`. If that
+    /// element is renamed, `dom.header` is `null` and the trap throws on
+    /// drawer open. Pin the selector target so a rename fails `cargo test`
+    /// here rather than at runtime on a phone (mirrors the chat-main test).
+    #[test]
+    fn index_html_has_app_header_for_trap_target() {
+        assert!(
+            INDEX_HTML.contains("<header class=\"app-header\">"),
+            "ui/index.html must contain `<header class=\"app-header\">` — \
+             app.js's `dom.header = document.querySelector(\
+             \"header.app-header\")` depends on it as the strict-trap target; \
+             a rename would make `dom.header` null and throw on drawer open."
+        );
+    }
+
     #[test]
     fn strip_js_comments_removes_line_and_block_comments() {
         let src = "// sidebar-open in a comment\n/* matchMedia here */ real();";
