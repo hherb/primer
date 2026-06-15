@@ -584,6 +584,18 @@ mod tests {
         );
     }
 
+    /// Return the body (between `{` and the next `}`) of the first CSS rule
+    /// whose selector line matches `selector`, e.g. `css_rule_body(css,
+    /// ".drawer-header {")`. Scoping the assertion to the rule body avoids both
+    /// the panic risk of a fixed-width byte slice and a false-positive on a
+    /// `display: none` belonging to a neighbouring rule.
+    fn css_rule_body<'a>(css: &'a str, selector: &str) -> Option<&'a str> {
+        let open = css.find(selector)? + selector.len();
+        let rest = &css[open..];
+        let close = rest.find('}')?;
+        Some(&rest[..close])
+    }
+
     /// The in-dialog close button is mobile-only: on desktop the same
     /// `#sidebar` is a persistent two-column landmark whose collapse is driven
     /// by the header toggle, so a redundant in-panel `×` would confuse. Pin
@@ -596,12 +608,13 @@ mod tests {
             "ui/styles.css must style the `.drawer-header` bar that holds the \
              in-dialog mobile close button (issue #233)."
         );
-        let header_hidden = STYLES_CSS
-            .find(".drawer-header {")
-            .map(|p| STYLES_CSS[p..p + 80.min(STYLES_CSS.len() - p)].contains("display: none"))
-            .unwrap_or(false);
+        // The first `.drawer-header {` rule is the top-level (non-media-query)
+        // one, defined before the `@media (max-width: 940px)` reveal; its body
+        // must hide the bar so the close button only appears on mobile.
+        let default_body = css_rule_body(STYLES_CSS, ".drawer-header {")
+            .expect("ui/styles.css must contain a top-level `.drawer-header {{ … }}` rule");
         assert!(
-            header_hidden,
+            default_body.contains("display: none"),
             "ui/styles.css must hide `.drawer-header {{ display: none }}` by \
              default so the in-dialog close button only appears on mobile (it \
              is revealed via `display: flex` inside the \
