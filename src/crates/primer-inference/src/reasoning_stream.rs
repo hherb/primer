@@ -67,8 +67,10 @@ pub(crate) fn process_filtered_chunk(
             // genuinely said nothing — a retry would not help — so it still
             // surfaces `ReasoningWithoutAnswer`.
             None if chunk.finish_reason == FinishReason::Length => {
+                // `finalize_visible` returns `None` only when the tail is
+                // empty, so there is provably no visible text to carry here.
                 FilterAction::Final(Ok(TokenChunk {
-                    text: visible,
+                    text: String::new(),
                     done: true,
                     finish_reason: chunk.finish_reason,
                 }))
@@ -104,7 +106,6 @@ fn log_suppressed(filter: &mut ReasoningFilter, backend: &'static str) {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use primer_core::inference::FinishReason;
     use primer_core::reasoning::{ReasoningMarker, default_markers};
 
     fn chunk(text: &str, done: bool) -> TokenChunk {
