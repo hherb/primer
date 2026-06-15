@@ -105,6 +105,23 @@ struct ChatChunk {
     message: ChatResponseMessage,
     #[serde(default)]
     done: bool,
+    /// Why generation stopped, present only on the terminal (`done`) line.
+    /// Ollama reports `"length"` when the model hit its predict/context
+    /// limit and `"stop"` on a clean finish.
+    #[serde(default)]
+    done_reason: Option<String>,
+}
+
+/// Map Ollama's `done_reason` to a [`FinishReason`]. `"length"` (the
+/// model ran out of context / predict budget) becomes
+/// [`FinishReason::Length`] so the dialogue manager's recovery loop
+/// fires; everything else (including a clean `"stop"` or an absent
+/// reason) stays [`FinishReason::Stop`].
+fn map_ollama_finish_reason(done_reason: Option<&str>) -> FinishReason {
+    match done_reason {
+        Some("length") => FinishReason::Length,
+        _ => FinishReason::Stop,
+    }
 }
 
 /// Buffers bytes from a streaming HTTP response and yields complete
@@ -140,7 +157,7 @@ fn parse_ollama_line(line: &str) -> Result<TokenChunk> {
     Ok(TokenChunk {
         text: chunk.message.content,
         done: chunk.done,
-        ..Default::default()
+        finish_reason: map_ollama_finish_reason(chunk.done_reason.as_deref()),
     })
 }
 
@@ -372,6 +389,42 @@ mod tests {
     #[test]
     fn parse_ollama_line_returns_err_on_garbage() {
         assert!(parse_ollama_line("not json").is_err());
+    }
+
+    #[test]
+    fn map_ollama_finish_reason_length_is_length() {
+        assert_eq!(
+            map_ollama_finish_reason(Some("length")),
+            FinishReason::Length
+        );
+    }
+
+    #[test]
+    fn map_ollama_finish_reason_stop_is_stop() {
+        assert_eq!(map_ollama_finish_reason(Some("stop")), FinishReason::Stop);
+    }
+
+    #[test]
+    fn map_ollama_finish_reason_absent_is_stop() {
+        assert_eq!(map_ollama_finish_reason(None), FinishReason::Stop);
+    }
+
+    #[test]
+    fn parse_ollama_line_done_with_length_reason_flags_length() {
+        let chunk =
+            parse_ollama_line(r#"{"message":{"content":""},"done":true,"done_reason":"length"}"#)
+                .unwrap();
+        assert!(chunk.done);
+        assert_eq!(chunk.finish_reason, FinishReason::Length);
+    }
+
+    #[test]
+    fn parse_ollama_line_done_with_stop_reason_flags_stop() {
+        let chunk =
+            parse_ollama_line(r#"{"message":{"content":""},"done":true,"done_reason":"stop"}"#)
+                .unwrap();
+        assert!(chunk.done);
+        assert_eq!(chunk.finish_reason, FinishReason::Stop);
     }
 
     #[test]

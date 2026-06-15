@@ -80,6 +80,32 @@ fn parse_chunk_done_on_finish_reason() {
 }
 
 #[test]
+fn map_openai_finish_reason_length_is_length() {
+    assert_eq!(map_openai_finish_reason("length"), FinishReason::Length);
+}
+
+#[test]
+fn map_openai_finish_reason_stop_is_stop() {
+    assert_eq!(map_openai_finish_reason("stop"), FinishReason::Stop);
+}
+
+#[test]
+fn parse_chunk_length_finish_reason_flags_length() {
+    let data = r#"{"id":"x","choices":[{"delta":{"content":""},"finish_reason":"length"}]}"#;
+    let chunk = parse_openai_compat_chunk(data).unwrap().unwrap();
+    assert!(chunk.done);
+    assert_eq!(chunk.finish_reason, FinishReason::Length);
+}
+
+#[test]
+fn parse_chunk_stop_finish_reason_flags_stop() {
+    let data = r#"{"id":"x","choices":[{"delta":{"content":""},"finish_reason":"stop"}]}"#;
+    let chunk = parse_openai_compat_chunk(data).unwrap().unwrap();
+    assert!(chunk.done);
+    assert_eq!(chunk.finish_reason, FinishReason::Stop);
+}
+
+#[test]
 fn parse_chunk_done_marker() {
     let chunk = parse_openai_compat_chunk("[DONE]").unwrap().unwrap();
     assert_eq!(chunk.text, "");

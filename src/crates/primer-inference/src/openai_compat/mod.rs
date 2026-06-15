@@ -78,6 +78,18 @@ struct ChunkDelta {
     content: Option<String>,
 }
 
+/// Map an OpenAI-compatible `finish_reason` to a [`FinishReason`].
+/// `"length"` (the model hit `max_tokens` / the context window) becomes
+/// [`FinishReason::Length`] so the dialogue manager's recovery loop
+/// fires; every other reason (including a clean `"stop"`) stays
+/// [`FinishReason::Stop`].
+fn map_openai_finish_reason(finish_reason: &str) -> FinishReason {
+    match finish_reason {
+        "length" => FinishReason::Length,
+        _ => FinishReason::Stop,
+    }
+}
+
 /// Parse one `data:` payload from the OpenAI SSE stream into a
 /// `TokenChunk`. Returns `Ok(None)` for chunks with no content
 /// (e.g. the initial role-only delta or empty choices).
@@ -103,7 +115,11 @@ fn parse_openai_compat_chunk(data: &str) -> Result<Option<TokenChunk>> {
     Ok(Some(TokenChunk {
         text,
         done: choice.finish_reason.is_some(),
-        ..Default::default()
+        finish_reason: choice
+            .finish_reason
+            .as_deref()
+            .map(map_openai_finish_reason)
+            .unwrap_or_default(),
     }))
 }
 
