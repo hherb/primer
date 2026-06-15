@@ -140,6 +140,7 @@ fn parse_ollama_line(line: &str) -> Result<TokenChunk> {
     Ok(TokenChunk {
         text: chunk.message.content,
         done: chunk.done,
+        ..Default::default()
     })
 }
 
@@ -293,6 +294,7 @@ impl InferenceBackend for OllamaBackend {
                                 TokenChunk {
                                     text: String::new(),
                                     done: true,
+                                    ..Default::default()
                                 },
                                 &mut had_visible,
                                 "ollama",

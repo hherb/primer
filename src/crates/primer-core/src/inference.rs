@@ -70,12 +70,29 @@ pub struct Prompt {
     pub messages: Vec<Message>,
 }
 
+/// Why a streaming generation ended. Meaningful only on the terminal
+/// chunk (`done == true`); every non-terminal chunk carries the
+/// default `Stop`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+pub enum FinishReason {
+    /// The model finished cleanly.
+    #[default]
+    Stop,
+    /// Generation was cut off because the context window filled. The
+    /// reply already streamed in full via the token callback but may
+    /// stop mid-thought — the dialogue manager reacts by notifying the
+    /// child and retrying with a smaller prompt.
+    Length,
+}
+
 /// A single token (or chunk) emitted during streaming generation.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Default)]
 pub struct TokenChunk {
     pub text: String,
     /// True when the model has finished generating.
     pub done: bool,
+    /// Why generation ended. Only meaningful when `done == true`.
+    pub finish_reason: FinishReason,
 }
 
 /// A boxed, pinned stream of token chunks — the return type of streaming generation.
@@ -184,5 +201,23 @@ mod gen_params_tests {
     fn default_generation_params_have_no_routing() {
         let p = GenerationParams::default();
         assert!(p.routing.is_none());
+    }
+}
+
+#[cfg(test)]
+mod finish_reason_tests {
+    use super::*;
+
+    #[test]
+    fn finish_reason_defaults_to_stop() {
+        assert_eq!(FinishReason::default(), FinishReason::Stop);
+    }
+
+    #[test]
+    fn token_chunk_default_is_empty_not_done_stop() {
+        let c = TokenChunk::default();
+        assert!(c.text.is_empty());
+        assert!(!c.done);
+        assert_eq!(c.finish_reason, FinishReason::Stop);
     }
 }

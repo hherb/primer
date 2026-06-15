@@ -86,6 +86,7 @@ fn parse_openai_compat_chunk(data: &str) -> Result<Option<TokenChunk>> {
         return Ok(Some(TokenChunk {
             text: String::new(),
             done: true,
+            ..Default::default()
         }));
     }
     let chunk: ChatCompletionChunk = serde_json::from_str(data).map_err(|e| {
@@ -102,6 +103,7 @@ fn parse_openai_compat_chunk(data: &str) -> Result<Option<TokenChunk>> {
     Ok(Some(TokenChunk {
         text,
         done: choice.finish_reason.is_some(),
+        ..Default::default()
     }))
 }
 
@@ -372,6 +374,7 @@ impl InferenceBackend for OpenAiCompatBackend {
                                 TokenChunk {
                                     text: String::new(),
                                     done: true,
+                                    ..Default::default()
                                 },
                                 &mut had_visible,
                                 "openai-compat",

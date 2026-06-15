@@ -208,11 +208,13 @@ mod tests {
                     let _ = tx.unbounded_send(Ok(TokenChunk {
                         text: c.clone(),
                         done: false,
+                        ..Default::default()
                     }));
                 }
                 let _ = tx.unbounded_send(Ok(TokenChunk {
                     text: String::new(),
                     done: true,
+                    ..Default::default()
                 }));
             });
             Ok(Box::pin(rx))

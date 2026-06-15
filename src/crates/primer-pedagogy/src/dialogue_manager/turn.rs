@@ -36,6 +36,13 @@ use primer_core::inference::{GenerationParams, Prompt};
 use super::{DialogueManager, ExtractionPart, PostResponseResult};
 use crate::prompt_builder;
 
+/// Outcome of one streaming attempt: the accumulated text plus why the
+/// stream ended (drives the context-limit retry decision).
+pub(super) struct StreamOutcome {
+    pub text: String,
+    pub finish_reason: primer_core::inference::FinishReason,
+}
+
 impl DialogueManager {
     /// Process the child's input and generate the Primer's response.
     /// Convenience wrapper around `respond_to_streaming` that discards
@@ -58,7 +65,7 @@ impl DialogueManager {
     pub async fn respond_to_streaming<F>(
         &mut self,
         child_input: &str,
-        on_chunk: F,
+        mut on_chunk: F,
     ) -> Result<String>
     where
         F: FnMut(&str),
@@ -91,11 +98,14 @@ impl DialogueManager {
             self.last_break_suggested_at = Some(now);
         }
 
-        let (prompt, passage_count) = self.build_turn_prompt(child_input, intent).await;
-
-        // 3. Stream the response, accumulating into a single String.
+        // 2+3. Progressive-shrink recovery loop: build the prompt at the
+        // current budget tier, stream the reply, and on a context-limit
+        // truncation notify the child and retry with a smaller prompt.
+        // Only the final answer is returned (and later recorded); partial
+        // attempts before a successful retry are dropped. The child turn
+        // was already recorded once above, so retries don't duplicate it.
         let result = self
-            .stream_inference_response(&prompt, intent, passage_count, on_chunk)
+            .run_recovery_loop(child_input, intent, &mut on_chunk)
             .await;
 
         // 4. On success, record the Primer turn, update the learner,
@@ -157,12 +167,21 @@ impl DialogueManager {
         &self,
         child_input: &str,
         intent: PedagogicalIntent,
+        tier: super::PromptBudgetTier,
     ) -> (Prompt, usize) {
-        let knowledge_context = self.retrieve_knowledge(child_input).await;
+        let knowledge_context = if tier.includes_knowledge() {
+            self.retrieve_knowledge(child_input).await
+        } else {
+            Vec::new()
+        };
         // Reflects what retrieval matched (the routing complexity signal),
         // independent of any small-context truncation/budget drop below.
         let passage_count = knowledge_context.len();
-        let (summary, retrieved_older) = self.retrieve_long_term_memory(child_input).await;
+        let (summary, retrieved_older) = if tier.includes_long_term_memory() {
+            self.retrieve_long_term_memory(child_input).await
+        } else {
+            (String::new(), Vec::new())
+        };
         // Compute due-vocab once per turn. Wallclock dependency is
         // `chrono::Utc::now()` here — pure functions stay testable via
         // `now`-injection, but the production call site reads the system
@@ -174,7 +193,8 @@ impl DialogueManager {
             self.vocab_settings.max_per_prompt,
         );
         let backend_name = self.inference.name();
-        let context_turns = self.config.effective_context_window_turns(backend_name);
+        let base_window = self.config.effective_context_window_turns(backend_name);
+        let context_turns = tier.context_window_turns(base_window);
         let break_minutes = self.config.break_suggest_after_minutes;
 
         // Small-context backends (the Qualcomm NPU `QnnBackend` runs a
@@ -229,13 +249,17 @@ impl DialogueManager {
     /// `GenerationParams.routing` is populated for every call. A
     /// `RouterBackend` reads these signals to make complexity-aware
     /// routing decisions; every other backend ignores them.
+    ///
+    /// Returns a `StreamOutcome` containing the accumulated text and the
+    /// `FinishReason`, which the caller uses to decide whether to retry
+    /// with a smaller prompt tier.
     async fn stream_inference_response<F>(
         &self,
         prompt: &Prompt,
         intent: PedagogicalIntent,
         passage_count: usize,
-        mut on_chunk: F,
-    ) -> Result<String>
+        on_chunk: &mut F,
+    ) -> Result<StreamOutcome>
     where
         F: FnMut(&str),
     {
@@ -249,6 +273,7 @@ impl DialogueManager {
         let mut stream = self.inference.generate_stream(prompt, &params).await?;
 
         let mut accumulated = String::new();
+        let mut finish_reason = primer_core::inference::FinishReason::Stop;
         while let Some(item) = stream.next().await {
             let chunk = item.inspect_err(|e| {
                 tracing::warn!("Stream error mid-generation: {e}");
@@ -258,10 +283,79 @@ impl DialogueManager {
                 accumulated.push_str(&chunk.text);
             }
             if chunk.done {
+                finish_reason = chunk.finish_reason;
                 break;
             }
         }
-        Ok(accumulated)
+        Ok(StreamOutcome {
+            text: accumulated,
+            finish_reason,
+        })
+    }
+
+    /// Drive the context-limit recovery loop: stream at the current budget
+    /// tier; on a `FinishReason::Length` truncation, stream the locale-aware
+    /// apology and retry at the next tighter tier (up to
+    /// [`crate::consts::MAX_TRUNCATION_RETRIES`] retries). When the tightest
+    /// tier still truncates, stream the soft-stop cue and accept the partial.
+    /// Returns the final accumulated text (the only text recorded as the
+    /// Primer turn). A pre-stream error from any attempt propagates as `Err`.
+    async fn run_recovery_loop<F>(
+        &self,
+        child_input: &str,
+        intent: PedagogicalIntent,
+        on_chunk: &mut F,
+    ) -> Result<String>
+    where
+        F: FnMut(&str),
+    {
+        use primer_core::inference::FinishReason;
+        let sep = crate::consts::TURN_NOTICE_SEPARATOR;
+
+        let mut tier = super::PromptBudgetTier::Full;
+        // Most recent non-empty partial, kept as a fallback for the
+        // exhaustion path: if the tightest tier truncates having produced
+        // no visible text, recording an empty Primer turn would pollute the
+        // session record, so we fall back to the last attempt that said
+        // something. A clean (`Stop`) empty reply is left untouched — that
+        // is the model genuinely answering nothing, pre-existing behaviour.
+        let mut last_nonempty = String::new();
+        loop {
+            let (prompt, passage_count) = self.build_turn_prompt(child_input, intent, tier).await;
+            let outcome = self
+                .stream_inference_response(&prompt, intent, passage_count, on_chunk)
+                .await?;
+            if !outcome.text.is_empty() {
+                last_nonempty = outcome.text.clone();
+            }
+            match (outcome.finish_reason, tier.next_tighter()) {
+                (FinishReason::Stop, _) => return Ok(outcome.text),
+                (FinishReason::Length, Some(next)) => {
+                    let msg = self.prompt_pack.memory_limit_retry().to_string();
+                    on_chunk(sep);
+                    on_chunk(&msg);
+                    on_chunk(sep);
+                    tier = next;
+                }
+                (FinishReason::Length, None) => {
+                    // Every tier truncated; accept the partial. Prefer the
+                    // final attempt's text, falling back to the last
+                    // non-empty partial so we never record an empty turn.
+                    let text = if outcome.text.is_empty() {
+                        last_nonempty
+                    } else {
+                        outcome.text
+                    };
+                    let msg = self.prompt_pack.memory_limit_soft_stop().to_string();
+                    // No trailing separator: nothing follows the soft-stop
+                    // cue (unlike the retry apology, which precedes the next
+                    // attempt's text).
+                    on_chunk(sep);
+                    on_chunk(&msg);
+                    return Ok(text);
+                }
+            }
+        }
     }
 
     /// Step 4. Compute the active concepts for the just-completed

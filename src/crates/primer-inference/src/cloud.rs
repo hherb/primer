@@ -253,11 +253,13 @@ fn parse_anthropic_event(ev: &SseEvent) -> Result<Option<TokenChunk>> {
             Ok(Some(TokenChunk {
                 text: parsed.delta.text,
                 done: false,
+                ..Default::default()
             }))
         }
         "message_stop" => Ok(Some(TokenChunk {
             text: String::new(),
             done: true,
+            ..Default::default()
         })),
         "error" => {
             let parsed: ErrorPayload = serde_json::from_str(&ev.data).map_err(|e| {

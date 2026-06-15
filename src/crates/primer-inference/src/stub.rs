@@ -46,6 +46,7 @@ impl InferenceBackend for StubBackend {
         let chunk = TokenChunk {
             text: response,
             done: true,
+            ..Default::default()
         };
 
         Ok(Box::pin(stream::once(async { Ok(chunk) })))

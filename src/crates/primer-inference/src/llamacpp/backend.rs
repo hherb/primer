@@ -82,6 +82,7 @@ impl InferenceBackend for LlamaCppBackend {
                     TokenChunk {
                         text: piece.to_string(),
                         done: false,
+                        ..Default::default()
                     },
                     &mut had_visible,
                     "llamacpp",
@@ -106,6 +107,7 @@ impl InferenceBackend for LlamaCppBackend {
                         TokenChunk {
                             text: String::new(),
                             done: true,
+                            ..Default::default()
                         },
                         &mut had_visible,
                         "llamacpp",

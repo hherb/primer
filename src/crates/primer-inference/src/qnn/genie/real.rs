@@ -561,5 +561,6 @@ unsafe extern "C" fn streaming_token_callback(
     let _ = sender.unbounded_send(Ok(TokenChunk {
         text: token.into_owned(),
         done: false,
+        ..Default::default()
     }));
 }

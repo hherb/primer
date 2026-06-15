@@ -225,7 +225,11 @@ mod tests {
             _params: &GenerationParams,
         ) -> Result<TokenStream> {
             let text = self.0.clone();
-            let chunk = TokenChunk { text, done: true };
+            let chunk = TokenChunk {
+                text,
+                done: true,
+                ..Default::default()
+            };
             Ok(Box::pin(stream::once(async move { Ok(chunk) })))
         }
     }
