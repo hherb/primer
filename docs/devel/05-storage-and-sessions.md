@@ -62,6 +62,8 @@ Both are implemented by [SqliteSessionStore](../../src/crates/primer-storage/src
 
 The `Result<Option<…>>` shape on `load_session`, `load_learner`, and `most_recent_session_learner_id` is deliberate. "Not found" is not an error — it's a normal first-run signal. Reserving `Err` for genuine I/O failures keeps the CLI free of "is this an expected miss or a real problem?" conditionals.
 
+Locale is a per-learner property, persisted via `LearnerStore`. On first save it's written to `learners.locale` (added in schema v6, default `'en'`); on `--resume` (and on the GUI's start-new-session path) a `--language` / Settings locale that disagrees with the resumed learner's stored locale is a **hard error**, not a silent re-tag. The reasoning is that the knowledge base, STT/TTS, and prompt pack all key off locale, and `concepts.concept_language_tag` would otherwise start tagging new rows under the wrong language — corrupting the longitudinal vocabulary record. Resolution is either reverting the locale to the stored value or starting fresh under a new DB.
+
 ## Schema-migration pattern
 
 [primer-storage](../../src/crates/primer-storage/src/schema.rs) follows one shape across every migration. Read [schema.rs](../../src/crates/primer-storage/src/schema.rs) and you will see `apply_v2_migrations`, `apply_v3_migrations`, … `apply_v8_migrations` — eight migrations layered additively, each idempotent, each transaction-wrapped, each safe to run on a fresh DB or on any older DB being upgraded. The constant `USER_VERSION` lives at the top of that file (currently `8`). Open path lives in [store/mod.rs](../../src/crates/primer-storage/src/store/mod.rs) and runs every migration in order on every open.

@@ -11,16 +11,18 @@ The chapter ends with a "common pitfalls" parade — most of these mirror gotcha
 Tests live next to the crate they test, never in a top-level `tests/` directory at the repo root. There are three patterns in use, each chosen for a reason:
 
 - **Inline `#[cfg(test)] mod tests`** for unit tests against private items. The 30+ characterization tests for `decide_intent` live this way at the bottom of [primer-pedagogy/src/prompt_builder.rs](../../src/crates/primer-pedagogy/src/prompt_builder.rs) (search for `mod tests`). They pin the heuristic's *current* behaviour — what intent does the Primer pick for a frustrated 6-year-old who just asked "what is gravity?" — and they are the first thing to read when changing intent routing.
-- **Per-crate `tests/` directory** for integration tests that exercise a whole crate's public surface. Examples: [primer-storage's session tests](../../src/crates/primer-storage/src/store/tests/session_tests.rs), [the retrieval-quality benchmarks](../../src/crates/primer-kb-load/tests/retrieval_quality.rs), and the BM25-only and hybrid-retrieval sweep harnesses at [retrieval_sweep.rs](../../src/crates/primer-kb-load/tests/retrieval_sweep.rs) and [retrieval_sweep_hybrid.rs](../../src/crates/primer-kb-load/tests/retrieval_sweep_hybrid.rs).
+- **Per-crate `tests/` directory** for integration tests that exercise a whole crate's public surface. Examples: [primer-storage's session tests](../../src/crates/primer-storage/src/store/tests/session_tests.rs), [the retrieval-quality benchmarks](../../src/crates/primer-kb-load/tests/retrieval_quality.rs), and the BM25-only and hybrid-retrieval sweep harnesses at [retrieval_sweep.rs](../../src/crates/primer-kb-load/tests/retrieval_sweep.rs) and [retrieval_sweep_hybrid.rs](../../src/crates/primer-kb-load/tests/retrieval_sweep_hybrid.rs). The host-tested benchmark harness for inference throughput lives at [primer-inference/src/bench/](../../src/crates/primer-inference/src/bench/) — its pure metrics/thermal/prompt-loading modules run on the default `cargo test` (no NPU or GGUF needed), so the QNN and llama.cpp device examples carry no untested logic.
 - **Per-axis split for the dialogue manager.** [primer-pedagogy/src/dialogue_manager/tests/](../../src/crates/primer-pedagogy/src/dialogue_manager/tests/) holds three files — `lifecycle_tests.rs`, `turn_tests.rs`, `background_tests.rs` — each pinned to one axis of behaviour. Shared mocks (stub backends, stub session stores, stub classifiers) and fixture builders live in [test_support.rs](../../src/crates/primer-pedagogy/src/dialogue_manager/test_support.rs) so the three test files don't fork their setup. When you add a new method to `DialogueManager`, add the test to the file matching its responsibility — don't grow a fourth test module.
 
 > **Why:** the split mirrors the production split (`lifecycle.rs` / `turn.rs` / `background.rs`), so a reviewer reading a PR can hold one axis in their head at a time. A test that crosses axes is a smell — it usually means a method moved files but its test didn't.
 
-The retrieval sweeps are worth calling out separately. [retrieval_sweep.rs](../../src/crates/primer-kb-load/tests/retrieval_sweep.rs) is a 24-cell grid search over BM25-only retrieval parameters; [retrieval_sweep_hybrid.rs](../../src/crates/primer-kb-load/tests/retrieval_sweep_hybrid.rs) is a 54-cell sweep over the hybrid (BM25 + dense vector) parameter space, gated behind `--features fastembed --ignored`. Both produce CSVs for offline analysis. They are how the current defaults in [primer-core::consts::retrieval](../../src/crates/primer-core/src/consts.rs) were chosen, and they exist so the next time someone wants to retune, they can re-run the sweep and update the consts in one commit.
+The retrieval sweeps are worth calling out separately. [retrieval_sweep.rs](../../src/crates/primer-kb-load/tests/retrieval_sweep.rs) is a 24-cell grid search over BM25-only retrieval parameters; [retrieval_sweep_hybrid.rs](../../src/crates/primer-kb-load/tests/retrieval_sweep_hybrid.rs) is a 54-cell sweep over the hybrid (BM25 + dense vector) parameter space, gated behind `--features fastembed --ignored`. There are parallel German sweeps at [retrieval_sweep_de.rs](../../src/crates/primer-kb-load/tests/retrieval_sweep_de.rs) and [retrieval_sweep_hybrid_de.rs](../../src/crates/primer-kb-load/tests/retrieval_sweep_hybrid_de.rs) over the Klexikon corpus. All four files are thin `#[ignore]` shims over the shared harness at [tests/common/sweep.rs](../../src/crates/primer-kb-load/tests/common/sweep.rs) — that helper is the single source of truth for the grid constants, the selection rule, and the print format; adding a new locale is data-only (define `QUERIES_<XX>` in `tests/common/<xx>.rs` plus a ~50-line shim). Both produce CSVs for offline analysis. They are how the current defaults in [primer-core::consts::retrieval](../../src/crates/primer-core/src/consts.rs) were chosen, and they exist so the next time someone wants to retune, they can re-run the sweep and update the consts in one commit.
+
+The [BM25 floor tripwire](../../src/crates/primer-kb-load/tests/bm25_floor_tripwire.rs) is a separate `#[ignore]`'d diagnostic — it probes the actual top-K BM25 score distribution and fires loudly if the margin above `KB_BM25_ONLY_MIN_SCORE` closes. Run it explicitly when expanding the seed corpus: `~/.cargo/bin/cargo test -p primer-kb-load --test bm25_floor_tripwire -- --ignored --nocapture`.
 
 ## Running tests
 
-All test commands run from `src/`:
+All test commands run from `src/`. Invoke cargo as `~/.cargo/bin/cargo` (the rustup proxy) so the pinned 1.88 toolchain in `rust-toolchain.toml` is honoured — a Homebrew `cargo` on `$PATH` silently uses its own (older) toolchain and produces confusing trait-resolution failures, especially on the speech features.
 
 ```bash
 cargo test                                 # everything, default features
@@ -29,17 +31,38 @@ cargo test -p primer-pedagogy decide_intent  # filter by substring
 cargo test -- --nocapture                  # show stdout/stderr from passing tests
 ```
 
-Feature-gated crates need their feature on the command line. The most common ones:
+> **Note:** the default `cargo test` now builds the `embedding` (fastembed) feature — it is in `default` for both `primer-cli` and `primer-gui`. The first run downloads the ONNX Runtime binary from `cdn.pyke.io`; CI proves this on Linux and macOS.
+
+Feature-gated test paths need their feature on the command line. The most common ones:
 
 ```bash
 cargo test -p primer-embedding --features fastembed
 cargo test -p primer-speech    --features silero,whisper,piper,cpal
+cargo test -p primer-speech    --features macos-native        # SFSpeechRecognizer / AVSpeechSynthesizer (macOS)
+cargo test -p primer-speech    --features macos-native-26      # SpeechAnalyzer Swift sidecar (macOS 26)
+cargo test -p primer-inference --features llamacpp             # in-process llama.cpp (MockLlamaEngine covers the seam on default build too)
+cargo test -p primer-inference --features qnn                  # Qualcomm NPU host-mock path (no device needed)
 cargo test -p primer-kb-load   --features fastembed -- --ignored  # hybrid sweep
 ```
 
-> **Note:** `--ignored` runs tests marked `#[ignore]` *instead of* the default suite, not in addition to it. The hybrid sweep is `#[ignore]` because it downloads the BGE-M3 model on first run (~570 MB) and takes minutes to complete — it is run on demand, not in CI.
+> **Note:** `--ignored` runs tests marked `#[ignore]` *instead of* the default suite, not in addition to it. The hybrid sweeps (EN and DE) are `#[ignore]` because they download the BGE-M3 model on first run (~570 MB) and take minutes to complete — they are run on demand, not in CI.
+
+> **Note:** most of the QNN and llama.cpp logic is host-tested on the *default* `cargo test` via trait-abstracted seams (`MockLlamaEngine`, the Genie host-mock) and the pure `primer-inference::bench` module. The `--features qnn` / `--features llamacpp` runs add the real-FFI arms; actual on-device throughput numbers stay device-gated (no GGUF or NPU is touched by any autonomous run). The macOS-native smoke tests (e.g. `tests/macos_tts.rs`, `tests/macos26_smoke.rs`) are `#[ignore]`'d and need a real mic / a macOS 26 host.
 
 Single-test substring filtering works on every test target. `cargo test -p primer-pedagogy decide_intent_routes` matches every test whose name contains that substring, which is the fastest way to iterate on the decide-intent characterization suite while editing it.
+
+## Cross-compiling and on-device validation
+
+The whole `primer` binary dep graph cross-compiles cleanly to `aarch64-linux-android` from a stock macOS host (NDK 29 + the pinned 1.88 toolchain), and CI enforces this as a drift guard on every push/PR (`.github/workflows/ci.yml::android-cross-compile`). Reproduce locally:
+
+```bash
+rustup target add aarch64-linux-android --toolchain 1.88
+cargo build --target aarch64-linux-android --bin primer   # NOT --workspace: primer-gui is webkit2gtk, out of Android scope
+```
+
+Android stays BM25-only by guidance (issue #157), so the CI guard pins the `primer-cli` steps to `--no-default-features` — the device-unverified aarch64 ort download is kept out of the required guard, and runtime guidance on Android remains `--embedder-backend none`.
+
+Three runbooks cover the device side: [android-build-quickstart.md](android-build-quickstart.md) (the Tauri-Android APK build path), [redmagic-termux-quickstart.md](redmagic-termux-quickstart.md) (the Termux on-device REPL build, including the `/tmp`-not-writable and `--name`-consistency-on-resume gotchas), and [qnn-validation-runbook.md](qnn-validation-runbook.md) (the Qualcomm NPU bring-up procedure).
 
 ## RUST_LOG and `--verbose`
 
@@ -148,7 +171,7 @@ Most of these are direct mirrors of [CLAUDE.md](../../CLAUDE.md). They show up h
 
 > **Gotcha:** `--speech` panics at startup with an espeak data error. Install `espeak-ng` system-wide (`brew install espeak-ng` on macOS, `sudo apt install espeak-ng-data` on Debian/Ubuntu). The `espeak-rs` crate ships an incomplete subset of espeak's data files that fails for most voices.
 
-> **Gotcha:** `--embedder-backend fastembed` exits with a build hint. The `embedding` cargo feature on `primer-cli` is off by default, so the fastembed backend is not compiled in. Build with `cargo build --features primer-cli/embedding` (or run with `--features primer-cli/embedding`). Same shape as `--speech` and the `speech` feature.
+> **Gotcha:** `--embedder-backend fastembed` exits with a build hint. The `embedding` cargo feature is now in `default` for `primer-cli` and `primer-gui`, so a normal build has it — but a `--no-default-features` build does not, and on that build the flag exits with a "requires the `embedding` cargo feature" hint. The `--embedder-backend` *default* is feature-aware: `fastembed` when `embedding` is compiled in, `none` otherwise, so a flagless run does the right thing for whatever was built.
 
 > **Gotcha:** First fastembed run hangs for a few minutes with no output. It is downloading the BGE-M3 model (~570 MB) into `~/.cache/primer/models/` from `cdn.pyke.io`. Subsequent runs are fast. If construction fails, the dialogue manager falls back to BM25-only with a `tracing::warn!` — the conversation still works.
 
@@ -166,7 +189,7 @@ Most of these are direct mirrors of [CLAUDE.md](../../CLAUDE.md). They show up h
 
 Symptom: the REPL waits indefinitely after sending a turn to the cloud or Ollama backend, no tokens printed, no error.
 
-The streaming pipeline is a `futures::channel::mpsc::unbounded` driven by a tokio task that reads bytes from the HTTP response, frames them via [`SseBuffer`](../../src/crates/primer-inference/src/cloud.rs) (Anthropic; defined inline around line 147) or [`NdjsonBuffer`](../../src/crates/primer-inference/src/ollama.rs) (Ollama; defined inline around line 99), and forwards parsed events as chunks. A hang means one of three things:
+The streaming pipeline is a `futures::channel::mpsc::unbounded` driven by a tokio task that reads bytes from the HTTP response, frames them via a per-backend hand-rolled buffer — [`SseBuffer`](../../src/crates/primer-inference/src/cloud.rs) (Anthropic `event:`/`data:` framing), [`NdjsonBuffer`](../../src/crates/primer-inference/src/ollama.rs) (Ollama one-JSON-per-line), or `OpenAiSseBuffer` (the OpenAI `/v1/chat/completions` `data:` SSE format, terminated by `data: [DONE]`) — and forwards parsed events as chunks. A hang means one of three things:
 
 1. **The HTTP request never completed handshake.** Check `RUST_LOG=hyper=debug,reqwest=debug`. If you see no `Sending request` line, the issue is config (URL, port, TLS).
 2. **The response was 2xx but the body channel never delivered bytes.** This is the load-bearing case — Anthropic and Ollama can both legitimately keep a connection open with no data while the model warms up, but if it goes on past your retry budget, something is wrong server-side. Add a `tracing::trace!` inside `SseBuffer::push` / `NdjsonBuffer::push` to see whether bytes are arriving but failing to parse.
