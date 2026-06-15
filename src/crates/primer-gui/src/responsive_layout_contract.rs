@@ -544,6 +544,107 @@ mod tests {
         );
     }
 
+    /// Extract the `#sidebar` `<aside>…</aside>` subtree so assertions about
+    /// in-dialog content are scoped to the drawer rather than the whole
+    /// document (where a `drawer-close` button could otherwise match a stray
+    /// element). Spans the opening `<aside` to its matching `</aside>`.
+    fn sidebar_subtree(html: &str) -> &str {
+        let start = html
+            .find("<aside")
+            .expect("ui/index.html must contain the `<aside>` sidebar element");
+        let rest = &html[start..];
+        let end = rest
+            .find("</aside>")
+            .map(|e| e + "</aside>".len())
+            .expect("the sidebar `<aside>` must be closed with `</aside>`");
+        &rest[..end]
+    }
+
+    /// `aria-modal="true"` instructs assistive tech to confine the user to the
+    /// dialog subtree, so the drawer's close affordance must live *inside*
+    /// `#sidebar`, not only in the out-of-subtree header toggle (issue #233).
+    /// Pin an in-dialog close button so a screen-reader user is never stranded
+    /// inside the modal with no reachable dismiss control.
+    #[test]
+    fn index_html_has_in_dialog_drawer_close_button() {
+        let subtree = sidebar_subtree(INDEX_HTML);
+        assert!(
+            subtree.contains("id=\"drawer-close\""),
+            "ui/index.html's `#sidebar` drawer must contain an in-dialog close \
+             button `id=\"drawer-close\"` so the close affordance lives inside \
+             the `aria-modal` dialog subtree (issue #233) — the header toggle \
+             alone is outside the subtree and unreachable to a confined \
+             screen-reader user."
+        );
+        assert!(
+            subtree.contains("aria-label=\"Close evaluation sidebar\""),
+            "ui/index.html's `#drawer-close` button must carry \
+             `aria-label=\"Close evaluation sidebar\"` so its icon glyph has an \
+             accessible name."
+        );
+    }
+
+    /// Return the body (between `{` and the next `}`) of the first CSS rule
+    /// whose selector line matches `selector`, e.g. `css_rule_body(css,
+    /// ".drawer-header {")`. Scoping the assertion to the rule body avoids both
+    /// the panic risk of a fixed-width byte slice and a false-positive on a
+    /// `display: none` belonging to a neighbouring rule.
+    fn css_rule_body<'a>(css: &'a str, selector: &str) -> Option<&'a str> {
+        let open = css.find(selector)? + selector.len();
+        let rest = &css[open..];
+        let close = rest.find('}')?;
+        Some(&rest[..close])
+    }
+
+    /// The in-dialog close button is mobile-only: on desktop the same
+    /// `#sidebar` is a persistent two-column landmark whose collapse is driven
+    /// by the header toggle, so a redundant in-panel `×` would confuse. Pin
+    /// that its `.drawer-header` wrapper is hidden by default and revealed only
+    /// under the mobile breakpoint, mirroring the drawer-itself mobile scoping.
+    #[test]
+    fn stylesheet_hides_drawer_close_on_desktop() {
+        assert!(
+            STYLES_CSS.contains(".drawer-header"),
+            "ui/styles.css must style the `.drawer-header` bar that holds the \
+             in-dialog mobile close button (issue #233)."
+        );
+        // The first `.drawer-header {` rule is the top-level (non-media-query)
+        // one, defined before the `@media (max-width: 940px)` reveal; its body
+        // must hide the bar so the close button only appears on mobile.
+        let default_body = css_rule_body(STYLES_CSS, ".drawer-header {")
+            .expect("ui/styles.css must contain a top-level `.drawer-header {{ … }}` rule");
+        assert!(
+            default_body.contains("display: none"),
+            "ui/styles.css must hide `.drawer-header {{ display: none }}` by \
+             default so the in-dialog close button only appears on mobile (it \
+             is revealed via `display: flex` inside the \
+             `@media (max-width: 940px)` block); on the desktop column it would \
+             be a redundant control."
+        );
+    }
+
+    /// The in-dialog close button must actually close the drawer. Pin that
+    /// app.js binds a click handler to `#drawer-close` (via the cached
+    /// `dom.drawerClose`) so the new control isn't inert decoration; closing
+    /// through `setSidebarOpen(false)` reuses the same focus-restore +
+    /// modality-teardown path as the toggle and backdrop.
+    #[test]
+    fn app_js_wires_in_dialog_drawer_close() {
+        let code = strip_js_comments(APP_JS);
+        assert!(
+            code.contains("drawer-close"),
+            "ui/app.js must cache the in-dialog close button \
+             (`document.getElementById(\"drawer-close\")`) so its click can \
+             dismiss the drawer."
+        );
+        assert!(
+            code.contains("dom.drawerClose"),
+            "ui/app.js must reference `dom.drawerClose` and bind its click to \
+             `setSidebarOpen(false)`, routing the in-dialog close through the \
+             same teardown + focus-restore path as the toggle/backdrop."
+        );
+    }
+
     #[test]
     fn strip_js_comments_removes_line_and_block_comments() {
         let src = "// sidebar-open in a comment\n/* matchMedia here */ real();";

@@ -509,8 +509,10 @@ focus into it and closing restores it to the toggle, while the chat behind the d
 backdrop is made `inert` and scroll-locked. It is also announced as a
 `role="dialog"` / `aria-modal="true"` and is a **strict focus trap**: every header
 control except the close toggle is made `inert` while it is open, so `Tab` cycles
-only within the drawer and its toggle (all mobile-only; desktop is unchanged).
-Remaining: pedagogy/answer-quality tuning on the 4B NPU model.
+only within the drawer and its toggle (all mobile-only; desktop is unchanged). The
+drawer also carries its own in-dialog close button (a sticky `×` inside the
+`aria-modal` subtree) so a confined screen-reader user always has a reachable
+dismiss control. Remaining: pedagogy/answer-quality tuning on the 4B NPU model.
 
 ## Building the macOS DMG
 

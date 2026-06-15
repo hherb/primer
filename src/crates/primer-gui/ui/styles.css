@@ -422,6 +422,15 @@ body.sidebar-collapsed .sidebar {
   display: none;
 }
 
+/* In-dialog close affordance for the mobile drawer (issue #233). Hidden by
+   default — on the desktop column the header toggle drives collapse, so an
+   in-panel `×` would be a redundant control. Revealed via `display: flex`
+   inside the mobile media query, where the drawer is an `aria-modal` dialog
+   that needs a dismiss control inside its own subtree. */
+.drawer-header {
+  display: none;
+}
+
 .sidebar-section {
   padding: 0.9rem 1rem;
   border-bottom: 1px solid var(--border);
@@ -1765,6 +1774,28 @@ code {
     border-left: 1px solid var(--border);
     transform: translateX(100%);
     transition: transform 200ms ease;
+  }
+
+  /* Reveal the in-dialog close button as a sticky bar pinned to the top of
+     the scrolling drawer, with the `×` glyph right-aligned. `position:
+     sticky; top: 0` keeps it visible as the drawer's sections scroll under
+     it; the surface background + bottom border stop scrolled content from
+     showing through the gap. */
+  .drawer-header {
+    display: flex;
+    justify-content: flex-end;
+    position: sticky;
+    top: 0;
+    z-index: 1;
+    padding: 0.4rem 0.6rem;
+    background: var(--surface);
+    border-bottom: 1px solid var(--border);
+  }
+
+  .drawer-close {
+    /* A larger touch target than the glyph alone, for a thumb tap. */
+    min-width: 2.25rem;
+    min-height: 2.25rem;
   }
 
   /* Shadow only while open — on a closed (off-canvas) drawer the
