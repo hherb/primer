@@ -473,6 +473,14 @@ impl SequenceBackend {
             scripts: Mutex::new(scripts.into()),
         }
     }
+
+    /// Number of scripts not yet consumed by a `generate_stream` call.
+    /// Retry-loop tests assert this is `0` to prove the expected number
+    /// of inference attempts ran (catches a loop that stops early and
+    /// leaves a script unused).
+    pub(super) fn remaining(&self) -> usize {
+        self.scripts.lock().unwrap().len()
+    }
 }
 
 #[async_trait]

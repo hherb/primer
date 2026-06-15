@@ -903,6 +903,9 @@ async fn truncated_turn_retries_then_records_only_final_answer() {
         !last.text.contains(&apology),
         "recorded turn must not contain apology"
     );
+    // Exactly three inference attempts ran (Full, NoKnowledge, Minimal) —
+    // every scripted stream was consumed, none left over.
+    assert_eq!(backend.remaining(), 0, "all three attempts must have run");
 }
 
 #[tokio::test]
@@ -925,6 +928,7 @@ async fn exhausted_retries_soft_stop_and_record_partial() {
     let pack = crate::prompt_pack::load_cached(primer_core::i18n::Locale::English)
         .expect("English pack must load");
     let soft_stop = pack.memory_limit_soft_stop().to_string();
+    let apology = pack.memory_limit_retry().to_string();
 
     let seen = Mutex::new(String::new());
     let final_text = dm
@@ -935,16 +939,26 @@ async fn exhausted_retries_soft_stop_and_record_partial() {
         .unwrap();
     let seen = seen.into_inner().unwrap();
 
-    assert!(
-        seen.contains(&soft_stop),
-        "soft-stop cue must appear in streamed output; got: {seen:?}"
+    // Two apologies (the two retries) precede a single soft-stop cue.
+    assert_eq!(
+        seen.matches(&apology).count(),
+        2,
+        "expected 2 apologies before the soft-stop, got: {seen:?}"
+    );
+    assert_eq!(
+        seen.matches(&soft_stop).count(),
+        1,
+        "soft-stop cue must appear exactly once; got: {seen:?}"
     );
     assert_eq!(final_text, "A3", "last partial must be returned");
-    assert_eq!(
-        dm.session.turns.last().unwrap().text,
-        "A3",
-        "last partial must be recorded"
+    let last = dm.session.turns.last().unwrap();
+    assert_eq!(last.text, "A3", "last partial must be recorded");
+    assert!(
+        !last.text.contains(&soft_stop) && !last.text.contains(&apology),
+        "recorded turn must not contain the soft-stop cue or any apology"
     );
+    // All three attempts ran; none left unused.
+    assert_eq!(backend.remaining(), 0, "all three attempts must have run");
 }
 
 #[tokio::test]
