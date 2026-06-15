@@ -9,7 +9,7 @@
 //! step, so the two backends share one verified implementation.
 
 use primer_core::error::{InferenceError, PrimerError, Result};
-use primer_core::inference::TokenChunk;
+use primer_core::inference::{FinishReason, TokenChunk};
 use primer_core::reasoning::{ReasoningFilter, finalize_visible};
 
 /// What the caller should do with the result of filtering one parsed chunk.
@@ -58,6 +58,21 @@ pub(crate) fn process_filtered_chunk(
                 done: true,
                 finish_reason: chunk.finish_reason,
             })),
+            // No visible answer was produced. If the reply was truncated by
+            // the token budget (`Length`), prefer the context-limit recovery
+            // over `ReasoningWithoutAnswer` (issue #241): forward the terminal
+            // chunk so the dialogue manager apologises and retries with a
+            // smaller prompt, which may let the model finish its reasoning and
+            // produce a visible answer. A clean (`Stop`) all-reasoning reply
+            // genuinely said nothing — a retry would not help — so it still
+            // surfaces `ReasoningWithoutAnswer`.
+            None if chunk.finish_reason == FinishReason::Length => {
+                FilterAction::Final(Ok(TokenChunk {
+                    text: visible,
+                    done: true,
+                    finish_reason: chunk.finish_reason,
+                }))
+            }
             None => FilterAction::Final(Err(PrimerError::Inference(
                 InferenceError::ReasoningWithoutAnswer,
             ))),
@@ -89,6 +104,7 @@ fn log_suppressed(filter: &mut ReasoningFilter, backend: &'static str) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use primer_core::inference::FinishReason;
     use primer_core::reasoning::{ReasoningMarker, default_markers};
 
     fn chunk(text: &str, done: bool) -> TokenChunk {
@@ -211,5 +227,67 @@ mod tests {
         );
         assert_eq!(visible, "");
         assert!(err);
+    }
+
+    #[test]
+    fn truncated_reasoning_only_reply_carries_length_not_error() {
+        // A reply truncated by the token budget (terminal `finish_reason:
+        // Length`) whose entire content stayed inside a `<think>` block
+        // produces no visible answer. `Length` must WIN over
+        // `ReasoningWithoutAnswer` (issue #241): returning the terminal chunk
+        // with `Length` lets the dialogue manager's context-limit recovery
+        // fire (apology + smaller-prompt retry), which may let the model
+        // finish its reasoning and produce a visible answer — strictly more
+        // useful than giving up the turn with a generic "thinking problem".
+        let mut filter = ReasoningFilter::new(default_markers());
+        let mut had_visible = false;
+        // Open a reasoning block, stream only reasoning, never close it.
+        let _ = process_filtered_chunk(
+            &mut filter,
+            chunk("<think>still thinking", false),
+            &mut had_visible,
+            "test",
+        );
+        // Budget runs out: terminal chunk carries `Length`.
+        let done = TokenChunk {
+            text: String::new(),
+            done: true,
+            finish_reason: FinishReason::Length,
+        };
+        match process_filtered_chunk(&mut filter, done, &mut had_visible, "test") {
+            FilterAction::Final(Ok(c)) => {
+                assert!(c.text.is_empty(), "no visible answer was produced");
+                assert!(c.done);
+                assert_eq!(c.finish_reason, FinishReason::Length);
+            }
+            _ => panic!("expected Final(Ok) carrying Length, not an error"),
+        }
+        assert!(!had_visible);
+    }
+
+    #[test]
+    fn clean_reasoning_only_reply_still_errors() {
+        // The precedence is gated on `Length`: a `Stop` (natural-end)
+        // all-reasoning reply still surfaces `ReasoningWithoutAnswer`. A
+        // model that reasoned and then deliberately said nothing is a real
+        // no-answer turn — a smaller-prompt retry would not help, so the
+        // generic "thinking problem" path is correct here.
+        let mut filter = ReasoningFilter::new(default_markers());
+        let mut had_visible = false;
+        let _ = process_filtered_chunk(
+            &mut filter,
+            chunk("<think>still thinking", false),
+            &mut had_visible,
+            "test",
+        );
+        let done = TokenChunk {
+            text: String::new(),
+            done: true,
+            finish_reason: FinishReason::Stop,
+        };
+        assert!(matches!(
+            process_filtered_chunk(&mut filter, done, &mut had_visible, "test"),
+            FilterAction::Final(Err(_))
+        ));
     }
 }
