@@ -38,12 +38,16 @@ use crate::prompt_pack::PromptPack;
 
 mod apply;
 mod background;
+mod budget_tier;
 mod learner_update;
 mod lifecycle;
 mod retrieval;
 mod summary;
 mod turn;
 use apply::{apply_assessment, apply_comprehension, apply_extraction, merge_concepts_into_turn};
+// Re-export consumed by Task 7 (retry loop); unused until then.
+#[allow(unused_imports)]
+pub(crate) use budget_tier::PromptBudgetTier;
 
 #[cfg(test)]
 mod test_support;
