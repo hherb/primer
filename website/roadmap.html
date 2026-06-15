@@ -56,7 +56,7 @@
     <p>Run the conversation loop offline on hardware families own. Target: under three seconds to first token on at least one local platform.</p>
     <ul>
       <li>Embedded local inference on laptop/desktop — landed; device benchmarking under way</li>
-      <li>Qualcomm NPU backend — pipeline validated on a Snapdragon 8 Elite phone at ~9.4 tokens/s (June 2026); final integration rides with app packaging</li>
+      <li>Qualcomm NPU backend — the Primer now holds a full multi-turn conversation on a Snapdragon 8 Elite phone's Hexagon neural processor at ~25.7 tokens/s, first token in under a second (June 2026)</li>
       <li>Per-turn hybrid routing between a local model and an optional cloud model — landed, opt-in</li>
     </ul>
   </div>
@@ -74,9 +74,9 @@
 
   <div class="phase">
     <h3>Phase 3 — A device a child can hold <span class="badge badge-progress">Started</span></h3>
-    <p>The Primer as a physical object: turn it on and talk, no other equipment. Android app packaging — the deployment path to phone-class hardware — has begun.</p>
+    <p>The Primer as a physical object: turn it on and talk, no other equipment. Android app packaging — the deployment path to phone-class hardware — is working, and the app now runs the conversation on the phone's neural processor.</p>
     <ul>
-      <li>Android app build working; on-device NPU bring-up in final debugging</li>
+      <li>Android app builds and installs as an APK carrying the NPU runtime; the Primer holds a coherent multi-turn conversation on-device, generating every token on the phone's neural processor</li>
       <li>Ahead: display (colour e-ink or repurposed tablet), microphone array and speaker, battery and drop-resistant enclosure</li>
     </ul>
   </div>
@@ -102,11 +102,23 @@
   </div>
   <div class="milestone">
     <time datetime="2026-06-09">9 June 2026</time>
-    <p>On-device NPU inference validated: a 4-billion-parameter model on the phone's Hexagon neural processor at ~9.4 tokens/s, ~190 ms to first token, 57 °C peak.</p>
+    <p>The neural-processor inference pipeline validated on a Snapdragon 8 Elite phone — a 4-billion-parameter model generating coherent text on the phone's Hexagon NPU, comfortably inside thermal limits.</p>
   </div>
   <div class="milestone">
     <time datetime="2026-06-11">11 June 2026</time>
     <p>Android app packaging landed: the Primer's desktop app builds and runs as an Android APK, carrying the NPU runtime — the path to the first fully self-contained phone deployment.</p>
+  </div>
+  <div class="milestone">
+    <time datetime="2026-06-12">12 June 2026</time>
+    <p>First token generated on the phone's neural processor by the Primer's own app — the NPU backend running end-to-end inside the Android build, not a reference proxy.</p>
+  </div>
+  <div class="milestone">
+    <time datetime="2026-06-14">14 June 2026</time>
+    <p>A full multi-turn Socratic conversation runs on the phone's neural processor — near-instant, stable across turns, with a responsive phone-screen layout. Entirely on-device.</p>
+  </div>
+  <div class="milestone">
+    <time datetime="2026-06-15">15 June 2026</time>
+    <p>On-device throughput measured inside the app: ~25.7 tokens/s sustained, first token in under a second — well past the target for comfortable conversation.</p>
   </div>
 </section>
 

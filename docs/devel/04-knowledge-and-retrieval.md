@@ -1,6 +1,6 @@
 # Knowledge and retrieval
 
-This chapter is about how the Primer grounds its replies in real, attributed text. It covers the [KnowledgeBase](../../src/crates/primer-core/src/knowledge.rs) trait, the SQLite + FTS5 implementation, the lexical (BM25) and hybrid (BM25 + dense-vector RRF) retrieval paths, the [Embedder](../../src/crates/primer-core/src/embedder.rs) trait and its three concrete backends, the multi-layer auto-seeded corpus that ships in the repo, and the locale-aware schema that lets every language live side-by-side without contaminating each other's BM25 statistics. Two recipes at the end show how to extend the seed corpus and how to add a brand-new locale.
+This chapter is about how the Primer grounds its replies in real, attributed text. It covers the [KnowledgeBase](../../src/crates/primer-core/src/knowledge.rs) trait, the SQLite + FTS5 implementation, the lexical (BM25) and hybrid (BM25 + dense-vector RRF) retrieval paths, the [Embedder](../../src/crates/primer-core/src/embedder.rs) trait and its concrete backends, the multi-layer auto-seeded corpus that ships in the repo, and the locale-aware schema that lets every language live side-by-side without contaminating each other's BM25 statistics. Two recipes at the end show how to extend the seed corpus and how to add a brand-new locale.
 
 If you already read chapter 3 on inference and pedagogy, the dialogue manager you saw there pulls retrieved passages into the system prompt before every turn — this chapter is the back half of that pipeline.
 
@@ -32,7 +32,7 @@ pub trait KnowledgeBase: Send + Sync {
 }
 ```
 
-A few details worth pinning down before you read further. `Passage` is `{ id, source, text, score }`, where `score` is "higher = more relevant" regardless of the underlying ranker — backends must normalise their internal scoring into that direction before returning. `SourceMeta` is the per-source attribution + licence record (`id`, `license`, `attribution`, `source_url`, `retrieved_at`); a passage's `source` field is a logical foreign key into `SourceMeta::id`. `RetrievalParams` is BM25-shaped (`top_k`, `min_score`, `source_filter`); `HybridParams` adds the wider candidate pool (`bm25_top_k`, `vector_top_k`) plus the RRF constant (`rrf_k`). Both `Default` impls read from [consts::retrieval](../../src/crates/primer-core/src/consts.rs) so any tuning change happens in one place.
+A few details worth pinning down before you read further. `Passage` is `{ id, source, text, score }`, where `score` is "higher = more relevant" regardless of the underlying ranker — backends must normalise their internal scoring into that direction before returning. `SourceMeta` is the per-source attribution + licence record (`id`, `license`, `attribution`, `source_url`, `retrieved_at`, `parent_source_id`); a passage's `source` field is a logical foreign key into `SourceMeta::id`, and `parent_source_id` (added in schema v4) optionally points one source row at an umbrella source for aggregated attribution. `RetrievalParams` is BM25-shaped (`top_k`, `min_score`, `source_filter`); `HybridParams` adds the wider candidate pool (`bm25_top_k`, `vector_top_k`) plus the RRF constant (`rrf_k`). Both `Default` impls read from [consts::retrieval](../../src/crates/primer-core/src/consts.rs) so any tuning change happens in one place.
 
 > **Note:** When no `Embedder` is wired, `retrieve_hybrid`'s default trait impl falls back to BM25-only — every consumer can call it unconditionally. This is what keeps the dialogue manager free of `if cfg!(feature = "embedding")` branches.
 
@@ -48,10 +48,10 @@ For locale `<pack_id>` (e.g. `en`, `de`), the per-locale layout is:
 
 Two cross-locale tables travel alongside:
 
-- `sources` — licence + attribution metadata, keyed by source id. Phase 0.2 schema; populated lazily by `upsert_source`.
+- `sources` — licence + attribution metadata, keyed by source id. Populated lazily by `upsert_source`. As of schema v4 it carries a nullable self-referential `parent_source_id` foreign key (enforced — the connection runs with `foreign_keys=ON`) so many per-article rows (e.g. `wiki-simple:en:mercury`) can point at one shared umbrella row (`wiki-simple:en`) for a single aggregated "Powered by …" credit line. Hand-drafted CC0 seed rows and the umbrella rows themselves have `parent_source_id = None`.
 - `embedding_models` — `(name, dim)` registry for every embedder ever seen on this DB. Mismatched dim under an existing name is a hard error rather than a silent fallback.
 
-The schema is at [USER_VERSION](../../src/crates/primer-knowledge/src/lib.rs) `3`. Migrations layer additively, each idempotent and transaction-wrapped: v2 added `sources`; v3 added `embedding_models` and the per-locale `embeddings_<pack>` tables. A pre-locale legacy `passages` table (from before the locale-aware refactor) is migrated into the requested locale's `passages_<pack>_content` pair on first open and the legacy table is dropped — the migration assumes the legacy corpus matches the locale being opened, which is the only sound assumption when locale wasn't tracked at write time.
+The schema is at [USER_VERSION](../../src/crates/primer-knowledge/src/lib.rs) `4`. Migrations layer additively, each idempotent and transaction-wrapped: v2 added `sources`; v3 added `embedding_models` and the per-locale `embeddings_<pack>` tables; v4 added the nullable `sources.parent_source_id` self-FK (the `ADD COLUMN` is guarded by a `pragma_table_info` check, so a fresh DB — which already gets the column from `create_sources_table` — no-ops it). Because the FK is enforced, the loader upserts umbrella (parent-less) rows before child rows. A pre-locale legacy `passages` table (from before the locale-aware refactor) is migrated into the requested locale's `passages_<pack>_content` pair on first open and the legacy table is dropped — the migration assumes the legacy corpus matches the locale being opened, which is the only sound assumption when locale wasn't tracked at write time.
 
 To open a knowledge base, prefer the locale-explicit constructor:
 
@@ -63,6 +63,8 @@ let kb = SqliteKnowledgeBase::open_for_locale(path, Locale::English)?;
 ```
 
 The shorter `SqliteKnowledgeBase::open(path)` exists for back-compat but is `#[deprecated]` — it silently routes a non-English corpus through the English-default migration path, which is exactly the bug class the deprecation message warns about.
+
+> **Why:** Hot-path SQL is precomputed once per instance in the private `LocaleSql` struct (`LocaleSql::new(pack)`) and fed to `Connection::prepare_cached`, so the corpus-bootstrap loop (`insert_passage`, the embedded-insert path, `--reembed` upsert, `retrieve`, the vector k-NN scan) pays a statement-cache hash lookup per row, not a `format!` + FTS5/SQL re-parse. `LocaleSql` is the single source of truth for that per-row SQL; the one-shot schema/migration SQL stays inline next to its logic.
 
 ## BM25 ranking
 
@@ -103,7 +105,9 @@ pub trait Embedder: Named + Send + Sync {
 
 `Embedder` inherits from `Named`, which is the same single-source-of-truth `name()` trait that all the speech traits inherit from — backends never have to write `name()` twice. `model_id` is a stable identifier (e.g. `"bge-m3"`, `"stub-fxhash-v1"`) persisted alongside every stored vector so cross-model mixing is detectable at open time.
 
-Three concrete impls live in [primer-embedding](../../src/crates/primer-embedding/src/lib.rs):
+Four concrete impls live in [primer-embedding](../../src/crates/primer-embedding/src/lib.rs): `StubEmbedder` is always built; `FastEmbedBackend`, `OllamaEmbedder`, and `OpenAiCompatEmbedder` each sit behind their own Cargo feature.
+
+> **Note:** The `--embedder-backend` runtime default (and the GUI's equivalent) is **feature-aware**: `fastembed` when the default `embedding` feature is compiled in (the default build), `none` on a `--no-default-features` build. This is the load-bearing trick that lets a flagless run do the right thing for whatever was compiled, without ever hard-failing. `none` is BM25-only; `stub` is for testing the hybrid pipeline structurally only.
 
 ### StubEmbedder
 
@@ -119,7 +123,11 @@ Behind the `fastembed` feature. Wraps [fastembed-rs](https://github.com/Anush008
 
 ### OllamaEmbedder
 
-Behind the `ollama` feature. Calls the local Ollama daemon's `/api/embeddings` endpoint (default model `nomic-embed-text`, default URL `http://localhost:11434`). This is the developer-prototyping path — useful for trying out a different embedding model without rebuilding the binary, but not the recommended runtime backend because it adds a network hop in the hot path. See [ollama.rs](../../src/crates/primer-embedding/src/ollama.rs).
+Behind the `ollama` feature. Calls the local Ollama daemon's `/api/embeddings` endpoint (default model `nomic-embed-text`, default URL `http://localhost:11434`), one input at a time. This is the developer-prototyping path — useful for trying out a different embedding model without rebuilding the binary, but not the recommended runtime backend because it adds a network hop in the hot path. See [ollama.rs](../../src/crates/primer-embedding/src/ollama.rs).
+
+### OpenAiCompatEmbedder
+
+Behind the `openai-compat` feature. Calls a server's `/v1/embeddings` endpoint with **native batch support** — it sends the full batch in a single request (unlike `OllamaEmbedder`, which loops one-at-a-time), and sorts the response by `index` to match input order since the spec allows out-of-order replies. Works with oMLX, LM Studio, vLLM, and remote providers. Dim-mismatch is a hard error, same as the others.
 
 > **Gotcha:** The `embedding` and `speech` cargo features both pin `ort = "=2.0.0-rc.10"`. Bumping fastembed past `5.7.0` will break the speech build until the vendored silero/whisper/piper crates get rc.11+ patches. The two feature stacks share an ort version by load-bearing constraint, not by accident.
 
@@ -141,51 +149,62 @@ Whichever directory yields at least one matching file wins, and **all** matching
 
 This is what makes the multi-layer corpus work transparently. Today, for `Locale::English`, the in-repo seed dir holds two files:
 
-- `seed_passages.en.jsonl` — 55 hand-drafted passages, CC0-1.0, covering the five planned clusters (space, body, how-things-work, life, earth/weather).
+- `seed_passages.en.jsonl` — 56 hand-drafted passages, CC0-1.0, covering the five planned clusters (space, body, how-things-work, life, earth/weather).
 - `wiki_passages.en.jsonl` — 35 lead paragraphs from Simple English Wikipedia, CC-BY-SA-3.0, covering physics fundamentals, chemistry, biology, earth science, and health.
 
-Both load on a fresh English KB, giving 90 passages out of the box. A future `wiki_passages.de.jsonl` would auto-load on a German session without any code change. The older `discover_seed_jsonl(locale)` API still exists for back-compat (it returns just the canonical `seed_passages.<pack>.jsonl`); new code should prefer `discover_seed_files`.
+Both load on a fresh English KB, giving 91 passages out of the box. The German layer already ships too: `wiki_passages.de.jsonl` (66 articles from the Klexikon children's wiki, CC-BY-SA-4.0) auto-loads on a `--language de` session with no code change. The older `discover_seed_jsonl(locale)` API still exists for back-compat (it returns just the canonical `seed_passages.<pack>.jsonl`); new code should prefer `discover_seed_files`.
 
-The loader half — `load_jsonl(kb, path)` — is idempotent. It treats `id` as the deduplication key: a row already in `passages_<pack>_content` with the same `id` is skipped, not overwritten, mirroring the append-only behaviour of `SessionStore::save_session`. Re-running on the same JSONL is a no-op; running it on a JSONL with new entries adds only the new ones. The `sources` table uses upsert semantics so attribution stays current.
+The loader half — `load_jsonl(kb, path)` — is idempotent. It treats `id` as the deduplication key: a row already in `passages_<pack>_content` with the same `id` is skipped, not overwritten, mirroring the append-only behaviour of `SessionStore::save_session`. Re-running on the same JSONL is a no-op; running it on a JSONL with new entries adds only the new ones. The `sources` table uses upsert semantics so attribution stays current. A JSONL line may carry an optional nested `parent_source` object (the umbrella-attribution case from schema v4); when present, the loader registers the umbrella source row first (de-duped across every passage that shares it, since the `parent_source_id` FK is enforced) and links the passage's own source to it.
 
 > **Note:** `auto_seed_if_empty` runs unconditionally on every CLI startup, but the empty-KB check makes the actual load conditional. After the first run the KB is non-empty and the function is a `passage_count` query plus an early return.
 
-## Wikipedia ingestion pipeline
+## Wikipedia-shaped ingestion pipeline
 
-The Wikipedia layer is regenerated by a Python pipeline at [data/ingest/](../../data/ingest/), not at build time — the developer runs it once and commits the resulting JSONL. This keeps Rust builds hermetic (no network, no Python dep) and makes changes to the corpus reviewable as ordinary diffs.
+The wiki layers are regenerated by a Python pipeline at [data/ingest/](../../data/ingest/), not at build time — the developer runs it once and commits the resulting JSONL. This keeps Rust builds hermetic (no network, no Python dep) and makes changes to the corpus reviewable as ordinary diffs.
 
-The design is: pure functions where possible; network is the test boundary, injected via an `http_client` parameter so the unit tests can run with a mocked transport. Source files live next to a `tests/` directory that exercises the pure halves directly.
+The design is: pure functions where possible; network is the test boundary, injected via an `http_client` parameter so the unit tests can run with a mocked transport.
 
-Two functions do the actual fetching, in [simple_wikipedia.py](../../data/ingest/simple_wikipedia.py):
+The pipeline is parameterised by a frozen [`WikiSource`](../../data/ingest/wiki/source.py) dataclass (`pack_id`, `api_url`, `web_base_url`, `id_prefix`, `human_label`, `license`, `topic_tags`, `disambiguation_patterns`, `fetch_strategy`, `batch_size`) so multiple Wikipedia-shaped sources share one fetch / passage-emit / JSONL-write path. Two presets ship today:
 
-- `fetch_lead(title, *, http_client)` — fetch one article's lead paragraph. Raises loudly on missing pages, empty extracts, and disambiguation pages (matched by `_DISAMBIGUATION_PATTERNS` against the lead's first 300 characters; the cure is a more specific title like `Base (chemistry)` rather than `Base`).
-- `fetch_leads(titles, *, http_client)` — batched variant that fetches up to 20 titles per API call. Strictly better than calling `fetch_lead` in a loop because the MediaWiki extracts endpoint enforces a per-IP rate limit; one request for twenty leads costs a single rate-limit slot.
+- **`SIMPLE_ENGLISH`** — Simple English Wikipedia; the `text_extracts` strategy uses `action=query&prop=extracts&exintro=1&explaintext=1` with `batch_size=20` (MediaWiki's per-IP cap), so one request fetches twenty leads for a single rate-limit slot.
+- **`KLEXIKON`** — the German children's wiki at `klexikon.zum.de`; the `klexikon_wikitext` strategy uses `action=parse&prop=wikitext&section=0` plus `strip_klexikon_wikitext` (Klexikon's MediaWiki has no TextExtracts extension), `batch_size=1` (the `parse` API takes one page per call).
 
-The whitelist at [simple_wikipedia_whitelist.txt](../../data/ingest/simple_wikipedia_whitelist.txt) is hand-curated. To expand it, [build_whitelist.py](../../data/ingest/build_whitelist.py) pulls candidates from Wikipedia's Vital Articles Level 4 list — they still need manual review because the Vital list includes plenty of articles that aren't appropriate for an eight-year-old.
+Both strategy fetchers raise loudly on missing pages, empty extracts, and disambiguation pages (matched per-source against the lead's first 300 characters; the cure is a more specific title like `Base (chemistry)` rather than `Base`). Each emitted passage carries a nested `parent_source` umbrella object (`id = "<id_prefix>:<pack_id>"`, e.g. `wiki-simple:en`) so the Rust loader can de-dupe per-article rows under one aggregated attribution row (schema v4).
 
-To regenerate the wiki layer:
+The implementation lives under [data/ingest/wiki/](../../data/ingest/wiki/): `source.py` (the `WikiSource` dataclass + presets + slugify + the `to_passage` emitter), `strip.py` (Klexikon wikitext → plain text), and `fetch.py` (HTTP dispatch + per-strategy fetchers). [simple_wikipedia.py](../../data/ingest/simple_wikipedia.py) is now just the CLI entry point (pipeline orchestrator + argparse).
+
+> **Note:** Every HTTP call goes through one retry boundary — `retry_http_get` in [retry.py](../../data/ingest/retry.py) — which retries on HTTP 429 / 5xx with exponential backoff and honours `Retry-After` for the delta-seconds form. Network errors propagate unchanged. Tune the retry constants there, not at the call sites.
+
+The whitelists are hand-curated, one per source: [simple_wikipedia_whitelist.txt](../../data/ingest/simple_wikipedia_whitelist.txt) (en) and `klexikon_whitelist.txt` (de). To expand the English one, [build_whitelist.py](../../data/ingest/build_whitelist.py) pulls candidates from Wikipedia's Vital Articles Level 4 list — they still need manual review because the Vital list includes plenty of articles that aren't appropriate for an eight-year-old.
+
+> **Gotcha:** Python tooling in this repo is **uv-only** — use `uv` for venvs, installs, and runs; never `pip` directly and never `python3 -m venv`.
+
+To regenerate a wiki layer:
 
 ```bash
-# from the repo root
-python3 -m venv .venv
-source .venv/bin/activate
-pip install -r data/ingest/requirements.txt
 cd data/ingest
-python3 simple_wikipedia.py
+uv venv
+uv pip install -r requirements.txt
+uv run python simple_wikipedia.py --language en   # Simple English → wiki_passages.en.jsonl
+uv run python simple_wikipedia.py --language de   # Klexikon → wiki_passages.de.jsonl
 ```
 
-Re-runs are deterministic — output is sorted by `id`, JSON-serialised with `ensure_ascii=True`, so diffs only reflect real article-content changes upstream. Commit the regenerated `data/seed/wiki_passages.en.jsonl` alongside whatever change motivated the rerun.
+Re-runs are deterministic — output is sorted by `id`, JSON-serialised with `ensure_ascii=True`, so diffs only reflect real article-content changes upstream. Commit the regenerated `data/seed/wiki_passages.<pack>.jsonl` alongside whatever change motivated the rerun.
 
 ## Sweep tests
 
-Two sweep tests pin the retrieval defaults against the 90-passage corpus. Both live in [primer-kb-load/tests/](../../src/crates/primer-kb-load/tests/), not under `primer-knowledge/`, because they exercise the full ingestion + retrieval pipeline end-to-end.
+Sweep tests pin the retrieval defaults against the shipped corpus. They live in [primer-kb-load/tests/](../../src/crates/primer-kb-load/tests/), not under `primer-knowledge/`, because they exercise the full ingestion + retrieval pipeline end-to-end. There is a parallel pair per locale; the harness itself is shared at [tests/common/sweep.rs](../../src/crates/primer-kb-load/tests/common/sweep.rs), so each per-locale sweep file is a thin `#[ignore]` shim that supplies the locale, cluster list, and benchmark queries.
+
+For English (the 91-passage corpus, 91-query benchmark with 24 strict-subset canonical-id mappings):
 
 - [retrieval_sweep.rs](../../src/crates/primer-kb-load/tests/retrieval_sweep.rs) — BM25-only sweep. Always built; `#[ignore]`'d so it doesn't run in default CI. Run via `cargo test -p primer-kb-load --test retrieval_sweep -- --ignored sweep_retrieval_params --nocapture`. The 24-cell sweep is what produced today's defaults: `KB_FINAL_TOP_K = 5` and `KB_BM25_ONLY_MIN_SCORE = 0.5`.
-- [retrieval_sweep_hybrid.rs](../../src/crates/primer-kb-load/tests/retrieval_sweep_hybrid.rs) — hybrid (BM25 + dense-vector RRF) sweep. Gated on `--features fastembed` AND `#[ignore]`'d, so even `cargo test --features fastembed` skips it without `--ignored`. Run via `cargo test -p primer-kb-load --features fastembed --test retrieval_sweep_hybrid -- --ignored sweep_retrieval_params_hybrid --nocapture`. The 54-cell sweep produced today's hybrid defaults: `KB_BM25_TOP_K = 30`, `KB_VECTOR_TOP_K = 30`, `KB_FINAL_TOP_K = 5`, `RRF_K = 60`. Hybrid achieves 100% loose / 100% strict recall on the 87-query benchmark (with 20 strict-subset canonical-id mappings).
+- [retrieval_sweep_hybrid.rs](../../src/crates/primer-kb-load/tests/retrieval_sweep_hybrid.rs) — hybrid (BM25 + dense-vector RRF) sweep. Gated on `--features fastembed` AND `#[ignore]`'d, so even `cargo test --features fastembed` skips it without `--ignored`. Run via `cargo test -p primer-kb-load --features fastembed --test retrieval_sweep_hybrid -- --ignored sweep_retrieval_params_hybrid --nocapture`. The 54-cell sweep produced today's hybrid defaults: `KB_BM25_TOP_K = 30`, `KB_VECTOR_TOP_K = 30`, `KB_FINAL_TOP_K = 5`, `RRF_K = 60`. Hybrid achieves 100% loose / 100% strict recall on all 91 queries / 24 mappings.
 
-The standing regression tests (always-on, not `#[ignore]`'d) live in [retrieval_quality.rs](../../src/crates/primer-kb-load/tests/retrieval_quality.rs) (BM25-only) and [retrieval_quality_hybrid.rs](../../src/crates/primer-kb-load/tests/retrieval_quality_hybrid.rs) (hybrid; the real-`fastembed` recall floor is gated on the feature, but a `StubEmbedder` structural sanity check runs on every build).
+The German Klexikon corpus has a parallel benchmark (31 child-style queries, 25 strict mappings) driving `retrieval_sweep_de.rs` (24-cell BM25, sized to five clusters — `Cluster::Wiki` is omitted because Klexikon *is* the wiki for `de`) and `retrieval_sweep_hybrid_de.rs` (54-cell hybrid under `--features fastembed`).
 
-The list of queries the BM25-only path is allowed to miss lives in [tests/common/mod.rs](../../src/crates/primer-kb-load/tests/common/mod.rs) as `KNOWN_FAILING_QUERIES`. The hybrid analogue, `KNOWN_FAILING_QUERIES_HYBRID`, is empty today — the dense leg lifted every BM25 strict miss in the benchmark, including the canonical "how does the sun shine" case (closed issue #42). New entries on the hybrid list mean either a real semantic regression or a corpus-coverage gap the dense leg can't bridge; investigate before committing.
+The standing regression tests (always-on, not `#[ignore]`'d) live in [retrieval_quality.rs](../../src/crates/primer-kb-load/tests/retrieval_quality.rs) (BM25-only) and [retrieval_quality_hybrid.rs](../../src/crates/primer-kb-load/tests/retrieval_quality_hybrid.rs) (hybrid; the real-`fastembed` recall floor is gated on the feature, but a `StubEmbedder` structural sanity check runs on every build). German has the analogous `retrieval_quality_de.rs` and `retrieval_quality_hybrid_de.rs`.
+
+The list of queries the BM25-only path is allowed to miss lives in [tests/common/mod.rs](../../src/crates/primer-kb-load/tests/common/mod.rs) as `KNOWN_FAILING_QUERIES`. The English hybrid analogue, `KNOWN_FAILING_QUERIES_HYBRID`, is **empty today** — the dense leg lifted every BM25 strict miss in the benchmark, including the canonical "how does the sun shine" case (closed issue #42). German carries non-empty lists (`KNOWN_FAILING_QUERIES_DE`, `KNOWN_FAILING_QUERIES_DE_HYBRID`) for a handful of stress paraphrases that hit genuine Klexikon corpus-coverage gaps (e.g. the `haut` article doesn't describe goosebumps; the `mond` article doesn't discuss tides). New entries on any hybrid list mean either a real semantic regression or a corpus-coverage gap the dense leg can't bridge; investigate before committing.
 
 ---
 
@@ -193,7 +212,7 @@ The list of queries the BM25-only path is allowed to miss lives in [tests/common
 
 You want to add a passage on a topic the corpus doesn't cover well, or tweak an existing passage so a struggling query finally resolves. The flow is JSONL-first: the data file is the source of truth, and the test suite tells you whether the change earned its keep.
 
-**1. Edit the JSONL.** Choose the right layer. Hand-drafted, CC0 content goes in `data/seed/seed_passages.<pack>.jsonl`; new wiki content goes through the [Wikipedia ingestion pipeline](#wikipedia-ingestion-pipeline) and lands in `wiki_passages.<pack>.jsonl`. To add a third layer (say, a curriculum source), create a new `<your_layer>.<pack>.jsonl` in `data/seed/`; the discovery code picks it up automatically.
+**1. Edit the JSONL.** Choose the right layer. Hand-drafted, CC0 content goes in `data/seed/seed_passages.<pack>.jsonl`; new wiki content goes through the [Wikipedia-shaped ingestion pipeline](#wikipedia-shaped-ingestion-pipeline) and lands in `wiki_passages.<pack>.jsonl`. To add a third layer (say, a curriculum source), create a new `<your_layer>.<pack>.jsonl` in `data/seed/`; the discovery code picks it up automatically.
 
 A row looks like this:
 
@@ -239,7 +258,7 @@ Adding a new locale means picking a stable pack id, writing a translation pack, 
 
 **2. Add the TOML pack.** Mirror `primer-core/i18n/en.toml` at `primer-core/i18n/<pack_id>.toml`. Every locale-specific user-visible string lives there, including `break_suggestion_intro` with the `{minutes}` substitution token. The pattern is reusable for any future locale-aware unit substitution — the locale's TOML owns its own unit word ("minutes" / "Minuten" / etc).
 
-**3. Add the seed JSONL.** At minimum, create `data/seed/seed_passages.<pack_id>.jsonl` with hand-drafted passages. Optionally regenerate `data/seed/wiki_passages.<pack_id>.jsonl` via the [ingestion pipeline](#wikipedia-ingestion-pipeline) — Simple English Wikipedia obviously won't apply, but the same pattern adapts to any per-language MediaWiki extracts endpoint.
+**3. Add the seed JSONL.** At minimum, create `data/seed/seed_passages.<pack_id>.jsonl` with hand-drafted passages. Optionally regenerate `data/seed/wiki_passages.<pack_id>.jsonl` via the [ingestion pipeline](#wikipedia-shaped-ingestion-pipeline) — Simple English Wikipedia won't apply directly, but the `WikiSource` dataclass is built to adapt: add a new preset for any per-language MediaWiki-shaped source (the German Klexikon preset is the worked example).
 
 **4. Open the KB for the new locale.** No code change beyond the call site:
 

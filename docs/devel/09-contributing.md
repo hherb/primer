@@ -35,6 +35,8 @@ Commit messages follow [Conventional Commits](https://www.conventionalcommits.or
 
 Scope is optional but encouraged — `feat(speech):` or `docs(devel):` reads better than a bare `feat:` in `git log --oneline`. The subject should be imperative mood, lowercase, no trailing period: `add silero VAD wrapper`, not `Added silero VAD wrapper.`.
 
+> **Note:** commits produced with AI assistance (Claude Code) carry a `Co-Authored-By:` trailer crediting the model, matching the convention already visible in `git log` and the "Claude" row in [ROADMAP.md](../../ROADMAP.md)'s contributor table. Keep the trailer on the final commit line so attribution is greppable.
+
 > **Gotcha:** never use `--no-verify` to skip pre-commit hooks. Hooks exist for a reason; if one fails, fix the underlying issue instead of bypassing it. Likewise, never `git commit --amend` after pushing a branch — force-pushing rewrites history out from under reviewers and breaks line-comment threads. If you need to fix a pushed commit, add a follow-up commit; squashing happens at merge time.
 
 ## Code style
@@ -48,7 +50,23 @@ cargo clippy --workspace --all-targets -- -D warnings
 cargo test --workspace
 ```
 
-The CI workflow at [.github/workflows/ci.yml](../../.github/workflows/ci.yml) runs `cargo fmt --check`, `cargo clippy --workspace --all-targets` with `RUSTFLAGS=-D warnings`, and `cargo test --workspace --no-fail-fast`. A PR that fails any of these will not merge until it does. Run them locally before pushing — turnaround is faster on your machine than in GitHub Actions.
+The CI workflow at [.github/workflows/ci.yml](../../.github/workflows/ci.yml) runs `cargo fmt --check`, `cargo clippy --workspace --all-targets` with `RUSTFLAGS=-D warnings`, and `cargo test --workspace --no-fail-fast`, plus drift guards for the non-default features and an `aarch64-linux-android` cross-compile. A PR that fails any of these will not merge until it does. Run them locally before pushing — turnaround is faster on your machine than in GitHub Actions.
+
+The toolchain is pinned to **1.88** in [rust-toolchain.toml](../../src/rust-toolchain.toml), honoured only by the rustup proxy binaries — invoke cargo as `~/.cargo/bin/cargo` so a Homebrew `cargo` on `$PATH` doesn't silently shadow it (see [chapter 8](08-testing-and-debugging.md)).
+
+### The pre-commit hook
+
+A version-controlled pre-commit hook lives at [.githooks/pre-commit](../../.githooks/pre-commit). On any commit that touches `.rs` files it runs `cargo fmt --all -- --check` from `src/` (and fast-skips otherwise), so a formatting drift fails locally instead of after a CI round-trip. Opt in once per clone:
+
+```bash
+git config core.hooksPath .githooks
+```
+
+The CI step is the source of truth; the hook is an early-warning copy. It skips with a one-line warning when `cargo` isn't on `PATH` and `$CARGO` is unset, so docs-only contributors aren't forced to install rustup.
+
+### Branch protection
+
+Branch protection on `main` is the recommended structural fix and the merge-boundary backstop: the repo settings require the `cargo test (default features)` status check to pass before a PR can merge to `main`. The local hook complements this but does not replace it — the hook closes the loop for direct `git commit`; branch protection closes it at the merge boundary regardless of contributor discipline.
 
 Before opening a PR:
 
@@ -61,7 +79,7 @@ cargo test
 
 `cargo fmt` writes the changes; `cargo fmt --all -- --check` (what CI runs) only verifies. The `-D warnings` flag promotes every clippy lint to a hard error, matching CI's `RUSTFLAGS=-D warnings` setting. If clippy flags something you genuinely cannot fix, prefer a narrowly-scoped `#[allow(clippy::lint_name)]` with a comment explaining why, over a workspace-level allow.
 
-> **Note:** the `speech` and `embedding` cargo features pull heavy native deps (ONNX Runtime, espeak-ng) and are not part of the default-features CI build. If your change touches `primer-speech` or `primer-embedding`, build and test those features locally — see [chapter 7](07-speech-and-voice-loop.md) and [chapter 4](04-knowledge-and-retrieval.md).
+> **Note:** the `embedding` feature is now in `default` and built by CI (the cdn.pyke.io ORT download is proven on Linux + macOS). The `speech`, `llamacpp`, `qnn`, and the Apple-native (`macos-native` / `macos-native-26`) features pull heavy native deps (ONNX Runtime, espeak-ng, llama.cpp, the QAIRT SDK, a Swift sidecar) and are *not* part of the default `cargo test` job — CI covers them with clippy/cross-compile drift guards rather than a full test run. If your change touches `primer-speech`, `primer-inference` local backends, or `primer-embedding`, build and test the relevant features locally — see [chapter 7](07-speech-and-voice-loop.md), [chapter 8](08-testing-and-debugging.md), and [chapter 4](04-knowledge-and-retrieval.md).
 
 ## No magic numbers
 

@@ -2,7 +2,7 @@
 
 Welcome. This manual is for **external open-source contributors** who want to understand how the Primer is built, find their way around the workspace, and land changes that fit the project's pedagogical and architectural intent.
 
-It covers: how to clone and run the project, how the twelve crates fit together, where the pedagogical "soul" lives, how each subsystem (inference, retrieval, storage, classifiers, speech) is structured, how to test and debug locally, and how to send a pull request that we can merge with confidence.
+It covers: how to clone and run the project, how the fifteen crates fit together, where the pedagogical "soul" lives, how each subsystem (inference, retrieval, storage, classifiers, speech) is structured, how to test and debug locally, and how to send a pull request that we can merge with confidence.
 
 It does **not** cover: the product vision (see [README.md](../../README.md) and [primer_technical_spec.md](../../primer_technical_spec.md)), the long-range phase plan ([ROADMAP.md](../../ROADMAP.md)), or speculative ideas not yet on the roadmap ([SPECULATIONS_AND_IDEAS.md](../../SPECULATIONS_AND_IDEAS.md)). It is also **not** a user manual — it assumes you intend to read or change code.
 
@@ -21,8 +21,8 @@ Three suggested orderings depending on why you are here:
 | # | Chapter | What it covers |
 |---|---|---|
 | 01 | [Getting started](01-getting-started.md) | Clone, build, first run, env files, tests, logging. |
-| 02 | [Architecture overview](02-architecture-overview.md) | Trait-based abstraction, the 12-crate graph, pedagogical principles. |
-| 03 | [Inference and pedagogy](03-inference-and-pedagogy.md) | `InferenceBackend` impls, `DialogueManager`, `decide_intent`, retry, error i18n. |
+| 02 | [Architecture overview](02-architecture-overview.md) | Trait-based abstraction, the 15-crate graph, pedagogical principles. |
+| 03 | [Inference and pedagogy](03-inference-and-pedagogy.md) | `InferenceBackend` impls (stub/cloud/ollama/openai-compat/llamacpp/qnn + fallback/router), `DialogueManager`, `decide_intent`, retry, error i18n. |
 | 04 | [Knowledge and retrieval](04-knowledge-and-retrieval.md) | FTS5 + hybrid retrieval, embedders, seed corpus, locales. |
 | 05 | [Storage and sessions](05-storage-and-sessions.md) | Session/learner stores, schema migrations, long-term memory. |
 | 06 | [Classifiers and the learner model](06-classifiers-and-learner-model.md) | Classifier/extractor/comprehension trio, vocab Leitner box. |
