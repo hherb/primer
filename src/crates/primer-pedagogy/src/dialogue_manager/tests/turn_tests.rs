@@ -894,6 +894,25 @@ async fn truncated_turn_retries_then_records_only_final_answer() {
         "expected 2 apologies in streamed output, got: {seen:?}"
     );
     assert!(seen.contains("A1") && seen.contains("A2") && seen.contains("A3"));
+    // The visible stream is ordered partial → apology → next partial → … :
+    // each partial precedes the apology that precedes the next attempt's
+    // partial. Position-checking (not just counting) pins the UX sequence.
+    let p1 = seen.find("A1").unwrap();
+    let p2 = seen.find("A2").unwrap();
+    let p3 = seen.find("A3").unwrap();
+    let first_apology = seen.find(&apology).unwrap();
+    let second_apology = seen[first_apology + apology.len()..]
+        .find(&apology)
+        .map(|i| i + first_apology + apology.len())
+        .unwrap();
+    assert!(
+        p1 < first_apology && first_apology < p2,
+        "apology must sit between A1 and A2: {seen:?}"
+    );
+    assert!(
+        p2 < second_apology && second_apology < p3,
+        "second apology must sit between A2 and A3: {seen:?}"
+    );
     // Only the final clean answer is returned AND recorded.
     assert_eq!(final_text, "A3");
     let last = dm.session.turns.last().unwrap();
@@ -962,6 +981,45 @@ async fn exhausted_retries_soft_stop_and_record_partial() {
 }
 
 #[tokio::test]
+async fn exhausted_retries_falls_back_to_last_nonempty_partial() {
+    // Every tier truncates, and the tightest (final) attempt produces NO
+    // visible text. Rather than record an empty Primer turn, the loop falls
+    // back to the most recent non-empty partial ("A2").
+    use primer_core::inference::FinishReason;
+    let backend = std::sync::Arc::new(SequenceBackend::new(vec![
+        vec![Ok(chunk("A1", false)), Ok(finished(FinishReason::Length))],
+        vec![Ok(chunk("A2", false)), Ok(finished(FinishReason::Length))],
+        // Final attempt: no partial text, just a truncating terminal chunk.
+        vec![Ok(finished(FinishReason::Length))],
+    ]));
+    let knowledge = std::sync::Arc::new(EmptyKnowledge);
+    let mut dm = DialogueManager::new(
+        test_learner(),
+        backend.clone(),
+        knowledge.clone(),
+        DialogueManagerStores::default(),
+        default_subsystems(),
+        PedagogyConfig::default(),
+    );
+
+    let final_text = dm
+        .respond_to_streaming("teach me about volcanoes", |_| {})
+        .await
+        .unwrap();
+    assert_eq!(
+        final_text, "A2",
+        "empty final partial must fall back to the last non-empty one"
+    );
+    let last = dm.session.turns.last().unwrap();
+    assert_eq!(last.speaker, Speaker::Primer);
+    assert_eq!(
+        last.text, "A2",
+        "recorded turn must be the fallback partial"
+    );
+    assert_eq!(backend.remaining(), 0, "all three attempts must have run");
+}
+
+#[tokio::test]
 async fn clean_first_try_has_no_retries_or_apologies() {
     let backend = std::sync::Arc::new(ScriptedBackend::new(vec![
         Ok(chunk("hello", false)),
@@ -989,6 +1047,56 @@ async fn clean_first_try_has_no_retries_or_apologies() {
         !seen.contains(&apology),
         "clean first try must not stream any apology; got: {seen:?}"
     );
+}
+
+#[tokio::test]
+async fn retry_stream_error_propagates_and_drops_turn() {
+    // Attempt 1 truncates (Length) → apology streamed → retry. Attempt 2
+    // errors mid-stream after a partial. The error must propagate as Err and
+    // the Primer turn must NOT be recorded — the same drop-the-partial
+    // semantics as a first-attempt mid-stream error, now exercised across a
+    // retry boundary.
+    use primer_core::inference::FinishReason;
+    let backend = std::sync::Arc::new(SequenceBackend::new(vec![
+        vec![Ok(chunk("A1", false)), Ok(finished(FinishReason::Length))],
+        vec![
+            Ok(chunk("A2", false)),
+            Err(PrimerError::Inference("simulated drop on retry".into())),
+        ],
+    ]));
+    let knowledge = std::sync::Arc::new(EmptyKnowledge);
+    let mut dm = DialogueManager::new(
+        test_learner(),
+        backend.clone(),
+        knowledge.clone(),
+        DialogueManagerStores::default(),
+        default_subsystems(),
+        PedagogyConfig::default(),
+    );
+    let pack = crate::prompt_pack::load_cached(primer_core::i18n::Locale::English)
+        .expect("English pack must load");
+    let apology = pack.memory_limit_retry().to_string();
+
+    let seen = Mutex::new(String::new());
+    let result = dm
+        .respond_to_streaming("teach me about volcanoes", |c| {
+            seen.lock().unwrap().push_str(c)
+        })
+        .await;
+
+    assert!(
+        result.is_err(),
+        "mid-stream error on a retry must propagate"
+    );
+    let seen = seen.into_inner().unwrap();
+    // The first attempt's partial + the apology + the second partial all
+    // streamed before the error.
+    assert!(seen.contains("A1") && seen.contains(&apology) && seen.contains("A2"));
+    // Child turn recorded; Primer turn dropped.
+    assert_eq!(dm.session.turns.len(), 1);
+    assert_eq!(dm.session.turns[0].speaker, Speaker::Child);
+    // Both scripted attempts ran before the error.
+    assert_eq!(backend.remaining(), 0, "both attempts must have run");
 }
 
 #[tokio::test]

@@ -313,11 +313,21 @@ impl DialogueManager {
         let sep = crate::consts::TURN_NOTICE_SEPARATOR;
 
         let mut tier = super::PromptBudgetTier::Full;
+        // Most recent non-empty partial, kept as a fallback for the
+        // exhaustion path: if the tightest tier truncates having produced
+        // no visible text, recording an empty Primer turn would pollute the
+        // session record, so we fall back to the last attempt that said
+        // something. A clean (`Stop`) empty reply is left untouched — that
+        // is the model genuinely answering nothing, pre-existing behaviour.
+        let mut last_nonempty = String::new();
         loop {
             let (prompt, passage_count) = self.build_turn_prompt(child_input, intent, tier).await;
             let outcome = self
                 .stream_inference_response(&prompt, intent, passage_count, on_chunk)
                 .await?;
+            if !outcome.text.is_empty() {
+                last_nonempty = outcome.text.clone();
+            }
             match (outcome.finish_reason, tier.next_tighter()) {
                 (FinishReason::Stop, _) => return Ok(outcome.text),
                 (FinishReason::Length, Some(next)) => {
@@ -328,10 +338,21 @@ impl DialogueManager {
                     tier = next;
                 }
                 (FinishReason::Length, None) => {
+                    // Every tier truncated; accept the partial. Prefer the
+                    // final attempt's text, falling back to the last
+                    // non-empty partial so we never record an empty turn.
+                    let text = if outcome.text.is_empty() {
+                        last_nonempty
+                    } else {
+                        outcome.text
+                    };
                     let msg = self.prompt_pack.memory_limit_soft_stop().to_string();
+                    // No trailing separator: nothing follows the soft-stop
+                    // cue (unlike the retry apology, which precedes the next
+                    // attempt's text).
                     on_chunk(sep);
                     on_chunk(&msg);
-                    return Ok(outcome.text);
+                    return Ok(text);
                 }
             }
         }
