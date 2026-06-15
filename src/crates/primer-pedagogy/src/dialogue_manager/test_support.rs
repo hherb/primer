@@ -390,6 +390,7 @@ pub(super) fn chunk(text: &str, done: bool) -> TokenChunk {
     TokenChunk {
         text: text.to_string(),
         done,
+        ..Default::default()
     }
 }
 

@@ -50,6 +50,7 @@ impl InferenceBackend for MockBackend {
                 let chunk = TokenChunk {
                     text: text.clone(),
                     done: true,
+                    ..Default::default()
                 };
                 Ok(Box::pin(stream::once(async move { Ok(chunk) })))
             }

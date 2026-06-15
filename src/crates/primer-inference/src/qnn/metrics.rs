@@ -410,11 +410,13 @@ mod tests {
             let _ = tx.unbounded_send(Ok(TokenChunk {
                 text: (*t).to_string(),
                 done: false,
+                ..Default::default()
             }));
         }
         let _ = tx.unbounded_send(Ok(TokenChunk {
             text: String::new(),
             done: true,
+            ..Default::default()
         }));
         drop(tx);
         Box::pin(rx)
@@ -484,6 +486,7 @@ mod tests {
         let _ = tx.unbounded_send(Ok(TokenChunk {
             text: "partial".to_string(),
             done: false,
+            ..Default::default()
         }));
         let _ = tx.unbounded_send(Err(primer_core::error::PrimerError::Inference(
             "boom".into(),

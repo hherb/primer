@@ -245,6 +245,7 @@ pub(crate) fn emit_query_outcome(
             let _ = sender.unbounded_send(Ok(TokenChunk {
                 text: String::new(),
                 done: true,
+                ..Default::default()
             }));
         }
         QueryOutcome::Error => {

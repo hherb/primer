@@ -296,6 +296,7 @@ fn emit_tokens(tokens: &[String], sender: &UnboundedSender<PrimerResult<TokenChu
         let _ = sender.unbounded_send(Ok(TokenChunk {
             text: token.clone(),
             done: false,
+            ..Default::default()
         }));
     }
 }
@@ -305,6 +306,7 @@ fn emit_tokens_then_done(tokens: &[String], sender: &UnboundedSender<PrimerResul
     let _ = sender.unbounded_send(Ok(TokenChunk {
         text: String::new(),
         done: true,
+        ..Default::default()
     }));
 }
 

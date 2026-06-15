@@ -775,6 +775,7 @@ async fn respond_to_streaming_threads_routing_signals() {
                 Ok(TokenChunk {
                     text: "ok".into(),
                     done: true,
+                    ..Default::default()
                 })
             })))
         }
