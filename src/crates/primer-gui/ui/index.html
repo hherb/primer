@@ -129,6 +129,26 @@
       tabindex="-1"
       aria-label="Evaluation sidebar"
     >
+      <!-- In-dialog close affordance. Mobile-only (hidden on the desktop
+           column via `.drawer-header { display: none }`, revealed inside the
+           mobile media query): under the phone breakpoint the drawer is an
+           `aria-modal` dialog, and a confined screen-reader user must have a
+           dismiss control INSIDE the dialog subtree — the header toggle lives
+           outside `#sidebar` and is unreachable to them (issue #233). Sticky
+           so it stays visible while the drawer scrolls. Reuses the
+           settings-modal `.modal-close` glyph + styling. -->
+      <div class="drawer-header">
+        <button
+          type="button"
+          class="modal-close drawer-close"
+          id="drawer-close"
+          aria-label="Close evaluation sidebar"
+          title="Close"
+        >
+          ×
+        </button>
+      </div>
+
       <section class="sidebar-section" data-section="current-turn">
         <header class="sidebar-section-header">
           <h2>Current turn</h2>

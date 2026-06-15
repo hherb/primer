@@ -27,6 +27,7 @@ const dom = {
   send: document.getElementById("send"),
   sidebarToggle: document.getElementById("sidebar-toggle"),
   sidebar: document.getElementById("sidebar"),
+  drawerClose: document.getElementById("drawer-close"),
   header: document.querySelector("header.app-header"),
   chatMain: document.querySelector("main.chat"),
   drawerBackdrop: document.getElementById("drawer-backdrop"),
@@ -511,12 +512,12 @@ let drawerReturnFocus = null;
 /// open over the two-column layout. The element's existing
 /// `aria-label="Evaluation sidebar"` supplies the dialog's accessible name.
 ///
-/// Known tradeoff (tracked in #233): the close affordance is the header
-/// `#sidebar-toggle`, which lives *outside* this `#sidebar` dialog subtree.
 /// `aria-modal="true"` instructs assistive tech to confine the user to the
-/// dialog, so a screen-reader user dismisses the drawer via Esc or a backdrop
-/// tap rather than the toggle. The APG-canonical fix is an in-dialog close
-/// button; deferred as a UI/design addition pending owner sign-off.
+/// dialog subtree, so the drawer carries its own in-dialog close button
+/// (`#drawer-close`, mobile-only) INSIDE `#sidebar` — the APG-canonical
+/// dismiss control a confined screen-reader user can reach (issue #233). The
+/// header `#sidebar-toggle` (outside the subtree) stays live too as the
+/// sighted-keyboard close affordance; both route through `setSidebarOpen`.
 function setDrawerDialogRole(modal) {
   if (modal) {
     dom.sidebar.setAttribute("role", "dialog");
@@ -638,6 +639,15 @@ function setupSidebarToggle() {
   // tapping the backdrop dismisses it.
   if (dom.drawerBackdrop) {
     dom.drawerBackdrop.addEventListener("click", () => setSidebarOpen(false));
+  }
+
+  // In-dialog close button (mobile-only, hidden on desktop in CSS). It lives
+  // INSIDE the `#sidebar` aria-modal subtree so a confined screen-reader user
+  // has a reachable dismiss control (issue #233). Routing through
+  // setSidebarOpen(false) reuses the same modality teardown + focus-restore
+  // (back to the toggle) as the backdrop and Escape paths.
+  if (dom.drawerClose) {
+    dom.drawerClose.addEventListener("click", () => setSidebarOpen(false));
   }
 
   // Escape closes the drawer — scoped to mobile + open, and skipped while
