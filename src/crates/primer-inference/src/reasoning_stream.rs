@@ -48,7 +48,11 @@ pub(crate) fn process_filtered_chunk(
         visible.push_str(&filter.finish());
         log_suppressed(filter, backend);
         match finalize_visible(*had_visible, &visible, filter.did_suppress()) {
-            Some(text) => FilterAction::Final(Ok(TokenChunk { text, done: true, ..Default::default() })),
+            Some(text) => FilterAction::Final(Ok(TokenChunk {
+                text,
+                done: true,
+                ..Default::default()
+            })),
             None => FilterAction::Final(Err(PrimerError::Inference(
                 InferenceError::ReasoningWithoutAnswer,
             ))),
