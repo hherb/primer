@@ -223,6 +223,20 @@ struct TextDelta {
     text: String,
 }
 
+/// The `message_delta` event's payload. Anthropic reports the
+/// terminal `stop_reason` here, in a separate event from the
+/// `message_stop` that flags the end of the stream.
+#[derive(Debug, Deserialize)]
+struct MessageDelta {
+    delta: MessageDeltaBody,
+}
+
+#[derive(Debug, Deserialize)]
+struct MessageDeltaBody {
+    #[serde(default)]
+    stop_reason: Option<String>,
+}
+
 #[derive(Debug, Deserialize)]
 struct ErrorPayload {
     error: ErrorDetail,
@@ -273,12 +287,75 @@ fn parse_anthropic_event(ev: &SseEvent) -> Result<Option<TokenChunk>> {
             )))
         }
         // ping, message_start, content_block_start, content_block_stop, message_delta.
-        // Note: `message_delta` carries `stop_reason` which can flag mid-stream
-        // refusals or `max_tokens` truncation (i.e. "successful but incomplete"
-        // outcomes). We currently treat these as benign — the consumer sees a
-        // shorter response. If those need to surface as errors, inspect
-        // `stop_reason` here before falling through.
+        // `message_delta` carries `stop_reason`, but it arrives in a *separate*
+        // event from the terminal `message_stop` — so the finish reason is
+        // extracted by `anthropic_finish_reason_from_event` and threaded onto
+        // the terminal chunk by `AnthropicEventTranslator`, not here.
         _ => Ok(None),
+    }
+}
+
+/// Map Anthropic's `stop_reason` to a [`FinishReason`]. `"max_tokens"`
+/// (the reply hit the `max_tokens` cap / context window) becomes
+/// [`FinishReason::Length`] so the dialogue manager's recovery loop
+/// fires; every other reason (`"end_turn"`, `"stop_sequence"`, …) stays
+/// [`FinishReason::Stop`].
+fn map_anthropic_stop_reason(stop_reason: &str) -> FinishReason {
+    match stop_reason {
+        "max_tokens" => FinishReason::Length,
+        _ => FinishReason::Stop,
+    }
+}
+
+/// Extract the finish reason from a `message_delta` event, if it carries
+/// a `stop_reason`. Returns `None` for any other event and for a
+/// `message_delta` with no `stop_reason` (so it never overwrites a
+/// reason already observed).
+fn anthropic_finish_reason_from_event(ev: &SseEvent) -> Option<FinishReason> {
+    if ev.event != "message_delta" {
+        return None;
+    }
+    let parsed: MessageDelta = serde_json::from_str(&ev.data).ok()?;
+    parsed
+        .delta
+        .stop_reason
+        .as_deref()
+        .map(map_anthropic_stop_reason)
+}
+
+/// Stateful translator from Anthropic SSE events to `TokenChunk`s.
+///
+/// Anthropic delivers the terminal `stop_reason` (on `message_delta`)
+/// and the end-of-stream marker (on `message_stop`) in two separate
+/// events. The translator remembers the most recent stop reason and
+/// stamps it onto the terminal chunk, so the dialogue manager sees a
+/// `done` chunk whose `finish_reason` reflects whether the reply was
+/// cut off by the context window.
+struct AnthropicEventTranslator {
+    pending_finish: FinishReason,
+}
+
+impl AnthropicEventTranslator {
+    fn new() -> Self {
+        Self {
+            pending_finish: FinishReason::Stop,
+        }
+    }
+
+    /// Translate one event into the chunk to forward (if any). The
+    /// terminal chunk carries the tracked finish reason.
+    fn step(&mut self, ev: &SseEvent) -> Result<Option<TokenChunk>> {
+        if let Some(fr) = anthropic_finish_reason_from_event(ev) {
+            self.pending_finish = fr;
+        }
+        let mut chunk = match parse_anthropic_event(ev)? {
+            Some(c) => c,
+            None => return Ok(None),
+        };
+        if chunk.done {
+            chunk.finish_reason = self.pending_finish;
+        }
+        Ok(Some(chunk))
     }
 }
 
@@ -356,12 +433,13 @@ impl InferenceBackend for CloudBackend {
         // token instead of relying on consumer-drop to stop the task.
         tokio::spawn(async move {
             let mut buf = SseBuffer::new();
+            let mut translator = AnthropicEventTranslator::new();
             'outer: loop {
                 match bytes_stream.next().await {
                     Some(Ok(bytes)) => {
                         buf.extend(&bytes);
                         while let Some(ev) = buf.next_event() {
-                            match parse_anthropic_event(&ev) {
+                            match translator.step(&ev) {
                                 Ok(Some(chunk)) => {
                                     let done = chunk.done;
                                     if tx.send(Ok(chunk)).await.is_err() {
@@ -467,6 +545,136 @@ mod tests {
         let chunk = parse_anthropic_event(&ev).unwrap().unwrap();
         assert_eq!(chunk.text, "");
         assert!(chunk.done);
+    }
+
+    #[test]
+    fn map_anthropic_stop_reason_max_tokens_is_length() {
+        assert_eq!(
+            map_anthropic_stop_reason("max_tokens"),
+            FinishReason::Length
+        );
+    }
+
+    #[test]
+    fn map_anthropic_stop_reason_end_turn_is_stop() {
+        assert_eq!(map_anthropic_stop_reason("end_turn"), FinishReason::Stop);
+    }
+
+    #[test]
+    fn finish_reason_from_message_delta_max_tokens_is_length() {
+        let ev = SseEvent {
+            event: "message_delta".to_string(),
+            data: r#"{"type":"message_delta","delta":{"stop_reason":"max_tokens","stop_sequence":null}}"#
+                .to_string(),
+        };
+        assert_eq!(
+            anthropic_finish_reason_from_event(&ev),
+            Some(FinishReason::Length)
+        );
+    }
+
+    #[test]
+    fn finish_reason_from_message_delta_without_stop_reason_is_none() {
+        let ev = SseEvent {
+            event: "message_delta".to_string(),
+            data: r#"{"type":"message_delta","delta":{}}"#.to_string(),
+        };
+        assert_eq!(anthropic_finish_reason_from_event(&ev), None);
+    }
+
+    #[test]
+    fn finish_reason_from_non_delta_event_is_none() {
+        let ev = SseEvent {
+            event: "content_block_delta".to_string(),
+            data: r#"{"delta":{"text":"hi"}}"#.to_string(),
+        };
+        assert_eq!(anthropic_finish_reason_from_event(&ev), None);
+    }
+
+    #[test]
+    fn translator_stamps_length_from_delta_onto_message_stop() {
+        let mut translator = AnthropicEventTranslator::new();
+        // A content delta forwards a non-terminal chunk.
+        let content = SseEvent {
+            event: "content_block_delta".to_string(),
+            data: r#"{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"Hi"}}"#
+                .to_string(),
+        };
+        let c = translator.step(&content).unwrap().unwrap();
+        assert!(!c.done);
+        // The message_delta carries the stop reason but yields no chunk.
+        let delta = SseEvent {
+            event: "message_delta".to_string(),
+            data: r#"{"type":"message_delta","delta":{"stop_reason":"max_tokens"}}"#.to_string(),
+        };
+        assert!(translator.step(&delta).unwrap().is_none());
+        // The terminal message_stop chunk inherits the tracked reason.
+        let stop = SseEvent {
+            event: "message_stop".to_string(),
+            data: "{}".to_string(),
+        };
+        let terminal = translator.step(&stop).unwrap().unwrap();
+        assert!(terminal.done);
+        assert_eq!(terminal.finish_reason, FinishReason::Length);
+    }
+
+    #[test]
+    fn translator_defaults_terminal_chunk_to_stop() {
+        let mut translator = AnthropicEventTranslator::new();
+        let stop = SseEvent {
+            event: "message_stop".to_string(),
+            data: "{}".to_string(),
+        };
+        let terminal = translator.step(&stop).unwrap().unwrap();
+        assert!(terminal.done);
+        assert_eq!(terminal.finish_reason, FinishReason::Stop);
+    }
+
+    /// Drive the exact `SseBuffer` + `AnthropicEventTranslator` pair the
+    /// `generate_stream` spawn loop uses over a raw byte stream, split
+    /// across chunk boundaries (the `message_delta` lands in a separate
+    /// network chunk from the terminal `message_stop`). Asserts the
+    /// terminal chunk carries `Length` — covering the buffer→event→
+    /// translator integration, not just the translator in isolation.
+    fn drive_stream(raw_chunks: &[&[u8]]) -> Vec<TokenChunk> {
+        let mut buf = SseBuffer::new();
+        let mut translator = AnthropicEventTranslator::new();
+        let mut chunks = Vec::new();
+        for raw in raw_chunks {
+            buf.extend(raw);
+            while let Some(ev) = buf.next_event() {
+                if let Some(chunk) = translator.step(&ev).unwrap() {
+                    chunks.push(chunk);
+                }
+            }
+        }
+        chunks
+    }
+
+    #[test]
+    fn stream_loop_threads_max_tokens_onto_terminal_chunk() {
+        let chunks = drive_stream(&[
+            b"event: content_block_delta\ndata: {\"type\":\"content_block_delta\",\"index\":0,\"delta\":{\"type\":\"text_delta\",\"text\":\"Hi\"}}\n\n",
+            b"event: message_delta\ndata: {\"type\":\"message_delta\",\"delta\":{\"stop_reason\":\"max_tokens\"}}\n\n",
+            b"event: message_stop\ndata: {}\n\n",
+        ]);
+        let text: String = chunks.iter().map(|c| c.text.as_str()).collect();
+        assert_eq!(text, "Hi");
+        let terminal = chunks.last().expect("a terminal chunk");
+        assert!(terminal.done);
+        assert_eq!(terminal.finish_reason, FinishReason::Length);
+    }
+
+    #[test]
+    fn stream_loop_defaults_terminal_chunk_to_stop() {
+        let chunks = drive_stream(&[
+            b"event: content_block_delta\ndata: {\"type\":\"content_block_delta\",\"index\":0,\"delta\":{\"type\":\"text_delta\",\"text\":\"Done\"}}\n\n",
+            b"event: message_delta\ndata: {\"type\":\"message_delta\",\"delta\":{\"stop_reason\":\"end_turn\"}}\n\n",
+            b"event: message_stop\ndata: {}\n\n",
+        ]);
+        let terminal = chunks.last().expect("a terminal chunk");
+        assert!(terminal.done);
+        assert_eq!(terminal.finish_reason, FinishReason::Stop);
     }
 
     #[test]
