@@ -22,15 +22,15 @@
 //! Today the production defaults are EN-tuned consts imported across
 //! both locales.
 //!
-//! Implementation lives in `tests/common/sweep.rs` so the EN and DE
-//! harnesses share one source of truth.
+//! Implementation lives in `tests/common/sweep/hybrid.rs` so the EN and
+//! DE harnesses share one source of truth.
 
 #![cfg(feature = "fastembed")]
 
 mod common;
 
 use common::de::QUERIES_DE;
-use common::sweep::{HybridSweepConfig, run_hybrid_sweep};
+use common::sweep::hybrid::{HybridSweepConfig, run_hybrid_sweep};
 use primer_core::i18n::Locale;
 
 #[tokio::test]

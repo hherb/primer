@@ -19,15 +19,15 @@
 //! A follow-up session can run it, eyeball the table, and update
 //! `KB_BM25_TOP_K`, `KB_VECTOR_TOP_K`, `RRF_K` if a clear winner emerges.
 //!
-//! Implementation lives in `tests/common/sweep.rs` so the EN and DE
-//! harnesses share one source of truth.
+//! Implementation lives in `tests/common/sweep/hybrid.rs` so the EN and
+//! DE harnesses share one source of truth.
 
 #![cfg(feature = "fastembed")]
 
 mod common;
 
 use common::QUERIES;
-use common::sweep::{HybridSweepConfig, run_hybrid_sweep};
+use common::sweep::hybrid::{HybridSweepConfig, run_hybrid_sweep};
 use primer_core::i18n::Locale;
 
 #[tokio::test]

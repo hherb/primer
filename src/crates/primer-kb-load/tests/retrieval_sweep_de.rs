@@ -18,14 +18,14 @@
 //! hand-drafted seed sitting alongside it). This matches the
 //! cluster-floor sanity test in `tests/common/de.rs`.
 //!
-//! Implementation lives in `tests/common/sweep.rs` so the EN and DE
-//! harnesses share one source of truth.
+//! Implementation lives in `tests/common/sweep/bm25.rs` so the EN and
+//! DE harnesses share one source of truth.
 
 mod common;
 
 use common::Cluster;
 use common::de::QUERIES_DE;
-use common::sweep::{Bm25SweepConfig, run_bm25_sweep};
+use common::sweep::bm25::{Bm25SweepConfig, run_bm25_sweep};
 use primer_core::i18n::Locale;
 
 /// Dashed-separator width tuned to the visible DE table footprint
