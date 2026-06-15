@@ -103,6 +103,14 @@ pub trait PromptPack: Send + Sync {
     /// Locale-keyed: each pack's TOML template owns its unit word
     /// ("minutes" / "Minuten") so adding a new locale is purely additive.
     fn break_suggestion_intro(&self, minutes: u32) -> String;
+    /// Child-facing apology streamed when a turn was truncated by the
+    /// context limit and the Primer is about to retry with a smaller
+    /// prompt. Locale-keyed; no placeholders.
+    fn memory_limit_retry(&self) -> &str;
+    /// Child-facing cue streamed when context-limit retries are exhausted
+    /// and the Primer accepts the partial reply. Locale-keyed; no
+    /// placeholders.
+    fn memory_limit_soft_stop(&self) -> &str;
     fn child_label(&self) -> &str;
     fn primer_label(&self) -> &str;
     /// Lowercased prefixes that mark a child's input as a direct
@@ -297,6 +305,8 @@ pub struct TomlPromptPack {
     retrieved_intro: String,
     vocab_review_intro: String,
     break_suggestion_intro_template: String,
+    memory_limit_retry: String,
+    memory_limit_soft_stop: String,
     child_label: String,
     primer_label: String,
     factual_prefixes: Vec<String>,
@@ -399,6 +409,16 @@ impl TomlPromptPack {
             &raw.sections.break_suggestion_intro,
             &["minutes"],
         )?;
+        validate_placeholders(
+            "sections.memory_limit_retry",
+            &raw.sections.memory_limit_retry,
+            &[],
+        )?;
+        validate_placeholders(
+            "sections.memory_limit_soft_stop",
+            &raw.sections.memory_limit_soft_stop,
+            &[],
+        )?;
         validate_placeholders("labels.child", &raw.labels.child, &[])?;
         validate_placeholders("labels.primer", &raw.labels.primer, &[])?;
         // No placeholders allowed in any voice_state field — every value
@@ -476,6 +496,8 @@ impl TomlPromptPack {
             retrieved_intro: unescape_braces(&raw.sections.retrieved_intro),
             vocab_review_intro: unescape_braces(&raw.sections.vocab_review_intro),
             break_suggestion_intro_template: raw.sections.break_suggestion_intro,
+            memory_limit_retry: unescape_braces(&raw.sections.memory_limit_retry),
+            memory_limit_soft_stop: unescape_braces(&raw.sections.memory_limit_soft_stop),
             child_label: unescape_braces(&raw.labels.child),
             primer_label: unescape_braces(&raw.labels.primer),
             factual_prefixes: raw
@@ -559,6 +581,12 @@ impl PromptPack for TomlPromptPack {
             &[("minutes", &minutes.to_string())],
         )
     }
+    fn memory_limit_retry(&self) -> &str {
+        &self.memory_limit_retry
+    }
+    fn memory_limit_soft_stop(&self) -> &str {
+        &self.memory_limit_soft_stop
+    }
     fn child_label(&self) -> &str {
         &self.child_label
     }
@@ -630,6 +658,10 @@ struct SectionsSection {
     retrieved_intro: String,
     vocab_review_intro: String,
     break_suggestion_intro: String,
+    #[serde(default)]
+    memory_limit_retry: String,
+    #[serde(default)]
+    memory_limit_soft_stop: String,
 }
 
 #[derive(Deserialize)]
@@ -1736,6 +1768,20 @@ speak_hint = "x"
         let pack = load(Locale::English).unwrap();
         let rendered = pack.break_suggestion_intro(45);
         assert!(rendered.contains("45"), "{rendered:?}");
+    }
+
+    #[test]
+    fn english_pack_exposes_memory_limit_strings() {
+        let pack = english_pack();
+        assert!(!pack.memory_limit_retry().is_empty());
+        assert!(!pack.memory_limit_soft_stop().is_empty());
+    }
+
+    #[test]
+    fn german_pack_exposes_memory_limit_strings() {
+        let pack = german_pack();
+        assert!(!pack.memory_limit_retry().is_empty());
+        assert!(!pack.memory_limit_soft_stop().is_empty());
     }
 
     /// The English pack's [voice_state] table holds the same byte-identical
