@@ -510,6 +510,13 @@ let drawerReturnFocus = null;
 /// announcing a dialog there would wrongly tell assistive tech a modal is
 /// open over the two-column layout. The element's existing
 /// `aria-label="Evaluation sidebar"` supplies the dialog's accessible name.
+///
+/// Known tradeoff (tracked in #233): the close affordance is the header
+/// `#sidebar-toggle`, which lives *outside* this `#sidebar` dialog subtree.
+/// `aria-modal="true"` instructs assistive tech to confine the user to the
+/// dialog, so a screen-reader user dismisses the drawer via Esc or a backdrop
+/// tap rather than the toggle. The APG-canonical fix is an in-dialog close
+/// button; deferred as a UI/design addition pending owner sign-off.
 function setDrawerDialogRole(modal) {
   if (modal) {
     dom.sidebar.setAttribute("role", "dialog");
@@ -524,8 +531,17 @@ function setDrawerDialogRole(modal) {
 /// live (not cached) so a control added to the header later is covered
 /// automatically. The toggle itself is excluded — it is the drawer's close
 /// affordance and must stay reachable while the rest of the header is inert.
+///
+/// The selector matches every *tabbable* element kind, not just buttons, so
+/// a future `<a href>`, `<input>`, `<select>`, `<textarea>`, or
+/// `tabindex="0"` control added to the header can't silently leak back into
+/// the tab order and re-break the trap. `tabindex="-1"` is excluded: it is
+/// programmatically focusable but not in the tab order, so it never threatens
+/// the trap and need not be inerted.
+const TABBABLE_SELECTOR =
+  'button, a[href], input, select, textarea, [tabindex]:not([tabindex="-1"])';
 function nonToggleHeaderControls() {
-  return Array.from(dom.header.querySelectorAll("button, a[href]")).filter(
+  return Array.from(dom.header.querySelectorAll(TABBABLE_SELECTOR)).filter(
     (el) => el !== dom.sidebarToggle,
   );
 }
