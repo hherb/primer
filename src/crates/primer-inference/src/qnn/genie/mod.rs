@@ -236,16 +236,19 @@ pub(crate) fn emit_query_outcome(
 ) {
     match outcome {
         QueryOutcome::Complete | QueryOutcome::ContextLimit => {
-            if outcome == QueryOutcome::ContextLimit {
+            let finish_reason = if outcome == QueryOutcome::ContextLimit {
                 tracing::warn!(
                     target: "primer::qnn",
                     "GenieDialog_query hit the context limit (status {status}); completing the turn with the streamed reply"
                 );
-            }
+                primer_core::inference::FinishReason::Length
+            } else {
+                primer_core::inference::FinishReason::Stop
+            };
             let _ = sender.unbounded_send(Ok(TokenChunk {
                 text: String::new(),
                 done: true,
-                ..Default::default()
+                finish_reason,
             }));
         }
         QueryOutcome::Error => {
@@ -328,6 +331,40 @@ mod tests {
             .expect("a terminal item")
             .expect("context-limit completes gracefully (Ok), not Err");
         assert!(chunk.done, "context limit must still emit a done chunk");
+    }
+
+    #[test]
+    fn context_limit_emits_terminal_length_chunk() {
+        use futures::StreamExt;
+        use futures::executor::block_on;
+        let (tx, mut rx) = futures::channel::mpsc::unbounded::<PrimerResult<TokenChunk>>();
+        emit_query_outcome(
+            QueryOutcome::ContextLimit,
+            GENIE_STATUS_CONTEXT_LIMIT_EXCEEDED,
+            &tx,
+        );
+        drop(tx);
+        let chunk = block_on(rx.next()).unwrap().unwrap();
+        assert!(chunk.done);
+        assert_eq!(
+            chunk.finish_reason,
+            primer_core::inference::FinishReason::Length
+        );
+    }
+
+    #[test]
+    fn complete_emits_terminal_stop_chunk() {
+        use futures::StreamExt;
+        use futures::executor::block_on;
+        let (tx, mut rx) = futures::channel::mpsc::unbounded::<PrimerResult<TokenChunk>>();
+        emit_query_outcome(QueryOutcome::Complete, GENIE_STATUS_SUCCESS, &tx);
+        drop(tx);
+        let chunk = block_on(rx.next()).unwrap().unwrap();
+        assert!(chunk.done);
+        assert_eq!(
+            chunk.finish_reason,
+            primer_core::inference::FinishReason::Stop
+        );
     }
 
     #[test]
