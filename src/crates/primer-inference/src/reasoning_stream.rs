@@ -48,10 +48,15 @@ pub(crate) fn process_filtered_chunk(
         visible.push_str(&filter.finish());
         log_suppressed(filter, backend);
         match finalize_visible(*had_visible, &visible, filter.did_suppress()) {
+            // Carry the terminal chunk's finish reason through the filter so a
+            // `FinishReason::Length` truncation isn't reset to `Stop` (the
+            // dialogue manager's context-limit recovery keys off it). QNN
+            // doesn't use this filter today, but ollama/openai-compat route
+            // through it and are the backends a future length-mapping touches.
             Some(text) => FilterAction::Final(Ok(TokenChunk {
                 text,
                 done: true,
-                ..Default::default()
+                finish_reason: chunk.finish_reason,
             })),
             None => FilterAction::Final(Err(PrimerError::Inference(
                 InferenceError::ReasoningWithoutAnswer,

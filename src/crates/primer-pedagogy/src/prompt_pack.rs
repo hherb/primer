@@ -409,15 +409,18 @@ impl TomlPromptPack {
             &raw.sections.break_suggestion_intro,
             &["minutes"],
         )?;
-        validate_placeholders(
+        // The context-limit apology / soft-stop are streamed to the child
+        // unconditionally on the truncation path (unlike summary_intro etc.,
+        // which are omitted when empty), so an empty value would silently
+        // stream nothing. Require both to be present and non-empty at load
+        // time — the same fail-loud discipline as `voice_state`.
+        validate_non_empty(
             "sections.memory_limit_retry",
             &raw.sections.memory_limit_retry,
-            &[],
         )?;
-        validate_placeholders(
+        validate_non_empty(
             "sections.memory_limit_soft_stop",
             &raw.sections.memory_limit_soft_stop,
-            &[],
         )?;
         validate_placeholders("labels.child", &raw.labels.child, &[])?;
         validate_placeholders("labels.primer", &raw.labels.primer, &[])?;
@@ -658,9 +661,7 @@ struct SectionsSection {
     retrieved_intro: String,
     vocab_review_intro: String,
     break_suggestion_intro: String,
-    #[serde(default)]
     memory_limit_retry: String,
-    #[serde(default)]
     memory_limit_soft_stop: String,
 }
 
@@ -702,6 +703,18 @@ fn validate_voice_state_section(section: &VoiceStateSection) -> Result<()> {
                 "prompt pack: field {field} must not be empty"
             )));
         }
+    }
+    Ok(())
+}
+
+/// Reject an empty pack field at load time. Used for strings that are
+/// rendered unconditionally (so an empty value would silently produce
+/// nothing) rather than omitted-when-empty.
+fn validate_non_empty(field: &str, value: &str) -> Result<()> {
+    if value.is_empty() {
+        return Err(PrimerError::Config(format!(
+            "prompt pack: field {field} must not be empty"
+        )));
     }
     Ok(())
 }
@@ -1047,6 +1060,8 @@ summary_intro = ""
 retrieved_intro = ""
 vocab_review_intro = ""
 break_suggestion_intro = ""
+memory_limit_retry = "x"
+memory_limit_soft_stop = "x"
 
 [labels]
 child = "Kind"
@@ -1201,6 +1216,8 @@ summary_intro = ""
 retrieved_intro = ""
 vocab_review_intro = ""
 break_suggestion_intro = ""
+memory_limit_retry = "x"
+memory_limit_soft_stop = "x"
 
 [labels]
 child = "Child"
@@ -1374,6 +1391,8 @@ summary_intro = ""
 retrieved_intro = ""
 vocab_review_intro = ""
 break_suggestion_intro = ""
+memory_limit_retry = "x"
+memory_limit_soft_stop = "x"
 
 [labels]
 child = "Child"
@@ -1437,6 +1456,8 @@ summary_intro = "__SUMMARY__"
 retrieved_intro = ""
 vocab_review_intro = ""
 break_suggestion_intro = ""
+memory_limit_retry = "x"
+memory_limit_soft_stop = "x"
 
 [labels]
 child = "Child"
@@ -1784,6 +1805,21 @@ speak_hint = "x"
         assert!(!pack.memory_limit_soft_stop().is_empty());
     }
 
+    #[test]
+    fn empty_memory_limit_retry_returns_err() {
+        // The apology is streamed unconditionally on the truncation path, so
+        // an empty value must fail loudly at load time (like voice_state),
+        // not silently stream nothing.
+        let body = synthetic_pack_body("en", "English", "en-US", "[]");
+        let bad = body.replace(r#"memory_limit_retry = "x""#, r#"memory_limit_retry = """#);
+        let err = TomlPromptPack::from_toml_str(Locale::English, &bad)
+            .err()
+            .expect("expected empty memory_limit_retry to fail");
+        let s = format!("{err}");
+        assert!(s.contains("sections.memory_limit_retry"), "got: {s}");
+        assert!(s.contains("must not be empty"), "got: {s}");
+    }
+
     /// The English pack's [voice_state] table holds the same byte-identical
     /// strings the GUI used to hardcode in `VoiceStateCopy::for_locale`
     /// before the i18n move. Any drift here will be flagged in the GUI's
@@ -2012,6 +2048,8 @@ summary_intro = ""
 retrieved_intro = ""
 vocab_review_intro = ""
 break_suggestion_intro = ""
+memory_limit_retry = "x"
+memory_limit_soft_stop = "x"
 
 [labels]
 child = "Child"

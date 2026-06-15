@@ -1252,6 +1252,8 @@ summary_intro = ""
 retrieved_intro = ""
 vocab_review_intro = ""
 break_suggestion_intro = ""
+memory_limit_retry = "x"
+memory_limit_soft_stop = "x"
 
 [labels]
 child = "Child"
