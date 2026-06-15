@@ -27,6 +27,7 @@ const dom = {
   send: document.getElementById("send"),
   sidebarToggle: document.getElementById("sidebar-toggle"),
   sidebar: document.getElementById("sidebar"),
+  header: document.querySelector("header.app-header"),
   chatMain: document.querySelector("main.chat"),
   drawerBackdrop: document.getElementById("drawer-backdrop"),
   settingsOpen: document.getElementById("settings-open"),
@@ -502,13 +503,88 @@ function syncSidebarToggle(open) {
 /// rather than dropping focus to `<body>`.
 let drawerReturnFocus = null;
 
-/// Apply or release the mobile drawer's modal semantics. On open: focus
-/// moves into the drawer (`#sidebar` carries `tabindex="-1"` so it accepts
-/// programmatic focus without joining the tab order) and the chat `<main>`
-/// behind the dim backdrop is marked `inert` — unfocusable and hidden from
-/// the accessibility tree, so the composer and conversation can't be
-/// tabbed to or read by assistive tech while the drawer is up. On close:
-/// the `inert` is cleared and focus is restored to the toggle.
+/// Toggle the mobile drawer's ARIA modal announcement: `role="dialog"` +
+/// `aria-modal="true"` on open, both removed on close. Applied in JS rather
+/// than as static markup, and only on mobile, because the same `#sidebar`
+/// element is the *persistent desktop column* (a complementary landmark) —
+/// announcing a dialog there would wrongly tell assistive tech a modal is
+/// open over the two-column layout. The element's existing
+/// `aria-label="Evaluation sidebar"` supplies the dialog's accessible name.
+///
+/// Known tradeoff (tracked in #233): the close affordance is the header
+/// `#sidebar-toggle`, which lives *outside* this `#sidebar` dialog subtree.
+/// `aria-modal="true"` instructs assistive tech to confine the user to the
+/// dialog, so a screen-reader user dismisses the drawer via Esc or a backdrop
+/// tap rather than the toggle. The APG-canonical fix is an in-dialog close
+/// button; deferred as a UI/design addition pending owner sign-off.
+function setDrawerDialogRole(modal) {
+  if (modal) {
+    dom.sidebar.setAttribute("role", "dialog");
+    dom.sidebar.setAttribute("aria-modal", "true");
+  } else {
+    dom.sidebar.removeAttribute("role");
+    dom.sidebar.removeAttribute("aria-modal");
+  }
+}
+
+/// The header's interactive controls other than the close toggle. Queried
+/// live (not cached) so a control added to the header later is covered
+/// automatically. The toggle itself is excluded — it is the drawer's close
+/// affordance and must stay reachable while the rest of the header is inert.
+///
+/// The selector matches every *tabbable* element kind, not just buttons, so
+/// a future `<a href>`, `<input>`, `<select>`, `<textarea>`, or
+/// `tabindex="0"` control added to the header can't silently leak back into
+/// the tab order and re-break the trap. `tabindex="-1"` is excluded: it is
+/// programmatically focusable but not in the tab order, so it never threatens
+/// the trap and need not be inerted.
+const TABBABLE_SELECTOR =
+  'button, a[href], input, select, textarea, [tabindex]:not([tabindex="-1"])';
+function nonToggleHeaderControls() {
+  return Array.from(dom.header.querySelectorAll(TABBABLE_SELECTOR)).filter(
+    (el) => el !== dom.sidebarToggle,
+  );
+}
+
+/// Make the strict focus trap: inert (or release) every header control
+/// except the close toggle. Combined with the already-inert chat `<main>`,
+/// the only tabbable elements left are the drawer's contents and the
+/// toggle, so `Tab`/`Shift+Tab` wrap naturally between them with no manual
+/// keydown handler — the `inert` attribute removes the rest from both the
+/// tab order and the accessibility tree, which is exactly what
+/// `aria-modal="true"` promises.
+function setHeaderChromeInert(inert) {
+  for (const el of nonToggleHeaderControls()) {
+    if (inert) {
+      el.setAttribute("inert", "");
+    } else {
+      el.removeAttribute("inert");
+    }
+  }
+}
+
+/// Tear down every piece of the drawer's modal DOM state: the chat `<main>`
+/// inert, the header-chrome inert, and the `role`/`aria-modal` announcement.
+/// None of these are media-scoped (unlike the CSS scroll-lock + backdrop,
+/// which auto-release across the breakpoint), so both the close path and the
+/// resize-to-desktop handler funnel through this one helper to keep the
+/// teardown in lockstep. Does NOT restore focus — the close path restores it
+/// to the toggle; the breakpoint-change path deliberately drops it.
+/// Idempotent (`removeAttribute` on an absent attribute is a no-op).
+function releaseDrawerModality() {
+  dom.chatMain.removeAttribute("inert");
+  setHeaderChromeInert(false);
+  setDrawerDialogRole(false);
+  drawerReturnFocus = null;
+}
+
+/// Apply or release the mobile drawer's strict-modal semantics. On open:
+/// focus moves into the drawer (`#sidebar` carries `tabindex="-1"` so it
+/// accepts programmatic focus without joining the tab order); the chat
+/// `<main>` and every non-toggle header control are marked `inert`
+/// (unfocusable + hidden from the a11y tree); and the drawer is announced as
+/// a `role="dialog"` / `aria-modal="true"`. On close: all of that is torn
+/// down via `releaseDrawerModality` and focus is restored to the toggle.
 ///
 /// No-op on desktop, where the same `#sidebar` element is a persistent
 /// two-column-layout column rather than a modal overlay; the breakpoint
@@ -526,14 +602,16 @@ function applyDrawerModality(open) {
     const alreadyOpen = dom.chatMain.hasAttribute("inert");
     drawerReturnFocus = dom.sidebarToggle;
     dom.chatMain.setAttribute("inert", "");
+    setHeaderChromeInert(true);
+    setDrawerDialogRole(true);
     if (!alreadyOpen) {
       dom.sidebar.focus({ preventScroll: true });
     }
   } else {
-    dom.chatMain.removeAttribute("inert");
-    if (drawerReturnFocus) {
-      drawerReturnFocus.focus({ preventScroll: true });
-      drawerReturnFocus = null;
+    const returnTo = drawerReturnFocus;
+    releaseDrawerModality();
+    if (returnTo) {
+      returnTo.focus({ preventScroll: true });
     }
   }
 }
@@ -582,13 +660,13 @@ function setupSidebarToggle() {
   // mobile lands on the drawer's default-closed state; entering desktop
   // restores the collapse-class semantics. The CSS-driven backdrop
   // visibility and scroll-lock auto-release across the breakpoint, but the
-  // `inert` attribute is a DOM attribute (not media-scoped), so an open
-  // drawer that's resized up to desktop would otherwise strand an inert
-  // chat behind the two-column layout — clear it (and any pending focus
-  // restore) unconditionally here.
+  // modal DOM state (chat `inert`, header-chrome `inert`, the drawer's
+  // `role="dialog"`/`aria-modal`) is NOT media-scoped, so an open drawer
+  // resized up to desktop would otherwise strand it behind the two-column
+  // layout — tear it all down (and drop any pending focus restore)
+  // unconditionally here, through the same helper the close path uses.
   mobileQuery.addEventListener("change", () => {
-    dom.chatMain.removeAttribute("inert");
-    drawerReturnFocus = null;
+    releaseDrawerModality();
     syncSidebarToggle(isSidebarOpen());
   });
 
