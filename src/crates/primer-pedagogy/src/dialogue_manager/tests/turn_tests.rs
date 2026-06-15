@@ -855,6 +855,128 @@ async fn cadence_resets_after_suggest_break_fires() {
     );
 }
 
+// ─── Context-limit recovery loop ────────────────────────────────────────
+
+#[tokio::test]
+async fn truncated_turn_retries_then_records_only_final_answer() {
+    use primer_core::inference::FinishReason;
+    let backend = std::sync::Arc::new(SequenceBackend::new(vec![
+        vec![Ok(chunk("A1", false)), Ok(finished(FinishReason::Length))],
+        vec![Ok(chunk("A2", false)), Ok(finished(FinishReason::Length))],
+        vec![Ok(chunk("A3", false)), Ok(finished(FinishReason::Stop))],
+    ]));
+    let knowledge = std::sync::Arc::new(EmptyKnowledge);
+    let mut dm = DialogueManager::new(
+        test_learner(),
+        backend.clone(),
+        knowledge.clone(),
+        DialogueManagerStores::default(),
+        default_subsystems(),
+        PedagogyConfig::default(),
+    );
+    let pack = crate::prompt_pack::load_cached(primer_core::i18n::Locale::English)
+        .expect("English pack must load");
+    let apology = pack.memory_limit_retry().to_string();
+
+    let seen = Mutex::new(String::new());
+    let final_text = dm
+        .respond_to_streaming("teach me about volcanoes", |c| {
+            seen.lock().unwrap().push_str(c)
+        })
+        .await
+        .unwrap();
+
+    let seen = seen.into_inner().unwrap();
+    // Two apologies streamed (one per retry), all three partials visible.
+    assert_eq!(
+        seen.matches(&apology).count(),
+        2,
+        "expected 2 apologies in streamed output, got: {seen:?}"
+    );
+    assert!(seen.contains("A1") && seen.contains("A2") && seen.contains("A3"));
+    // Only the final clean answer is returned AND recorded.
+    assert_eq!(final_text, "A3");
+    let last = dm.session.turns.last().unwrap();
+    assert_eq!(last.speaker, Speaker::Primer);
+    assert_eq!(last.text, "A3");
+    assert!(
+        !last.text.contains(&apology),
+        "recorded turn must not contain apology"
+    );
+}
+
+#[tokio::test]
+async fn exhausted_retries_soft_stop_and_record_partial() {
+    use primer_core::inference::FinishReason;
+    let backend = std::sync::Arc::new(SequenceBackend::new(vec![
+        vec![Ok(chunk("A1", false)), Ok(finished(FinishReason::Length))],
+        vec![Ok(chunk("A2", false)), Ok(finished(FinishReason::Length))],
+        vec![Ok(chunk("A3", false)), Ok(finished(FinishReason::Length))],
+    ]));
+    let knowledge = std::sync::Arc::new(EmptyKnowledge);
+    let mut dm = DialogueManager::new(
+        test_learner(),
+        backend.clone(),
+        knowledge.clone(),
+        DialogueManagerStores::default(),
+        default_subsystems(),
+        PedagogyConfig::default(),
+    );
+    let pack = crate::prompt_pack::load_cached(primer_core::i18n::Locale::English)
+        .expect("English pack must load");
+    let soft_stop = pack.memory_limit_soft_stop().to_string();
+
+    let seen = Mutex::new(String::new());
+    let final_text = dm
+        .respond_to_streaming("teach me about volcanoes", |c| {
+            seen.lock().unwrap().push_str(c)
+        })
+        .await
+        .unwrap();
+    let seen = seen.into_inner().unwrap();
+
+    assert!(
+        seen.contains(&soft_stop),
+        "soft-stop cue must appear in streamed output; got: {seen:?}"
+    );
+    assert_eq!(final_text, "A3", "last partial must be returned");
+    assert_eq!(
+        dm.session.turns.last().unwrap().text,
+        "A3",
+        "last partial must be recorded"
+    );
+}
+
+#[tokio::test]
+async fn clean_first_try_has_no_retries_or_apologies() {
+    let backend = std::sync::Arc::new(ScriptedBackend::new(vec![
+        Ok(chunk("hello", false)),
+        Ok(chunk("", true)),
+    ]));
+    let knowledge = std::sync::Arc::new(EmptyKnowledge);
+    let mut dm = DialogueManager::new(
+        test_learner(),
+        backend.clone(),
+        knowledge.clone(),
+        DialogueManagerStores::default(),
+        default_subsystems(),
+        PedagogyConfig::default(),
+    );
+    let pack = crate::prompt_pack::load_cached(primer_core::i18n::Locale::English)
+        .expect("English pack must load");
+    let apology = pack.memory_limit_retry().to_string();
+
+    let seen = Mutex::new(String::new());
+    dm.respond_to_streaming("hi", |c| seen.lock().unwrap().push_str(c))
+        .await
+        .unwrap();
+    let seen = seen.into_inner().unwrap();
+    assert!(
+        !seen.contains(&apology),
+        "clean first try must not stream any apology; got: {seen:?}"
+    );
+}
+
 #[tokio::test]
 async fn build_turn_prompt_no_knowledge_tier_omits_kb_section() {
     use primer_core::conversation::PedagogicalIntent;

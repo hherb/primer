@@ -5,8 +5,6 @@
 //! manager's retry loop is unit-testable without an inference backend.
 
 /// Which optional prompt sections to include on a given attempt.
-// Consumed by the retry loop wired in Task 7; dead_code until then.
-#[allow(dead_code)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum PromptBudgetTier {
     /// Today's behaviour: KB passages + long-term memory + full window.
@@ -18,10 +16,11 @@ pub(crate) enum PromptBudgetTier {
     Minimal,
 }
 
-// Methods consumed by the retry loop wired in Task 7; dead_code until then.
-#[allow(dead_code)]
 impl PromptBudgetTier {
     /// The full ladder, tightest-last. Length − 1 == number of retries.
+    /// Only referenced from tests (the production retry loop uses
+    /// `next_tighter` for step-by-step traversal).
+    #[allow(dead_code)]
     pub(crate) const LADDER: [PromptBudgetTier; 3] = [Self::Full, Self::NoKnowledge, Self::Minimal];
 
     /// The next tighter tier, or `None` if already at the tightest.

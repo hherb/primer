@@ -11,6 +11,7 @@
 //! can use these via `super::test_support::*`. Nothing in this file
 //! is reachable outside `crate::dialogue_manager`.
 
+use std::collections::VecDeque;
 use std::sync::{Arc, Mutex};
 
 use async_trait::async_trait;
@@ -452,6 +453,61 @@ impl InferenceBackend for RepeatingBackend {
             "[repeating-backend summary covering {} turns]",
             turns.len()
         ))
+    }
+}
+
+// ─── SequenceBackend ─────────────────────────────────────────────────
+
+/// Test inference backend returning a DIFFERENT scripted stream per
+/// `generate_stream` call — for retry-loop tests that invoke the backend
+/// multiple times.
+pub(super) struct SequenceBackend {
+    name: String,
+    scripts: Mutex<VecDeque<Vec<Result<TokenChunk>>>>,
+}
+
+impl SequenceBackend {
+    pub(super) fn new(scripts: Vec<Vec<Result<TokenChunk>>>) -> Self {
+        Self {
+            name: "scripted-test".to_string(),
+            scripts: Mutex::new(scripts.into()),
+        }
+    }
+}
+
+#[async_trait]
+impl InferenceBackend for SequenceBackend {
+    fn name(&self) -> &str {
+        &self.name
+    }
+    async fn is_available(&self) -> bool {
+        true
+    }
+    async fn generate_stream(
+        &self,
+        _prompt: &Prompt,
+        _params: &GenerationParams,
+    ) -> Result<TokenStream> {
+        let items = self
+            .scripts
+            .lock()
+            .unwrap()
+            .pop_front()
+            .expect("SequenceBackend ran out of scripts");
+        Ok(Box::pin(stream::iter(items)))
+    }
+    async fn summarize(&self, turns: &[Turn], _target_chars: usize) -> Result<String> {
+        Ok(format!("[test summary covering {} turns]", turns.len()))
+    }
+}
+
+/// Terminal stream chunk carrying an explicit `FinishReason` (the `chunk`
+/// helper always produces `Stop`). Used by context-limit recovery tests.
+pub(super) fn finished(finish_reason: primer_core::inference::FinishReason) -> TokenChunk {
+    TokenChunk {
+        text: String::new(),
+        done: true,
+        finish_reason,
     }
 }
 
