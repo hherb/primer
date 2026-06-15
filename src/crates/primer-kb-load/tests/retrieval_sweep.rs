@@ -20,14 +20,14 @@
 //! expansion that dilutes BM25 scores. See the override rationale in
 //! `consts::retrieval::KB_BM25_ONLY_MIN_SCORE`.
 //!
-//! Implementation lives in `tests/common/sweep.rs` so the EN and DE
-//! harnesses share one source of truth.
+//! Implementation lives in `tests/common/sweep/bm25.rs` so the EN and
+//! DE harnesses share one source of truth.
 
 mod common;
 
 use common::Cluster;
 use common::QUERIES;
-use common::sweep::{Bm25SweepConfig, run_bm25_sweep};
+use common::sweep::bm25::{Bm25SweepConfig, run_bm25_sweep};
 use primer_core::i18n::Locale;
 
 /// Dashed-separator width tuned to the visible EN table footprint
