@@ -6,7 +6,7 @@
 //! later task).
 
 use primer_core::error::Result;
-use primer_core::inference::{GenerationParams, Prompt};
+use primer_core::inference::{FinishReason, GenerationParams, Prompt};
 
 /// Abstraction over the blocking llama.cpp generation surface.
 ///
@@ -25,15 +25,19 @@ pub trait LlamaEngine: Send + Sync {
 
     /// Run the blocking decode loop over `rendered`. For each detokenized
     /// RAW piece, call `on_token(piece)`; stop early if it returns `false`
-    /// (the consumer dropped the stream). Return `Ok(())` on natural
-    /// completion (eos / max_tokens / a matched stop sequence), or `Err`
+    /// (the consumer dropped the stream). On natural completion return the
+    /// [`FinishReason`] describing *why* generation ended:
+    /// [`FinishReason::Length`] when the reply was truncated by the
+    /// `max_tokens` / context budget (so the dialogue manager's context-limit
+    /// recovery fires), or [`FinishReason::Stop`] on a clean finish (eos / a
+    /// matched stop sequence / the consumer dropping the stream). Return `Err`
     /// on a decode failure.
     fn infer(
         &self,
         rendered: &str,
         params: &GenerationParams,
         on_token: &mut dyn FnMut(&str) -> bool,
-    ) -> Result<()>;
+    ) -> Result<FinishReason>;
 }
 
 #[cfg(feature = "llamacpp")]
@@ -166,7 +170,7 @@ mod real {
             rendered: &str,
             params: &GenerationParams,
             on_token: &mut dyn FnMut(&str) -> bool,
-        ) -> Result<()> {
+        ) -> Result<FinishReason> {
             let _guard = self.ctx_guard.blocking_lock();
             let backend = backend_handle()?;
 
@@ -244,10 +248,18 @@ mod real {
             let mut accumulated = String::new();
             let mut decoder = encoding_rs::UTF_8.new_decoder();
 
+            // Assume the budget will be exhausted (a `Length` truncation);
+            // any clean exit (eos / matched stop sequence) flips this to
+            // `Stop` before the loop breaks. If the `for` runs to its full
+            // `max_tokens` count without a `break`, the assumption holds and
+            // the reply was cut off by the token budget — exactly the signal
+            // the dialogue manager's context-limit recovery keys off.
+            let mut finish = FinishReason::Length;
             for _ in 0..params.max_tokens {
                 let token = sampler.sample(&ctx, batch.n_tokens() - 1);
                 sampler.accept(token);
                 if token == self.model.token_eos() {
+                    finish = FinishReason::Stop;
                     break;
                 }
                 let piece = self
@@ -264,10 +276,13 @@ mod real {
                     if !visible.is_empty() {
                         let _ = on_token(visible);
                     }
+                    finish = FinishReason::Stop;
                     break;
                 }
                 if !on_token(&piece) {
-                    return Ok(());
+                    // Consumer dropped the stream — not a truncation; no
+                    // recovery is wanted.
+                    return Ok(FinishReason::Stop);
                 }
                 batch.clear();
                 batch
@@ -277,7 +292,13 @@ mod real {
                 ctx.decode(&mut batch)
                     .map_err(|e| PrimerError::Inference(format!("decode: {e}").into()))?;
             }
-            Ok(())
+            // A `max_tokens` of 0 never enters the loop and leaves `finish` at
+            // its `Length` default; that degenerate config (no tokens
+            // requested) is not a real truncation, so report `Stop`.
+            if params.max_tokens == 0 {
+                finish = FinishReason::Stop;
+            }
+            Ok(finish)
         }
     }
 }

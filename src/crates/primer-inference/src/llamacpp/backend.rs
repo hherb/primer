@@ -98,16 +98,21 @@ impl InferenceBackend for LlamaCppBackend {
             let result = engine.infer(&rendered, &params, &mut on_token);
 
             match result {
-                Ok(()) => {
+                Ok(finish_reason) => {
                     // Flush: feed a synthetic done chunk so a held-back
                     // visible tail still reaches the child and a
                     // reasoning-only stream surfaces ReasoningWithoutAnswer.
+                    // The engine's `finish_reason` rides on this terminal
+                    // chunk (carried through the reasoning filter) so a
+                    // `FinishReason::Length` truncation reaches the dialogue
+                    // manager's context-limit recovery instead of looking
+                    // like a clean `Stop`.
                     if let FilterAction::Final(r) = process_filtered_chunk(
                         &mut filter,
                         TokenChunk {
                             text: String::new(),
                             done: true,
-                            ..Default::default()
+                            finish_reason,
                         },
                         &mut had_visible,
                         "llamacpp",
@@ -132,15 +137,17 @@ mod tests {
     use super::*;
     use futures::StreamExt;
     use primer_core::error::PrimerError;
-    use primer_core::inference::Prompt;
+    use primer_core::inference::{FinishReason, Prompt};
 
     /// A scripted engine for host tests. `pieces` are emitted as raw tokens
     /// in order; `fail_after` (if set) makes `infer` return an Err once that
-    /// many pieces have been emitted.
+    /// many pieces have been emitted; `finish` is the [`FinishReason`]
+    /// reported on natural (non-error) completion.
     struct MockLlamaEngine {
         model_id: String,
         pieces: Vec<String>,
         fail_after: Option<usize>,
+        finish: FinishReason,
     }
 
     impl MockLlamaEngine {
@@ -149,6 +156,7 @@ mod tests {
                 model_id: model_id.to_string(),
                 pieces: pieces.iter().map(|s| s.to_string()).collect(),
                 fail_after: None,
+                finish: FinishReason::Stop,
             }
         }
         fn failing(model_id: &str, pieces: &[&str], fail_after: usize) -> Self {
@@ -156,7 +164,15 @@ mod tests {
                 model_id: model_id.to_string(),
                 pieces: pieces.iter().map(|s| s.to_string()).collect(),
                 fail_after: Some(fail_after),
+                finish: FinishReason::Stop,
             }
+        }
+        /// A run that completes by exhausting the token budget — reports
+        /// [`FinishReason::Length`] like a context-truncated reply. Builder
+        /// style.
+        fn truncated(mut self) -> Self {
+            self.finish = FinishReason::Length;
+            self
         }
     }
 
@@ -176,16 +192,16 @@ mod tests {
             _rendered: &str,
             _params: &GenerationParams,
             on_token: &mut dyn FnMut(&str) -> bool,
-        ) -> Result<()> {
+        ) -> Result<FinishReason> {
             for (i, p) in self.pieces.iter().enumerate() {
                 if !on_token(p) {
-                    return Ok(()); // consumer dropped
+                    return Ok(FinishReason::Stop); // consumer dropped
                 }
                 if Some(i + 1) == self.fail_after {
                     return Err(PrimerError::Inference("mock decode failure".into()));
                 }
             }
-            Ok(())
+            Ok(self.finish)
         }
     }
 
@@ -197,22 +213,36 @@ mod tests {
     }
 
     async fn collect(backend: &LlamaCppBackend) -> (String, bool) {
+        let (out, errored, _) = collect_with_reason(backend).await;
+        (out, errored)
+    }
+
+    /// Like [`collect`] but also returns the [`FinishReason`] of the terminal
+    /// (`done`) chunk, defaulting to `Stop` if the stream errored or produced
+    /// no terminal chunk.
+    async fn collect_with_reason(backend: &LlamaCppBackend) -> (String, bool, FinishReason) {
         let mut stream = backend
             .generate_stream(&prompt(), &GenerationParams::default())
             .await
             .unwrap();
         let mut out = String::new();
         let mut errored = false;
+        let mut finish = FinishReason::Stop;
         while let Some(item) = stream.next().await {
             match item {
-                Ok(c) => out.push_str(&c.text),
+                Ok(c) => {
+                    out.push_str(&c.text);
+                    if c.done {
+                        finish = c.finish_reason;
+                    }
+                }
                 Err(_) => {
                     errored = true;
                     break;
                 }
             }
         }
-        (out, errored)
+        (out, errored, finish)
     }
 
     #[test]
@@ -276,6 +306,44 @@ mod tests {
         let (out, errored) = collect(&backend).await;
         assert_eq!(out, "partial ");
         assert!(errored);
+    }
+
+    #[tokio::test]
+    async fn clean_run_emits_stop_finish_reason() {
+        // A normal completion (eos / clean stop) carries FinishReason::Stop
+        // on the terminal chunk — no spurious context-limit recovery.
+        let backend = LlamaCppBackend::new(Arc::new(MockLlamaEngine::new("m", &["all done"])));
+        let (out, errored, finish) = collect_with_reason(&backend).await;
+        assert_eq!(out, "all done");
+        assert!(!errored);
+        assert_eq!(finish, FinishReason::Stop);
+    }
+
+    #[tokio::test]
+    async fn truncated_run_emits_length_finish_reason() {
+        // A run that exhausts the token budget reports FinishReason::Length so
+        // the dialogue manager's notify-and-retry recovery fires (issue #238).
+        let backend = LlamaCppBackend::new(Arc::new(
+            MockLlamaEngine::new("m", &["cut off mid"]).truncated(),
+        ));
+        let (out, errored, finish) = collect_with_reason(&backend).await;
+        assert_eq!(out, "cut off mid");
+        assert!(!errored);
+        assert_eq!(finish, FinishReason::Length);
+    }
+
+    #[tokio::test]
+    async fn truncated_run_carries_length_through_reasoning_filter() {
+        // Length must survive the reasoning strip: a truncated reply that
+        // opened with a <think> block still reaches the child with the
+        // terminal Length flag intact (the filter carries finish_reason).
+        let backend = LlamaCppBackend::new(Arc::new(
+            MockLlamaEngine::new("m", &["<think>plan</think>", "partial answer"]).truncated(),
+        ));
+        let (out, errored, finish) = collect_with_reason(&backend).await;
+        assert_eq!(out, "partial answer");
+        assert!(!errored);
+        assert_eq!(finish, FinishReason::Length);
     }
 
     #[tokio::test]
