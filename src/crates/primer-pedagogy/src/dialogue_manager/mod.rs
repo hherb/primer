@@ -45,8 +45,7 @@ mod retrieval;
 mod summary;
 mod turn;
 use apply::{apply_assessment, apply_comprehension, apply_extraction, merge_concepts_into_turn};
-// Re-export consumed by Task 7 (retry loop); unused until then.
-#[allow(unused_imports)]
+// Re-export used by build_turn_prompt (Task 6) and the retry loop (Task 7).
 pub(crate) use budget_tier::PromptBudgetTier;
 
 #[cfg(test)]

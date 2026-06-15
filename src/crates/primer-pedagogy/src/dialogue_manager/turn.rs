@@ -91,7 +91,9 @@ impl DialogueManager {
             self.last_break_suggested_at = Some(now);
         }
 
-        let (prompt, passage_count) = self.build_turn_prompt(child_input, intent).await;
+        let (prompt, passage_count) = self
+            .build_turn_prompt(child_input, intent, super::PromptBudgetTier::Full)
+            .await;
 
         // 3. Stream the response, accumulating into a single String.
         let result = self
@@ -157,12 +159,21 @@ impl DialogueManager {
         &self,
         child_input: &str,
         intent: PedagogicalIntent,
+        tier: super::PromptBudgetTier,
     ) -> (Prompt, usize) {
-        let knowledge_context = self.retrieve_knowledge(child_input).await;
+        let knowledge_context = if tier.includes_knowledge() {
+            self.retrieve_knowledge(child_input).await
+        } else {
+            Vec::new()
+        };
         // Reflects what retrieval matched (the routing complexity signal),
         // independent of any small-context truncation/budget drop below.
         let passage_count = knowledge_context.len();
-        let (summary, retrieved_older) = self.retrieve_long_term_memory(child_input).await;
+        let (summary, retrieved_older) = if tier.includes_long_term_memory() {
+            self.retrieve_long_term_memory(child_input).await
+        } else {
+            (String::new(), Vec::new())
+        };
         // Compute due-vocab once per turn. Wallclock dependency is
         // `chrono::Utc::now()` here — pure functions stay testable via
         // `now`-injection, but the production call site reads the system
@@ -174,7 +185,8 @@ impl DialogueManager {
             self.vocab_settings.max_per_prompt,
         );
         let backend_name = self.inference.name();
-        let context_turns = self.config.effective_context_window_turns(backend_name);
+        let base_window = self.config.effective_context_window_turns(backend_name);
+        let context_turns = tier.context_window_turns(base_window);
         let break_minutes = self.config.break_suggest_after_minutes;
 
         // Small-context backends (the Qualcomm NPU `QnnBackend` runs a

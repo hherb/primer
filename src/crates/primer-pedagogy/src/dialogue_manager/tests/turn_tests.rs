@@ -576,7 +576,11 @@ async fn build_turn_prompt_includes_vocab_section_when_concept_is_overdue() {
     });
 
     let (prompt, _passage_count) = dm
-        .build_turn_prompt("tell me a story", PedagogicalIntent::SocraticQuestion)
+        .build_turn_prompt(
+            "tell me a story",
+            PedagogicalIntent::SocraticQuestion,
+            crate::dialogue_manager::PromptBudgetTier::Full,
+        )
         .await;
 
     assert!(
@@ -625,7 +629,11 @@ async fn build_turn_prompt_omits_vocab_section_when_no_concept_is_due() {
     });
 
     let (prompt, _passage_count) = dm
-        .build_turn_prompt("what is gravity", PedagogicalIntent::SocraticQuestion)
+        .build_turn_prompt(
+            "what is gravity",
+            PedagogicalIntent::SocraticQuestion,
+            crate::dialogue_manager::PromptBudgetTier::Full,
+        )
         .await;
 
     assert!(
@@ -659,7 +667,11 @@ async fn build_turn_prompt_budgets_system_prompt_for_small_context_backend() {
     );
 
     let (prompt, _passage_count) = dm
-        .build_turn_prompt("why is the sky blue", PedagogicalIntent::SocraticQuestion)
+        .build_turn_prompt(
+            "why is the sky blue",
+            PedagogicalIntent::SocraticQuestion,
+            crate::dialogue_manager::PromptBudgetTier::Full,
+        )
         .await;
 
     assert!(
@@ -696,7 +708,11 @@ async fn build_turn_prompt_leaves_large_context_backend_unbudgeted() {
     );
 
     let (prompt, _passage_count) = dm
-        .build_turn_prompt("why is the sky blue", PedagogicalIntent::SocraticQuestion)
+        .build_turn_prompt(
+            "why is the sky blue",
+            PedagogicalIntent::SocraticQuestion,
+            crate::dialogue_manager::PromptBudgetTier::Full,
+        )
         .await;
 
     assert!(
@@ -836,5 +852,54 @@ async fn cadence_resets_after_suggest_break_fires() {
         dm.last_intent(),
         Some(primer_core::conversation::PedagogicalIntent::SuggestBreak),
         "second turn at the same wallclock should fall through to natural intent"
+    );
+}
+
+#[tokio::test]
+async fn build_turn_prompt_no_knowledge_tier_omits_kb_section() {
+    use primer_core::conversation::PedagogicalIntent;
+
+    // Use BigPassageKnowledge: every passage body is a repetition of
+    // KNOWLEDGEMARKER, which is a unique string that only appears in the
+    // system prompt via the KB section. A standard (non-qnn) backend keeps
+    // the unbounded path so Full definitely includes KB content.
+    let backend = std::sync::Arc::new(ScriptedBackend::new(vec![Ok(chunk("", true))]));
+    let knowledge = std::sync::Arc::new(BigPassageKnowledge::new(3, 10));
+    let dm = DialogueManager::new(
+        test_learner(),
+        backend.clone(),
+        knowledge.clone(),
+        DialogueManagerStores::default(),
+        default_subsystems(),
+        primer_core::config::PedagogyConfig::default(),
+    );
+
+    let (prompt_full, _) = dm
+        .build_turn_prompt(
+            "why is the sky blue",
+            PedagogicalIntent::SocraticQuestion,
+            crate::dialogue_manager::PromptBudgetTier::Full,
+        )
+        .await;
+    let (prompt_nokb, _) = dm
+        .build_turn_prompt(
+            "why is the sky blue",
+            PedagogicalIntent::SocraticQuestion,
+            crate::dialogue_manager::PromptBudgetTier::NoKnowledge,
+        )
+        .await;
+
+    // KNOWLEDGEMARKER appears in passage bodies via BigPassageKnowledge::MARKER.
+    // Full tier retrieves passages → marker present; NoKnowledge tier skips
+    // retrieval → marker absent.
+    assert!(
+        prompt_full.system.contains(BigPassageKnowledge::MARKER),
+        "Full tier must include KB passages (marker absent): {}",
+        &prompt_full.system[..prompt_full.system.len().min(300)]
+    );
+    assert!(
+        !prompt_nokb.system.contains(BigPassageKnowledge::MARKER),
+        "NoKnowledge tier must NOT include KB passages (marker present): {}",
+        &prompt_nokb.system[..prompt_nokb.system.len().min(300)]
     );
 }

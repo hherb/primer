@@ -22,8 +22,7 @@ pub(crate) enum PromptBudgetTier {
 #[allow(dead_code)]
 impl PromptBudgetTier {
     /// The full ladder, tightest-last. Length − 1 == number of retries.
-    pub(crate) const LADDER: [PromptBudgetTier; 3] =
-        [Self::Full, Self::NoKnowledge, Self::Minimal];
+    pub(crate) const LADDER: [PromptBudgetTier; 3] = [Self::Full, Self::NoKnowledge, Self::Minimal];
 
     /// The next tighter tier, or `None` if already at the tightest.
     pub(crate) fn next_tighter(self) -> Option<Self> {
@@ -69,8 +68,14 @@ mod tests {
 
     #[test]
     fn next_tighter_walks_the_ladder_then_stops() {
-        assert_eq!(PromptBudgetTier::Full.next_tighter(), Some(PromptBudgetTier::NoKnowledge));
-        assert_eq!(PromptBudgetTier::NoKnowledge.next_tighter(), Some(PromptBudgetTier::Minimal));
+        assert_eq!(
+            PromptBudgetTier::Full.next_tighter(),
+            Some(PromptBudgetTier::NoKnowledge)
+        );
+        assert_eq!(
+            PromptBudgetTier::NoKnowledge.next_tighter(),
+            Some(PromptBudgetTier::Minimal)
+        );
         assert_eq!(PromptBudgetTier::Minimal.next_tighter(), None);
     }
 
@@ -88,7 +93,10 @@ mod tests {
     fn minimal_caps_window_at_floor_others_pass_through() {
         let base = 12;
         assert_eq!(PromptBudgetTier::Full.context_window_turns(base), base);
-        assert_eq!(PromptBudgetTier::NoKnowledge.context_window_turns(base), base);
+        assert_eq!(
+            PromptBudgetTier::NoKnowledge.context_window_turns(base),
+            base
+        );
         assert_eq!(
             PromptBudgetTier::Minimal.context_window_turns(base),
             crate::consts::MINIMAL_TIER_CONTEXT_WINDOW_TURNS
