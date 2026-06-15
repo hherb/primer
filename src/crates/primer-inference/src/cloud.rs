@@ -630,6 +630,53 @@ mod tests {
         assert_eq!(terminal.finish_reason, FinishReason::Stop);
     }
 
+    /// Drive the exact `SseBuffer` + `AnthropicEventTranslator` pair the
+    /// `generate_stream` spawn loop uses over a raw byte stream, split
+    /// across chunk boundaries (the `message_delta` lands in a separate
+    /// network chunk from the terminal `message_stop`). Asserts the
+    /// terminal chunk carries `Length` — covering the buffer→event→
+    /// translator integration, not just the translator in isolation.
+    fn drive_stream(raw_chunks: &[&[u8]]) -> Vec<TokenChunk> {
+        let mut buf = SseBuffer::new();
+        let mut translator = AnthropicEventTranslator::new();
+        let mut chunks = Vec::new();
+        for raw in raw_chunks {
+            buf.extend(raw);
+            while let Some(ev) = buf.next_event() {
+                if let Some(chunk) = translator.step(&ev).unwrap() {
+                    chunks.push(chunk);
+                }
+            }
+        }
+        chunks
+    }
+
+    #[test]
+    fn stream_loop_threads_max_tokens_onto_terminal_chunk() {
+        let chunks = drive_stream(&[
+            b"event: content_block_delta\ndata: {\"type\":\"content_block_delta\",\"index\":0,\"delta\":{\"type\":\"text_delta\",\"text\":\"Hi\"}}\n\n",
+            b"event: message_delta\ndata: {\"type\":\"message_delta\",\"delta\":{\"stop_reason\":\"max_tokens\"}}\n\n",
+            b"event: message_stop\ndata: {}\n\n",
+        ]);
+        let text: String = chunks.iter().map(|c| c.text.as_str()).collect();
+        assert_eq!(text, "Hi");
+        let terminal = chunks.last().expect("a terminal chunk");
+        assert!(terminal.done);
+        assert_eq!(terminal.finish_reason, FinishReason::Length);
+    }
+
+    #[test]
+    fn stream_loop_defaults_terminal_chunk_to_stop() {
+        let chunks = drive_stream(&[
+            b"event: content_block_delta\ndata: {\"type\":\"content_block_delta\",\"index\":0,\"delta\":{\"type\":\"text_delta\",\"text\":\"Done\"}}\n\n",
+            b"event: message_delta\ndata: {\"type\":\"message_delta\",\"delta\":{\"stop_reason\":\"end_turn\"}}\n\n",
+            b"event: message_stop\ndata: {}\n\n",
+        ]);
+        let terminal = chunks.last().expect("a terminal chunk");
+        assert!(terminal.done);
+        assert_eq!(terminal.finish_reason, FinishReason::Stop);
+    }
+
     #[test]
     fn parse_anthropic_event_skips_ignorable_events() {
         for name in [
