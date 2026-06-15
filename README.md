@@ -506,7 +506,10 @@ slide-in overlay drawer (backdrop tap / Esc to dismiss), and the header condense
 its action buttons to icons so nothing runs off-screen in portrait or landscape.
 The drawer is now a proper modal for keyboard/assistive-tech users — opening moves
 focus into it and closing restores it to the toggle, while the chat behind the dim
-backdrop is made `inert` and scroll-locked (all mobile-only; desktop is unchanged).
+backdrop is made `inert` and scroll-locked. It is also announced as a
+`role="dialog"` / `aria-modal="true"` and is a **strict focus trap**: every header
+control except the close toggle is made `inert` while it is open, so `Tab` cycles
+only within the drawer and its toggle (all mobile-only; desktop is unchanged).
 Remaining: pedagogy/answer-quality tuning on the 4B NPU model.
 
 ## Building the macOS DMG
