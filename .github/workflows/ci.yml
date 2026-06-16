@@ -209,6 +209,21 @@ jobs:
         # subsequent runs warm.
         run: cargo clippy -p primer-inference --features llamacpp --all-targets -- -D warnings
 
+      - name: cargo clippy -p primer-kb-load --features fastembed
+        # Closes #246. The default `test` job clippy's the workspace with
+        # default features only, so the `#[cfg(feature = "fastembed")]`-gated
+        # test code in primer-kb-load (the hybrid sweep harness + the hybrid
+        # retrieval-quality tests) is never linted there. The dedicated
+        # `--features fastembed` steps above target primer-EMBEDDING, not
+        # primer-kb-load — so a latent clippy warning in the kb-load fastembed
+        # harness only surfaced during unrelated work (it did, in #245: a
+        # pre-existing `too_many_arguments` on `evaluate_hybrid_cell` had to be
+        # silenced manually). `--all-targets` lints the tests; clippy does not
+        # run them, so this incurs no BGE-M3 model download — only the
+        # (already-warm) ort-runtime compile-time download shared with the
+        # `cargo check --features fastembed` step above.
+        run: cargo clippy -p primer-kb-load --features fastembed --all-targets -- -D warnings
+
   # macOS feature-combo drift-guard. The Apple-native speech backends
   # (`macos-native`, `macos-native-26`) and the `voice-loop` state
   # machine they wire into are platform-specific and invisible to the

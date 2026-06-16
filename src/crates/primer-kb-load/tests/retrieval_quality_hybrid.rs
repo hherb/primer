@@ -172,7 +172,6 @@ async fn hybrid_retrieval_recall_with_fastembed() {
     }
     assert!(
         !loose_failed && !strict_failed,
-        "hybrid retrieval-quality regressions at HybridParams::default():\n{}",
-        msg
+        "hybrid retrieval-quality regressions at HybridParams::default():\n{msg}"
     );
 }
