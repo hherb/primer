@@ -1,16 +1,42 @@
-//! Public bridge surface for the Android speech module.
-//!
-//! Re-exports the JNI bridge type on Android targets and exposes a host stub
-//! on all other targets so downstream crates can name `bridge::JniSpeechBridge`
-//! without `cfg` noise at every call site.
+//! The bridge seam. `query_capabilities()` on the module routes through an
+//! `AndroidSpeechBridge`; the real impl is JNI (android-only), the mock makes
+//! the surrounding logic host-testable — the `primer-inference::qnn`
+//! `GenieLibrary`/`GenieDialog` pattern.
 
-#[cfg(target_os = "android")]
-pub use super::jni_bridge::JniSpeechBridge;
+use crate::android::SpeechCapabilities;
+use primer_core::error::Result;
 
-/// Host stub — `JniSpeechBridge` is not available outside of Android targets.
-/// This type exists solely to allow code that names `bridge::JniSpeechBridge`
-/// to compile on non-Android hosts (e.g. CI, developer laptops).
-#[cfg(not(target_os = "android"))]
-pub struct JniSpeechBridge {
-    _private: (),
+/// Everything the diagnostic needs from the device. Plan 2 extends this trait
+/// with `start_listening` / `speak` / `cancel` / `poll_event`.
+pub trait AndroidSpeechBridge: Send {
+    fn query_capabilities(&self) -> Result<SpeechCapabilities>;
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::android::TtsVoiceInfo;
+
+    struct MockBridge(SpeechCapabilities);
+    impl AndroidSpeechBridge for MockBridge {
+        fn query_capabilities(&self) -> Result<SpeechCapabilities> {
+            Ok(self.0.clone())
+        }
+    }
+
+    #[test]
+    fn bridge_returns_capabilities() {
+        let caps = SpeechCapabilities {
+            on_device_recognition_available: true,
+            recognition_locales: vec![],
+            tts_voices: vec![TtsVoiceInfo {
+                name: "offline".into(),
+                locale: "en-US".into(),
+                network_required: false,
+                not_installed: false,
+            }],
+        };
+        let bridge = MockBridge(caps.clone());
+        assert_eq!(bridge.query_capabilities().unwrap(), caps);
+    }
 }
