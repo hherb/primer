@@ -4,8 +4,9 @@
 //! drain machinery — the GUI passes a no-op `on_committed_audio`,
 //! `wait_for_speaker_drain = None`, and `is_speaking = None` to `run_loop`
 //! (D1).
-
-#![cfg(feature = "android-native")]
+//!
+//! Gated on `android-native` at the module declaration in
+//! [`crate::voice_loop`].
 
 use std::sync::Arc;
 

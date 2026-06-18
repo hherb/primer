@@ -84,7 +84,10 @@ mod tests {
     #[test]
     fn first_nonempty_partial_starts_speech() {
         let mut vad = AndroidDerivedVad::new();
-        assert_eq!(vad.on_event(&SpeechEvent::Partial { text: "".into() }), None);
+        assert_eq!(
+            vad.on_event(&SpeechEvent::Partial { text: "".into() }),
+            None
+        );
         assert_eq!(
             vad.on_event(&SpeechEvent::Partial { text: "how".into() }),
             Some(VadEvent::SpeechStart)
@@ -146,7 +149,9 @@ mod tests {
         vad.reset();
         // After reset a fresh partial starts speech again.
         assert_eq!(
-            vad.on_event(&SpeechEvent::Partial { text: "next".into() }),
+            vad.on_event(&SpeechEvent::Partial {
+                text: "next".into()
+            }),
             Some(VadEvent::SpeechStart)
         );
         assert_eq!(vad.take_pending_end(), None);

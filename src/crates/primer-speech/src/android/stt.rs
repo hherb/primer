@@ -70,10 +70,7 @@ pub async fn run_recognizer_loop(
             .await
             .map_err(|e| primer_core::error::PrimerError::Speech(format!("poll join: {e}")))??;
         let Some(event) = polled else { continue };
-        let was_end = matches!(
-            event,
-            SpeechEvent::EndOfSpeech | SpeechEvent::Final { .. }
-        );
+        let was_end = matches!(event, SpeechEvent::EndOfSpeech | SpeechEvent::Final { .. });
         process_event(&event, &mut vad, &event_tx, &transcript_tx);
         if was_end {
             // Re-arm for the next utterance (one-shot recognizer).

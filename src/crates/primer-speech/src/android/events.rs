@@ -34,12 +34,21 @@ mod tests {
 
     #[test]
     fn parses_partial_and_final_and_end() {
-        let p: SpeechEvent =
-            serde_json::from_str(r#"{"kind":"partial","text":"how do"}"#).unwrap();
-        assert_eq!(p, SpeechEvent::Partial { text: "how do".into() });
+        let p: SpeechEvent = serde_json::from_str(r#"{"kind":"partial","text":"how do"}"#).unwrap();
+        assert_eq!(
+            p,
+            SpeechEvent::Partial {
+                text: "how do".into()
+            }
+        );
         let f: SpeechEvent =
             serde_json::from_str(r#"{"kind":"final","text":"how do birds fly"}"#).unwrap();
-        assert_eq!(f, SpeechEvent::Final { text: "how do birds fly".into() });
+        assert_eq!(
+            f,
+            SpeechEvent::Final {
+                text: "how do birds fly".into()
+            }
+        );
         let e: SpeechEvent = serde_json::from_str(r#"{"kind":"end_of_speech"}"#).unwrap();
         assert_eq!(e, SpeechEvent::EndOfSpeech);
     }
@@ -52,7 +61,12 @@ mod tests {
         assert_eq!(d, SpeechEvent::TtsDone);
         let t: SpeechEvent =
             serde_json::from_str(r#"{"kind":"tts_error","message":"boom"}"#).unwrap();
-        assert_eq!(t, SpeechEvent::TtsError { message: "boom".into() });
+        assert_eq!(
+            t,
+            SpeechEvent::TtsError {
+                message: "boom".into()
+            }
+        );
     }
 
     #[test]

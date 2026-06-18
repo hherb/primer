@@ -114,7 +114,10 @@ pub(crate) mod tests {
                 text: "how do birds fly".into()
             })
         );
-        assert_eq!(bridge.poll_event(0).unwrap(), Some(SpeechEvent::EndOfSpeech));
+        assert_eq!(
+            bridge.poll_event(0).unwrap(),
+            Some(SpeechEvent::EndOfSpeech)
+        );
         assert_eq!(bridge.poll_event(0).unwrap(), None);
     }
 
