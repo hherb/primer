@@ -146,3 +146,7 @@ supertonic = ["speech", "primer-speech/supertonic"]
 # non-macOS builds. See docs/macos_native_speech.md.
 macos-native = ["primer-speech/macos-native"]
 macos-native-26 = ["primer-speech/macos-native-26"]
+
+# Android-native speech diagnostic (Plan 1) + (Plan 2) voice loop. Forwards
+# to primer-speech/android-native. Independent of `speech` (no cpal/whisper/piper).
+android-native = ["dep:primer-speech", "primer-speech/android-native"]
