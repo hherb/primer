@@ -1,6 +1,7 @@
 package org.theprimer.gui
 
 import android.content.Context
+import android.os.Build
 import android.speech.SpeechRecognizer
 import android.speech.tts.TextToSpeech
 import org.json.JSONArray
@@ -24,8 +25,14 @@ object PrimerSpeech {
     fun queryCapabilities(): String {
         val ctx = appContext ?: return """{"on_device_recognition_available":false,"recognition_locales":[],"tts_voices":[]}"""
         val obj = JSONObject()
-        obj.put("on_device_recognition_available",
-            SpeechRecognizer.isOnDeviceRecognitionAvailable(ctx))
+        // isOnDeviceRecognitionAvailable is API 31+; minSdk is 24, so guard it
+        // (the build-time NewApi lint would otherwise fail the APK build).
+        val onDevice = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
+            SpeechRecognizer.isOnDeviceRecognitionAvailable(ctx)
+        } else {
+            false
+        }
+        obj.put("on_device_recognition_available", onDevice)
         obj.put("recognition_locales", JSONArray())
 
         val voicesJson = JSONArray()
