@@ -1,7 +1,7 @@
 # Primer — Next Session Brief
 
 **Audience:** future Claude Code session continuing work on this repo.
-**Last updated:** 2026-06-19 — work is on the **unmerged feature branch `android-voice-loop-plan2`** (3 commits ahead of `main` at `103a96b`). This session **planned Plan 2 of the Android-native voice POC and shipped Task 1** (the `nativeInit`/`ndk_context` bridge-bootstrap fix). The branch needs a **PR to `main`** (branch protection). The prior brief was stale — PR #249 (Android voice Plan 1, capability gate **GO**) had merged since it was written; this session picked up that thread.
+**Last updated:** 2026-06-19 — work is on feature branch `android-voice-loop-plan2`, pushed and open as **PR #250** (4 commits ahead of `main` at `103a96b`; CI running at handoff). This session **planned Plan 2 of the Android-native voice POC and shipped Task 1** (the `nativeInit`/`ndk_context` bridge-bootstrap fix). The prior brief was stale — PR #249 (Android voice Plan 1, capability gate **GO**) had merged since it was written; this session picked up that thread.
 
 **Context at session start:** the owner chose (via the session-opening question) to pursue **Android voice Plan 2** over the other open items (pedagogy tuning, latency routing). Plan 1 (#249) had landed on `main` and left one carried blocker — the `speech_capabilities` Tauri command panicked on-device in `ndk_context::android_context()`. Plan 2 is the voice-loop implementation; its Task 1 is that bootstrap fix.
 
@@ -17,8 +17,8 @@ All on branch `android-voice-loop-plan2` (PR not yet opened):
 
 > The next steps are the rest of Plan 2, in order. Tasks 2–6 + 9 are **host-implementable now** (no device); Tasks 7, 8, 10 need the RedMagic.
 
-### 1. ⭐ Open a PR for the branch, then continue Plan 2 host tasks
-- **Acceptance:** `gh pr create --base main` for `android-voice-loop-plan2` (the 3 commits above). CI must stay green: `cargo test (default features)`, the android `--features qnn` AND `--features android-native` cross-compile guards. Then implement **Plan 2 Tasks 2–6 + 9** by TDD (event types + extended bridge trait; `AndroidDerivedVad`; un-gate `ChannelStt`; `AndroidTts`; `AndroidStt` consumer + `build_android_voice_backends`; Stt/Tts enum variants). Each task in the plan has full failing-test-first code + exact commands. All are host-testable + android-cross-compilable; merge them before the device tasks.
+### 1. ⭐ Land PR #250, then continue Plan 2 host tasks
+- **Acceptance:** confirm PR #250 CI is green (`cargo test (default features)`, the android `--features qnn` AND `--features android-native` cross-compile guards) and merge it. Then implement **Plan 2 Tasks 2–6 + 9** by TDD (event types + extended bridge trait; `AndroidDerivedVad`; un-gate `ChannelStt`; `AndroidTts`; `AndroidStt` consumer + `build_android_voice_backends`; Stt/Tts enum variants). Each task in the plan has full failing-test-first code + exact commands. All are host-testable + android-cross-compilable; merge them before the device tasks.
 - **Note:** Task 2 Step 4 says to add `not yet implemented (Task 7)` stubs for the five new `JniSpeechBridge` methods so the android cross-compile stays green between Task 2 and Task 7 — don't skip that or the aarch64 guard breaks mid-sequence.
 
 ### 2. Device-only Plan 2 tasks (need the RedMagic 11 Pro)
@@ -32,7 +32,7 @@ All on branch `android-voice-loop-plan2` (PR not yet opened):
 
 - **`nativeInit` symbol resolution / load order is the #1 device unknown.** The `Java_org_theprimer_gui_PrimerSpeech_nativeInit` symbol must be in the loaded Tauri app `.so` and not stripped. If Kotlin's `external fun nativeInit()` throws `UnsatisfiedLinkError`, the symbol name or the lib-load order is wrong (it must be called *after* `super.onCreate` loads the Rust lib). Task 10 Step 1 is its gate. The code compiles + cross-compiles; only on-device proves it links + runs.
 - **`find_class` on an attached thread** (Plan 1 risk #2, carried) — may need the cached-`Context` classloader fallback; revealed by Task 10.
-- **Branch not yet merged.** Everything this session is on `android-voice-loop-plan2`. Don't assume `main` has it. Open the PR early so CI runs.
+- **Branch not yet merged.** Everything this session is on `android-voice-loop-plan2` (PR #250, open). Don't assume `main` has it — confirm #250 merged before building on it.
 - **`ndk-context` stays in `Cargo.lock`** — that is correct (a transitive Tauri-Android dep); don't try to prune it again. The only intended lock change was removing primer-speech's *direct* dependency line.
 - **Plan 2's host/device split is deliberate** — implement + merge Tasks 2–6 + 9 from a desktop; do not block them on the device.
 
@@ -64,9 +64,9 @@ PATH="$NDK_BIN:$PATH" \
   CARGO_TARGET_AARCH64_LINUX_ANDROID_LINKER="$NDK_BIN/aarch64-linux-android24-clang" \
   ~/.cargo/bin/cargo build --target aarch64-linux-android --no-default-features -p primer-gui --features android-native
 
-# === Open the PR, then continue Plan 2 Tasks 2-6 + 9 (host, TDD) ===
-git push -u origin android-voice-loop-plan2
-gh pr create --base main --title "Android-native voice POC — Plan 2: Task 1 (nativeInit bridge bootstrap)" --body "..."
+# === PR #250 is open; confirm green + merge, then continue Tasks 2-6 + 9 (host, TDD) ===
+gh pr checks 250
+gh pr merge 250 --squash   # once green
 # Then implement plan tasks 2-6 + 9 (full TDD code + commands in the plan doc).
 ```
 
