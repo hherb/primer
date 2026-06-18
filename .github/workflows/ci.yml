@@ -453,6 +453,16 @@ jobs:
         # are inherited from the earlier "Export NDK toolchain env" step.
         run: cargo build --target aarch64-linux-android --no-default-features -p primer-gui --features qnn
 
+      - name: Cross-compile primer-gui --features android-native (Tauri mobile)
+        # Drift-guard for the Android-native voice POC (Plan 1): compiles the
+        # JNI speech bridge (`primer-speech/android-native` → jni + ndk-context)
+        # and the `speech_capabilities` diagnostic command into the GUI's
+        # android-mobile dep graph. None of the default/qnn steps above pull
+        # `primer-speech` or the `android` module, so this seam is otherwise
+        # invisible to CI. Lib/cdylib-only — no Gradle, no APK — mirroring the
+        # qnn guard. NDK env vars inherited from "Export NDK toolchain env".
+        run: cargo build --target aarch64-linux-android --no-default-features -p primer-gui --features android-native
+
       - name: Cross-compile primer-qnn-sys
         # The Phase 1.2 Genie/QNN FFI crate is `target_os = "android"`-gated
         # for its real-dlopen path; on every other target `GenieLibrary::open`
