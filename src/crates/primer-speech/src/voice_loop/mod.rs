@@ -13,6 +13,10 @@
 //! and `docs/superpowers/specs/2026-05-13-gui-voice-mode-design.md` for
 //! the full design.
 
+/// Channel-backed STT adapter — cpal-free, reachable from android-native.
+/// Lives outside the cpal-gated `backends_common` so the OS-owned-mic
+/// Android build can reuse it (Plan 2 Task 4).
+pub mod channel_stt;
 pub mod observer;
 /// Runtime STT/TTS backend selector enums (pure data; never feature-gated).
 /// Single source of truth for the decoupled voice-loop wiring — the CLI uses
@@ -52,6 +56,7 @@ pub mod backends_macos_native_26;
 #[cfg(all(target_os = "macos", feature = "cpal", feature = "macos-native-26"))]
 pub(crate) mod macos26_audio_buffer;
 
+pub use channel_stt::ChannelStt;
 pub use observer::{ExitReason, LoopObserver, TurnCompletePayload, VoiceState};
 pub use selectors::{SttBackend, TtsAssets, TtsBackend, build_tts};
 pub use state_machine::{
@@ -60,7 +65,7 @@ pub use state_machine::{
 };
 
 #[cfg(feature = "cpal")]
-pub use backends_common::{ChannelStt, LocalBackends};
+pub use backends_common::LocalBackends;
 
 #[cfg(all(feature = "silero", feature = "whisper", feature = "cpal"))]
 pub use backends::build_local_backends;
