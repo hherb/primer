@@ -5,6 +5,7 @@
 pub mod bridge;
 mod capabilities;
 pub mod events;
+pub mod stt;
 pub mod tts;
 pub mod vad;
 pub mod vm;

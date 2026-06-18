@@ -50,6 +50,12 @@ pub mod backends_macos_native;
 #[cfg(all(target_os = "macos", feature = "cpal", feature = "macos-native-26"))]
 pub mod backends_macos_native_26;
 
+/// Android-native voice backend builder (OS-owned mic + speaker). Cpal-free
+/// — see [`backends_android_native::build_android_voice_backends`] (Plan 2
+/// Task 6).
+#[cfg(feature = "android-native")]
+pub mod backends_android_native;
+
 /// Pure helper for the macos-native-26 audio thread's pre-resample
 /// chunk buffer; clears on `is_speaking` to prevent pre-speak audio
 /// leaking into the post-speak transcription (closes #139).

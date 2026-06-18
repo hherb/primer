@@ -34,6 +34,18 @@ pub struct ChannelStt {
     pub(super) rx: TranscriptRx,
 }
 
+impl ChannelStt {
+    /// Build a `ChannelStt` from the consuming end of a transcript channel.
+    /// Wraps the receiver in the `Arc<Mutex<…>>` the adapter needs so
+    /// callers (the android recognizer consumer, future builders) don't
+    /// reach into the private field.
+    pub fn from_receiver(rx: std::sync::mpsc::Receiver<String>) -> Self {
+        Self {
+            rx: Arc::new(Mutex::new(rx)),
+        }
+    }
+}
+
 impl Named for ChannelStt {
     fn name(&self) -> &str {
         "channel-stt"
