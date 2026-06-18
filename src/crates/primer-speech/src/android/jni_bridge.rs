@@ -4,6 +4,7 @@
 
 use crate::android::bridge::AndroidSpeechBridge;
 use crate::android::capabilities::SpeechCapabilities;
+use crate::android::events::SpeechEvent;
 use jni::JavaVM;
 use jni::objects::JString;
 use primer_core::error::{PrimerError, Result};
@@ -47,5 +48,29 @@ impl AndroidSpeechBridge for JniSpeechBridge {
         let java_str = env.get_string(&jstr).map_err(jerr)?;
         let s: String = java_str.into();
         serde_json::from_str(&s).map_err(jerr)
+    }
+
+    // ── Voice-loop methods — real JNI impls land in Plan 2 Task 7
+    // (device-only). Stubbed here so the trait is satisfied and the
+    // aarch64-linux-android cross-compile stays green between Task 2 and
+    // Task 7. Each returns a clear "not yet implemented" Speech error.
+    fn start_listening(&self, _bcp47: &str) -> Result<()> {
+        Err(jerr("start_listening not yet implemented (Plan 2 Task 7)"))
+    }
+
+    fn stop_listening(&self) -> Result<()> {
+        Err(jerr("stop_listening not yet implemented (Plan 2 Task 7)"))
+    }
+
+    fn poll_event(&self, _timeout_ms: u32) -> Result<Option<SpeechEvent>> {
+        Err(jerr("poll_event not yet implemented (Plan 2 Task 7)"))
+    }
+
+    fn speak(&self, _text: &str) -> Result<()> {
+        Err(jerr("speak not yet implemented (Plan 2 Task 7)"))
+    }
+
+    fn cancel_speech(&self) -> Result<()> {
+        Err(jerr("cancel_speech not yet implemented (Plan 2 Task 7)"))
     }
 }
