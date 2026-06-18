@@ -391,6 +391,25 @@ pub mod speech {
         /// observed promptly; long enough that the per-poll JNI round-trip
         /// overhead is amortised. Mirrors macos26's `EVENT_POLL_INTERVAL`.
         pub const POLL_TIMEOUT: Duration = Duration::from_millis(100);
+
+        /// Backoff before re-arming the recognizer after a recoverable error
+        /// (`ERROR_NO_MATCH` / `ERROR_SPEECH_TIMEOUT` / `ERROR_RECOGNIZER_BUSY`).
+        /// Small so the loop keeps listening responsively, but non-zero so a
+        /// pathological immediate-error engine can't tight-spin the CPU.
+        pub const REARM_BACKOFF: Duration = Duration::from_millis(150);
+
+        /// `android.speech.SpeechRecognizer` `onError` codes the consumer
+        /// treats as RECOVERABLE — the recognizer is one-shot and these are
+        /// the expected "heard nothing this window" outcomes, so the loop
+        /// re-arms and keeps listening rather than dying. Any other code
+        /// (permissions, language unavailable, client, server) is terminal
+        /// — re-arming would either spin or never succeed.
+        ///
+        /// Values from the Android SDK (`SpeechRecognizer.ERROR_*`); pinned
+        /// here so the pure re-arm classifier needs no Android dep.
+        pub const ERROR_SPEECH_TIMEOUT: i32 = 6;
+        pub const ERROR_NO_MATCH: i32 = 7;
+        pub const ERROR_RECOGNIZER_BUSY: i32 = 8;
     }
 }
 

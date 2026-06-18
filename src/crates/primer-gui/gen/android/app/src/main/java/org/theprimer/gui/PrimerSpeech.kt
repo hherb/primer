@@ -7,8 +7,11 @@ import android.os.Bundle
 import android.os.Handler
 import android.os.Looper
 import android.speech.RecognitionListener
+import android.speech.RecognitionSupport
+import android.speech.RecognitionSupportCallback
 import android.speech.RecognizerIntent
 import android.speech.SpeechRecognizer
+import java.util.concurrent.Executor
 import android.speech.tts.TextToSpeech
 import android.speech.tts.UtteranceProgressListener
 import org.json.JSONArray
@@ -137,11 +140,25 @@ object PrimerSpeech {
 
     // ── Voice-loop bridge methods (Plan 2 Task 7) ──────────────────────
 
+    // The BCP-47 the Rust loop last requested, and the effective installed
+    // tag we actually arm with. The device may have only a same-language
+    // *variant* installed on-device (device-found 2026-06-19: en-AU installed,
+    // en-US merely supported → ERROR_LANGUAGE_NOT_SUPPORTED). We resolve the
+    // requested tag to an installed variant once (via checkRecognitionSupport)
+    // and cache it so every later arm goes straight to startListening.
+    @Volatile private var requestedTag: String? = null
+    @Volatile private var effectiveTag: String? = null
+
     /**
      * Arm the on-device recognizer for one utterance in `bcp47`. The
      * recognizer is one-shot per startListening; the Rust consumer re-arms
      * after each terminal event. Strict offline-first: built via
      * `createOnDeviceSpeechRecognizer` (API 31+) with `EXTRA_PREFER_OFFLINE`.
+     *
+     * If the exact `bcp47` isn't installed on-device but a same-language
+     * variant is (e.g. requested en-US, installed en-AU), we arm with the
+     * installed variant — it works fully offline now, rather than failing
+     * with ERROR_LANGUAGE_NOT_SUPPORTED waiting on a download.
      */
     @JvmStatic
     fun startListening(bcp47: String) {
@@ -150,25 +167,97 @@ object PrimerSpeech {
             !SpeechRecognizer.isOnDeviceRecognitionAvailable(ctx)) {
             // No offline recognizer — never fall back to the network factory
             // ([[project_strict_offline_first]]). Surface as an STT error.
+            dbg("startListening: on-device recognizer unavailable")
             enqueueSttError(SpeechRecognizer.ERROR_RECOGNIZER_BUSY)
             return
         }
+        dbg("startListening($bcp47)")
         runOnMainBlocking {
             if (recognizer == null) {
                 recognizer = SpeechRecognizer.createOnDeviceSpeechRecognizer(ctx).apply {
                     setRecognitionListener(listener)
                 }
+                dbg("recognizer created")
             }
-            val intent = Intent(RecognizerIntent.ACTION_RECOGNIZE_SPEECH).apply {
-                putExtra(RecognizerIntent.EXTRA_LANGUAGE_MODEL,
-                    RecognizerIntent.LANGUAGE_MODEL_FREE_FORM)
-                putExtra(RecognizerIntent.EXTRA_LANGUAGE, bcp47)
-                putExtra(RecognizerIntent.EXTRA_PARTIAL_RESULTS, true)
-                putExtra(RecognizerIntent.EXTRA_PREFER_OFFLINE, true)
+            val cached = if (bcp47 == requestedTag) effectiveTag else null
+            if (cached != null) {
+                arm(cached)
+            } else if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+                // Resolve the requested tag to an installed variant, then arm.
+                resolveAndArm(bcp47)
+            } else {
+                // Pre-API-33: no support query; arm with the requested tag.
+                arm(bcp47)
             }
-            recognizer?.startListening(intent)
         }
     }
+
+    /** Build the recognition intent for `tag` and start listening. Must run on
+     *  the main Looper (called from inside [runOnMainBlocking]). */
+    private fun arm(tag: String) {
+        val intent = Intent(RecognizerIntent.ACTION_RECOGNIZE_SPEECH).apply {
+            putExtra(RecognizerIntent.EXTRA_LANGUAGE_MODEL,
+                RecognizerIntent.LANGUAGE_MODEL_FREE_FORM)
+            putExtra(RecognizerIntent.EXTRA_LANGUAGE, tag)
+            putExtra(RecognizerIntent.EXTRA_PARTIAL_RESULTS, true)
+            putExtra(RecognizerIntent.EXTRA_PREFER_OFFLINE, true)
+        }
+        dbg("arm($tag)")
+        recognizer?.startListening(intent)
+    }
+
+    /** Query on-device recognition support, pick the best installed variant of
+     *  `bcp47` (exact > same-language > requested), cache it, and arm. If no
+     *  same-language variant is installed, trigger a background model download
+     *  for the requested tag (works for next time) and arm with the request.
+     *  API 33+. */
+    @androidx.annotation.RequiresApi(Build.VERSION_CODES.TIRAMISU)
+    private fun resolveAndArm(bcp47: String) {
+        val rec = recognizer ?: return
+        val probeIntent = Intent(RecognizerIntent.ACTION_RECOGNIZE_SPEECH).apply {
+            putExtra(RecognizerIntent.EXTRA_LANGUAGE_MODEL,
+                RecognizerIntent.LANGUAGE_MODEL_FREE_FORM)
+            putExtra(RecognizerIntent.EXTRA_LANGUAGE, bcp47)
+        }
+        val direct = Executor { it.run() }
+        val ok = runCatching {
+            rec.checkRecognitionSupport(probeIntent, direct, object : RecognitionSupportCallback {
+                override fun onSupportResult(support: RecognitionSupport) {
+                    val installed = support.installedOnDeviceLanguages
+                    dbg("support installed=$installed pending=${support.pendingOnDeviceLanguages}")
+                    val eff = pickInstalledVariant(bcp47, installed)
+                    if (eff == null && installed.none { sameLanguage(it, bcp47) }) {
+                        dbg("triggerModelDownload($bcp47)")
+                        runCatching { rec.triggerModelDownload(probeIntent) }
+                            .onFailure { dbg("triggerModelDownload threw: $it") }
+                    }
+                    val tag = eff ?: bcp47
+                    requestedTag = bcp47
+                    effectiveTag = tag
+                    arm(tag)
+                }
+                override fun onError(error: Int) {
+                    dbg("checkRecognitionSupport onError $error")
+                    arm(bcp47) // fall back to the requested tag
+                }
+            })
+        }.isSuccess
+        if (!ok) {
+            dbg("checkRecognitionSupport threw; arming requested tag")
+            arm(bcp47)
+        }
+    }
+
+    /** Pick the best installed on-device tag for `requested`: exact match
+     *  wins, else any same-language variant (en-US → en-AU), else null. */
+    private fun pickInstalledVariant(requested: String, installed: List<String>): String? {
+        installed.firstOrNull { it.equals(requested, ignoreCase = true) }?.let { return it }
+        return installed.firstOrNull { sameLanguage(it, requested) }
+    }
+
+    /** Whether two BCP-47 tags share a primary language subtag (before '-'). */
+    private fun sameLanguage(a: String, b: String): Boolean =
+        a.substringBefore('-').equals(b.substringBefore('-'), ignoreCase = true)
 
     /** Stop / cancel the recognizer (no terminal event is enqueued). */
     @JvmStatic
@@ -224,30 +313,47 @@ object PrimerSpeech {
 
     /** Recognizer callbacks → event-queue JSON (see ordering contract above). */
     private val listener = object : RecognitionListener {
-        override fun onReadyForSpeech(params: Bundle?) {}
-        override fun onBeginningOfSpeech() {}
+        override fun onReadyForSpeech(params: Bundle?) { dbg("onReadyForSpeech") }
+        override fun onBeginningOfSpeech() { dbg("onBeginningOfSpeech") }
         override fun onRmsChanged(rmsdB: Float) {}
         override fun onBufferReceived(buffer: ByteArray?) {}
 
         // Deliberately NOT enqueued: onEndOfSpeech fires before onResults, so
         // an end_of_speech event would drive SpeechEnd before the transcript
         // is queued. onResults (final) is the single terminal edge.
-        override fun onEndOfSpeech() {}
+        override fun onEndOfSpeech() { dbg("onEndOfSpeech") }
 
         override fun onPartialResults(partialResults: Bundle?) {
-            firstResult(partialResults)?.let { enqueuePartial(it) }
+            val t = firstResult(partialResults)
+            dbg("onPartialResults: ${t ?: "(none)"}")
+            t?.let { enqueuePartial(it) }
         }
 
         override fun onResults(results: Bundle?) {
+            val t = firstResult(results) ?: ""
+            dbg("onResults: '$t'")
             // Always enqueue a final (even empty) so the consumer re-arms.
-            enqueueFinal(firstResult(results) ?: "")
+            enqueueFinal(t)
         }
 
         override fun onError(error: Int) {
+            dbg("onError: $error")
             enqueueSttError(error)
         }
 
         override fun onEvent(eventType: Int, params: Bundle?) {}
+    }
+
+    // Device-diagnostic sink: logcat is dead on some ROMs, so recognizer
+    // lifecycle is appended to <filesDir>/recognizer.log, readable via
+    // `adb shell run-as <pkg> cat files/recognizer.log`. Cheap append; safe
+    // to keep — it is the only window into on-device recognizer behaviour.
+    private fun dbg(line: String) {
+        val ctx = appContext ?: return
+        runCatching {
+            java.io.File(ctx.filesDir, "recognizer.log")
+                .appendText("${System.currentTimeMillis()} $line\n")
+        }
     }
 
     private fun firstResult(bundle: Bundle?): String? {

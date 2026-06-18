@@ -43,10 +43,42 @@ pub fn process_event(
     }
 }
 
+/// Whether a recognizer event should trigger a re-arm (`start_listening`
+/// again). The on-device `SpeechRecognizer` is one-shot per arm, so the
+/// loop must re-arm after EVERY terminal outcome to keep listening:
+///
+/// - `Final` / `EndOfSpeech` — the utterance completed; re-arm for the next.
+/// - `SttError` with a RECOVERABLE code (`ERROR_NO_MATCH` /
+///   `ERROR_SPEECH_TIMEOUT` / `ERROR_RECOGNIZER_BUSY`) — the recognizer
+///   heard nothing this window and stopped; re-arm so the child can still
+///   speak. **Without this the loop dies on the first pre-speech timeout**
+///   (the recognizer fires `ERROR_SPEECH_TIMEOUT` within seconds of arming
+///   if no speech starts), which is exactly the "doesn't activate on my
+///   voice" failure mode (device-found 2026-06-19).
+/// - Any other `SttError` (permissions, language unavailable, client,
+///   server) is terminal — re-arming would spin or never succeed.
+/// - `Partial` — mid-utterance; never re-arm.
+pub fn should_rearm(event: &SpeechEvent) -> bool {
+    use primer_core::consts::speech::android::{
+        ERROR_NO_MATCH, ERROR_RECOGNIZER_BUSY, ERROR_SPEECH_TIMEOUT,
+    };
+    match event {
+        SpeechEvent::Final { .. } | SpeechEvent::EndOfSpeech => true,
+        SpeechEvent::SttError { code } => {
+            matches!(
+                *code,
+                ERROR_NO_MATCH | ERROR_SPEECH_TIMEOUT | ERROR_RECOGNIZER_BUSY
+            )
+        }
+        _ => false,
+    }
+}
+
 /// Poll the bridge for recognizer events, driving the derived VAD and
 /// forwarding edges + transcripts, until `stop` fires or the bridge errors.
-/// Re-arms `start_listening` after each utterance (the recognizer is
-/// one-shot per `startListening`).
+/// Re-arms `start_listening` after each terminal event ([`should_rearm`] —
+/// the recognizer is one-shot per `startListening`), including after a
+/// recoverable no-match/timeout so the loop keeps listening.
 pub async fn run_recognizer_loop(
     bridge: Arc<dyn AndroidSpeechBridge>,
     bcp47: String,
@@ -70,11 +102,25 @@ pub async fn run_recognizer_loop(
             .await
             .map_err(|e| primer_core::error::PrimerError::Speech(format!("poll join: {e}")))??;
         let Some(event) = polled else { continue };
-        let was_end = matches!(event, SpeechEvent::EndOfSpeech | SpeechEvent::Final { .. });
+        let rearm = should_rearm(&event);
+        // Only ERROR_RECOGNIZER_BUSY needs a backoff before re-arming (it can
+        // fire immediately and tight-spin). NO_MATCH / SPEECH_TIMEOUT fire only
+        // after a multi-second audio window, so they re-arm immediately —
+        // minimising the dead window in which the child's first word would be
+        // clipped on a follow-up turn (device-found 2026-06-19: leading 1-2
+        // words cut after the first prompt; this shrinks the re-arm gap).
+        let needs_backoff = matches!(
+            event,
+            SpeechEvent::SttError {
+                code: primer_core::consts::speech::android::ERROR_RECOGNIZER_BUSY
+            }
+        );
         process_event(&event, &mut vad, &event_tx, &transcript_tx);
-        if was_end {
-            // Re-arm for the next utterance (one-shot recognizer).
+        if rearm {
             vad.reset();
+            if needs_backoff {
+                tokio::time::sleep(primer_core::consts::speech::android::REARM_BACKOFF).await;
+            }
             bridge.start_listening(&bcp47)?;
         }
     }
@@ -128,6 +174,39 @@ mod tests {
         );
         assert!(txt_rx.try_recv().is_err());
         assert!(event_rx.try_recv().is_err());
+    }
+
+    #[test]
+    fn rearm_on_terminal_events_and_recoverable_errors() {
+        use primer_core::consts::speech::android::{
+            ERROR_NO_MATCH, ERROR_RECOGNIZER_BUSY, ERROR_SPEECH_TIMEOUT,
+        };
+        // Terminal utterance events re-arm.
+        assert!(should_rearm(&SpeechEvent::Final { text: "hi".into() }));
+        assert!(should_rearm(&SpeechEvent::EndOfSpeech));
+        // Recoverable errors re-arm so the loop keeps listening (the
+        // device-found "doesn't activate" fix — a pre-speech timeout must
+        // not kill the loop).
+        assert!(should_rearm(&SpeechEvent::SttError {
+            code: ERROR_SPEECH_TIMEOUT
+        }));
+        assert!(should_rearm(&SpeechEvent::SttError {
+            code: ERROR_NO_MATCH
+        }));
+        assert!(should_rearm(&SpeechEvent::SttError {
+            code: ERROR_RECOGNIZER_BUSY
+        }));
+    }
+
+    #[test]
+    fn no_rearm_on_partial_or_fatal_errors() {
+        // Mid-utterance partials never re-arm.
+        assert!(!should_rearm(&SpeechEvent::Partial { text: "ho".into() }));
+        // Fatal errors (permissions=9, language unavailable=12, client=5)
+        // are terminal — re-arming would spin or never succeed.
+        assert!(!should_rearm(&SpeechEvent::SttError { code: 9 }));
+        assert!(!should_rearm(&SpeechEvent::SttError { code: 12 }));
+        assert!(!should_rearm(&SpeechEvent::SttError { code: 5 }));
     }
 
     #[test]
