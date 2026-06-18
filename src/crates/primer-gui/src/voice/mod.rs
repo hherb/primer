@@ -20,7 +20,13 @@ pub mod assets;
 pub mod backends;
 #[cfg(feature = "speech")]
 pub mod download;
-#[cfg(feature = "speech")]
+// `observer` + `responder` are cpal-free (they only touch the voice-loop
+// traits + Tauri + the DM), so they are shared by both the cpal speech
+// build and the cpal-free `android-native` build.
+#[cfg(any(feature = "speech", feature = "android-native"))]
 pub mod observer;
-#[cfg(feature = "speech")]
+#[cfg(any(feature = "speech", feature = "android-native"))]
 pub mod responder;
+// Android-native voice backend builder (OS-owned mic/speaker; no cpal).
+#[cfg(feature = "android-native")]
+pub mod backends_android;

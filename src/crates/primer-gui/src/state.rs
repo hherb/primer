@@ -56,10 +56,10 @@ pub struct AppState {
     pub session: Mutex<Option<ActiveSession>>,
 
     /// The currently active voice loop, if any. Only present when the
-    /// binary was built with `--features speech` AND the user started
-    /// voice mode via `start_voice_mode`. `None` on default builds and
-    /// when voice mode is inactive.
-    #[cfg(feature = "speech")]
+    /// binary was built with `--features speech` OR `--features
+    /// android-native` AND the user started voice mode. `None` on default
+    /// builds and when voice mode is inactive.
+    #[cfg(any(feature = "speech", feature = "android-native"))]
     pub voice: Mutex<Option<ActiveVoiceLoop>>,
 }
 
@@ -72,7 +72,7 @@ impl AppState {
             home,
             config: Mutex::new(config),
             session: Mutex::new(None),
-            #[cfg(feature = "speech")]
+            #[cfg(any(feature = "speech", feature = "android-native"))]
             voice: Mutex::new(None),
         }
     }
@@ -84,9 +84,10 @@ impl AppState {
 ///
 /// The reason this struct is cfg-guarded rather than always-present-but-
 /// None is that `VoiceLoopError` only exists when the `voice-loop` speech
-/// feature is compiled in. Gating the whole slot is cleaner than inventing
-/// a stub type.
-#[cfg(feature = "speech")]
+/// feature (or `android-native`, which also pulls `primer-speech`'s
+/// voice-loop) is compiled in. Gating the whole slot is cleaner than
+/// inventing a stub type.
+#[cfg(any(feature = "speech", feature = "android-native"))]
 pub struct ActiveVoiceLoop {
     /// Join handle for the spawned voice-loop task. Dropping it aborts
     /// the task (tokio semantics); the `stop_voice_mode` command sends

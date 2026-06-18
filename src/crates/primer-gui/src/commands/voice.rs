@@ -324,7 +324,12 @@ pub async fn stop_voice_mode(_state: tauri::State<'_, AppState>) -> Result<(), S
 /// pressed the off button — the frontend reads the still-`true` flag
 /// and auto-restarts voice mode under the new locale (closes #102
 /// polished follow-up).
-#[cfg(feature = "speech")]
+///
+/// Shared by the desktop (`speech`) and Android (`android-native`) stop
+/// paths: the body only touches `state`, the loop handle, config, and the
+/// session — nothing cpal-specific — so the Android command delegates here
+/// rather than duplicating the join + toggle + session-drop logic.
+#[cfg(any(feature = "speech", feature = "android-native"))]
 pub(crate) async fn stop_voice_mode_inner(
     state: &AppState,
     preserve_toggle: bool,
@@ -506,6 +511,17 @@ pub async fn get_voice_state_copy(
 #[tauri::command]
 pub async fn voice_mode_available() -> Result<bool, String> {
     Ok(cfg!(feature = "speech"))
+}
+
+/// Whether this binary was compiled with the Android-native speech stack
+/// (`android-native`). The frontend uses this to choose the
+/// `*_voice_mode_android` commands over the desktop `*_voice_mode`
+/// commands and to enable the voice toggle on an Android build (where
+/// `voice_mode_available` is false — `android-native` is independent of
+/// the cpal `speech` feature). A pure compile-time flag, no session state.
+#[tauri::command]
+pub async fn android_voice_available() -> Result<bool, String> {
+    Ok(cfg!(feature = "android-native"))
 }
 
 /// Whether this binary was compiled with a macOS-native speech stack

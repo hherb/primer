@@ -18,6 +18,10 @@
   const state = {
     active: false,
     available: false,
+    // True on an `android-native` build: the OS owns the recognizer + TTS,
+    // so we invoke the `*_voice_mode_android` command variants. Set at
+    // launch from `android_voice_available`.
+    android: false,
     currentVoiceState: null,    // "listen" | "latent_think" | "speak" | null
     // Guard against concurrent auto-start attempts (e.g. rapid back-to-back
     // session switches firing `primerRestoreVoiceMode` before the first
@@ -39,6 +43,13 @@
   };
 
   function $(id) { return document.getElementById(id); }
+
+  // Map a base voice command to its Android variant on android-native
+  // builds (the OS owns the mic/speaker, so a distinct command path builds
+  // the cpal-free backends). Desktop builds use the base names unchanged.
+  function vcmd(base) {
+    return state.android ? `${base}_android` : base;
+  }
 
   function setActive(active) {
     state.active = active;
@@ -71,12 +82,12 @@
   async function onToggleClick() {
     if (!state.available) return;
     if (state.active) {
-      await invoke("stop_voice_mode").catch((e) => showError(`stop voice: ${e}`));
+      await invoke(vcmd("stop_voice_mode")).catch((e) => showError(`stop voice: ${e}`));
       setActive(false);
       return;
     }
     try {
-      await invoke("start_voice_mode");
+      await invoke(vcmd("start_voice_mode"));
       setActive(true);
     } catch (err) {
       if (err && err.kind === "asset_missing") {
@@ -205,7 +216,7 @@
           cleanup();
           // Retry start_voice_mode now that assets are local.
           try {
-            await invoke("start_voice_mode");
+            await invoke(vcmd("start_voice_mode"));
             setActive(true);
           } catch (err) {
             showError(`start after download: ${(err && (err.message || JSON.stringify(err))) || String(err)}`);
@@ -262,7 +273,7 @@
   // Stop button + Esc both route to cancel_voice_response.
   async function onStop() {
     if (!state.active) return;
-    await invoke("cancel_voice_response").catch(() => {});
+    await invoke(vcmd("cancel_voice_response")).catch(() => {});
   }
 
   function onKeyDown(e) {
@@ -337,7 +348,7 @@
     if (!cfg || !cfg.speech || cfg.speech.voice_mode_enabled !== true) return;
     state.starting = true;
     try {
-      await invoke("start_voice_mode");
+      await invoke(vcmd("start_voice_mode"));
       setActive(true);
     } catch (err) {
       if (err && err.kind === "asset_missing") {
@@ -368,7 +379,13 @@
     // disabled and showed the misleading "Voice mode is not built into
     // this binary" tooltip even on speech-enabled binaries.
     const available = await invoke("voice_mode_available").catch(() => false);
-    state.available = available === true;
+    // `android-native` is independent of the cpal `speech` feature, so an
+    // Android build reports voice_mode_available=false but still has the
+    // OS-backed voice loop. Treat either as available and route to the
+    // `*_android` commands via `vcmd`.
+    const androidAvailable = await invoke("android_voice_available").catch(() => false);
+    state.android = androidAvailable === true;
+    state.available = available === true || state.android;
     const toggle = $("voice-mode-toggle");
     if (!toggle) return;
     toggle.disabled = !state.available;
