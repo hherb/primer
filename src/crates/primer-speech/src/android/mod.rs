@@ -5,6 +5,7 @@
 pub mod bridge;
 mod capabilities;
 pub mod events;
+pub mod vad;
 pub mod vm;
 
 pub use capabilities::{SpeechCapabilities, TtsVoiceInfo, select_offline_voice};
