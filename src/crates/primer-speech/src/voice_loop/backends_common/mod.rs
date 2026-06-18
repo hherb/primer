@@ -29,8 +29,7 @@ use std::time::Duration;
 use ringbuf::HeapCons;
 use ringbuf::HeapProd;
 
-use primer_core::error::{PrimerError, Result};
-use primer_core::speech::{Named, StreamingSpeechToText, TranscriptSegment, TranscriptionSession};
+use primer_core::error::Result;
 
 use crate::voice_loop::{DrainHook, LoopBackends};
 use crate::{MicCapture, Resampler, SpeakerSink};
