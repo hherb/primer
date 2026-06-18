@@ -23,6 +23,11 @@ pub enum SttBackend {
     /// Apple Speech.framework STT (macOS-only; SFSpeechRecognizer on
     /// `macos-native`, SpeechAnalyzer on `macos-native-26`).
     MacosNative,
+    /// Android on-device `SpeechRecognizer` (android-only; `android-native`).
+    /// The GUI android command calls `build_android_voice_backends` directly,
+    /// so this variant only names the path for config/diagnostics — it is not
+    /// dispatched through `build_voice_backends` (see [`build_tts`]'s note).
+    AndroidNative,
 }
 
 /// Which synthesiser the voice loop injects as its TTS.
@@ -36,6 +41,10 @@ pub enum TtsBackend {
     Supertonic,
     /// Apple AVSpeechSynthesizer (macOS-only).
     MacosNative,
+    /// Android `TextToSpeech` (android-only; `android-native`). Like
+    /// [`SttBackend::AndroidNative`], names the path for config/diagnostics;
+    /// the GUI android command builds the TTS directly.
+    AndroidNative,
 }
 
 /// Neutral asset bundle for [`build_tts`]. Each backend reads only the
@@ -70,6 +79,14 @@ pub fn build_tts(
         TtsBackend::Piper => build_piper_tts(assets),
         TtsBackend::Supertonic => build_supertonic_tts(assets),
         TtsBackend::MacosNative => build_macos_native_tts(assets),
+        // The android voice path builds its TTS via
+        // `voice_loop::backends_android_native::build_android_voice_backends`
+        // (OS-owned speaker), not through this asset-based selector.
+        TtsBackend::AndroidNative => Err(PrimerError::Speech(
+            "Android-native TTS is built via build_android_voice_backends, \
+             not build_tts"
+                .to_string(),
+        )),
     }
 }
 
@@ -199,6 +216,14 @@ pub async fn build_voice_backends(
         SttBackend::MacosNative => {
             build_macos_native_stt(tts, voice, locale, mic_silence_ms, verbose).await
         }
+        // Android STT is built via build_android_voice_backends (OS-owned
+        // mic, no cpal); it is never dispatched through this cpal-based
+        // builder. Reaching here means a misconfigured desktop build.
+        SttBackend::AndroidNative => Err(PrimerError::Speech(
+            "Android-native STT is built via build_android_voice_backends, \
+             not build_voice_backends"
+                .to_string(),
+        )),
     }
 }
 
@@ -309,6 +334,12 @@ mod tests {
         );
         let parsed: SttBackend = serde_json::from_str("\"macos-native\"").unwrap();
         assert_eq!(parsed, SttBackend::MacosNative);
+        assert_eq!(
+            serde_json::to_string(&SttBackend::AndroidNative).unwrap(),
+            "\"android-native\""
+        );
+        let android: SttBackend = serde_json::from_str("\"android-native\"").unwrap();
+        assert_eq!(android, SttBackend::AndroidNative);
     }
 
     #[test]
@@ -325,6 +356,12 @@ mod tests {
             serde_json::to_string(&TtsBackend::MacosNative).unwrap(),
             "\"macos-native\""
         );
+        assert_eq!(
+            serde_json::to_string(&TtsBackend::AndroidNative).unwrap(),
+            "\"android-native\""
+        );
+        let android: TtsBackend = serde_json::from_str("\"android-native\"").unwrap();
+        assert_eq!(android, TtsBackend::AndroidNative);
     }
 
     #[test]

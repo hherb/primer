@@ -59,7 +59,13 @@ pub mod cpal_io;
 #[cfg(feature = "cpal")]
 pub use cpal_io::{MicCapture, Resampler, SpeakerSink, push_all_with_bail, wait_for_drain};
 
-#[cfg(feature = "voice-loop")]
+// `android-native` also needs the voice loop (the shared state machine,
+// `LoopBackends`, `ChannelStt`, and the cpal-free
+// `backends_android_native` builder), but it must NOT pull cpal. The
+// module's cpal-dependent submodules (`backends_common`, `backends`, the
+// macOS builders) are individually cpal-gated, so the parent gate widening
+// to `android-native` only switches on the cpal-free parts.
+#[cfg(any(feature = "voice-loop", feature = "android-native"))]
 pub mod voice_loop;
 
 #[cfg(all(
