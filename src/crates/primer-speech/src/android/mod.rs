@@ -32,3 +32,20 @@ pub fn query_capabilities() -> Result<SpeechCapabilities> {
         "android speech capabilities are only available on android targets".into(),
     ))
 }
+
+/// Construct the real JNI speech bridge as a trait object the GUI voice
+/// command wires into [`crate::voice_loop::backends_android_native`]. On
+/// Android this is the live `JniSpeechBridge`; on every other target it is a
+/// platform stub (mirrors [`query_capabilities`]) so `--features
+/// android-native` still builds host-side / for non-android targets.
+#[cfg(target_os = "android")]
+pub fn new_jni_bridge() -> Result<std::sync::Arc<dyn bridge::AndroidSpeechBridge>> {
+    Ok(std::sync::Arc::new(jni_bridge::JniSpeechBridge::new()?))
+}
+
+#[cfg(not(target_os = "android"))]
+pub fn new_jni_bridge() -> Result<std::sync::Arc<dyn bridge::AndroidSpeechBridge>> {
+    Err(primer_core::error::PrimerError::Speech(
+        "android speech bridge is only available on android targets".into(),
+    ))
+}
