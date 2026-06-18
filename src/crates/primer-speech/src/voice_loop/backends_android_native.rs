@@ -73,18 +73,32 @@ pub fn build_android_voice_backends(
         }
     });
 
+    // The TTS owns the shared "Primer is speaking" flag; the recognizer
+    // consumer watches it to pause listening during SPEAK (no barge-in /
+    // no TTS self-capture; re-arms fresh when speech ends — closes the
+    // device-found clipping + stuck-recognizer issues, 2026-06-19).
+    let tts = AndroidTts::new(Arc::clone(&bridge));
+    let speaking = tts.speaking_flag();
+
     // Recognizer consumer task.
     let bridge_consumer = Arc::clone(&bridge);
     tokio::spawn(async move {
-        if let Err(e) =
-            run_recognizer_loop(bridge_consumer, bcp47, event_tx_std, transcript_tx, stop_rx).await
+        if let Err(e) = run_recognizer_loop(
+            bridge_consumer,
+            bcp47,
+            event_tx_std,
+            transcript_tx,
+            stop_rx,
+            speaking,
+        )
+        .await
         {
             tracing::warn!(target: "primer::speech::android", "recognizer loop ended: {e}");
         }
     });
 
     let stt = Arc::new(ChannelStt::from_receiver(transcript_rx));
-    let tts = Arc::new(AndroidTts::new(bridge));
+    let tts = Arc::new(tts);
     let backends = LoopBackends::single_locale(stt, tts, voice, locale);
     backends.ensure_active_locale_coverage()?;
 

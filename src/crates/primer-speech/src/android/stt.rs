@@ -8,6 +8,7 @@
 //! `AndroidStt` type is needed; the builder constructs `ChannelStt` directly.
 
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 
 use primer_core::error::Result;
 use primer_core::speech::VadEvent;
@@ -15,6 +16,30 @@ use primer_core::speech::VadEvent;
 use crate::android::bridge::AndroidSpeechBridge;
 use crate::android::events::SpeechEvent;
 use crate::android::vad::AndroidDerivedVad;
+
+/// What the consumer should do this iteration given whether the Primer is
+/// speaking and whether the recognizer is currently armed. Pure so the
+/// pause-during-SPEAK policy is host-testable.
+#[derive(Debug, PartialEq, Eq)]
+pub enum ArmAction {
+    /// Not speaking and not armed → start listening.
+    Arm,
+    /// Speaking and armed → stop listening (don't transcribe the Primer's
+    /// own TTS; no barge-in).
+    Disarm,
+    /// Already in the desired state → do nothing.
+    Hold,
+}
+
+/// Decide the arm transition. The recognizer should listen exactly when the
+/// Primer is NOT speaking.
+pub fn arm_action(speaking: bool, armed: bool) -> ArmAction {
+    match (speaking, armed) {
+        (false, false) => ArmAction::Arm,
+        (true, true) => ArmAction::Disarm,
+        _ => ArmAction::Hold,
+    }
+}
 
 /// One recognizer event → (VadEvent edges, final transcript). Pure: takes
 /// the channels by ref so it is host-testable without tokio. The final
@@ -85,15 +110,36 @@ pub async fn run_recognizer_loop(
     event_tx: std::sync::mpsc::Sender<VadEvent>,
     transcript_tx: std::sync::mpsc::Sender<String>,
     mut stop: tokio::sync::oneshot::Receiver<()>,
+    speaking: Arc<AtomicBool>,
 ) -> Result<()> {
     use primer_core::consts::speech::android::POLL_TIMEOUT;
     let timeout_ms = POLL_TIMEOUT.as_millis() as u32;
     let mut vad = AndroidDerivedVad::new();
-    bridge.start_listening(&bcp47)?;
+    let mut armed = false;
     loop {
         if stop.try_recv().is_ok() {
             let _ = bridge.stop_listening();
             return Ok(());
+        }
+        // Pause listening while the Primer speaks (no barge-in / no TTS
+        // self-capture); re-arm fresh the moment it stops (less clipping).
+        match arm_action(speaking.load(Ordering::SeqCst), armed) {
+            ArmAction::Arm => {
+                vad.reset();
+                bridge.start_listening(&bcp47)?;
+                armed = true;
+            }
+            ArmAction::Disarm => {
+                let _ = bridge.stop_listening();
+                vad.reset();
+                armed = false;
+            }
+            ArmAction::Hold => {}
+        }
+        if !armed {
+            // Not listening (Primer speaking) — idle until it stops.
+            tokio::time::sleep(POLL_TIMEOUT).await;
+            continue;
         }
         // poll_event blocks up to timeout_ms inside Kotlin; wrap in
         // spawn_blocking so the tokio worker is not held for the wait.
@@ -118,10 +164,16 @@ pub async fn run_recognizer_loop(
         process_event(&event, &mut vad, &event_tx, &transcript_tx);
         if rearm {
             vad.reset();
+            armed = false;
             if needs_backoff {
                 tokio::time::sleep(primer_core::consts::speech::android::REARM_BACKOFF).await;
             }
-            bridge.start_listening(&bcp47)?;
+            // Only re-arm immediately if the Primer isn't speaking; otherwise
+            // the top-of-loop `arm_action` re-arms once SPEAK ends.
+            if !speaking.load(Ordering::SeqCst) {
+                bridge.start_listening(&bcp47)?;
+                armed = true;
+            }
         }
     }
 }
@@ -196,6 +248,17 @@ mod tests {
         assert!(should_rearm(&SpeechEvent::SttError {
             code: ERROR_RECOGNIZER_BUSY
         }));
+    }
+
+    #[test]
+    fn arm_action_listens_only_when_not_speaking() {
+        // Primer silent + not yet listening → arm.
+        assert_eq!(arm_action(false, false), ArmAction::Arm);
+        // Primer speaking + still armed → disarm (no barge-in / TTS capture).
+        assert_eq!(arm_action(true, true), ArmAction::Disarm);
+        // Already in the desired state → hold.
+        assert_eq!(arm_action(false, true), ArmAction::Hold);
+        assert_eq!(arm_action(true, false), ArmAction::Hold);
     }
 
     #[test]
