@@ -10,8 +10,10 @@
 //! never a panic — the whole point of moving off `ndk_context`.
 //!
 //! [`VmCache`] is generic purely so its set-once / unset-is-an-error
-//! semantics are host-testable without a real `JavaVM`; the only
-//! production instantiation is `VmCache<jni::JavaVM>` (android-only).
+//! semantics are host-testable without a real `JavaVM`; the production
+//! instantiations are `VmCache<jni::JavaVM>` and `VmCache<GlobalRef>`
+//! (the cached `PrimerSpeech` class — see [`imp::primer_speech_class`];
+//! both android-only).
 
 use std::sync::OnceLock;
 
@@ -65,9 +67,24 @@ impl<T> VmCache<T> {
 mod imp {
     use super::VmCache;
     use jni::JavaVM;
+    use jni::objects::GlobalRef;
     use primer_core::error::Result;
 
     static JAVA_VM: VmCache<JavaVM> = VmCache::new();
+
+    /// Cached `org.theprimer.gui.PrimerSpeech` class, held as a process-wide
+    /// `GlobalRef` so JNI bridge calls running on native attached threads can
+    /// resolve it WITHOUT `JNIEnv::find_class`.
+    ///
+    /// `find_class` on a thread attached from native code uses the system /
+    /// bootstrap classloader, which cannot see app classes — on-device this
+    /// throws `ClassNotFoundException: "org.theprimer.gui.PrimerSpeech"`
+    /// (Plan 1 risk #2, confirmed via the 2026-06-19 dropbox tombstone). The
+    /// fix is to resolve the class once, on a real Java thread that has the
+    /// app classloader: the `nativeInit` JNI export receives the
+    /// `PrimerSpeech` class itself as its `jclass` argument (it is a static
+    /// method on that class) and caches a `GlobalRef` to it here.
+    static PRIMER_SPEECH_CLASS: VmCache<GlobalRef> = VmCache::new();
 
     /// Cache the process `JavaVM`. Called once from the `nativeInit` JNI
     /// export. A redundant second call is benign and logged.
@@ -84,10 +101,28 @@ mod imp {
     pub fn java_vm() -> Result<&'static JavaVM> {
         JAVA_VM.get()
     }
+
+    /// Cache the `PrimerSpeech` class `GlobalRef`. Called once from
+    /// `nativeInit` with a global ref derived from the `jclass` JNI argument.
+    /// A redundant second call is benign and logged.
+    pub fn set_primer_speech_class(class: GlobalRef) {
+        if PRIMER_SPEECH_CLASS.set(class).is_err() {
+            tracing::warn!(
+                target: "primer::speech::android",
+                "nativeInit called more than once; keeping the first PrimerSpeech class ref"
+            );
+        }
+    }
+
+    /// Borrow the cached `PrimerSpeech` class `GlobalRef`, or error if
+    /// `nativeInit` has not run.
+    pub fn primer_speech_class() -> Result<&'static GlobalRef> {
+        PRIMER_SPEECH_CLASS.get()
+    }
 }
 
 #[cfg(target_os = "android")]
-pub use imp::{java_vm, set_java_vm};
+pub use imp::{java_vm, primer_speech_class, set_java_vm, set_primer_speech_class};
 
 #[cfg(test)]
 mod tests {
