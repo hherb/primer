@@ -11,6 +11,11 @@ import java.util.concurrent.TimeUnit
 
 /** Looper-bound Android speech work, called from Rust over JNI. */
 object PrimerSpeech {
+    // How long queryCapabilities waits for the async TextToSpeech engine init
+    // before giving up and returning whatever voices it has (empty on timeout).
+    // A diagnostic-only bound; the real voice loop (Plan 2) does not block.
+    private const val TTS_INIT_TIMEOUT_SECONDS = 5L
+
     // Cached by init() so JNI calls on attached threads can resolve a real
     // Context (the system classloader on an attached thread cannot see app
     // classes — the canonical JNI-on-Android gotcha; the cached app Context
@@ -55,7 +60,7 @@ object PrimerSpeech {
             }
             latch.countDown()
         }
-        latch.await(5, TimeUnit.SECONDS)
+        latch.await(TTS_INIT_TIMEOUT_SECONDS, TimeUnit.SECONDS)
         tts?.shutdown()
         obj.put("tts_voices", voicesJson)
         return obj.toString()

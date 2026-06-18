@@ -77,6 +77,9 @@ NDK_HOME=/opt/homebrew/share/android-ndk ANDROID_HOME=~/Library/Android/sdk \
 ## Note on gate scaffolding
 
 The file-mirror diagnostic (`PrimerSpeech.kt` file write, `MainActivity` direct probe,
-`speech_diag.rs` round-trip recorder, the `app.js` probe) is **temporary `[GATE-SCAFFOLD]`
-code**, to be reverted before the branch merges — Plan 1's permanent surface is the
-`speech_capabilities` Tauri command (a real Settings→Diagnostics trigger lands in Plan 2).
+`speech_diag.rs` round-trip recorder, the `app.js` probe) was **temporary `[GATE-SCAFFOLD]`
+code** used only to capture the on-device result above. **It has been reverted — it is NOT
+in the merged branch.** Plan 1's permanent surface is the `speech_capabilities` Tauri command
+(a real Settings→Diagnostics trigger lands in Plan 2). Note that command is **registered but
+not yet functional on-device**: it panics in `JniSpeechBridge::new()` on `ndk_context`
+(see "Open item carried to Plan 2" above); the Plan 2 `nativeInit` fix makes it live.
