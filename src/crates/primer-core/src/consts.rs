@@ -372,6 +372,26 @@ pub mod speech {
         /// keeps the worst-case detection latency under 2× this value.
         pub const EVENT_POLL_INTERVAL: Duration = Duration::from_millis(100);
     }
+
+    /// Android on-device `SpeechRecognizer` derived-VAD tunables. The
+    /// recognizer endpoints itself (`onEndOfSpeech`), so unlike macos26 we do
+    /// not need an inactivity timer in the common case — but we keep a guard
+    /// path for engines that emit `onResults` without a preceding
+    /// `onEndOfSpeech`.
+    pub mod android {
+        use std::time::Duration;
+
+        /// Minimum trimmed characters in a partial/final transcript to treat
+        /// as speech onset (mirrors macos26's `SPEECH_START_MIN_TEXT_CHARS`
+        /// so empty/whitespace partials don't fire SpeechStart).
+        pub const SPEECH_START_MIN_TEXT_CHARS: usize = 1;
+
+        /// How long the recognizer consumer waits per `poll_event` call
+        /// before looping. Short enough that a `stop`/`cancel` signal is
+        /// observed promptly; long enough that the per-poll JNI round-trip
+        /// overhead is amortised. Mirrors macos26's `EVENT_POLL_INTERVAL`.
+        pub const POLL_TIMEOUT: Duration = Duration::from_millis(100);
+    }
 }
 
 /// Defaults shared across the CLI, GUI, and frontend for the learner

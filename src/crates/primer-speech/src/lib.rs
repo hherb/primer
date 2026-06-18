@@ -59,7 +59,13 @@ pub mod cpal_io;
 #[cfg(feature = "cpal")]
 pub use cpal_io::{MicCapture, Resampler, SpeakerSink, push_all_with_bail, wait_for_drain};
 
-#[cfg(feature = "voice-loop")]
+// `android-native` also needs the voice loop (the shared state machine,
+// `LoopBackends`, `ChannelStt`, and the cpal-free
+// `backends_android_native` builder), but it must NOT pull cpal. The
+// module's cpal-dependent submodules (`backends_common`, `backends`, the
+// macOS builders) are individually cpal-gated, so the parent gate widening
+// to `android-native` only switches on the cpal-free parts.
+#[cfg(any(feature = "voice-loop", feature = "android-native"))]
 pub mod voice_loop;
 
 #[cfg(all(
@@ -98,7 +104,7 @@ pub mod android;
 #[unsafe(no_mangle)]
 pub extern "system" fn Java_org_theprimer_gui_PrimerSpeech_nativeInit(
     env: jni::JNIEnv,
-    _class: jni::objects::JClass,
+    class: jni::objects::JClass,
 ) {
     match env.get_java_vm() {
         Ok(vm) => {
@@ -109,6 +115,28 @@ pub extern "system" fn Java_org_theprimer_gui_PrimerSpeech_nativeInit(
             tracing::error!(
                 target: "primer::speech::android",
                 "nativeInit: get_java_vm failed: {e}"
+            );
+        }
+    }
+    // Cache the PrimerSpeech class itself (the `class` JNI argument is
+    // `org.theprimer.gui.PrimerSpeech`, since nativeInit is a static method
+    // on it). nativeInit runs on a real Java thread with the app
+    // classloader, so the global ref captured here lets later JNI bridge
+    // calls on native attached threads skip `find_class` — which would
+    // otherwise use the system classloader and throw ClassNotFoundException
+    // (Plan 1 risk #2, confirmed on-device 2026-06-19).
+    match env.new_global_ref(&class) {
+        Ok(global) => {
+            crate::android::vm::set_primer_speech_class(global);
+            tracing::info!(
+                target: "primer::speech::android",
+                "nativeInit: PrimerSpeech class cached"
+            );
+        }
+        Err(e) => {
+            tracing::error!(
+                target: "primer::speech::android",
+                "nativeInit: new_global_ref(class) failed: {e}"
             );
         }
     }
