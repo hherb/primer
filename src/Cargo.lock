@@ -3730,6 +3730,8 @@ dependencies = [
  "cpal",
  "dispatch2",
  "hound",
+ "jni",
+ "ndk-context",
  "objc2",
  "objc2-avf-audio",
  "objc2-foundation",

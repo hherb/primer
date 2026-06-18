@@ -78,6 +78,12 @@ dispatch2 = { workspace = true, optional = true }
 # async extern "Swift" method bridges.
 swift-bridge = { version = "0.1", features = ["async"], optional = true }
 
+# Android JNI + NDK context — opt-in via `android-native`. `jni` exposes safe
+# Rust wrappers for the JNI C API; `ndk-context` resolves the active JavaVM /
+# Activity so JNI calls can be made without a caller-supplied raw pointer.
+jni = { workspace = true, optional = true }
+ndk-context = { workspace = true, optional = true }
+
 [build-dependencies]
 swift-bridge-build = { version = "0.1", optional = true }
 
@@ -131,6 +137,11 @@ macos-native-26 = [
     "dep:block2",
     "dep:dispatch2",
 ]
+# Android-native speech (SpeechRecognizer + TextToSpeech via a Kotlin
+# helper called over JNI). Mutually exclusive with the macOS-native
+# features. The pure logic compiles on every host; only the JNI bridge is
+# target_os="android"-gated, so host CI tests the decision logic.
+android-native = ["dep:jni", "dep:ndk-context", "dep:serde_json"]
 
 [[example]]
 name = "tts_hello"
