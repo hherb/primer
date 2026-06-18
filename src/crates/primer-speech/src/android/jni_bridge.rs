@@ -9,7 +9,7 @@ use jni::objects::JString;
 use primer_core::error::{PrimerError, Result};
 
 pub struct JniSpeechBridge {
-    vm: JavaVM,
+    vm: &'static JavaVM,
 }
 
 fn jerr(e: impl std::fmt::Display) -> PrimerError {
@@ -21,12 +21,11 @@ impl JniSpeechBridge {
         // The JavaVM is cached by the `nativeInit` JNI export
         // (MainActivity.onCreate → PrimerSpeech.nativeInit). We no longer
         // touch ndk_context — it is not populated for our call path under
-        // the Tauri-mobile runtime (Plan 1 gate finding, 2026-06-18).
-        let cached = crate::android::vm::java_vm()?;
-        // SAFETY: the cached JavaVM lives for the process lifetime. We copy
-        // its underlying *mut JavaVM into a fresh handle so this struct owns
-        // an independent JavaVM (jni::JavaVM is a thin pointer wrapper).
-        let vm = unsafe { JavaVM::from_raw(cached.get_java_vm_pointer()) }.map_err(jerr)?;
+        // the Tauri-mobile runtime (Plan 1 gate finding, 2026-06-18). The
+        // cache hands back a `&'static JavaVM` (it lives for the process
+        // lifetime), so the bridge borrows it directly — no raw-pointer
+        // re-wrap, no unsafe. `attach_current_thread` only needs `&self`.
+        let vm = crate::android::vm::java_vm()?;
         Ok(Self { vm })
     }
 }
