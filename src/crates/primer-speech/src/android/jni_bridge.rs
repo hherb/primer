@@ -4,8 +4,8 @@
 
 use crate::android::bridge::AndroidSpeechBridge;
 use crate::android::capabilities::SpeechCapabilities;
-use jni::objects::JString;
 use jni::JavaVM;
+use jni::objects::JString;
 use primer_core::error::{PrimerError, Result};
 
 pub struct JniSpeechBridge {
@@ -38,12 +38,7 @@ impl AndroidSpeechBridge for JniSpeechBridge {
             .map_err(jerr)?;
         // call_static_method returns JValueOwned; .l() extracts the JObject.
         let obj = env
-            .call_static_method(
-                &class,
-                "queryCapabilities",
-                "()Ljava/lang/String;",
-                &[],
-            )
+            .call_static_method(&class, "queryCapabilities", "()Ljava/lang/String;", &[])
             .map_err(jerr)?
             .l()
             .map_err(jerr)?;
