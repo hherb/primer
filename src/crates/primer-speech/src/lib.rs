@@ -12,6 +12,15 @@ compile_error!(
      (`macos-native-26` for macOS 26+, `macos-native` for older macOS)"
 );
 
+#[cfg(all(
+    feature = "android-native",
+    any(feature = "macos-native", feature = "macos-native-26")
+))]
+compile_error!(
+    "android-native is mutually exclusive with macos-native / macos-native-26; \
+     pick one via --features"
+);
+
 pub mod locale_defaults;
 pub mod phrase_split;
 pub mod stub;
@@ -70,3 +79,6 @@ pub mod macos;
 // load-bearing one and must reflect actual build support.
 #[cfg(all(target_os = "macos", feature = "macos-native-26"))]
 pub mod macos26;
+
+#[cfg(feature = "android-native")]
+pub mod android;
