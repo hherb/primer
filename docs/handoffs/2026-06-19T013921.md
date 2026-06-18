@@ -30,6 +30,18 @@ All on branch `android-voice-loop-plan2-tasks2-9` (PR #251, open):
 ### Carried / owner-or-hardware-gated (unchanged)
 - Pedagogy/answer-quality tuning on the 4B NPU model (owner-in-the-loop — the standing top open question); on-device #224 length-recovery spot-check; latency-routing calibration (`--primary-ttft-budget-ms` around the measured p95 ≈ 2.6 s); #223 GENIE enum; #170 Supertonic Stages E/F; #201 llamacpp BOS; #192/#166 human-at-mic smokes; #157 Termux ONNX validation; #135 glib bump on Tauri 3.
 
+## On-device probe this session — Task 1 re-proven; classloader fallback is the next blocker
+
+Built the `main` debug APK (`--no-default-features --features android-native`), installed on the RedMagic (912607710061), launched, and probed:
+
+- **✅ `nativeInit` links + runs.** The `Java_org_theprimer_gui_PrimerSpeech_nativeInit` symbol is present and exported in the packaged `lib/arm64-v8a/libprimer_gui.so` (`llvm-nm -D`), and the app launches without an `UnsatisfiedLinkError` (it would have crashed in `onCreate` otherwise). The #1 carried device unknown ("symbol resolution / load order") is **cleared**.
+- **✅ Task 1's JavaVM cache works.** A `query_capabilities` invocation got **past** `java_vm()` (no "android speech not initialised" error) and `attach_current_thread` all the way to `find_class` — exactly the call path `ndk_context` failed. The cached-VM fix is proven on-device.
+- **⚠️ Next blocker surfaced: Plan 1 risk #2 (the `find_class` classloader problem).** The dropbox native-crash tombstone (2026-06-19 01:53) shows `java.lang.ClassNotFoundException: "org.theprimer.gui.PrimerSpeech"` with a **system/bootstrap classloader** path (`DexPathList[[directory "."],nativeLibraryDirectories=[/system/lib64,…]]`) — the signature of JNI `find_class` on a native attached thread, which can't see app classes. (The accompanying `hwuiTask0` SIGABRT "destroyed mutex" is collateral teardown after the Java exception.) **Fix is known and documented** (Task 7 Step 2 note): resolve the class via the cached app `Context.getClassLoader().loadClass("org.theprimer.gui.PrimerSpeech")` instead of `env.find_class(...)`. This unblocks `query_capabilities` AND every Task 7 JNI bridge method.
+
+**Device-debug recipe that worked (logcat is dead on this ROM):** symbol check `unzip APK lib/arm64-v8a/*.so` + `llvm-nm -D`; crash inspection `adb shell dumpsys dropbox --print` (look for `data_app_native_crash` / `data_app_crash`); WebView CDP is **origin-locked** (Chromium rejects external `Origin`; `--remote-allow-origins` unreachable on the embedded webview) so don't rely on it — read crashes via dropbox and app files via `run-as org.theprimer.gui cat files/...`.
+
+**Immediate next step:** implement the classloader fallback in `jni_bridge.rs` (a `find_class`-then-`Context.getClassLoader().loadClass` two-step, mirroring the Task 7 Step 2 note), confirm `query_capabilities` returns real JSON, then proceed into Tasks 7/8/10. This is small and is the true completion of Task 1's acceptance ("`speech_capabilities` returns JSON instead of failing").
+
 ## Open decisions / risks
 
 - **The `voice_loop` gate widening (`84ce51d`) is the one non-obvious design call.** Before it, `--features android-native` compiled `primer-speech` *without* `voice_loop`, so `build_android_voice_backends` and the shared `run_loop` the GUI android command (Task 8) will drive were silently absent. The fix is correct and the cpal submodules stay gated — but anyone touching `voice_loop`'s feature gates must keep both `voice-loop` and `android-native` compiling. The GUI guard (`primer-gui --features android-native`, aarch64) now exercises this.
