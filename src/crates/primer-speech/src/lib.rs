@@ -82,3 +82,34 @@ pub mod macos26;
 
 #[cfg(feature = "android-native")]
 pub mod android;
+
+/// JNI entry point cached at app startup. Kotlin declares this as
+/// `external fun nativeInit()` on `PrimerSpeech` and calls it from
+/// `MainActivity.onCreate`. We capture the `JavaVM` from the provided
+/// `JNIEnv` and stash it for every later JNI bridge to reuse — the fix for
+/// Plan 1's `ndk_context` blocker (the Tauri-mobile runtime does not
+/// populate `ndk_context` for our call path).
+///
+/// The symbol name MUST be `Java_<pkg>_<Class>_nativeInit` with `.`/`/`
+/// replaced by `_`; here `org.theprimer.gui.PrimerSpeech` produces the
+/// name below. A mismatch is an `UnsatisfiedLinkError` at the Kotlin call
+/// site. Device-verified (Plan 2 Task 10).
+#[cfg(all(target_os = "android", feature = "android-native"))]
+#[unsafe(no_mangle)]
+pub extern "system" fn Java_org_theprimer_gui_PrimerSpeech_nativeInit(
+    env: jni::JNIEnv,
+    _class: jni::objects::JClass,
+) {
+    match env.get_java_vm() {
+        Ok(vm) => {
+            crate::android::vm::set_java_vm(vm);
+            tracing::info!(target: "primer::speech::android", "nativeInit: JavaVM cached");
+        }
+        Err(e) => {
+            tracing::error!(
+                target: "primer::speech::android",
+                "nativeInit: get_java_vm failed: {e}"
+            );
+        }
+    }
+}

@@ -25,6 +25,14 @@ object PrimerSpeech {
     @JvmStatic
     fun init(ctx: Context) { appContext = ctx.applicationContext }
 
+    /**
+     * Implemented in Rust (primer-speech, android-native) as
+     * `Java_org_theprimer_gui_PrimerSpeech_nativeInit`. Caches the JavaVM
+     * so the JNI speech bridge can resolve it without `ndk_context`. Called
+     * once from `MainActivity.onCreate` after the Rust library has loaded.
+     */
+    @JvmStatic external fun nativeInit()
+
     /** Returns the SpeechCapabilities JSON the Rust side parses with serde. */
     @JvmStatic
     fun queryCapabilities(): String {

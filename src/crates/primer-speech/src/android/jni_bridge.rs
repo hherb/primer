@@ -18,14 +18,15 @@ fn jerr(e: impl std::fmt::Display) -> PrimerError {
 
 impl JniSpeechBridge {
     pub fn new() -> Result<Self> {
-        // ndk_context is populated by the Tauri-mobile runtime. If the
-        // on-device gate shows it is NOT, the documented fallback is a
-        // `nativeInit` JNI export caching the JavaVM — see the plan's Risks.
-        let ctx = ndk_context::android_context();
-        // SAFETY: ndk_context guarantees the pointer is a valid *mut JavaVM
-        // for the lifetime of the Android process. We wrap it immediately and
-        // never store the raw pointer.
-        let vm = unsafe { JavaVM::from_raw(ctx.vm().cast()) }.map_err(jerr)?;
+        // The JavaVM is cached by the `nativeInit` JNI export
+        // (MainActivity.onCreate → PrimerSpeech.nativeInit). We no longer
+        // touch ndk_context — it is not populated for our call path under
+        // the Tauri-mobile runtime (Plan 1 gate finding, 2026-06-18).
+        let cached = crate::android::vm::java_vm()?;
+        // SAFETY: the cached JavaVM lives for the process lifetime. We copy
+        // its underlying *mut JavaVM into a fresh handle so this struct owns
+        // an independent JavaVM (jni::JavaVM is a thin pointer wrapper).
+        let vm = unsafe { JavaVM::from_raw(cached.get_java_vm_pointer()) }.map_err(jerr)?;
         Ok(Self { vm })
     }
 }

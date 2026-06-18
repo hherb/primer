@@ -119,14 +119,13 @@ minijinja = "2"
 # `=2.0.0-rc.10` ort pin.
 llama-cpp-2 = "0.1.146"
 
-# Android JNI + NDK context — pulled only by primer-speech's `android-native`
-# feature. `jni` provides safe Rust wrappers around the JNI C API so the
-# Kotlin helper can be called from Rust without raw FFI; `ndk-context` resolves
-# the current JavaVM / Activity from within a running Android app (Tauri-Android
-# or a standalone Activity) so `jni::JavaVM::from_raw()` doesn't need a
-# caller-supplied pointer.
+# Android JNI — pulled only by primer-speech's `android-native` feature.
+# `jni` provides safe Rust wrappers around the JNI C API so the Kotlin
+# helper can be called from Rust without raw FFI. The active JavaVM is
+# cached by the `nativeInit` JNI export (see `primer_speech::android::vm`)
+# rather than resolved from `ndk-context`, which the Tauri-mobile runtime
+# does not populate for our call path (Plan 1 gate finding, 2026-06-18).
 jni = "0.21"
-ndk-context = "0.1"
 
 # Workspace crates
 primer-core = { path = "crates/primer-core" }
