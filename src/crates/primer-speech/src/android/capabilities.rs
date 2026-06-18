@@ -114,4 +114,12 @@ mod tests {
         let voices = vec![v("net", "en-US", true, false)];
         assert!(select_offline_voice(&voices, "en-US").is_none());
     }
+
+    #[test]
+    fn prefix_fallback_rejects_network_voice() {
+        // The only prefix-matching voice is network-required → None, never a
+        // network voice (the offline-first invariant holds in the fallback arm).
+        let voices = vec![v("net-gb", "en-GB", true, false)];
+        assert!(select_offline_voice(&voices, "en").is_none());
+    }
 }
