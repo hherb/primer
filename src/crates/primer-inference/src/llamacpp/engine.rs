@@ -233,12 +233,14 @@ mod real {
                 .str_to_token(rendered, add_bos)
                 .map_err(|e| PrimerError::Inference(format!("tokenize: {e}").into()))?;
 
-            // `AddBos::Always` normally guarantees at least the BOS token, so
-            // `tokens` is non-empty in practice. Guard explicitly anyway: an
+            // `tokens` is non-empty in practice: a non-trivial rendered prompt
+            // tokenizes to at least one token, and the `AddBos::Always` branch
+            // additionally guarantees a leading BOS. Guard explicitly anyway —
+            // since the per-model decision above can now pick `AddBos::Never`
+            // (issue #201), the no-BOS path is more reachable than before. An
             // empty `tokens` would make `tokens.len() - 1` below underflow
             // (panic in debug, wrap to usize::MAX in release → no token ever
-            // carries logits → garbage sampling). A model with no BOS token
-            // fed an empty `rendered` is the only way to reach this.
+            // carries logits → garbage sampling); reject it cleanly instead.
             if tokens.is_empty() {
                 return Err(PrimerError::Inference(
                     "tokenization produced no tokens (empty prompt and model has no BOS)".into(),
