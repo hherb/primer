@@ -8,6 +8,7 @@
 //! `AndroidStt` type is needed; the builder constructs `ChannelStt` directly.
 
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 
 use primer_core::error::Result;
 use primer_core::speech::VadEvent;
@@ -15,6 +16,30 @@ use primer_core::speech::VadEvent;
 use crate::android::bridge::AndroidSpeechBridge;
 use crate::android::events::SpeechEvent;
 use crate::android::vad::AndroidDerivedVad;
+
+/// What the consumer should do this iteration given whether the Primer is
+/// speaking and whether the recognizer is currently armed. Pure so the
+/// pause-during-SPEAK policy is host-testable.
+#[derive(Debug, PartialEq, Eq)]
+pub enum ArmAction {
+    /// Not speaking and not armed → start listening.
+    Arm,
+    /// Speaking and armed → stop listening (don't transcribe the Primer's
+    /// own TTS; no barge-in).
+    Disarm,
+    /// Already in the desired state → do nothing.
+    Hold,
+}
+
+/// Decide the arm transition. The recognizer should listen exactly when the
+/// Primer is NOT speaking.
+pub fn arm_action(speaking: bool, armed: bool) -> ArmAction {
+    match (speaking, armed) {
+        (false, false) => ArmAction::Arm,
+        (true, true) => ArmAction::Disarm,
+        _ => ArmAction::Hold,
+    }
+}
 
 /// One recognizer event → (VadEvent edges, final transcript). Pure: takes
 /// the channels by ref so it is host-testable without tokio. The final
@@ -43,25 +68,78 @@ pub fn process_event(
     }
 }
 
+/// Whether a recognizer event should trigger a re-arm (`start_listening`
+/// again). The on-device `SpeechRecognizer` is one-shot per arm, so the
+/// loop must re-arm after EVERY terminal outcome to keep listening:
+///
+/// - `Final` / `EndOfSpeech` — the utterance completed; re-arm for the next.
+/// - `SttError` with a RECOVERABLE code (`ERROR_NO_MATCH` /
+///   `ERROR_SPEECH_TIMEOUT` / `ERROR_RECOGNIZER_BUSY`) — the recognizer
+///   heard nothing this window and stopped; re-arm so the child can still
+///   speak. **Without this the loop dies on the first pre-speech timeout**
+///   (the recognizer fires `ERROR_SPEECH_TIMEOUT` within seconds of arming
+///   if no speech starts), which is exactly the "doesn't activate on my
+///   voice" failure mode (device-found 2026-06-19).
+/// - Any other `SttError` (permissions, language unavailable, client,
+///   server) is terminal — re-arming would spin or never succeed.
+/// - `Partial` — mid-utterance; never re-arm.
+pub fn should_rearm(event: &SpeechEvent) -> bool {
+    use primer_core::consts::speech::android::{
+        ERROR_NO_MATCH, ERROR_RECOGNIZER_BUSY, ERROR_SPEECH_TIMEOUT,
+    };
+    match event {
+        SpeechEvent::Final { .. } | SpeechEvent::EndOfSpeech => true,
+        SpeechEvent::SttError { code } => {
+            matches!(
+                *code,
+                ERROR_NO_MATCH | ERROR_SPEECH_TIMEOUT | ERROR_RECOGNIZER_BUSY
+            )
+        }
+        _ => false,
+    }
+}
+
 /// Poll the bridge for recognizer events, driving the derived VAD and
 /// forwarding edges + transcripts, until `stop` fires or the bridge errors.
-/// Re-arms `start_listening` after each utterance (the recognizer is
-/// one-shot per `startListening`).
+/// Re-arms `start_listening` after each terminal event ([`should_rearm`] —
+/// the recognizer is one-shot per `startListening`), including after a
+/// recoverable no-match/timeout so the loop keeps listening.
 pub async fn run_recognizer_loop(
     bridge: Arc<dyn AndroidSpeechBridge>,
     bcp47: String,
     event_tx: std::sync::mpsc::Sender<VadEvent>,
     transcript_tx: std::sync::mpsc::Sender<String>,
     mut stop: tokio::sync::oneshot::Receiver<()>,
+    speaking: Arc<AtomicBool>,
 ) -> Result<()> {
     use primer_core::consts::speech::android::POLL_TIMEOUT;
     let timeout_ms = POLL_TIMEOUT.as_millis() as u32;
     let mut vad = AndroidDerivedVad::new();
-    bridge.start_listening(&bcp47)?;
+    let mut armed = false;
     loop {
         if stop.try_recv().is_ok() {
             let _ = bridge.stop_listening();
             return Ok(());
+        }
+        // Pause listening while the Primer speaks (no barge-in / no TTS
+        // self-capture); re-arm fresh the moment it stops (less clipping).
+        match arm_action(speaking.load(Ordering::SeqCst), armed) {
+            ArmAction::Arm => {
+                vad.reset();
+                bridge.start_listening(&bcp47)?;
+                armed = true;
+            }
+            ArmAction::Disarm => {
+                let _ = bridge.stop_listening();
+                vad.reset();
+                armed = false;
+            }
+            ArmAction::Hold => {}
+        }
+        if !armed {
+            // Not listening (Primer speaking) — idle until it stops.
+            tokio::time::sleep(POLL_TIMEOUT).await;
+            continue;
         }
         // poll_event blocks up to timeout_ms inside Kotlin; wrap in
         // spawn_blocking so the tokio worker is not held for the wait.
@@ -70,12 +148,38 @@ pub async fn run_recognizer_loop(
             .await
             .map_err(|e| primer_core::error::PrimerError::Speech(format!("poll join: {e}")))??;
         let Some(event) = polled else { continue };
-        let was_end = matches!(event, SpeechEvent::EndOfSpeech | SpeechEvent::Final { .. });
+        let rearm = should_rearm(&event);
+        // Only ERROR_RECOGNIZER_BUSY needs a backoff before re-arming (it can
+        // fire immediately and tight-spin). NO_MATCH / SPEECH_TIMEOUT fire only
+        // after a multi-second audio window, so they re-arm immediately —
+        // minimising the dead window in which the child's first word would be
+        // clipped on a follow-up turn (device-found 2026-06-19: leading 1-2
+        // words cut after the first prompt; this shrinks the re-arm gap).
+        let needs_backoff = matches!(
+            event,
+            SpeechEvent::SttError {
+                code: primer_core::consts::speech::android::ERROR_RECOGNIZER_BUSY
+            }
+        );
         process_event(&event, &mut vad, &event_tx, &transcript_tx);
-        if was_end {
-            // Re-arm for the next utterance (one-shot recognizer).
+        if rearm {
+            // Two arm sites coexist by design: the top-of-loop `arm_action`
+            // (which re-arms a poll-timeout later) and this inline re-arm. The
+            // inline path exists ONLY to shrink the clip window — it re-arms
+            // immediately (after the backoff) rather than waiting for the next
+            // loop iteration. Setting `armed = true` here makes the next
+            // `arm_action` a no-op (`Hold`), so the recognizer is never armed
+            // twice. If the Primer is speaking we skip the inline arm and let
+            // the top-of-loop `arm_action` re-arm once SPEAK ends.
             vad.reset();
-            bridge.start_listening(&bcp47)?;
+            armed = false;
+            if needs_backoff {
+                tokio::time::sleep(primer_core::consts::speech::android::REARM_BACKOFF).await;
+            }
+            if !speaking.load(Ordering::SeqCst) {
+                bridge.start_listening(&bcp47)?;
+                armed = true;
+            }
         }
     }
 }
@@ -128,6 +232,50 @@ mod tests {
         );
         assert!(txt_rx.try_recv().is_err());
         assert!(event_rx.try_recv().is_err());
+    }
+
+    #[test]
+    fn rearm_on_terminal_events_and_recoverable_errors() {
+        use primer_core::consts::speech::android::{
+            ERROR_NO_MATCH, ERROR_RECOGNIZER_BUSY, ERROR_SPEECH_TIMEOUT,
+        };
+        // Terminal utterance events re-arm.
+        assert!(should_rearm(&SpeechEvent::Final { text: "hi".into() }));
+        assert!(should_rearm(&SpeechEvent::EndOfSpeech));
+        // Recoverable errors re-arm so the loop keeps listening (the
+        // device-found "doesn't activate" fix — a pre-speech timeout must
+        // not kill the loop).
+        assert!(should_rearm(&SpeechEvent::SttError {
+            code: ERROR_SPEECH_TIMEOUT
+        }));
+        assert!(should_rearm(&SpeechEvent::SttError {
+            code: ERROR_NO_MATCH
+        }));
+        assert!(should_rearm(&SpeechEvent::SttError {
+            code: ERROR_RECOGNIZER_BUSY
+        }));
+    }
+
+    #[test]
+    fn arm_action_listens_only_when_not_speaking() {
+        // Primer silent + not yet listening → arm.
+        assert_eq!(arm_action(false, false), ArmAction::Arm);
+        // Primer speaking + still armed → disarm (no barge-in / TTS capture).
+        assert_eq!(arm_action(true, true), ArmAction::Disarm);
+        // Already in the desired state → hold.
+        assert_eq!(arm_action(false, true), ArmAction::Hold);
+        assert_eq!(arm_action(true, false), ArmAction::Hold);
+    }
+
+    #[test]
+    fn no_rearm_on_partial_or_fatal_errors() {
+        // Mid-utterance partials never re-arm.
+        assert!(!should_rearm(&SpeechEvent::Partial { text: "ho".into() }));
+        // Fatal errors (permissions=9, language unavailable=12, client=5)
+        // are terminal — re-arming would spin or never succeed.
+        assert!(!should_rearm(&SpeechEvent::SttError { code: 9 }));
+        assert!(!should_rearm(&SpeechEvent::SttError { code: 12 }));
+        assert!(!should_rearm(&SpeechEvent::SttError { code: 5 }));
     }
 
     #[test]

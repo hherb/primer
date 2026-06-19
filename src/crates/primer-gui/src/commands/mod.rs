@@ -10,6 +10,8 @@ pub mod settings;
 #[cfg(feature = "android-native")]
 pub mod speech_diag;
 pub mod voice;
+#[cfg(feature = "android-native")]
+pub mod voice_android;
 
 use tauri::Wry;
 
@@ -42,7 +44,14 @@ pub fn register(builder: tauri::Builder<Wry>) -> tauri::Builder<Wry> {
         voice::voice_mode_available,
         voice::macos_native_speech_available,
         voice::supertonic_tts_available,
+        voice::android_voice_available,
         #[cfg(feature = "android-native")]
         speech_diag::speech_capabilities,
+        #[cfg(feature = "android-native")]
+        voice_android::start_voice_mode_android,
+        #[cfg(feature = "android-native")]
+        voice_android::stop_voice_mode_android,
+        #[cfg(feature = "android-native")]
+        voice_android::cancel_voice_response_android,
     ])
 }

@@ -66,27 +66,70 @@ impl AndroidSpeechBridge for JniSpeechBridge {
         serde_json::from_str(&s).map_err(jerr)
     }
 
-    // ── Voice-loop methods — real JNI impls land in Plan 2 Task 7
-    // (device-only). Stubbed here so the trait is satisfied and the
-    // aarch64-linux-android cross-compile stays green between Task 2 and
-    // Task 7. Each returns a clear "not yet implemented" Speech error.
-    fn start_listening(&self, _bcp47: &str) -> Result<()> {
-        Err(jerr("start_listening not yet implemented (Plan 2 Task 7)"))
+    // ── Voice-loop methods (Plan 2 Task 7) ─────────────────────────────
+    // Each mirrors `query_capabilities`'s pattern: attach the current thread,
+    // materialise the cached `PrimerSpeech` class (NOT `find_class` — see
+    // `primer_speech_class`), then `call_static_method`. Device-verified
+    // (Task 10); only the cross-compile is checked here.
+    fn start_listening(&self, bcp47: &str) -> Result<()> {
+        let mut env = self.vm.attach_current_thread().map_err(jerr)?;
+        let class = primer_speech_class(&mut env)?;
+        let arg = env.new_string(bcp47).map_err(jerr)?;
+        env.call_static_method(
+            &class,
+            "startListening",
+            "(Ljava/lang/String;)V",
+            &[(&arg).into()],
+        )
+        .map_err(jerr)?;
+        Ok(())
     }
 
     fn stop_listening(&self) -> Result<()> {
-        Err(jerr("stop_listening not yet implemented (Plan 2 Task 7)"))
+        let mut env = self.vm.attach_current_thread().map_err(jerr)?;
+        let class = primer_speech_class(&mut env)?;
+        env.call_static_method(&class, "stopListening", "()V", &[])
+            .map_err(jerr)?;
+        Ok(())
     }
 
-    fn poll_event(&self, _timeout_ms: u32) -> Result<Option<SpeechEvent>> {
-        Err(jerr("poll_event not yet implemented (Plan 2 Task 7)"))
+    fn poll_event(&self, timeout_ms: u32) -> Result<Option<SpeechEvent>> {
+        let mut env = self.vm.attach_current_thread().map_err(jerr)?;
+        let class = primer_speech_class(&mut env)?;
+        // pollSpeechEvent(int) -> String; "" means "no event this poll".
+        let obj = env
+            .call_static_method(
+                &class,
+                "pollSpeechEvent",
+                "(I)Ljava/lang/String;",
+                &[(timeout_ms as i32).into()],
+            )
+            .map_err(jerr)?
+            .l()
+            .map_err(jerr)?;
+        let jstr = JString::from(obj);
+        let s: String = env.get_string(&jstr).map_err(jerr)?.into();
+        if s.is_empty() {
+            return Ok(None);
+        }
+        serde_json::from_str(&s).map(Some).map_err(jerr)
     }
 
-    fn speak(&self, _text: &str) -> Result<()> {
-        Err(jerr("speak not yet implemented (Plan 2 Task 7)"))
+    fn speak(&self, text: &str) -> Result<()> {
+        let mut env = self.vm.attach_current_thread().map_err(jerr)?;
+        let class = primer_speech_class(&mut env)?;
+        let arg = env.new_string(text).map_err(jerr)?;
+        // Blocks inside Kotlin until the engine reports done (D3).
+        env.call_static_method(&class, "speak", "(Ljava/lang/String;)V", &[(&arg).into()])
+            .map_err(jerr)?;
+        Ok(())
     }
 
     fn cancel_speech(&self) -> Result<()> {
-        Err(jerr("cancel_speech not yet implemented (Plan 2 Task 7)"))
+        let mut env = self.vm.attach_current_thread().map_err(jerr)?;
+        let class = primer_speech_class(&mut env)?;
+        env.call_static_method(&class, "cancelSpeech", "()V", &[])
+            .map_err(jerr)?;
+        Ok(())
     }
 }
