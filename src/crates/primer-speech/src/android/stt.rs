@@ -163,13 +163,19 @@ pub async fn run_recognizer_loop(
         );
         process_event(&event, &mut vad, &event_tx, &transcript_tx);
         if rearm {
+            // Two arm sites coexist by design: the top-of-loop `arm_action`
+            // (which re-arms a poll-timeout later) and this inline re-arm. The
+            // inline path exists ONLY to shrink the clip window — it re-arms
+            // immediately (after the backoff) rather than waiting for the next
+            // loop iteration. Setting `armed = true` here makes the next
+            // `arm_action` a no-op (`Hold`), so the recognizer is never armed
+            // twice. If the Primer is speaking we skip the inline arm and let
+            // the top-of-loop `arm_action` re-arm once SPEAK ends.
             vad.reset();
             armed = false;
             if needs_backoff {
                 tokio::time::sleep(primer_core::consts::speech::android::REARM_BACKOFF).await;
             }
-            // Only re-arm immediately if the Primer isn't speaking; otherwise
-            // the top-of-loop `arm_action` re-arms once SPEAK ends.
             if !speaking.load(Ordering::SeqCst) {
                 bridge.start_listening(&bcp47)?;
                 armed = true;

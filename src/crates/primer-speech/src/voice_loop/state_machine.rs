@@ -880,6 +880,15 @@ async fn run_loop_inner<'r, O: LoopObserver>(
             //   would free one worker but the multi-thread runtime has
             //   several so this isn't a regression to leave it.
             //
+            // * **Android-native (`android-native`, Tauri GUI)**:
+            //   `AndroidTtsSession::push_text` blocks in JNI until the OS
+            //   `TextToSpeech` engine reports `onDone` (bounded by the Kotlin
+            //   `TTS_SPEAK_TIMEOUT`). No main-thread requirement — only the
+            //   recognizer methods post to the main Looper; `tts.speak` runs
+            //   on the calling thread. So this is the Piper case: one
+            //   multi-thread-tokio worker is blocked for the synth, the
+            //   others keep running. Worker-block accepted as a known cost.
+            //
             // What would have to change for the wrap to matter:
             // - A non-Apple multi-tenant runtime where the synth worker-block
             //   starves dense background tasks during SPEAK.

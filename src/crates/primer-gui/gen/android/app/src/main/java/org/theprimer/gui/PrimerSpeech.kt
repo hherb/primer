@@ -149,6 +149,13 @@ object PrimerSpeech {
     @Volatile private var requestedTag: String? = null
     @Volatile private var effectiveTag: String? = null
 
+    // The BCP-47 the Rust loop requested for THIS session, used to set the TTS
+    // voice language so the Primer answers in the learner's language rather
+    // than the device default (device-default would speak a German learner's
+    // reply in English on an en-default phone). Set on every startListening
+    // (the loop always arms with the learner locale before it speaks).
+    @Volatile private var ttsLocaleTag: String? = null
+
     /**
      * Arm the on-device recognizer for one utterance in `bcp47`. The
      * recognizer is one-shot per startListening; the Rust consumer re-arms
@@ -166,12 +173,19 @@ object PrimerSpeech {
         if (Build.VERSION.SDK_INT < Build.VERSION_CODES.S ||
             !SpeechRecognizer.isOnDeviceRecognitionAvailable(ctx)) {
             // No offline recognizer — never fall back to the network factory
-            // ([[project_strict_offline_first]]). Surface as an STT error.
+            // ([[project_strict_offline_first]]). Surface as a TERMINAL STT
+            // error: this is a permanent device condition, not a transient
+            // one, so it must NOT use a recoverable code (ERROR_RECOGNIZER_BUSY
+            // etc.) — the Rust consumer's `should_rearm` would otherwise re-arm
+            // into the same failed check and tight-spin forever. ERROR_CLIENT
+            // is classified terminal, so the loop ends cleanly.
             dbg("startListening: on-device recognizer unavailable")
-            enqueueSttError(SpeechRecognizer.ERROR_RECOGNIZER_BUSY)
+            enqueueSttError(SpeechRecognizer.ERROR_CLIENT)
             return
         }
         dbg("startListening($bcp47)")
+        // Record the learner locale so speak() can match the TTS voice to it.
+        ttsLocaleTag = bcp47
         runOnMainBlocking {
             if (recognizer == null) {
                 recognizer = SpeechRecognizer.createOnDeviceSpeechRecognizer(ctx).apply {
@@ -288,6 +302,12 @@ object PrimerSpeech {
         val ctx = appContext ?: return
         ensureTts(ctx)
         if (!ttsReady) { enqueueTtsError("tts engine not ready"); return }
+        // Match the voice to the learner locale (set by startListening). Idempotent
+        // and cheap; best-effort — if the language pack is unavailable the engine
+        // keeps its current voice rather than failing the turn.
+        ttsLocaleTag?.let { tag ->
+            runCatching { tts?.language = Locale.forLanguageTag(tag) }
+        }
         val latch = CountDownLatch(1)
         speakLatch = latch
         val params = Bundle()
@@ -301,7 +321,9 @@ object PrimerSpeech {
         speakLatch = null
     }
 
-    /** Abort any in-progress speech (GUI Stop / Esc). */
+    /** Abort any in-progress speech (GUI Stop / Esc). `TextToSpeech.stop()` is
+     *  documented thread-safe, so unlike the recognizer methods this needs no
+     *  main-Looper post. */
     @JvmStatic
     fun cancelSpeech() {
         tts?.stop()
@@ -401,8 +423,11 @@ object PrimerSpeech {
         })
         tts = engine
         initLatch.await(TTS_INIT_TIMEOUT_SECONDS, TimeUnit.SECONDS)
-        // Best-effort: match the engine's default voice to the app locale.
-        runCatching { engine.language = Locale.getDefault() }
+        // Initial fallback voice: the requested learner locale if known, else
+        // the device default. speak() re-applies the learner locale per turn.
+        val initialTag = ttsLocaleTag
+        val initialLocale = if (initialTag != null) Locale.forLanguageTag(initialTag) else Locale.getDefault()
+        runCatching { engine.language = initialLocale }
     }
 
     /** Post `block` to the main Looper and block the calling (JNI) thread
