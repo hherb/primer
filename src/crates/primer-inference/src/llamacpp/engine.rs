@@ -57,8 +57,12 @@ mod real {
     use tokio::sync::Mutex;
 
     use crate::llamacpp::params::{
-        resolve_n_ctx, sampler_spec, validate_gguf_path, visible_prefix_before_stop,
+        parse_add_bos_metadata, resolve_n_ctx, sampler_spec, should_prepend_bos,
+        validate_gguf_path, visible_prefix_before_stop,
     };
+
+    /// GGUF metadata key carrying the tokenizer's `add_bos_token` flag.
+    const ADD_BOS_TOKEN_META_KEY: &str = "tokenizer.ggml.add_bos_token";
 
     /// Global llama.cpp backend handle. `LlamaBackend::init()` may be called
     /// only once per process; this lazily initialises it.
@@ -92,6 +96,14 @@ mod real {
         model: std::sync::Arc<LlamaModel>,
         template: LlamaChatTemplate,
         n_ctx: u32,
+        // Model-constant BOS inputs to `should_prepend_bos`, resolved once at
+        // load (issue #201). `bos_piece` is the BOS token's text form (e.g.
+        // `<bos>`, `<|begin_of_text|>`) used to detect a template that already
+        // embeds a literal BOS; `None` when the model has no/empty BOS piece.
+        // `meta_add_bos` is the parsed `tokenizer.ggml.add_bos_token` metadata;
+        // `None` when absent or unparseable.
+        bos_piece: Option<String>,
+        meta_add_bos: Option<bool>,
         // llama.cpp forbids concurrent decode; serialise callers.
         ctx_guard: Mutex<()>,
     }
@@ -126,11 +138,27 @@ mod real {
                 .map(|s| s.to_string_lossy().into_owned())
                 .unwrap_or_else(|| "llamacpp-model".to_string());
 
+            // Resolve the BOS inputs once. `token_to_piece` with `special=true`
+            // renders the BOS token to its text form; an empty/errored piece
+            // (a model with no BOS) collapses to `None` so the literal-BOS
+            // guard never matches the start of every prompt.
+            let mut bos_decoder = encoding_rs::UTF_8.new_decoder();
+            let bos_piece = model
+                .token_to_piece(model.token_bos(), &mut bos_decoder, true, None)
+                .ok()
+                .filter(|s| !s.is_empty());
+            let meta_add_bos = model
+                .meta_val_str(ADD_BOS_TOKEN_META_KEY)
+                .ok()
+                .and_then(|raw| parse_add_bos_metadata(&raw));
+
             Ok(Self {
                 model_id,
                 model: std::sync::Arc::new(model),
                 template,
                 n_ctx: resolve_n_ctx(n_ctx_override),
+                bos_piece,
+                meta_add_bos,
                 ctx_guard: Mutex::new(()),
             })
         }
@@ -184,22 +212,35 @@ mod real {
                 .new_context(backend, LlamaContextParams::default().with_n_ctx(n_ctx))
                 .map_err(|e| PrimerError::Inference(format!("context: {e}").into()))?;
 
-            // `apply_chat_template` returns plain text WITHOUT the literal BOS
-            // token, so we add it once here via `AddBos::Always`. Templates
-            // that embed a literal `<bos>` — e.g. some Gemma variants — would
-            // double-encode it; empirical cross-model verification is tracked
-            // in issue #201 (run the owner-gated smoke against Gemma + Qwen3).
+            // `apply_chat_template` returns plain text WITHOUT a prepended BOS
+            // token id, but `str_to_token` parses special tokens in its input,
+            // so a template that embeds a *literal* BOS marker (Gemma's
+            // `<bos>`, Llama 3's `<|begin_of_text|>`) already yields one BOS.
+            // Adding another via `AddBos::Always` produces a quality-degrading
+            // double-BOS (issue #201). `should_prepend_bos` combines the
+            // literal-BOS-in-template check with the model's `add_bos_token`
+            // metadata; the common chat models (no literal BOS, no metadata)
+            // keep the historical add-once behaviour. Empirical cross-model
+            // confirmation stays owner-gated (the llamacpp real-model smoke).
+            let add_bos =
+                if should_prepend_bos(rendered, self.bos_piece.as_deref(), self.meta_add_bos) {
+                    AddBos::Always
+                } else {
+                    AddBos::Never
+                };
             let tokens = self
                 .model
-                .str_to_token(rendered, AddBos::Always)
+                .str_to_token(rendered, add_bos)
                 .map_err(|e| PrimerError::Inference(format!("tokenize: {e}").into()))?;
 
-            // `AddBos::Always` normally guarantees at least the BOS token, so
-            // `tokens` is non-empty in practice. Guard explicitly anyway: an
+            // `tokens` is non-empty in practice: a non-trivial rendered prompt
+            // tokenizes to at least one token, and the `AddBos::Always` branch
+            // additionally guarantees a leading BOS. Guard explicitly anyway —
+            // since the per-model decision above can now pick `AddBos::Never`
+            // (issue #201), the no-BOS path is more reachable than before. An
             // empty `tokens` would make `tokens.len() - 1` below underflow
             // (panic in debug, wrap to usize::MAX in release → no token ever
-            // carries logits → garbage sampling). A model with no BOS token
-            // fed an empty `rendered` is the only way to reach this.
+            // carries logits → garbage sampling); reject it cleanly instead.
             if tokens.is_empty() {
                 return Err(PrimerError::Inference(
                     "tokenization produced no tokens (empty prompt and model has no BOS)".into(),
