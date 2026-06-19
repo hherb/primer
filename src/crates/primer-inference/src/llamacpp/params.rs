@@ -107,6 +107,53 @@ pub fn visible_prefix_before_stop<'a>(
     None
 }
 
+/// Parse the `tokenizer.ggml.add_bos_token` GGUF metadata value to a bool.
+///
+/// GGUF boolean metadata surfaces through llama.cpp's `meta_val_str` as a
+/// string — conventionally `"true"`/`"false"`, but some converters emit
+/// `"1"`/`"0"`. Matching is case-insensitive and whitespace-trimmed. Any
+/// other value returns `None` so the caller falls back to its own default
+/// rather than guessing.
+pub fn parse_add_bos_metadata(raw: &str) -> Option<bool> {
+    match raw.trim().to_ascii_lowercase().as_str() {
+        "true" | "1" => Some(true),
+        "false" | "0" => Some(false),
+        _ => None,
+    }
+}
+
+/// Decide whether to prepend the model's BOS token when tokenizing a
+/// chat-template-rendered prompt.
+///
+/// `str_to_token` parses special tokens in its input (llama.cpp's
+/// `parse_special` is on), so a chat template that embeds a *literal* BOS
+/// marker — e.g. Gemma's `<bos>` or Llama 3's `<|begin_of_text|>` — already
+/// yields a BOS token. Adding another via `AddBos::Always` produces a
+/// quality-degrading double-BOS (issue #201).
+///
+/// Decision, in priority order:
+/// 1. If `bos_piece` is a non-empty string and `rendered` already begins with
+///    it, the template embeds the literal BOS — never add another (`false`).
+/// 2. Otherwise honour the model's `add_bos_token` metadata when present.
+/// 3. When metadata is absent (`None`), default to `true` — the historical
+///    `AddBos::Always` behaviour, correct for the common chat models
+///    (Qwen / Llama 2 / Mistral) whose templates do not embed a literal BOS.
+pub fn should_prepend_bos(
+    rendered: &str,
+    bos_piece: Option<&str>,
+    meta_add_bos_token: Option<bool>,
+) -> bool {
+    // 1. Literal-BOS-in-template guard (Gemma / Llama 3 style).
+    if let Some(bos) = bos_piece {
+        if !bos.is_empty() && rendered.starts_with(bos) {
+            return false;
+        }
+    }
+    // 2 + 3. Honour metadata when present; default to the historical
+    // "always add" behaviour otherwise.
+    meta_add_bos_token.unwrap_or(true)
+}
+
 /// Validate that `path` points to an existing GGUF file. Dev-facing error.
 pub fn validate_gguf_path(path: &Path) -> Result<(), InferenceError> {
     if !path.is_file() {
@@ -187,6 +234,66 @@ mod tests {
             visible_prefix_before_stop("x", "anything", &["".to_string()]),
             None
         );
+    }
+
+    #[test]
+    fn parse_add_bos_metadata_recognises_true_false_and_numeric() {
+        assert_eq!(parse_add_bos_metadata("true"), Some(true));
+        assert_eq!(parse_add_bos_metadata("false"), Some(false));
+        assert_eq!(parse_add_bos_metadata("1"), Some(true));
+        assert_eq!(parse_add_bos_metadata("0"), Some(false));
+    }
+
+    #[test]
+    fn parse_add_bos_metadata_is_case_insensitive_and_trims() {
+        assert_eq!(parse_add_bos_metadata(" TRUE "), Some(true));
+        assert_eq!(parse_add_bos_metadata("False"), Some(false));
+    }
+
+    #[test]
+    fn parse_add_bos_metadata_returns_none_for_unrecognised() {
+        assert_eq!(parse_add_bos_metadata("yes"), None);
+        assert_eq!(parse_add_bos_metadata(""), None);
+        assert_eq!(parse_add_bos_metadata("2"), None);
+    }
+
+    #[test]
+    fn should_prepend_bos_skips_when_template_embeds_literal_bos() {
+        // Gemma-style: rendered already starts with the literal BOS marker.
+        // The guard wins even when metadata says add_bos_token = true.
+        assert!(!should_prepend_bos(
+            "<bos><start_of_turn>user\nhi",
+            Some("<bos>"),
+            Some(true),
+        ));
+        // Llama 3-style literal BOS marker, no metadata.
+        assert!(!should_prepend_bos(
+            "<|begin_of_text|>system\n",
+            Some("<|begin_of_text|>"),
+            None,
+        ));
+    }
+
+    #[test]
+    fn should_prepend_bos_honours_metadata_when_no_literal_bos() {
+        // Template does NOT embed the literal BOS → respect metadata.
+        assert!(should_prepend_bos("User: hi", Some("<s>"), Some(true)));
+        assert!(!should_prepend_bos("User: hi", Some("<s>"), Some(false)));
+    }
+
+    #[test]
+    fn should_prepend_bos_defaults_to_true_when_metadata_absent() {
+        // Historical AddBos::Always behaviour for common chat models.
+        assert!(should_prepend_bos("User: hi", Some("<s>"), None));
+        assert!(should_prepend_bos("User: hi", None, None));
+    }
+
+    #[test]
+    fn should_prepend_bos_ignores_empty_bos_piece() {
+        // An empty/invalid BOS piece (e.g. a model with no BOS token) must
+        // not match the start of every string; fall through to metadata.
+        assert!(should_prepend_bos("anything", Some(""), None));
+        assert!(!should_prepend_bos("anything", Some(""), Some(false)));
     }
 
     #[test]
