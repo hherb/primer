@@ -77,7 +77,9 @@ object PrimerSpeech {
     // timed poll() pollSpeechEvent needs.
     private val eventQueue = LinkedBlockingQueue<String>()
 
-    // Persistent recognizer + synthesizer, created lazily on the main Looper.
+    // The recognizer is recreated on EVERY arm (see startListening) to dodge
+    // the on-device SpeechRecognizer reuse wedge; the synthesizer is persistent,
+    // created lazily on the main Looper. Both live on the main Looper.
     @Volatile private var recognizer: SpeechRecognizer? = null
     @Volatile private var tts: TextToSpeech? = null
     @Volatile private var ttsReady = false
@@ -187,12 +189,25 @@ object PrimerSpeech {
         // Record the learner locale so speak() can match the TTS voice to it.
         ttsLocaleTag = bcp47
         runOnMainBlocking {
-            if (recognizer == null) {
-                recognizer = SpeechRecognizer.createOnDeviceSpeechRecognizer(ctx).apply {
-                    setRecognitionListener(listener)
-                }
-                dbg("recognizer created")
+            // Recreate the recognizer on EVERY arm (destroy + fresh create)
+            // rather than reusing one persistent instance. Device-found
+            // 2026-06-19 on the RedMagic 11 Pro: Android's on-device
+            // SpeechRecognizer degrades/wedges after sustained startListening
+            // reuse and on a mid-session connectivity (airplane) toggle — it
+            // reports onReadyForSpeech but then emits no onPartialResults/
+            // onResults and no timeout (onError ERROR_CLIENT recurs). A fresh
+            // createOnDeviceSpeechRecognizer always recovers it. We trade the
+            // ~500ms per-arm create cost for reliability; the resolved
+            // effectiveTag is still cached below so checkRecognitionSupport is
+            // not re-run on the new instance. destroy() unbinds the recognizer
+            // service, halting its callback source, so the shared `listener`
+            // cannot receive a late event from the outgoing instance after the
+            // new arm — no stale stt_error/partial can leak across the swap.
+            recognizer?.destroy()
+            recognizer = SpeechRecognizer.createOnDeviceSpeechRecognizer(ctx).apply {
+                setRecognitionListener(listener)
             }
+            dbg("recognizer (re)created")
             val cached = if (bcp47 == requestedTag) effectiveTag else null
             if (cached != null) {
                 arm(cached)
@@ -273,10 +288,17 @@ object PrimerSpeech {
     private fun sameLanguage(a: String, b: String): Boolean =
         a.substringBefore('-').equals(b.substringBefore('-'), ignoreCase = true)
 
-    /** Stop / cancel the recognizer (no terminal event is enqueued). */
+    /** Stop / cancel the recognizer and release it (no terminal event is
+     *  enqueued). We `destroy()` rather than merely `cancel()` so the final
+     *  recognizer of a session is freed instead of leaking — the recreate-per-arm
+     *  contract means the next [startListening] builds a fresh instance anyway,
+     *  and nulling the field here is harmless (its `destroy()` no-ops on null). */
     @JvmStatic
     fun stopListening() {
-        runOnMainBlocking { recognizer?.cancel() }
+        runOnMainBlocking {
+            recognizer?.destroy()
+            recognizer = null
+        }
     }
 
     /**
