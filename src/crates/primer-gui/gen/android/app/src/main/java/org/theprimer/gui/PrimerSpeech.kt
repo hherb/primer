@@ -199,7 +199,10 @@ object PrimerSpeech {
             // createOnDeviceSpeechRecognizer always recovers it. We trade the
             // ~500ms per-arm create cost for reliability; the resolved
             // effectiveTag is still cached below so checkRecognitionSupport is
-            // not re-run on the new instance.
+            // not re-run on the new instance. destroy() unbinds the recognizer
+            // service, halting its callback source, so the shared `listener`
+            // cannot receive a late event from the outgoing instance after the
+            // new arm — no stale stt_error/partial can leak across the swap.
             recognizer?.destroy()
             recognizer = SpeechRecognizer.createOnDeviceSpeechRecognizer(ctx).apply {
                 setRecognitionListener(listener)
@@ -285,10 +288,17 @@ object PrimerSpeech {
     private fun sameLanguage(a: String, b: String): Boolean =
         a.substringBefore('-').equals(b.substringBefore('-'), ignoreCase = true)
 
-    /** Stop / cancel the recognizer (no terminal event is enqueued). */
+    /** Stop / cancel the recognizer and release it (no terminal event is
+     *  enqueued). We `destroy()` rather than merely `cancel()` so the final
+     *  recognizer of a session is freed instead of leaking — the recreate-per-arm
+     *  contract means the next [startListening] builds a fresh instance anyway,
+     *  and nulling the field here is harmless (its `destroy()` no-ops on null). */
     @JvmStatic
     fun stopListening() {
-        runOnMainBlocking { recognizer?.cancel() }
+        runOnMainBlocking {
+            recognizer?.destroy()
+            recognizer = null
+        }
     }
 
     /**
