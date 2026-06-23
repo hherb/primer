@@ -141,17 +141,27 @@ pub fn parse_add_bos_metadata(raw: &str) -> Option<bool> {
 pub fn should_prepend_bos(
     rendered: &str,
     bos_piece: Option<&str>,
-    meta_add_bos_token: Option<bool>,
+    meta_add_bos: Option<bool>,
 ) -> bool {
     // 1. Literal-BOS-in-template guard (Gemma / Llama 3 style).
-    if let Some(bos) = bos_piece {
-        if !bos.is_empty() && rendered.starts_with(bos) {
-            return false;
-        }
+    if template_embeds_bos(rendered, bos_piece) {
+        return false;
     }
     // 2 + 3. Honour metadata when present; default to the historical
     // "always add" behaviour otherwise.
-    meta_add_bos_token.unwrap_or(true)
+    meta_add_bos.unwrap_or(true)
+}
+
+/// Whether `rendered` already begins with the model's literal BOS piece — the
+/// leg that makes the Gemma / Llama-3 family skip the extra BOS. A `None` or
+/// empty `bos_piece` never matches.
+///
+/// Single source of truth for the template-detection predicate: both
+/// [`should_prepend_bos`] (the production decision) and [`bos_decision`] (the
+/// diagnostic projection) call this, so the recorded `template_embeds_bos`
+/// flag can never drift from the leg that actually drives the outcome.
+pub fn template_embeds_bos(rendered: &str, bos_piece: Option<&str>) -> bool {
+    bos_piece.is_some_and(|b| !b.is_empty() && rendered.starts_with(b))
 }
 
 /// Diagnostic snapshot of the BOS-prepend decision for one rendered prompt
@@ -189,13 +199,10 @@ pub fn bos_decision(
     bos_piece: Option<&str>,
     meta_add_bos: Option<bool>,
 ) -> BosDecision {
-    let template_embeds_bos = bos_piece
-        .map(|b| !b.is_empty() && rendered.starts_with(b))
-        .unwrap_or(false);
     BosDecision {
         bos_piece: bos_piece.map(str::to_string),
         meta_add_bos,
-        template_embeds_bos,
+        template_embeds_bos: template_embeds_bos(rendered, bos_piece),
         prepend_bos: should_prepend_bos(rendered, bos_piece, meta_add_bos),
     }
 }
@@ -340,6 +347,14 @@ mod tests {
         // not match the start of every string; fall through to metadata.
         assert!(should_prepend_bos("anything", Some(""), None));
         assert!(!should_prepend_bos("anything", Some(""), Some(false)));
+    }
+
+    #[test]
+    fn template_embeds_bos_matches_only_a_nonempty_leading_piece() {
+        assert!(template_embeds_bos("<bos>hi", Some("<bos>")));
+        assert!(!template_embeds_bos("hi<bos>", Some("<bos>"))); // not leading
+        assert!(!template_embeds_bos("anything", Some(""))); // empty piece
+        assert!(!template_embeds_bos("anything", None)); // no piece
     }
 
     #[test]
