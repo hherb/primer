@@ -141,17 +141,70 @@ pub fn parse_add_bos_metadata(raw: &str) -> Option<bool> {
 pub fn should_prepend_bos(
     rendered: &str,
     bos_piece: Option<&str>,
-    meta_add_bos_token: Option<bool>,
+    meta_add_bos: Option<bool>,
 ) -> bool {
     // 1. Literal-BOS-in-template guard (Gemma / Llama 3 style).
-    if let Some(bos) = bos_piece {
-        if !bos.is_empty() && rendered.starts_with(bos) {
-            return false;
-        }
+    if template_embeds_bos(rendered, bos_piece) {
+        return false;
     }
     // 2 + 3. Honour metadata when present; default to the historical
     // "always add" behaviour otherwise.
-    meta_add_bos_token.unwrap_or(true)
+    meta_add_bos.unwrap_or(true)
+}
+
+/// Whether `rendered` already begins with the model's literal BOS piece — the
+/// leg that makes the Gemma / Llama-3 family skip the extra BOS. A `None` or
+/// empty `bos_piece` never matches.
+///
+/// Single source of truth for the template-detection predicate: both
+/// [`should_prepend_bos`] (the production decision) and [`bos_decision`] (the
+/// diagnostic projection) call this, so the recorded `template_embeds_bos`
+/// flag can never drift from the leg that actually drives the outcome.
+pub fn template_embeds_bos(rendered: &str, bos_piece: Option<&str>) -> bool {
+    bos_piece.is_some_and(|b| !b.is_empty() && rendered.starts_with(b))
+}
+
+/// Diagnostic snapshot of the BOS-prepend decision for one rendered prompt
+/// (issue #201).
+///
+/// Built by `RealLlamaEngine::bos_decision` so the owner-gated real-model
+/// smoke can assert the per-model outcome — Gemma's template embeds a literal
+/// `<bos>` so we must NOT add another (`prepend_bos == false`); Qwen3 has no
+/// literal BOS so the historical add-once path holds (`prepend_bos == true`) —
+/// without reaching into raw token ids. Plain data so the shape is documented
+/// and host-tested next to [`should_prepend_bos`], the function whose decision
+/// it records.
+#[derive(Debug, Clone, PartialEq)]
+pub struct BosDecision {
+    /// The model's BOS token in text form (e.g. `<bos>`), or `None` when the
+    /// model has no/empty BOS piece.
+    pub bos_piece: Option<String>,
+    /// Parsed `tokenizer.ggml.add_bos_token` metadata, or `None` when the key
+    /// is absent or unparseable.
+    pub meta_add_bos: Option<bool>,
+    /// Whether `rendered` already begins with the literal `bos_piece` — the
+    /// leg that makes the Gemma / Llama-3 family skip the extra BOS.
+    pub template_embeds_bos: bool,
+    /// Final decision: `true` ⇒ tokenize with `AddBos::Always`, `false` ⇒
+    /// `AddBos::Never`. Equals [`should_prepend_bos`] over the same inputs.
+    pub prepend_bos: bool,
+}
+
+/// Build a [`BosDecision`] from the model-constant BOS inputs and a rendered
+/// prompt. Pure projection of [`should_prepend_bos`] plus the intermediate
+/// `template_embeds_bos` flag, surfaced so the real-model smoke can pinpoint
+/// *which* leg drove the outcome.
+pub fn bos_decision(
+    rendered: &str,
+    bos_piece: Option<&str>,
+    meta_add_bos: Option<bool>,
+) -> BosDecision {
+    BosDecision {
+        bos_piece: bos_piece.map(str::to_string),
+        meta_add_bos,
+        template_embeds_bos: template_embeds_bos(rendered, bos_piece),
+        prepend_bos: should_prepend_bos(rendered, bos_piece, meta_add_bos),
+    }
 }
 
 /// Validate that `path` points to an existing GGUF file. Dev-facing error.
@@ -294,6 +347,54 @@ mod tests {
         // not match the start of every string; fall through to metadata.
         assert!(should_prepend_bos("anything", Some(""), None));
         assert!(!should_prepend_bos("anything", Some(""), Some(false)));
+    }
+
+    #[test]
+    fn template_embeds_bos_matches_only_a_nonempty_leading_piece() {
+        assert!(template_embeds_bos("<bos>hi", Some("<bos>")));
+        assert!(!template_embeds_bos("hi<bos>", Some("<bos>"))); // not leading
+        assert!(!template_embeds_bos("anything", Some(""))); // empty piece
+        assert!(!template_embeds_bos("anything", None)); // no piece
+    }
+
+    #[test]
+    fn bos_decision_records_gemma_skip_via_template_leg() {
+        // Gemma-shaped: rendered starts with the literal BOS → skip the extra
+        // BOS even though metadata says add_bos_token = true.
+        let d = bos_decision("<bos><start_of_turn>user\nhi", Some("<bos>"), Some(true));
+        assert_eq!(d.bos_piece.as_deref(), Some("<bos>"));
+        assert_eq!(d.meta_add_bos, Some(true));
+        assert!(d.template_embeds_bos);
+        assert!(!d.prepend_bos);
+    }
+
+    #[test]
+    fn bos_decision_records_qwen_add_once_via_default_leg() {
+        // Qwen3-shaped: no literal BOS in the rendered prompt, no metadata →
+        // historical add-once path. The template leg did NOT drive it.
+        let d = bos_decision("<|im_start|>user\nhi", Some("<|endoftext|>"), None);
+        assert!(!d.template_embeds_bos);
+        assert!(d.prepend_bos);
+    }
+
+    #[test]
+    fn bos_decision_prepend_matches_should_prepend_bos() {
+        // The recorded decision is exactly should_prepend_bos over the same
+        // inputs, across the cross-product of the interesting cases.
+        let cases = [
+            ("<bos>x", Some("<bos>"), Some(true)),
+            ("User: hi", Some("<s>"), Some(false)),
+            ("User: hi", Some("<s>"), None),
+            ("anything", Some(""), None),
+            ("anything", None, Some(true)),
+        ];
+        for (rendered, bos, meta) in cases {
+            assert_eq!(
+                bos_decision(rendered, bos, meta).prepend_bos,
+                should_prepend_bos(rendered, bos, meta),
+                "mismatch for {rendered:?}/{bos:?}/{meta:?}"
+            );
+        }
     }
 
     #[test]

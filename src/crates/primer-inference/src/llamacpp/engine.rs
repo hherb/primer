@@ -57,8 +57,8 @@ mod real {
     use tokio::sync::Mutex;
 
     use crate::llamacpp::params::{
-        parse_add_bos_metadata, resolve_n_ctx, sampler_spec, should_prepend_bos,
-        validate_gguf_path, visible_prefix_before_stop,
+        BosDecision, bos_decision, parse_add_bos_metadata, resolve_n_ctx, sampler_spec,
+        should_prepend_bos, validate_gguf_path, visible_prefix_before_stop,
     };
 
     /// GGUF metadata key carrying the tokenizer's `add_bos_token` flag.
@@ -161,6 +161,16 @@ mod real {
                 meta_add_bos,
                 ctx_guard: Mutex::new(()),
             })
+        }
+
+        /// Diagnostic accessor (issue #201): report the per-model BOS-prepend
+        /// decision for `rendered` — the BOS inputs resolved at load plus the
+        /// resulting `should_prepend_bos` outcome. Used by the owner-gated
+        /// real-model smoke to confirm Gemma skips the extra BOS while Qwen3
+        /// keeps the historical add-once path, without inspecting token ids.
+        /// Pure: reads only model-constant state, runs no inference.
+        pub fn bos_decision(&self, rendered: &str) -> BosDecision {
+            bos_decision(rendered, self.bos_piece.as_deref(), self.meta_add_bos)
         }
     }
 
