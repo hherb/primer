@@ -68,6 +68,24 @@ pub fn process_event(
     }
 }
 
+/// Whether a silently-dead recognizer should be force-recreated. Even with
+/// recreate-per-arm, a fresh on-device recognizer can die with a terminal
+/// error (e.g. `ERROR_SERVER_DISCONNECTED`) and then emit NO further events,
+/// leaving the loop stuck in `armed=true` with a dead recognizer (device-found
+/// 2026-06-24, issue #259). When armed and not speaking, if no recognizer
+/// event has arrived within `timeout`, the loop drops the armed state so the
+/// top-of-loop [`arm_action`] recreates the recognizer. Returns false while
+/// speaking (the recognizer is intentionally disarmed during SPEAK) and when
+/// not armed (nothing to watch). Pure so the watchdog decision is host-tested.
+pub fn should_force_rearm(
+    armed: bool,
+    speaking: bool,
+    since_last_event: std::time::Duration,
+    timeout: std::time::Duration,
+) -> bool {
+    armed && !speaking && since_last_event >= timeout
+}
+
 /// Whether a recognizer event should trigger a re-arm (`start_listening`
 /// again). The on-device `SpeechRecognizer` is one-shot per arm, so the
 /// loop must re-arm after EVERY terminal outcome to keep listening:
@@ -112,10 +130,15 @@ pub async fn run_recognizer_loop(
     mut stop: tokio::sync::oneshot::Receiver<()>,
     speaking: Arc<AtomicBool>,
 ) -> Result<()> {
-    use primer_core::consts::speech::android::POLL_TIMEOUT;
+    use primer_core::consts::speech::android::{POLL_TIMEOUT, RECOGNIZER_WATCHDOG_TIMEOUT};
+    use std::time::Instant;
     let timeout_ms = POLL_TIMEOUT.as_millis() as u32;
     let mut vad = AndroidDerivedVad::new();
     let mut armed = false;
+    // Last time the recognizer produced any event. Drives the silent-dead
+    // recognizer watchdog (issue #259): a fresh recognizer can die with a
+    // terminal error and then emit nothing, wedging the armed loop.
+    let mut last_event_at = Instant::now();
     loop {
         if stop.try_recv().is_ok() {
             let _ = bridge.stop_listening();
@@ -128,6 +151,8 @@ pub async fn run_recognizer_loop(
                 vad.reset();
                 bridge.start_listening(&bcp47)?;
                 armed = true;
+                // Give the freshly armed recognizer a full watchdog window.
+                last_event_at = Instant::now();
             }
             ArmAction::Disarm => {
                 let _ = bridge.stop_listening();
@@ -147,7 +172,25 @@ pub async fn run_recognizer_loop(
         let polled = tokio::task::spawn_blocking(move || bridge_poll.poll_event(timeout_ms))
             .await
             .map_err(|e| primer_core::error::PrimerError::Speech(format!("poll join: {e}")))??;
-        let Some(event) = polled else { continue };
+        let Some(event) = polled else {
+            // No event this poll. If the recognizer has been silent past the
+            // watchdog window while armed (a fresh instance that died with a
+            // terminal error and emitted nothing — issue #259), drop the armed
+            // state so the next `arm_action` recreates it (recreate-per-arm
+            // handles cleanup of the dead instance).
+            if should_force_rearm(
+                armed,
+                speaking.load(Ordering::SeqCst),
+                last_event_at.elapsed(),
+                RECOGNIZER_WATCHDOG_TIMEOUT,
+            ) {
+                vad.reset();
+                armed = false;
+                last_event_at = Instant::now();
+            }
+            continue;
+        };
+        last_event_at = Instant::now();
         let rearm = should_rearm(&event);
         // Only ERROR_RECOGNIZER_BUSY needs a backoff before re-arming (it can
         // fire immediately and tight-spin). NO_MATCH / SPEECH_TIMEOUT fire only
@@ -179,6 +222,8 @@ pub async fn run_recognizer_loop(
             if !speaking.load(Ordering::SeqCst) {
                 bridge.start_listening(&bcp47)?;
                 armed = true;
+                // Fresh recognizer — restart the watchdog window.
+                last_event_at = Instant::now();
             }
         }
     }
@@ -254,6 +299,43 @@ mod tests {
         assert!(should_rearm(&SpeechEvent::SttError {
             code: ERROR_RECOGNIZER_BUSY
         }));
+    }
+
+    #[test]
+    fn force_rearm_only_when_armed_idle_and_past_timeout() {
+        use std::time::Duration;
+        let timeout = Duration::from_secs(12);
+        // Armed, not speaking, silent past the timeout → recreate (the #259
+        // silent-dead-recognizer recovery).
+        assert!(should_force_rearm(
+            true,
+            false,
+            Duration::from_secs(13),
+            timeout
+        ));
+        assert!(should_force_rearm(true, false, timeout, timeout)); // boundary: >=
+        // Still within the window (healthy idle recognizer fires NO_MATCH
+        // every ~5s, resetting the clock) → no recreate.
+        assert!(!should_force_rearm(
+            true,
+            false,
+            Duration::from_secs(5),
+            timeout
+        ));
+        // Not armed → nothing to watch.
+        assert!(!should_force_rearm(
+            false,
+            false,
+            Duration::from_secs(99),
+            timeout
+        ));
+        // Speaking → recognizer is intentionally disarmed during SPEAK.
+        assert!(!should_force_rearm(
+            true,
+            true,
+            Duration::from_secs(99),
+            timeout
+        ));
     }
 
     #[test]

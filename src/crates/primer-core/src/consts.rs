@@ -398,6 +398,19 @@ pub mod speech {
         /// pathological immediate-error engine can't tight-spin the CPU.
         pub const REARM_BACKOFF: Duration = Duration::from_millis(150);
 
+        /// Liveness watchdog for a silently-dead recognizer. Even with the
+        /// recreate-per-arm fix, a freshly created on-device recognizer can die
+        /// with a terminal error (e.g. `ERROR_SERVER_DISCONNECTED`) and then
+        /// emit NO further events, leaving the loop stuck in `armed=true` with a
+        /// dead recognizer (device-found 2026-06-24, RedMagic 11 Pro; issue
+        /// #259). If no recognizer event arrives within this window while armed
+        /// and not speaking, the loop drops the armed state so the recognizer is
+        /// recreated. Must be comfortably longer than the ~5 s NO_MATCH /
+        /// SPEECH_TIMEOUT cadence (a healthy idle recognizer fires one of those
+        /// every window, so it never trips the watchdog) yet short enough that a
+        /// dead mic recovers in seconds, not the ~3 min wedge observed on-device.
+        pub const RECOGNIZER_WATCHDOG_TIMEOUT: Duration = Duration::from_secs(12);
+
         /// `android.speech.SpeechRecognizer` `onError` codes the consumer
         /// treats as RECOVERABLE — the recognizer is one-shot and these are
         /// the expected "heard nothing this window" outcomes, so the loop
