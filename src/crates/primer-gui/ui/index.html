@@ -89,6 +89,21 @@
 
       <div class="error-banner" id="error-banner" hidden></div>
 
+      <!-- Mic-permission-denied banner (Android voice mode, issue #253). -->
+      <div
+        class="error-banner"
+        id="voice-permission-banner"
+        role="alert"
+        hidden
+      >
+        <span id="voice-permission-message"
+          >Microphone permission is needed for voice mode.</span
+        >
+        <button type="button" class="btn-secondary" id="voice-permission-settings">
+          Open settings
+        </button>
+      </div>
+
       <form class="composer" id="composer" autocomplete="off">
         <textarea
           id="input"

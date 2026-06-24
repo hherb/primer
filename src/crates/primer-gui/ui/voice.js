@@ -88,6 +88,7 @@
     }
     try {
       await invoke(vcmd("start_voice_mode"));
+      hidePermissionDenied();
       setActive(true);
     } catch (err) {
       if (err && err.kind === "asset_missing") {
@@ -99,6 +100,8 @@
             "Add the model paths in Settings → Speech, or re-enable " +
             "automatic download." + (names ? " Missing: " + names : ""),
         );
+      } else if (err && err.kind === "permission_denied") {
+        showPermissionDenied();
       } else if (err && err.kind === "not_built") {
         showError("Voice mode is not built into this binary.");
       } else {
@@ -270,6 +273,26 @@
     else console.error("[voice]", msg);
   }
 
+  // Show / hide the mic-permission-denied banner (Android voice mode,
+  // issue #253). The banner carries an "Open settings" button wired in
+  // `init` to the `open_app_settings` command.
+  function showPermissionDenied(msg) {
+    const banner = $("voice-permission-banner");
+    if (!banner) {
+      // Fallback for any host without the banner markup.
+      showError(msg || "Microphone permission is needed for voice mode.");
+      return;
+    }
+    const messageEl = $("voice-permission-message");
+    if (messageEl && msg) messageEl.textContent = msg;
+    banner.hidden = false;
+  }
+
+  function hidePermissionDenied() {
+    const banner = $("voice-permission-banner");
+    if (banner) banner.hidden = true;
+  }
+
   // Stop button + Esc both route to cancel_voice_response.
   async function onStop() {
     if (!state.active) return;
@@ -349,6 +372,7 @@
     state.starting = true;
     try {
       await invoke(vcmd("start_voice_mode"));
+      hidePermissionDenied();
       setActive(true);
     } catch (err) {
       if (err && err.kind === "asset_missing") {
@@ -361,6 +385,8 @@
             "re-enable automatic download." +
             (names ? " Missing: " + names : ""),
         );
+      } else if (err && err.kind === "permission_denied") {
+        showPermissionDenied();
       } else if (err && err.kind === "not_built") {
         // Silent — toggle is already disabled.
       } else {
@@ -420,6 +446,14 @@
     if (toggle) toggle.addEventListener("click", onToggleClick);
     const stopBtn = $("voice-stop");
     if (stopBtn) stopBtn.addEventListener("click", onStop);
+    const permSettingsBtn = $("voice-permission-settings");
+    if (permSettingsBtn) {
+      permSettingsBtn.addEventListener("click", () => {
+        invoke("open_app_settings").catch((e) =>
+          console.warn("[voice] open_app_settings:", e),
+        );
+      });
+    }
     document.addEventListener("keydown", onKeyDown);
     // Load locale copy first (fast, non-blocking), then subscribe events + restore.
     loadStateCopy().catch((e) => console.warn("voice loadStateCopy:", e));

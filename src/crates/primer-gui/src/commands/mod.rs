@@ -53,5 +53,7 @@ pub fn register(builder: tauri::Builder<Wry>) -> tauri::Builder<Wry> {
         voice_android::stop_voice_mode_android,
         #[cfg(feature = "android-native")]
         voice_android::cancel_voice_response_android,
+        #[cfg(feature = "android-native")]
+        voice_android::open_app_settings,
     ])
 }

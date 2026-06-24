@@ -52,8 +52,33 @@ pub async fn start_voice_mode_android(
 
     // 4. Build the Android voice backends (OS mic + speaker via JNI). No
     //    asset resolution / download — the recognizer + TTS are OS-managed.
+    //    Construct the JNI bridge first so the up-front mic-permission check
+    //    runs on the same instance the loop will use.
     let locale = Locale::from_pack_id(&cfg.learner.locale).unwrap_or_default();
-    let android = crate::voice::backends_android::build_android_backends(locale)
+    let bridge = primer_speech::android::new_jni_bridge()
+        .map_err(|e| StartVoiceModeError::from(format!("android bridge init: {e}")))?;
+
+    // 4a. Without RECORD_AUDIO the on-device recognizer only ever emits a
+    //     silent ERROR_INSUFFICIENT_PERMISSIONS. Check up front and surface a
+    //     typed error the frontend renders as a "grant the mic" banner with
+    //     an Open-settings button — rather than a voice toggle that silently
+    //     does nothing (issue #253). A genuine `Ok(false)` denial maps to the
+    //     PermissionDenied banner; a JNI `Err` is a different fault entirely
+    //     (the permission may well be granted), so log it and surface a generic
+    //     error instead of misdirecting the user to a settings page that shows
+    //     nothing to fix.
+    match bridge.has_record_audio_permission() {
+        Ok(true) => {}
+        Ok(false) => return Err(StartVoiceModeError::PermissionDenied),
+        Err(e) => {
+            tracing::warn!("RECORD_AUDIO permission check failed: {e}");
+            return Err(StartVoiceModeError::from(format!(
+                "mic permission check: {e}"
+            )));
+        }
+    }
+
+    let android = crate::voice::backends_android::build_android_backends(bridge, locale)
         .map_err(|e| StartVoiceModeError::from(format!("android backend init: {e}")))?;
     let crate::voice::backends_android::AndroidVoiceBackends {
         backends,
@@ -157,4 +182,14 @@ pub async fn cancel_voice_response_android(
         let _ = active.cancel_response_tx.try_send(());
     }
     Ok(())
+}
+
+/// Open the OS app-details settings screen so the user can grant the
+/// `RECORD_AUDIO` permission after a denial. Wired to the "Open settings"
+/// button on the permission-denied banner (issue #253). Best-effort: errors
+/// surface as a dev-facing string the frontend logs.
+#[tauri::command]
+pub async fn open_app_settings() -> Result<(), String> {
+    let bridge = primer_speech::android::new_jni_bridge().map_err(|e| e.to_string())?;
+    bridge.open_app_settings().map_err(|e| e.to_string())
 }

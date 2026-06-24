@@ -301,6 +301,19 @@ body.sidebar-collapsed {
   font-size: 0.85rem;
 }
 
+/* Mic-permission-denied banner: message + "Open settings" button on one
+   row (issue #253). Inherits the red error-banner palette above. */
+#voice-permission-banner {
+  display: flex;
+  align-items: center;
+  gap: 0.75rem;
+  justify-content: space-between;
+}
+
+#voice-permission-banner button {
+  flex: 0 0 auto;
+}
+
 /* ─── Composer ──────────────────────────────────────────────────── */
 
 .composer {
