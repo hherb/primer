@@ -49,9 +49,21 @@ async fn generates_nonempty_response() {
 /// `generates_nonempty_response` cannot observe.
 ///
 /// Set `PRIMER_LLAMACPP_EXPECT_PREPEND_BOS` to `true`/`false` to turn the
-/// printed diagnostic into a hard assertion:
-///   * Gemma (template embeds a literal `<bos>`)  → expect `false`
-///   * Qwen3 (no literal BOS in the template)      → expect `true`
+/// printed diagnostic into a hard assertion. Empirically (real-model runs,
+/// issue #201), the expected value is per-model:
+///   * Gemma 2 (`add_bos_token=true` metadata) → expect `true`. Its chat
+///     template literally starts with `{{ bos_token }}`, but llama.cpp's
+///     `apply_chat_template` renders that directive as EMPTY (the rendered
+///     prompt begins with `<start_of_turn>user`, not `<bos>`), so the
+///     metadata leg adds exactly one BOS. The feared double-BOS does not
+///     occur via this code path.
+///   * Llama 3.2 (no metadata, no literal BOS) → expect `true` (default leg).
+///   * Qwen3 (`add_bos_token=false` metadata) → expect `false` (metadata leg
+///     correctly suppresses the BOS).
+/// The literal-`<bos>`-in-template leg (`prepend_bos == false` via
+/// `template_embeds_bos`) is NOT reachable with any tested real model —
+/// llama.cpp strips the literal BOS from the render for both Gemma and
+/// Llama 3 — so it is covered only by the host unit tests in `params.rs`.
 /// Absent the env var the test only prints (a pure inspection run).
 #[tokio::test]
 #[ignore = "requires PRIMER_LLAMACPP_TEST_GGUF + a C++ toolchain + GPU"]
@@ -83,8 +95,10 @@ async fn reports_per_model_bos_decision() {
             .expect("PRIMER_LLAMACPP_EXPECT_PREPEND_BOS must be `true` or `false`");
         assert_eq!(
             decision.prepend_bos, expected,
-            "prepend_bos mismatch: a Gemma-family GGUF must NOT add a second BOS \
-             (expect false); a Qwen3 GGUF keeps the historical add-once (expect true)"
+            "prepend_bos mismatch: a Qwen3 GGUF (add_bos_token=false) suppresses \
+             the BOS (expect false); Gemma 2 / Llama 3 add exactly one BOS via \
+             the metadata/default leg (expect true) because llama.cpp's \
+             apply_chat_template does not surface a literal BOS in the render"
         );
     }
 }
