@@ -21,8 +21,37 @@ fn main() {
     println!("cargo:rerun-if-changed=src/macos26/bridge.rs");
     println!("cargo:rerun-if-changed=src/macos26/build_hints.rs");
 
+    #[cfg(feature = "whisper")]
+    link_cxx_runtime_on_macos();
+
     #[cfg(feature = "macos-native-26")]
     macos_native_26::build();
+}
+
+/// Link the C++ standard library when the `whisper` feature is active on
+/// macOS.
+///
+/// `whisper-cpp-plus-sys` builds whisper.cpp as static C++ archives and
+/// links the C++ runtime explicitly for Linux (`stdc++`) but **not** for
+/// macOS — there it relies on the final binary pulling libc++ in
+/// transitively (e.g. via the onnxruntime that the `silero`/`piper`
+/// features drag in through `ort`). A whisper-*only* build has no such
+/// transitive libc++, so the link fails with `___gxx_personality_v0`
+/// undefined (the C++ exception personality lives in libc++abi, which
+/// `-lc++` provides). Emitting the directive here makes `--features
+/// whisper` self-contained on macOS — needed by the #166 WhisperStream
+/// cache-reuse integration test, which compiles whisper alone. Redundant
+/// when libc++ is already linked (linking the same dylib twice is a
+/// no-op), so it is safe under the combined feature sets too.
+#[cfg(feature = "whisper")]
+fn link_cxx_runtime_on_macos() {
+    // Build scripts are compiled for the HOST, so `#[cfg(target_os)]` here
+    // would reflect the host rather than the build target. Read the target
+    // OS from the cargo-provided env var instead (mirrors how
+    // whisper-cpp-plus-sys's own build script branches on `target_os`).
+    if std::env::var("CARGO_CFG_TARGET_OS").as_deref() == Ok("macos") {
+        println!("cargo:rustc-link-lib=c++");
+    }
 }
 
 // Loaded via `#[path]` (rather than the conventional file-relative `mod`
