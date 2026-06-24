@@ -62,9 +62,20 @@ pub async fn start_voice_mode_android(
     //     silent ERROR_INSUFFICIENT_PERMISSIONS. Check up front and surface a
     //     typed error the frontend renders as a "grant the mic" banner with
     //     an Open-settings button — rather than a voice toggle that silently
-    //     does nothing (issue #253).
-    if !bridge.has_record_audio_permission().unwrap_or(false) {
-        return Err(StartVoiceModeError::PermissionDenied);
+    //     does nothing (issue #253). A genuine `Ok(false)` denial maps to the
+    //     PermissionDenied banner; a JNI `Err` is a different fault entirely
+    //     (the permission may well be granted), so log it and surface a generic
+    //     error instead of misdirecting the user to a settings page that shows
+    //     nothing to fix.
+    match bridge.has_record_audio_permission() {
+        Ok(true) => {}
+        Ok(false) => return Err(StartVoiceModeError::PermissionDenied),
+        Err(e) => {
+            tracing::warn!("RECORD_AUDIO permission check failed: {e}");
+            return Err(StartVoiceModeError::from(format!(
+                "mic permission check: {e}"
+            )));
+        }
     }
 
     let android = crate::voice::backends_android::build_android_backends(bridge, locale)
