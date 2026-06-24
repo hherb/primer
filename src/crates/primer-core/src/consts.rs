@@ -410,6 +410,15 @@ pub mod speech {
         pub const ERROR_SPEECH_TIMEOUT: i32 = 6;
         pub const ERROR_NO_MATCH: i32 = 7;
         pub const ERROR_RECOGNIZER_BUSY: i32 = 8;
+
+        /// `SpeechRecognizer.ERROR_INSUFFICIENT_PERMISSIONS` — the
+        /// `RECORD_AUDIO` runtime permission was denied. TERMINAL (never in
+        /// the recoverable set), so the recognizer loop does not re-arm into
+        /// a permission it cannot satisfy. The GUI checks the permission
+        /// up front before arming and surfaces a user-visible message; this
+        /// const names the async code for the classifier and any future
+        /// mid-session-revocation handling.
+        pub const ERROR_INSUFFICIENT_PERMISSIONS: i32 = 9;
     }
 }
 

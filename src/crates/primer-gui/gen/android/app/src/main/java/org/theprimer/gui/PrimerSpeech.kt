@@ -1,11 +1,16 @@
 package org.theprimer.gui
 
+import android.Manifest
 import android.content.Context
 import android.content.Intent
+import android.content.pm.PackageManager
+import android.net.Uri
 import android.os.Build
 import android.os.Bundle
 import android.os.Handler
 import android.os.Looper
+import android.provider.Settings
+import androidx.core.content.ContextCompat
 import android.speech.RecognitionListener
 import android.speech.RecognitionSupport
 import android.speech.RecognitionSupportCallback
@@ -138,6 +143,36 @@ object PrimerSpeech {
         probe?.shutdown()
         obj.put("tts_voices", voicesJson)
         return obj.toString()
+    }
+
+    /**
+     * Whether the `RECORD_AUDIO` runtime permission is currently granted.
+     * The Rust voice command checks this before arming the recognizer so a
+     * denial becomes a user-visible message instead of a silent recognizer
+     * `onError` (`ERROR_INSUFFICIENT_PERMISSIONS`). Returns false if the app
+     * Context has not been cached yet (init not run).
+     */
+    @JvmStatic
+    fun hasRecordAudioPermission(): Boolean {
+        val ctx = appContext ?: return false
+        return ContextCompat.checkSelfPermission(ctx, Manifest.permission.RECORD_AUDIO) ==
+            PackageManager.PERMISSION_GRANTED
+    }
+
+    /**
+     * Open this app's system settings page so the user can grant a
+     * previously denied permission. Best-effort — the recovery affordance
+     * behind the permission-denied banner. Started with FLAG_ACTIVITY_NEW_TASK
+     * because it launches from the cached application Context, not an Activity.
+     */
+    @JvmStatic
+    fun openAppSettings() {
+        val ctx = appContext ?: return
+        val intent = Intent(Settings.ACTION_APPLICATION_DETAILS_SETTINGS).apply {
+            data = Uri.fromParts("package", ctx.packageName, null)
+            addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+        }
+        runCatching { ctx.startActivity(intent) }
     }
 
     // ── Voice-loop bridge methods (Plan 2 Task 7) ──────────────────────

@@ -66,6 +66,26 @@ impl AndroidSpeechBridge for JniSpeechBridge {
         serde_json::from_str(&s).map_err(jerr)
     }
 
+    fn has_record_audio_permission(&self) -> Result<bool> {
+        let mut env = self.vm.attach_current_thread().map_err(jerr)?;
+        let class = primer_speech_class(&mut env)?;
+        // hasRecordAudioPermission() -> boolean; .z() extracts the jboolean.
+        let granted = env
+            .call_static_method(&class, "hasRecordAudioPermission", "()Z", &[])
+            .map_err(jerr)?
+            .z()
+            .map_err(jerr)?;
+        Ok(granted)
+    }
+
+    fn open_app_settings(&self) -> Result<()> {
+        let mut env = self.vm.attach_current_thread().map_err(jerr)?;
+        let class = primer_speech_class(&mut env)?;
+        env.call_static_method(&class, "openAppSettings", "()V", &[])
+            .map_err(jerr)?;
+        Ok(())
+    }
+
     // ── Voice-loop methods (Plan 2 Task 7) ─────────────────────────────
     // Each mirrors `query_capabilities`'s pattern: attach the current thread,
     // materialise the cached `PrimerSpeech` class (NOT `find_class` — see

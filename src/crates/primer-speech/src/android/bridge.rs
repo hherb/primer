@@ -16,6 +16,15 @@ use primer_core::error::Result;
 pub trait AndroidSpeechBridge: Send + Sync {
     /// Query the device's STT/TTS capabilities (Plan 1).
     fn query_capabilities(&self) -> Result<SpeechCapabilities>;
+    /// Whether the `RECORD_AUDIO` runtime permission is currently granted.
+    /// The GUI checks this up front before arming the recognizer so a denial
+    /// surfaces as a user-visible message rather than a silent `onError`
+    /// (`ERROR_INSUFFICIENT_PERMISSIONS`) the child never sees.
+    fn has_record_audio_permission(&self) -> Result<bool>;
+    /// Open the OS app-details settings screen so the user can grant a
+    /// previously denied permission. Best-effort — the recovery affordance
+    /// behind the permission-denied message.
+    fn open_app_settings(&self) -> Result<()>;
     /// Arm the on-device recognizer for one utterance in `bcp47`.
     fn start_listening(&self, bcp47: &str) -> Result<()>;
     /// Stop / cancel the recognizer.
@@ -44,6 +53,11 @@ pub(crate) mod tests {
         pub caps: SpeechCapabilities,
         pub events: Mutex<std::collections::VecDeque<SpeechEvent>>,
         pub spoken: Mutex<Vec<String>>,
+        /// Scriptable `RECORD_AUDIO` grant state (default granted). Flip to
+        /// `false` to exercise the permission-denied path.
+        pub record_audio_permission: bool,
+        /// How many times [`AndroidSpeechBridge::open_app_settings`] was called.
+        pub settings_opened: Mutex<u32>,
     }
 
     impl MockBridge {
@@ -61,6 +75,8 @@ pub(crate) mod tests {
                 },
                 events: Mutex::new(events.into()),
                 spoken: Mutex::new(vec![]),
+                record_audio_permission: true,
+                settings_opened: Mutex::new(0),
             }
         }
     }
@@ -68,6 +84,13 @@ pub(crate) mod tests {
     impl AndroidSpeechBridge for MockBridge {
         fn query_capabilities(&self) -> Result<SpeechCapabilities> {
             Ok(self.caps.clone())
+        }
+        fn has_record_audio_permission(&self) -> Result<bool> {
+            Ok(self.record_audio_permission)
+        }
+        fn open_app_settings(&self) -> Result<()> {
+            *self.settings_opened.lock().unwrap() += 1;
+            Ok(())
         }
         fn start_listening(&self, _bcp47: &str) -> Result<()> {
             Ok(())
@@ -126,5 +149,24 @@ pub(crate) mod tests {
         let bridge = MockBridge::with_events(vec![]);
         bridge.speak("hello there").unwrap();
         assert_eq!(bridge.spoken.lock().unwrap().as_slice(), ["hello there"]);
+    }
+
+    #[test]
+    fn bridge_reports_record_audio_permission() {
+        let mut bridge = MockBridge::with_events(vec![]);
+        // Default: granted.
+        assert!(bridge.has_record_audio_permission().unwrap());
+        // Denied path.
+        bridge.record_audio_permission = false;
+        assert!(!bridge.has_record_audio_permission().unwrap());
+    }
+
+    #[test]
+    fn open_app_settings_is_counted() {
+        let bridge = MockBridge::with_events(vec![]);
+        assert_eq!(*bridge.settings_opened.lock().unwrap(), 0);
+        bridge.open_app_settings().unwrap();
+        bridge.open_app_settings().unwrap();
+        assert_eq!(*bridge.settings_opened.lock().unwrap(), 2);
     }
 }

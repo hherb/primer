@@ -57,6 +57,10 @@ pub enum StartVoiceModeError {
     /// listing the missing `kind`s and pointing the user at
     /// Settings → Speech.
     AutoDownloadDisabled { entries: Vec<MissingAsset> },
+    /// The `RECORD_AUDIO` runtime permission is denied (Android voice mode).
+    /// The frontend renders a banner explaining the mic is needed, with an
+    /// "Open settings" button wired to the `open_app_settings` command.
+    PermissionDenied,
     /// Any other error — message is dev-facing; the frontend renders
     /// a generic banner and does not surface the inner string to the user.
     Other { message: String },

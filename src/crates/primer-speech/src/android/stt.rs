@@ -269,11 +269,14 @@ mod tests {
 
     #[test]
     fn no_rearm_on_partial_or_fatal_errors() {
+        use primer_core::consts::speech::android::ERROR_INSUFFICIENT_PERMISSIONS;
         // Mid-utterance partials never re-arm.
         assert!(!should_rearm(&SpeechEvent::Partial { text: "ho".into() }));
         // Fatal errors (permissions=9, language unavailable=12, client=5)
         // are terminal — re-arming would spin or never succeed.
-        assert!(!should_rearm(&SpeechEvent::SttError { code: 9 }));
+        assert!(!should_rearm(&SpeechEvent::SttError {
+            code: ERROR_INSUFFICIENT_PERMISSIONS
+        }));
         assert!(!should_rearm(&SpeechEvent::SttError { code: 12 }));
         assert!(!should_rearm(&SpeechEvent::SttError { code: 5 }));
     }
