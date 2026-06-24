@@ -87,9 +87,10 @@ A separate work item should pick a source, add a `WikiSource` preset (or hand-au
 
 ## Voice
 
-- **Piper voice:** [`hi_IN-rohan-medium`](https://huggingface.co/rhasspy/piper-voices/tree/main/hi/hi_IN/rohan/medium) — the only Hindi voice on rhasspy/piper-voices at the time of this writing (63 MB, medium tier).
+- **Recommended TTS — Supertonic 3** (issue #170). The multilingual Supertonic model covers Hindi at Piper-class CPU latency (Stage A.5 spike: RTF ≈ 0.18 for `hi`, model load ≈ 300 ms — see [`docs/devel/supertonic3-stage-a5-spike.md`](../../devel/supertonic3-stage-a5-spike.md)). This is the intended Hindi voice path; Piper's single Hindi voice is the fallback. **Licence note:** the Supertonic *weights* are OpenRAIL-M (the *code* is MIT). A deliberate licence read concluded the weights are usable as a default children's-tutor voice subject to four conditions (no weight redistribution, AI-voice disclosure, attribution + use-restriction pass-through, keep distinct from AGPL). The **licence gate is cleared** — see [`docs/devel/supertonic-openrail-license-assessment.md`](../../devel/supertonic-openrail-license-assessment.md). This is independent of the prompt-pack-review and corpus gates below, which remain open.
+- **Fallback TTS — Piper voice:** [`hi_IN-rohan-medium`](https://huggingface.co/rhasspy/piper-voices/tree/main/hi/hi_IN/rohan/medium) — the only Hindi voice on rhasspy/piper-voices at the time of this writing (63 MB, medium tier). Requires the `espeak-ng` system dependency; Supertonic does not.
 - **Whisper model:** `small` (multilingual). **Must be set explicitly via `WhisperStt::with_language("hi")`** — same gotcha as the German locale; without the language flag the multilingual model defaults to English and produces approximate-English transcripts of Hindi audio.
-- **espeak-ng phoneme coverage:** sufficient for Hindi text-to-speech; the Hindi phoneme set is supported by the standard espeak-ng install.
+- **espeak-ng phoneme coverage:** sufficient for Hindi text-to-speech with Piper; the Hindi phoneme set is supported by the standard espeak-ng install. (Not needed for the Supertonic path.)
 
 ## Tested models
 
