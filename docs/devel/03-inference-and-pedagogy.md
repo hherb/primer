@@ -81,7 +81,7 @@ When a model's context window fills before it finishes, the terminal stream chun
 
 There are **five producers** of `FinishReason::Length`, each mapped by a small pure helper so the recovery loop stays backend-agnostic:
 
-- **QNN** — Genie's `GENIE_STATUS_CONTEXT_LIMIT_EXCEEDED`.
+- **QNN** — Genie's `GENIE_STATUS_WARNING_CONTEXT_EXCEEDED` (`= 4` in `GenieCommon.h`).
 - **CloudBackend** — Anthropic's `stop_reason: "max_tokens"`, threaded onto the terminal chunk by `AnthropicEventTranslator` (Anthropic delivers it in a separate `message_delta` event).
 - **OllamaBackend** — `done_reason: "length"`.
 - **OpenAiCompatBackend** — `finish_reason: "length"`.

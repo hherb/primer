@@ -29,7 +29,7 @@ use std::path::Path;
 use futures::channel::mpsc::UnboundedSender;
 use primer_core::error::Result as PrimerResult;
 use primer_core::inference::TokenChunk;
-use primer_qnn_sys::{GENIE_STATUS_CONTEXT_LIMIT_EXCEEDED, GENIE_STATUS_SUCCESS, Genie_Status_t};
+use primer_qnn_sys::{GENIE_STATUS_SUCCESS, GENIE_STATUS_WARNING_CONTEXT_EXCEEDED, Genie_Status_t};
 use thiserror::Error;
 
 mod config;
@@ -192,7 +192,7 @@ pub(crate) enum QueryOutcome {
     /// Generation finished cleanly (`GENIE_STATUS_SUCCESS`).
     Complete,
     /// The context window filled mid-generation
-    /// ([`GENIE_STATUS_CONTEXT_LIMIT_EXCEEDED`]). The reply already streamed
+    /// ([`GENIE_STATUS_WARNING_CONTEXT_EXCEEDED`]). The reply already streamed
     /// in full via the token callback, so the turn completes with what was
     /// generated rather than being dropped.
     ContextLimit,
@@ -209,7 +209,7 @@ pub(crate) enum QueryOutcome {
 pub(crate) fn classify_query_status(status: Genie_Status_t) -> QueryOutcome {
     match status {
         GENIE_STATUS_SUCCESS => QueryOutcome::Complete,
-        GENIE_STATUS_CONTEXT_LIMIT_EXCEEDED => QueryOutcome::ContextLimit,
+        GENIE_STATUS_WARNING_CONTEXT_EXCEEDED => QueryOutcome::ContextLimit,
         _ => QueryOutcome::Error,
     }
 }
@@ -276,16 +276,18 @@ mod tests {
     #[test]
     fn classify_context_limit_status_is_graceful() {
         assert_eq!(
-            classify_query_status(GENIE_STATUS_CONTEXT_LIMIT_EXCEEDED),
+            classify_query_status(GENIE_STATUS_WARNING_CONTEXT_EXCEEDED),
             QueryOutcome::ContextLimit
         );
     }
 
     #[test]
     fn classify_other_nonsuccess_statuses_are_errors() {
-        // -1 (general), -2/-3 (invalid arg / mem), and arbitrary non-4
-        // positives must all stay hard errors so a real ABI fault is never
-        // silently treated as a completed turn.
+        // -1 (general), -2/-3 (invalid arg / mem), the sibling *warning*
+        // codes 1/2/3 (aborted / bound-handle / paused per GenieCommon.h),
+        // and arbitrary other positives must all stay hard errors: only the
+        // context-exceeded warning (4) is a graceful completion, so a real
+        // fault is never silently treated as a completed turn.
         for status in [-1, -2, -3, 1, 2, 3, 5, 99] {
             assert_eq!(
                 classify_query_status(status),
@@ -323,7 +325,7 @@ mod tests {
         let (tx, mut rx) = futures::channel::mpsc::unbounded::<PrimerResult<TokenChunk>>();
         emit_query_outcome(
             QueryOutcome::ContextLimit,
-            GENIE_STATUS_CONTEXT_LIMIT_EXCEEDED,
+            GENIE_STATUS_WARNING_CONTEXT_EXCEEDED,
             &tx,
         );
         drop(tx);
@@ -340,7 +342,7 @@ mod tests {
         let (tx, mut rx) = futures::channel::mpsc::unbounded::<PrimerResult<TokenChunk>>();
         emit_query_outcome(
             QueryOutcome::ContextLimit,
-            GENIE_STATUS_CONTEXT_LIMIT_EXCEEDED,
+            GENIE_STATUS_WARNING_CONTEXT_EXCEEDED,
             &tx,
         );
         drop(tx);

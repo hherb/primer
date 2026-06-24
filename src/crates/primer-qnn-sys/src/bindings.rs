@@ -75,12 +75,16 @@ pub type GenieDialog_Handle_t = *mut GenieDialog;
 
 /// Status code returned by every Genie call.
 ///
-/// The upstream header defines this as a C enum backed by `int32_t`. We
-/// mirror the underlying integer type but use bare `const` items rather
-/// than a Rust enum so that unknown future status values (e.g. a new
-/// failure code introduced in a later QAIRT) cannot trigger undefined
-/// behaviour when crossing the FFI boundary. Only the codes the Primer
-/// inspects are named; everything else is observable as the raw `i32`.
+/// The upstream `GenieCommon.h` declares this as `typedef int32_t
+/// Genie_Status_t;` with the individual codes as `#define`s (not a C
+/// `enum`). Positive values are non-fatal *warnings* (`1` aborted, `2`
+/// bound-handle, `3` paused, `4` context-exceeded); zero is success;
+/// negative values are errors (`-1` general, `-2` invalid-arg, …). We
+/// mirror the underlying integer type but use bare `const` items so that
+/// unknown future status values (e.g. a new code introduced in a later
+/// QAIRT) cannot trigger undefined behaviour when crossing the FFI
+/// boundary. Only the codes the Primer inspects are named; everything else
+/// is observable as the raw `i32`.
 pub type Genie_Status_t = i32;
 
 /// Operation completed successfully.
@@ -90,18 +94,22 @@ pub const GENIE_STATUS_SUCCESS: Genie_Status_t = 0;
 /// prompt plus the generated reply exceeded the model's context length
 /// (`Context limit exceeded (PROMPT + GEN > CTX)` in `genie.log`).
 ///
-/// This is NOT an ABI/setup failure — the reply already streamed in full
-/// via the token callback before the limit was hit, so the Primer treats
-/// it as a graceful completion (the turn keeps what was generated) rather
-/// than dropping the turn. See the on-device diagnosis (status 4 on QAIRT
-/// 2.45, RedMagic 11 Pro, cl2048 bundle): `~/qnn-export-2048/`
-/// `genie-status4-diagnosis.txt`. All other non-success codes stay hard
-/// errors so a genuine ABI mismatch is never masked.
+/// This is a *warning*, not an ABI/setup failure — the reply already
+/// streamed in full via the token callback before the limit was hit, so
+/// the Primer treats it as a graceful completion (the turn keeps what was
+/// generated) rather than dropping the turn. All other non-success codes
+/// stay hard errors so a genuine ABI mismatch is never masked.
 ///
-/// The value is reverse-engineered from `genie.log`, not read from a
-/// header (the QAIRT SDK is developer-portal-gated and unvendorable).
-/// Tracked for header confirmation in <https://github.com/hherb/primer/issues/223>.
-pub const GENIE_STATUS_CONTEXT_LIMIT_EXCEEDED: Genie_Status_t = 4;
+/// The value `4` and the canonical name are confirmed against the
+/// authoritative QAIRT `GenieCommon.h`:
+/// `#define GENIE_STATUS_WARNING_CONTEXT_EXCEEDED 4` (issue #223). Public
+/// copies of the header cross-checked: `qualcomm/qidk`,
+/// `qdsp6sw/qualcomm-ai-engine-direct-sdk`, and two independent vendored
+/// copies — all agree on `4`, and the warning ordering (1/2/3/4) is
+/// corroborated by Qualcomm's published docs. This matches the prior
+/// on-device diagnosis (status 4 on QAIRT 2.45, RedMagic 11 Pro, cl2048
+/// bundle): `~/qnn-export-2048/genie-status4-diagnosis.txt`.
+pub const GENIE_STATUS_WARNING_CONTEXT_EXCEEDED: Genie_Status_t = 4;
 
 /// Sentence-completion mode for `GenieDialog_query`.
 ///
