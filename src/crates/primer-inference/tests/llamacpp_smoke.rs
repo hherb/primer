@@ -50,7 +50,7 @@ async fn generates_nonempty_response() {
 ///
 /// Set `PRIMER_LLAMACPP_EXPECT_PREPEND_BOS` to `true`/`false` to turn the
 /// printed diagnostic into a hard assertion. Empirically (real-model runs,
-/// issue #201), every mainstream chat GGUF tested expects `true`:
+/// issue #201), the expected value is per-model:
 ///   * Gemma 2 (`add_bos_token=true` metadata) → expect `true`. Its chat
 ///     template literally starts with `{{ bos_token }}`, but llama.cpp's
 ///     `apply_chat_template` renders that directive as EMPTY (the rendered
