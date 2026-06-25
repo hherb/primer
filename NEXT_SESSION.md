@@ -1,7 +1,7 @@
 # Primer — Next Session Brief
 
 **Audience:** future Claude Code session continuing work on this repo.
-**Last updated:** 2026-06-25. Branch `docs/living-docs-refresh-2026-06-25` (committed locally at `36d537b`, **not yet pushed** — owner-authorised PR is item #0). `main` is at `81bc6f3`.
+**Last updated:** 2026-06-25. Branch `docs/living-docs-refresh-2026-06-25` (pushed; **PR #265 open** against `main`, awaiting owner review/merge). `main` is at `81bc6f3`.
 
 **The previous handoff is fully discharged:** its headline (push the `qnn-genie-status-header-confirm-223` branch + open a PR for #223) had already merged as **PR #264 (`81bc6f3`)** before this session opened. With no open PRs and every open issue owner/hardware/SDK-gated, the owner chose a **living-docs refresh** as this session's host-completable slice.
 
@@ -23,11 +23,11 @@
 
 ## What's next (concrete acceptance criteria)
 
-### 0. ⭐ Push + open the PR (owner-authorised, outward-facing)
-- `cd /Users/hherb/src/primer && git push -u origin docs/living-docs-refresh-2026-06-25 && gh pr create`. Docs-only; safe. **No issue to close** (this is a maintenance refresh, not an issue fix).
+### 0. ✅ Push + open the PR — DONE this session
+- Pushed; **PR #265** is open against `main` (docs-only; no issue to close — a maintenance refresh). Only owner review/merge remains.
 
-### 1. Stale branch cleanup (host-side, low-risk)
-- The **`docs/refresh-living-docs-2026-06`** branch (local + `origin`) is **dead and dangerous** — it branched from `6da74c5` (19 commits behind `main`) and its diff would *delete* large swaths of since-merged code (the entire `primer-speech/src/android/` subsystem, `whisper_stream_reuse.rs`, the sweep-harness split). It was NOT used this session. Recommend deleting it (`git push origin --delete docs/refresh-living-docs-2026-06`) so a future session doesn't mistake it for live work. Owner-authorise before deleting a remote branch.
+### 1. ✅ Stale branch cleanup — DONE this session
+- The **`docs/refresh-living-docs-2026-06`** branch (local + `origin`) was deleted. A whole-tree diff proved it was byte-identical to `cfac415` — i.e. it **was** the dev branch already merged as PR #244, so deletion lost nothing. (The earlier "would delete code" worry was an artifact of it being 19 commits behind `main`, not deletions it authored.) No action remains.
 
 ### Carried / owner-or-hardware-gated (unchanged from prior brief — none host-completable autonomously)
 - **#192** — manual macOS-native STT + injected non-AVSpeech TTS (Piper/Supertonic) audio path. Needs a mic + macOS build.
@@ -40,9 +40,9 @@
 
 ## Open decisions / risks
 
-- **Branch not yet pushed at handoff** (item #0) — outward-facing, owner-authorised.
+- **PR #265 open, awaiting owner review/merge** (item #0, done) — docs-only.
 - **The host-actionable backlog is genuinely empty of feature work.** Every open issue needs a microphone, the RedMagic phone, a gated SDK, or upstream Tauri 3. When a session opens like this one (headline already merged, backlog gated), the highest-value host slice is documentation/maintenance — survey `gh issue list` + the "Carried" section, confirm with the owner, and pick the genuinely host-completable slice.
-- **The dead `docs/refresh-living-docs-2026-06` branch** (item #1) is a footgun; flagged for deletion.
+- ~~**The dead `docs/refresh-living-docs-2026-06` branch**~~ — deleted this session (item #1, done); it was PR #244's already-merged dev branch.
 
 ## Patterns to reuse, not reinvent
 
@@ -57,7 +57,7 @@
 cd /Users/hherb/src/primer && git fetch && git log --oneline -4
 git checkout docs/living-docs-refresh-2026-06-25            # this session's branch (36d537b)
 # Item #0 — push + PR: git push -u origin docs/living-docs-refresh-2026-06-25 && gh pr create
-# Item #1 — delete the dead branch (owner-authorise): git push origin --delete docs/refresh-living-docs-2026-06
+# Item #1 — done this session (dead branch docs/refresh-living-docs-2026-06 deleted)
 
 # === Standard workspace gate (only if you touch .rs) ===
 cd /Users/hherb/src/primer/src
