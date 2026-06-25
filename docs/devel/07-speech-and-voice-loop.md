@@ -53,6 +53,7 @@ Real backends are gated behind cargo features in [primer-speech/Cargo.toml](../.
 | `voice-loop` | state machine | (the above building blocks) | The shared `LISTEN → LATENT_THINK → SPEAK` loop both binaries consume. |
 | `macos-native` | STT + TTS | `objc2-speech` / AVFoundation | `SFSpeechRecognizer` STT + `AVSpeechSynthesizer` TTS on macOS 13+; en-US / de-DE. Silero stays the VAD. |
 | `macos-native-26` | STT + VAD + TTS | Swift sidecar via `swift-bridge` | `SpeechAnalyzer`/`SpeechTranscriber`/`SpeechDetector` on macOS 26+; AVSpeechSynthesizer for TTS. **Mutually exclusive with `macos-native`** (a `compile_error!` enforces the XOR). |
+| `android-native` | STT + VAD + TTS | `jni` + `serde_json` (cpal-free) | Android on-device `SpeechRecognizer` STT + `TextToSpeech` TTS + derived VAD via a Kotlin/JNI bridge; the Android analogue of `macos-native-26`. **Mutually exclusive with `macos-native` / `macos-native-26`** (`compile_error!` XOR). |
 
 The portable building-block features are individually selectable for development — you can build with `--features silero` alone if you only want to exercise the VAD against a recorded WAV — but the `--speech` flag on `primer-cli` requires the full portable stack. The CLI's `speech` feature pulls Silero, Whisper, Piper, cpal, and the `voice-loop` state machine in transitively:
 
@@ -87,6 +88,37 @@ Two Apple-native feature stacks exist for macOS (and, eventually, iOS — the mo
 - **`macos-native-26`** ([primer-speech/src/macos26/](../../src/crates/primer-speech/src/macos26/)) uses `SpeechAnalyzer` + `SpeechTranscriber` + `SpeechDetector` via a Swift sidecar at `crates/primer-speech/swift-sources/Macos26PipelineImpl.swift`, bridged to Rust through `swift-bridge` and compiled to `libMacos26Pipeline.a` by the crate's `build.rs` (`swiftc`). It reuses `MacosTextToSpeech` for TTS (AVSpeechSynthesizer is unchanged on macOS 13+ and 26+). VAD events are *derived* from transcriber activity by `DerivedVadStateMachine`. Empirically ~100× faster to first partial than Whisper (~30 ms vs ~3.8 s). Locales: `en-US`, `de-DE` (Hindi errors loudly — `SpeechTranscriber` has no `hi-IN` as of macOS 26.5).
 
 Both are the friction-free demo surface, not production children's hardware: asset download is OS-managed (silent), and the `macos-native`/`macos-native-26` XOR is enforced by a `compile_error!`. See the long-form gotchas in [CLAUDE.md](../../CLAUDE.md) for the main-thread / `dispatch2` requirements, the streaming `mpsc<SynthesisEvent>` channel discipline, and the `dispatch2` whole-struct-capture (RFC 2229) trap.
+
+## Android-native speech backend
+
+The `android-native` feature ([primer-speech/src/android/](../../src/crates/primer-speech/src/android/)) is the Android analogue of `macos-native-26`: a fully on-device, **cpal-free** voice path that uses the OS's own engines — Android `SpeechRecognizer` (ASI/SODA) for STT, `TextToSpeech` for TTS — plus a *derived* VAD, all reached through a Kotlin/JNI bridge. It reuses the shared `voice_loop` state machine and pairs naturally with the NPU `QnnBackend`, so the whole turn runs offline inside the Tauri-Android APK. It is a device-verified **POC** (the on-device acceptance turn ran on a RedMagic 11 Pro, 2026-06-19) with robustness follow-ups tracked in issue #260.
+
+The Rust side splits along the same pure-core / device-edge line as the rest of the crate — decision logic compiles and is host-tested on every build; only the JNI calls are `#[cfg(target_os = "android")]`:
+
+| Module | Role |
+|---|---|
+| [bridge.rs](../../src/crates/primer-speech/src/android/bridge.rs) | The `AndroidSpeechBridge` trait (Rust→Kotlin, one-directional sync calls; events flow back by polling) + a scriptable `MockBridge` for host tests. |
+| [capabilities.rs](../../src/crates/primer-speech/src/android/capabilities.rs) | Pure `SpeechCapabilities` / `TtsVoiceInfo` types + `select_offline_voice` (rejects any network-required or not-installed voice, per [[project_strict_offline_first]]). |
+| [events.rs](../../src/crates/primer-speech/src/android/events.rs) | The `#[serde(tag = "kind")]` `SpeechEvent` enum (`Partial` / `Final` / `EndOfSpeech` / `SttError` / `TtsDone` / `TtsError`) whose JSON shape matches the Kotlin emitter exactly. |
+| [vad.rs](../../src/crates/primer-speech/src/android/vad.rs) | `AndroidDerivedVad` — synthesises `VadEvent` edges from recognizer callbacks (first non-empty partial/final → `SpeechStart`; `EndOfSpeech`/`Final` → `SpeechEnd`). Mirrors `macos26/vad.rs` but kept separate (discrete `onEndOfSpeech` vs. continuous partials). |
+| [stt.rs](../../src/crates/primer-speech/src/android/stt.rs) | The recognizer consumer: pure `arm_action` / `process_event` / `should_rearm` / `should_force_rearm` helpers plus the async `run_recognizer_loop` driver. |
+| [tts.rs](../../src/crates/primer-speech/src/android/tts.rs) | `AndroidTts` — a `StreamingTextToSpeech` that blocks until the OS reports `onDone` and emits **no** PCM (Android plays the audio itself). |
+| [jni_bridge.rs](../../src/crates/primer-speech/src/android/jni_bridge.rs) | The real `JniSpeechBridge` over JNI (`target_os = "android"`). |
+| [vm.rs](../../src/crates/primer-speech/src/android/vm.rs) | A set-once `VmCache` for the process-wide `JavaVM` and the `PrimerSpeech` class `GlobalRef`, both populated by `nativeInit`. |
+
+The voice-loop builder [voice_loop/backends_android_native.rs](../../src/crates/primer-speech/src/voice_loop/backends_android_native.rs) (`build_android_voice_backends`) is cpal-free: it reuses `ChannelStt` verbatim (final transcripts feed it over an mpsc), wires `AndroidTts`, and spawns the recognizer consumer task. The GUI selects it via the `#[cfg(feature = "android-native")]` Tauri commands in [primer-gui/src/commands/voice_android.rs](../../src/crates/primer-gui/src/commands/voice_android.rs) (`start/stop/cancel_voice_response_android`, `open_app_settings`), with `android_voice_available()` as the compile-time capability flag.
+
+The Kotlin half lives at [PrimerSpeech.kt](../../src/crates/primer-gui/gen/android/app/src/main/java/org/theprimer/gui/PrimerSpeech.kt); `MainActivity.onCreate` calls `PrimerSpeech.init(ctx)` then the Rust-exported `nativeInit()` and requests the `RECORD_AUDIO` permission.
+
+> **Gotcha — classloader.** `JNIEnv::find_class()` on a native-attached thread uses the system classloader, which cannot see app classes. `nativeInit` therefore caches the `PrimerSpeech` class as a `GlobalRef` (in `vm.rs`), and every bridge call resolves the class from that cached ref rather than `find_class`. Confirmed on-device 2026-06-19.
+
+> **Gotcha — main-Looper + poll model.** `SpeechRecognizer` and `TextToSpeech` must be created and driven on the main Looper, but JNI calls arrive on a native attached thread, so every Kotlin method posts to a `Handler(Looper.getMainLooper())` and blocks on a `CountDownLatch`. Recognizer callbacks push JSON onto a thread-safe `LinkedBlockingQueue`, which the Rust side drains via `pollSpeechEvent(timeoutMs)` — there are **no** Kotlin→Rust upcalls.
+
+> **Gotcha — `onEndOfSpeech` is not enqueued.** Android fires `onEndOfSpeech` *before* `onResults`, so forwarding it would drive `SpeechEnd` before the transcript is queued and produce an empty utterance. `onResults` (final) is the single terminal edge.
+
+> **Gotcha — recreate-per-arm + the silent-dead-recognizer watchdog.** The on-device recognizer degrades under sustained reuse and on a mid-session connectivity (airplane) toggle, so `startListening` destroys and recreates the recognizer on **every** arm (#254, device-confirmed: 27 clean arm cycles, airplane-toggle recovery). A residual failure mode remained (#259): a fresh recognizer can die with a terminal `ERROR_SERVER_DISCONNECTED` and emit *nothing*, wedging the armed loop. The fix is a liveness watchdog — `should_force_rearm` forces a re-arm when no recognizer event arrives within `RECOGNIZER_WATCHDOG_TIMEOUT` (12 s, comfortably longer than the healthy ~5 s `NO_MATCH` idle cadence). No-barge-in is in place via the shared `speaking` `Arc<AtomicBool>` (the recognizer is paused during SPEAK; `AndroidTts` raises the flag).
+
+> **Gotcha — permission-denied UX.** `start_voice_mode_android` checks `has_record_audio_permission()` up front and returns a typed `StartVoiceModeError::PermissionDenied` (rendered as a "microphone needed" banner with an **Open settings** button → `open_app_settings()`). A genuine JNI failure surfaces as a generic error, *not* `PermissionDenied`, so it never misdirects the user to the settings page.
 
 ## Why piper-rs is vendored at src/vendor/piper-rs/
 

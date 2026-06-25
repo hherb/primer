@@ -193,7 +193,7 @@ Re-runs are deterministic — output is sorted by `id`, JSON-serialised with `en
 
 ## Sweep tests
 
-Sweep tests pin the retrieval defaults against the shipped corpus. They live in [primer-kb-load/tests/](../../src/crates/primer-kb-load/tests/), not under `primer-knowledge/`, because they exercise the full ingestion + retrieval pipeline end-to-end. There is a parallel pair per locale; the harness itself is shared at [tests/common/sweep.rs](../../src/crates/primer-kb-load/tests/common/sweep.rs), so each per-locale sweep file is a thin `#[ignore]` shim that supplies the locale, cluster list, and benchmark queries.
+Sweep tests pin the retrieval defaults against the shipped corpus. They live in [primer-kb-load/tests/](../../src/crates/primer-kb-load/tests/), not under `primer-knowledge/`, because they exercise the full ingestion + retrieval pipeline end-to-end. There is a parallel pair per locale; the harness itself is shared at [tests/common/sweep/](../../src/crates/primer-kb-load/tests/common/sweep/) — split (issue #98) into [mod.rs](../../src/crates/primer-kb-load/tests/common/sweep/mod.rs) (the shared scaffold), [bm25.rs](../../src/crates/primer-kb-load/tests/common/sweep/bm25.rs) (the BM25 grid + selection), and [hybrid.rs](../../src/crates/primer-kb-load/tests/common/sweep/hybrid.rs) (the `fastembed`-gated hybrid grid). Each per-locale sweep file is a thin `#[ignore]` shim that imports from the submodule path directly (`common::sweep::bm25::{…}` / `common::sweep::hybrid::{…}` — no re-exports) and supplies the locale, cluster list, and benchmark queries.
 
 For English (the 91-passage corpus, 91-query benchmark with 24 strict-subset canonical-id mappings):
 
