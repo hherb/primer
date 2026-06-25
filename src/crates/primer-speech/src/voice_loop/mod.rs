@@ -24,6 +24,13 @@ pub mod observer;
 pub mod selectors;
 pub mod state_machine;
 
+/// Pure quit-phrase detection helpers (locale-aware), consumed by the
+/// state machine to decide when a child asked to end the session.
+mod quit_detect;
+/// Pure markdown-stripping helpers run on Primer text before it reaches
+/// the TTS engine.
+mod tts_markdown;
+
 /// Shared [`LocalBackends`] / [`ChannelStt`] types — gated only on `cpal`
 /// because every concrete backend builder (whisper+piper or macOS-native)
 /// needs the cpal-owned `MicCapture`/`SpeakerSink` but nothing else.
