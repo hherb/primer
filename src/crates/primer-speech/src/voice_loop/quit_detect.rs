@@ -6,11 +6,12 @@
 //! normalisation, and the equality check together (with their tests) in
 //! one leaf module keeps `state_machine.rs` focused on the loop itself.
 
-/// Per-locale quit phrases. If heard in the child's transcript, the
-/// session ends. Case-insensitive, word-boundary match (see
-/// [`is_quit_phrase`]). Each locale ships its own set so a child can
-/// quit in the language they speak — without a locale-aware list, the
-/// German voice mode silently lacks any voice-keyword end affordance.
+/// Per-locale quit phrases. If the child's transcript equals one of
+/// these (case-insensitive, after whitespace/punctuation normalisation
+/// — see [`is_quit_phrase`]), the session ends. Each locale ships its
+/// own set so a child can quit in the language they speak — without a
+/// locale-aware list, the German voice mode silently lacks any
+/// voice-keyword end affordance.
 ///
 /// Adding a new locale: append a `(pack_id, &[phrase, ...])` row. The
 /// pack_id must match `Locale::pack_id()` for the corresponding locale.
