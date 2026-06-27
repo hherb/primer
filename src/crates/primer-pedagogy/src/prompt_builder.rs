@@ -515,6 +515,17 @@ fn is_factual_question(text: &str) -> bool {
     is_factual_question_with_pack(english_pack(), text)
 }
 
+/// True when `text` is a declarative claim rather than a question.
+///
+/// Used to route a substantive, not-yet-understood child assertion to
+/// `ProbeReasoning` ("how do you know?") instead of the Socratic-question
+/// default. A trailing `?` (after trimming) marks a question, which stays
+/// on the default path; factual questions are already diverted earlier in
+/// `decide_intent_at_with_pack`.
+fn is_assertion(text: &str) -> bool {
+    !text.trim_end().ends_with('?')
+}
+
 /// Decide the next pedagogical intent based on the learner model
 /// and conversation history.
 ///
@@ -640,6 +651,15 @@ pub fn decide_intent_at_with_pack(
 
             if has_understood {
                 return PedagogicalIntent::Extension;
+            }
+
+            // The child asserted a substantive claim they have not yet
+            // shown they understand. Ask how they know / how they could
+            // check, rather than defaulting to a fresh Socratic question.
+            // (Questions — including non-factual ones — fail is_assertion
+            // and stay on the default path below.)
+            if is_assertion(&last.text) {
+                return PedagogicalIntent::ProbeReasoning;
             }
         }
     }

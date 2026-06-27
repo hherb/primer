@@ -248,9 +248,10 @@ fn nine_word_child_turn_is_short() {
 }
 
 #[test]
-fn ten_word_child_turn_is_not_short() {
-    // 10 < 10 is false → falls through to the concept-depth check,
-    // and with no understood concepts it lands on the default.
+fn ten_word_declarative_turn_returns_probe_reasoning() {
+    // 10 words → not short; declarative (no trailing '?'); no understood
+    // concept → the new "how do you know?" route fires instead of the
+    // bare SocraticQuestion default.
     let learner = learner_with(EngagementState::Engaged, vec![]);
     let mut session = empty_session();
     session.add_turn(child_turn(
@@ -259,7 +260,7 @@ fn ten_word_child_turn_is_not_short() {
     ));
     assert_eq!(
         decide_intent(&learner, &session),
-        PedagogicalIntent::SocraticQuestion,
+        PedagogicalIntent::ProbeReasoning,
     );
 }
 
@@ -297,8 +298,9 @@ fn long_child_turn_with_understood_concept_returns_extension() {
 }
 
 #[test]
-fn long_child_turn_with_concept_below_comprehension_returns_socratic_question() {
-    // Recall < Comprehension, so the Extension gate stays closed.
+fn long_child_turn_with_concept_below_comprehension_returns_probe_reasoning() {
+    // Recall < Comprehension, so the Extension gate stays closed and the
+    // declarative claim routes to ProbeReasoning.
     let learner = learner_with(
         EngagementState::Engaged,
         vec![concept_at("gravity", UnderstandingDepth::Recall)],
@@ -310,7 +312,7 @@ fn long_child_turn_with_concept_below_comprehension_returns_socratic_question() 
     ));
     assert_eq!(
         decide_intent(&learner, &session),
-        PedagogicalIntent::SocraticQuestion,
+        PedagogicalIntent::ProbeReasoning,
     );
 }
 
@@ -333,14 +335,12 @@ fn long_child_turn_with_concept_at_analysis_returns_extension() {
 }
 
 #[test]
-fn long_child_turn_with_unrelated_concept_returns_socratic_question() {
-    // Active concept doesn't match any tracked concept_id → no Extension.
+fn long_child_turn_with_unrelated_concept_returns_probe_reasoning() {
+    // Active concept doesn't match any tracked concept_id → no Extension;
+    // the declarative claim routes to ProbeReasoning.
     let learner = learner_with(
         EngagementState::Engaged,
-        vec![concept_at(
-            "photosynthesis",
-            UnderstandingDepth::Application,
-        )],
+        vec![concept_at("photosynthesis", UnderstandingDepth::Application)],
     );
     let mut session = empty_session();
     session.add_turn(child_turn(
@@ -349,7 +349,7 @@ fn long_child_turn_with_unrelated_concept_returns_socratic_question() {
     ));
     assert_eq!(
         decide_intent(&learner, &session),
-        PedagogicalIntent::SocraticQuestion,
+        PedagogicalIntent::ProbeReasoning,
     );
 }
 
@@ -438,6 +438,54 @@ fn non_factual_short_turn_still_returns_comprehension_check() {
     assert_eq!(
         decide_intent(&learner, &session),
         PedagogicalIntent::ComprehensionCheck,
+    );
+}
+
+// ─── ProbeReasoning: substantive declarative claims ───────────────
+
+#[test]
+fn substantive_declarative_claim_not_understood_returns_probe_reasoning() {
+    let learner = learner_with(EngagementState::Engaged, vec![]);
+    let mut session = empty_session();
+    session.add_turn(child_turn(
+        "the moon is made of rock and dust and it pulls the sea",
+        vec![],
+    ));
+    assert_eq!(
+        decide_intent(&learner, &session),
+        PedagogicalIntent::ProbeReasoning,
+    );
+}
+
+#[test]
+fn substantive_claim_phrased_as_question_stays_socratic() {
+    // Same length, but a trailing '?' makes it a (non-factual) question,
+    // so the assertion guard fails and it stays on the default.
+    let learner = learner_with(EngagementState::Engaged, vec![]);
+    let mut session = empty_session();
+    session.add_turn(child_turn(
+        "the moon is made of rock and dust and stuff right?",
+        vec![],
+    ));
+    assert_eq!(
+        decide_intent(&learner, &session),
+        PedagogicalIntent::SocraticQuestion,
+    );
+}
+
+#[test]
+fn frustrated_with_substantive_claim_still_scaffolding() {
+    // Engagement-state override precedes turn analysis, so a frustrated
+    // child's substantive claim gets Scaffolding, not ProbeReasoning.
+    let learner = learner_with(EngagementState::FrustratedStuck, vec![]);
+    let mut session = empty_session();
+    session.add_turn(child_turn(
+        "the moon is made of rock and dust and it pulls the sea",
+        vec![],
+    ));
+    assert_eq!(
+        decide_intent(&learner, &session),
+        PedagogicalIntent::Scaffolding,
     );
 }
 
