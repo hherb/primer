@@ -167,6 +167,10 @@ check covers the new key in all three packs.
 ## Files touched
 
 - `primer-core/src/conversation.rs` — enum variant, `ALL`, `name()`, tests.
+- `primer-core/src/router.rs` — `intent_weight` arm (compiler-forced
+  exhaustive match; weight `0.25`, matching `ComprehensionCheck`).
+- `primer-storage/src/catalog.rs` — `intent_id` (id 10) + `intent_name`
+  arms (compiler-forced); two `pedagogical_intents` count tests 9 → 10.
 - `primer-pedagogy/src/prompt_pack.rs` — `ALL_INTENTS`, `intent_key`.
 - `primer-pedagogy/src/prompt_builder.rs` — `is_assertion` helper + routing
   branch.
