@@ -200,3 +200,4 @@ These constrain prompt-builder and dialogue-manager changes — if a change make
 - The Primer never tries to maximise engagement. It detects frustration/disengagement and offers breaks, scaffolding, or session close — never guilt.
 - All learner data is local; cloud inference sends turns per-request only.
 - Comprehension is verified through transfer questions, application, and contradiction probing — not assumed from a confident-sounding response.
+- When the child asserts a claim, the Primer asks how she knows or how she could check — it does not confirm or correct outright. A child who is told she is wrong learns to defend; a child who is asked how she knows learns to look again. Routed deterministically via `PedagogicalIntent::ProbeReasoning` (a substantive declarative claim not yet at `Comprehension` depth), and stated in every pack's core-principles list.
