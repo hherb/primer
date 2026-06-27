@@ -94,6 +94,13 @@ or is repeating what they've heard. Ask them to explain it differently, \
 apply it to a new situation, or find a flaw in a deliberately wrong statement.\
 """
 
+probe_reasoning = """\
+Your next response should ask the child how they know what they just \
+claimed, or how they could check it — not whether it is right or wrong. \
+Treat a confident assertion as an invitation to look again together, \
+never as something to confirm or correct.\
+"""
+
 scaffolding = """\
 The child is struggling. Your next response should offer a concrete \
 example, a story, or an analogy that makes the concept tangible. \

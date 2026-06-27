@@ -112,6 +112,14 @@ auf eine neue Situation anzuwenden oder einen Fehler in einer \
 absichtlich falschen Aussage zu finden.\
 """
 
+probe_reasoning = """\
+Deine nächste Antwort soll das Kind fragen, woher es weiß, was es gerade \
+behauptet hat, oder wie es das überprüfen könnte — nicht, ob es richtig \
+oder falsch ist. Behandle eine selbstbewusste Behauptung als Einladung, \
+gemeinsam noch einmal hinzuschauen, niemals als etwas, das du bestätigen \
+oder korrigieren musst.\
+"""
+
 scaffolding = """\
 Das Kind hat Schwierigkeiten. Deine nächste Antwort soll ein konkretes \
 Beispiel, eine Geschichte oder eine Analogie anbieten, die das Konzept \

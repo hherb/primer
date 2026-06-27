@@ -585,6 +585,7 @@ direct_answer = "x"
 answer_then_pivot = "x"
 session_close = "x"
 suggest_break = "x"
+probe_reasoning = "x"
 
 [engagement]
 frustrated = ""

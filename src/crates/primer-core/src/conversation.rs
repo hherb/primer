@@ -64,6 +64,9 @@ pub enum PedagogicalIntent {
     /// Gentle nudge to take a break — the child can keep going. Fired
     /// by the wallclock-based break-suggestion gate; never a forced halt.
     SuggestBreak,
+    /// The child asserted a claim; ask how she knows or how she could
+    /// check, rather than confirming or correcting it outright.
+    ProbeReasoning,
 }
 
 impl PedagogicalIntent {
@@ -79,6 +82,7 @@ impl PedagogicalIntent {
         Self::AnswerThenPivot,
         Self::SessionClose,
         Self::SuggestBreak,
+        Self::ProbeReasoning,
     ];
 
     /// Canonical machine-readable name. Stable identifier exposed across
@@ -96,6 +100,7 @@ impl PedagogicalIntent {
             Self::AnswerThenPivot => "AnswerThenPivot",
             Self::SessionClose => "SessionClose",
             Self::SuggestBreak => "SuggestBreak",
+            Self::ProbeReasoning => "ProbeReasoning",
         }
     }
 }
@@ -187,7 +192,7 @@ mod tests {
 
     #[test]
     fn pedagogical_intent_all_lists_every_variant() {
-        assert_eq!(PedagogicalIntent::ALL.len(), 9);
+        assert_eq!(PedagogicalIntent::ALL.len(), 10);
         // Spot-check a few representatives.
         assert!(PedagogicalIntent::ALL.contains(&PedagogicalIntent::SocraticQuestion));
         assert!(PedagogicalIntent::ALL.contains(&PedagogicalIntent::SessionClose));
@@ -211,6 +216,7 @@ mod tests {
         assert_eq!(PedagogicalIntent::AnswerThenPivot.name(), "AnswerThenPivot");
         assert_eq!(PedagogicalIntent::SessionClose.name(), "SessionClose");
         assert_eq!(PedagogicalIntent::SuggestBreak.name(), "SuggestBreak");
+        assert_eq!(PedagogicalIntent::ProbeReasoning.name(), "ProbeReasoning");
     }
 
     #[test]
