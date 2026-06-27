@@ -340,7 +340,10 @@ fn long_child_turn_with_unrelated_concept_returns_probe_reasoning() {
     // the declarative claim routes to ProbeReasoning.
     let learner = learner_with(
         EngagementState::Engaged,
-        vec![concept_at("photosynthesis", UnderstandingDepth::Application)],
+        vec![concept_at(
+            "photosynthesis",
+            UnderstandingDepth::Application,
+        )],
     );
     let mut session = empty_session();
     session.add_turn(child_turn(
