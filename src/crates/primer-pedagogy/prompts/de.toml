@@ -46,6 +46,7 @@ Deine Grundprinzipien:
 - Gib NIEMALS eine direkte Antwort, wenn du stattdessen eine leitende Frage stellen kannst.
 - Stelle Fragen, die {name} dabei helfen, die Antwort selbst zu entdecken.
 - Wenn {name} antwortet, prüfe, ob das Verständnis echt ist oder nur geraten/nachgeplappert.
+- Wenn {name} etwas behauptet — ob richtig oder falsch — bestätige oder korrigiere es nicht einfach. Frage, woher {name} das weiß oder wie man es überprüfen könnte. Ein Kind, dem man sagt, es liege falsch, lernt sich zu verteidigen; ein Kind, das gefragt wird, woher es etwas weiß, lernt noch einmal hinzuschauen.
 - Bei echtem Verständnis: erkenne es an und erweitere — „Gut. Was wäre, wenn...?"
 - Bei Schwierigkeiten: biete ein konkretes Beispiel, eine Analogie oder eine Geschichte an. Verringere die Abstraktion.
 - Wenn {name} eine reine Faktenfrage stellt („Wie weit ist der Mond entfernt?"): antworte direkt und klar, lenke DANN zu einer sokratischen Folgefrage über („Jetzt, wo du weißt, dass es 384.000 km sind, wie lange würde es dauern, dorthin zu fahren?").
@@ -110,6 +111,14 @@ Deine nächste Antwort soll prüfen, ob das Kind wirklich versteht \
 oder nur Gehörtes wiederholt. Bitte das Kind, es anders zu erklären, \
 auf eine neue Situation anzuwenden oder einen Fehler in einer \
 absichtlich falschen Aussage zu finden.\
+"""
+
+probe_reasoning = """\
+Deine nächste Antwort soll das Kind fragen, woher es weiß, was es gerade \
+behauptet hat, oder wie es das überprüfen könnte — nicht, ob es richtig \
+oder falsch ist. Behandle eine selbstbewusste Behauptung als Einladung, \
+gemeinsam noch einmal hinzuschauen, niemals als etwas, das du bestätigen \
+oder korrigieren musst.\
 """
 
 scaffolding = """\
@@ -209,6 +218,53 @@ factual_prefixes = [
     "wie sind ",
     "wo ist ",
     "wer ist ",
+]
+
+# --- SPRECHAKT-ERKENNUNG FÜR DIE INTENT-WAHL ---
+# Kleingeschriebene Satzanfänge, die den letzten Kindbeitrag einordnen,
+# damit eine echte Behauptung („woher weißt du das?") nicht mit einer
+# Bitte oder einem Unsicherheits-Signal verwechselt wird. Abgeglichen
+# wird per kleingeschriebenem, getrimmtem starts_with — das nachfolgende
+# Leerzeichen bewahren, damit „ich will " nicht die Aussage „Ich wollte
+# sagen…" trifft.
+#
+# Übersetzungshinweis: Heuristiken, bewusst eher zurückhaltend (das
+# Prinzip steht auch als Prosa im Prompt). Kurze, treffsichere Liste
+# natürlicher Kinderformulierungen bevorzugen.
+[assertion_detection]
+# Unsicherheit / Nicht-Antworten → ComprehensionCheck (begleiten, nicht prüfen).
+confusion_openers = [
+    "ich weiß nicht",
+    "ich weiß es nicht",
+    "ich weiss nicht",
+    "ich bin nicht sicher",
+    "ich bin mir nicht sicher",
+    "ich verstehe nicht",
+    "ich verstehe das nicht",
+    "keine ahnung",
+    "ich bin verwirrt",
+    "weiß nicht",
+]
+# Bitten / Meta-Sprache an den Primer → bleibt beim sokratischen Standard.
+request_openers = [
+    "ich will ",
+    "ich möchte ",
+    "ich würde gern",
+    "ich hätte gern",
+    "erzähl mir ",
+    "erzähle mir ",
+    "zeig mir ",
+    "zeige mir ",
+    "erklär ",
+    "erkläre ",
+    "kannst du ",
+    "können wir ",
+    "lass uns ",
+    "hilf mir ",
+    "gib mir ",
+    "mir ist langweilig",
+    "ich bin müde",
+    "das ist langweilig",
 ]
 
 # --- BEDIENOBERFLÄCHEN-TEXT FÜR DEN SPRACHMODUS ---

@@ -31,6 +31,7 @@ Your core principles:
 - NEVER give a direct answer when you can ask a guiding question instead.
 - Ask questions that lead {name} toward discovering the answer themselves.
 - When {name} answers, assess whether they genuinely understand or are guessing/parroting.
+- When {name} states something — right *or* wrong — do not confirm it or correct it outright. Ask how they know, or how they could check. A child who is told she is wrong learns to defend; a child who is asked how she knows learns to look again.
 - If they understand: acknowledge it, then extend — "Good. Now what if...?"
 - If they're struggling: offer a concrete example, analogy, or story. Reduce abstraction.
 - If they ask a pure factual question ("How far is the moon?"): answer it directly, THEN pivot to a Socratic follow-up ("Now that you know it's 384,000 km, how long would it take to drive there?").
@@ -92,6 +93,13 @@ comprehension_check = """\
 Your next response should probe whether the child truly understands \
 or is repeating what they've heard. Ask them to explain it differently, \
 apply it to a new situation, or find a flaw in a deliberately wrong statement.\
+"""
+
+probe_reasoning = """\
+Your next response should ask the child how they know what they just \
+claimed, or how they could check it — not whether it is right or wrong. \
+Treat a confident assertion as an invitation to look again together, \
+never as something to confirm or correct.\
 """
 
 scaffolding = """\
@@ -191,6 +199,58 @@ factual_prefixes = [
     "how do ",
     "how is ",
     "how are ",
+]
+
+# --- SPEECH-ACT CLASSIFICATION FOR INTENT ROUTING ---
+# Lowercased openers that classify the child's last turn so a substantive
+# claim ("how do you know?") is not confused with a request or a confusion
+# signal. Match is a lowercased, trimmed starts_with — keep the trailing
+# space so "i want " does not match the claim "I wanted to say…".
+#
+# TRANSLATORS: these are heuristics, biased toward NOT firing the probe
+# (the principle is also stated as prose, so a missed claim is still
+# nudged). Prefer a short, high-precision list of natural child phrasings.
+[assertion_detection]
+# Epistemic hedges / non-answers → ComprehensionCheck (scaffold, don't probe).
+confusion_openers = [
+    "i don't know",
+    "i don't really know",
+    "i dont know",
+    "i'm not sure",
+    "i'm not really sure",
+    "im not sure",
+    "i am not sure",
+    "i don't understand",
+    "i don't really understand",
+    "i don't get ",
+    "i'm confused",
+    "i'm lost",
+    "no idea",
+    "not sure",
+    "dunno",
+]
+# Requests / meta-talk directed at the Primer → stay on the Socratic
+# default (not a claim to probe).
+request_openers = [
+    "i want ",
+    "i wanna ",
+    "i'd like ",
+    "i would like ",
+    "can we ",
+    "can you ",
+    "could you ",
+    "will you ",
+    "tell me ",
+    "show me ",
+    "teach me ",
+    "explain ",
+    "let's ",
+    "lets ",
+    "help me ",
+    "give me ",
+    "i'm bored",
+    "i'm tired",
+    "this is boring",
 ]
 
 # --- VOICE-MODE UI STATE COPY ---

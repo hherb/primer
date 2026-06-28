@@ -97,6 +97,7 @@ pub fn intent_weight(intent: PedagogicalIntent) -> f32 {
         PedagogicalIntent::Encouragement => 0.0,
         PedagogicalIntent::SessionClose => 0.0,
         PedagogicalIntent::SuggestBreak => 0.0,
+        PedagogicalIntent::ProbeReasoning => 0.25,
     }
 }
 

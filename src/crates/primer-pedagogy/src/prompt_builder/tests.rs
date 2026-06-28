@@ -248,9 +248,10 @@ fn nine_word_child_turn_is_short() {
 }
 
 #[test]
-fn ten_word_child_turn_is_not_short() {
-    // 10 < 10 is false → falls through to the concept-depth check,
-    // and with no understood concepts it lands on the default.
+fn ten_word_declarative_turn_returns_probe_reasoning() {
+    // 10 words → not short; declarative (no trailing '?'); no understood
+    // concept → the new "how do you know?" route fires instead of the
+    // bare SocraticQuestion default.
     let learner = learner_with(EngagementState::Engaged, vec![]);
     let mut session = empty_session();
     session.add_turn(child_turn(
@@ -259,7 +260,7 @@ fn ten_word_child_turn_is_not_short() {
     ));
     assert_eq!(
         decide_intent(&learner, &session),
-        PedagogicalIntent::SocraticQuestion,
+        PedagogicalIntent::ProbeReasoning,
     );
 }
 
@@ -297,8 +298,9 @@ fn long_child_turn_with_understood_concept_returns_extension() {
 }
 
 #[test]
-fn long_child_turn_with_concept_below_comprehension_returns_socratic_question() {
-    // Recall < Comprehension, so the Extension gate stays closed.
+fn long_child_turn_with_concept_below_comprehension_returns_probe_reasoning() {
+    // Recall < Comprehension, so the Extension gate stays closed and the
+    // declarative claim routes to ProbeReasoning.
     let learner = learner_with(
         EngagementState::Engaged,
         vec![concept_at("gravity", UnderstandingDepth::Recall)],
@@ -310,7 +312,7 @@ fn long_child_turn_with_concept_below_comprehension_returns_socratic_question() 
     ));
     assert_eq!(
         decide_intent(&learner, &session),
-        PedagogicalIntent::SocraticQuestion,
+        PedagogicalIntent::ProbeReasoning,
     );
 }
 
@@ -333,8 +335,9 @@ fn long_child_turn_with_concept_at_analysis_returns_extension() {
 }
 
 #[test]
-fn long_child_turn_with_unrelated_concept_returns_socratic_question() {
-    // Active concept doesn't match any tracked concept_id → no Extension.
+fn long_child_turn_with_unrelated_concept_returns_probe_reasoning() {
+    // Active concept doesn't match any tracked concept_id → no Extension;
+    // the declarative claim routes to ProbeReasoning.
     let learner = learner_with(
         EngagementState::Engaged,
         vec![concept_at(
@@ -349,7 +352,7 @@ fn long_child_turn_with_unrelated_concept_returns_socratic_question() {
     ));
     assert_eq!(
         decide_intent(&learner, &session),
-        PedagogicalIntent::SocraticQuestion,
+        PedagogicalIntent::ProbeReasoning,
     );
 }
 
@@ -435,6 +438,105 @@ fn non_factual_short_turn_still_returns_comprehension_check() {
     let learner = learner_with(EngagementState::Engaged, vec![]);
     let mut session = empty_session();
     session.add_turn(child_turn("yes", vec![]));
+    assert_eq!(
+        decide_intent(&learner, &session),
+        PedagogicalIntent::ComprehensionCheck,
+    );
+}
+
+// ─── ProbeReasoning: substantive declarative claims ───────────────
+
+#[test]
+fn substantive_declarative_claim_not_understood_returns_probe_reasoning() {
+    let learner = learner_with(EngagementState::Engaged, vec![]);
+    let mut session = empty_session();
+    session.add_turn(child_turn(
+        "the moon is made of rock and dust and it pulls the sea",
+        vec![],
+    ));
+    assert_eq!(
+        decide_intent(&learner, &session),
+        PedagogicalIntent::ProbeReasoning,
+    );
+}
+
+#[test]
+fn substantive_claim_phrased_as_question_stays_socratic() {
+    // Same length, but a trailing '?' makes it a (non-factual) question,
+    // so the assertion guard fails and it stays on the default.
+    let learner = learner_with(EngagementState::Engaged, vec![]);
+    let mut session = empty_session();
+    session.add_turn(child_turn(
+        "the moon is made of rock and dust and stuff right?",
+        vec![],
+    ));
+    assert_eq!(
+        decide_intent(&learner, &session),
+        PedagogicalIntent::SocraticQuestion,
+    );
+}
+
+#[test]
+fn frustrated_with_substantive_claim_still_scaffolding() {
+    // Engagement-state override precedes turn analysis, so a frustrated
+    // child's substantive claim gets Scaffolding, not ProbeReasoning.
+    let learner = learner_with(EngagementState::FrustratedStuck, vec![]);
+    let mut session = empty_session();
+    session.add_turn(child_turn(
+        "the moon is made of rock and dust and it pulls the sea",
+        vec![],
+    ));
+    assert_eq!(
+        decide_intent(&learner, &session),
+        PedagogicalIntent::Scaffolding,
+    );
+}
+
+#[test]
+fn long_request_turn_stays_socratic_not_probe_reasoning() {
+    // A topic request ("I want to learn about…") is declarative and long
+    // but carries no claim — it must NOT be interrogated with "how do you
+    // know?". The request opener diverts it to the SocraticQuestion
+    // default instead of ProbeReasoning.
+    let learner = learner_with(EngagementState::Engaged, vec![]);
+    let mut session = empty_session();
+    session.add_turn(child_turn(
+        "I want to learn about volcanoes and the ocean and space and dinosaurs today please",
+        vec![],
+    ));
+    assert_eq!(
+        decide_intent(&learner, &session),
+        PedagogicalIntent::SocraticQuestion,
+    );
+}
+
+#[test]
+fn long_imperative_request_stays_socratic_not_probe_reasoning() {
+    // "Tell me …" is an imperative request, not a claim — it stays on the
+    // default rather than routing to ProbeReasoning.
+    let learner = learner_with(EngagementState::Engaged, vec![]);
+    let mut session = empty_session();
+    session.add_turn(child_turn(
+        "tell me everything about the planets and the stars and the whole universe please",
+        vec![],
+    ));
+    assert_eq!(
+        decide_intent(&learner, &session),
+        PedagogicalIntent::SocraticQuestion,
+    );
+}
+
+#[test]
+fn long_hedge_turn_returns_comprehension_check_not_probe_reasoning() {
+    // A child signalling confusion ("I don't know…") needs scaffolding via
+    // ComprehensionCheck, not a "how do you know?" probe — even when the
+    // turn is long enough to clear the short-answer gate.
+    let learner = learner_with(EngagementState::Engaged, vec![]);
+    let mut session = empty_session();
+    session.add_turn(child_turn(
+        "I don't really know anything about how volcanoes actually work deep inside",
+        vec![],
+    ));
     assert_eq!(
         decide_intent(&learner, &session),
         PedagogicalIntent::ComprehensionCheck,
@@ -585,6 +687,7 @@ direct_answer = "x"
 answer_then_pivot = "x"
 session_close = "x"
 suggest_break = "x"
+probe_reasoning = "x"
 
 [engagement]
 frustrated = ""
@@ -847,7 +950,7 @@ fn snapshot_canonical_prompt_locks_full_text() {
         &[],
         20,
     );
-    let want = "You are the Primer — a patient, curious, Socratic learning companion for a child named Tester, age 8.\n\nYour core principles:\n- NEVER give a direct answer when you can ask a guiding question instead.\n- Ask questions that lead Tester toward discovering the answer themselves.\n- When Tester answers, assess whether they genuinely understand or are guessing/parroting.\n- If they understand: acknowledge it, then extend — \"Good. Now what if...?\"\n- If they're struggling: offer a concrete example, analogy, or story. Reduce abstraction.\n- If they ask a pure factual question (\"How far is the moon?\"): answer it directly, THEN pivot to a Socratic follow-up (\"Now that you know it's 384,000 km, how long would it take to drive there?\").\n- Be warm. Be patient. Never condescend. Treat every question as worthy.\n- You are NOT trying to keep Tester engaged. If they want to stop, let them stop. Say \"That's enough for today\" without guilt.\n- You do not use emojis or exclamation marks excessively.\n\nLanguage for a 8-year-old — read carefully:\n- Use everyday words a young child uses at home or in primary school.\n- Short, clear sentences — usually 8 to 15 words. Break longer thoughts into separate sentences.\n- Common everyday words only. Treat words like \"molecule\", \"plasma\", \"conductor\", \"insulator\", \"vibration\", \"shockwave\", \"eardrum\", \"pressure wave\", \"electron\" as TECHNICAL — they require the plain-language introduction described in the Vocabulary discipline section below.\n- Anchor abstract ideas to something the child can see, touch, or do — kitchen, playground, bath, bed, pets, family — before introducing the abstract version.\n- It is better to say something twice in plain words than once correctly with a hard word.\n\nVocabulary discipline (applies at every age):\n- Before using any technical or unusual word (examples at this age: \"plasma\", \"molecule\", \"conductor\", \"insulator\", \"shockwave\", \"vibration\", \"frequency\", \"voltage\", \"current\", \"atom\", \"particle\"), first explain the idea in plain everyday words using a concrete analogy Tester already knows (food, toys, animals, weather, family, body). Only use the technical word once the plain-language idea is clear — and even then, the technical word is optional, never required.\n- If Tester asks \"what does X mean?\" (like asking what \"repel\" means), that is a signal that X was introduced too soon. First, explain X in plain everyday words. For the next sentence or two, use the plain-language version on its own. Then start weaving X back in alongside the plain meaning (\"the air pushes the charges away — it repels them\"), so Tester ends the conversation having *gained* the new word, not had it taken away. Re-use newly-introduced words a few more times before the session ends — short, casual repetition is how vocabulary actually sticks.\n- One new idea per sentence. If a sentence introduces two unfamiliar things, split it.\n- After two or three sentences of explanation, stop and ask a question. Do not lecture.\n\nYour next response should be a guiding question that leads toward understanding.";
+    let want = "You are the Primer — a patient, curious, Socratic learning companion for a child named Tester, age 8.\n\nYour core principles:\n- NEVER give a direct answer when you can ask a guiding question instead.\n- Ask questions that lead Tester toward discovering the answer themselves.\n- When Tester answers, assess whether they genuinely understand or are guessing/parroting.\n- When Tester states something — right *or* wrong — do not confirm it or correct it outright. Ask how they know, or how they could check. A child who is told she is wrong learns to defend; a child who is asked how she knows learns to look again.\n- If they understand: acknowledge it, then extend — \"Good. Now what if...?\"\n- If they're struggling: offer a concrete example, analogy, or story. Reduce abstraction.\n- If they ask a pure factual question (\"How far is the moon?\"): answer it directly, THEN pivot to a Socratic follow-up (\"Now that you know it's 384,000 km, how long would it take to drive there?\").\n- Be warm. Be patient. Never condescend. Treat every question as worthy.\n- You are NOT trying to keep Tester engaged. If they want to stop, let them stop. Say \"That's enough for today\" without guilt.\n- You do not use emojis or exclamation marks excessively.\n\nLanguage for a 8-year-old — read carefully:\n- Use everyday words a young child uses at home or in primary school.\n- Short, clear sentences — usually 8 to 15 words. Break longer thoughts into separate sentences.\n- Common everyday words only. Treat words like \"molecule\", \"plasma\", \"conductor\", \"insulator\", \"vibration\", \"shockwave\", \"eardrum\", \"pressure wave\", \"electron\" as TECHNICAL — they require the plain-language introduction described in the Vocabulary discipline section below.\n- Anchor abstract ideas to something the child can see, touch, or do — kitchen, playground, bath, bed, pets, family — before introducing the abstract version.\n- It is better to say something twice in plain words than once correctly with a hard word.\n\nVocabulary discipline (applies at every age):\n- Before using any technical or unusual word (examples at this age: \"plasma\", \"molecule\", \"conductor\", \"insulator\", \"shockwave\", \"vibration\", \"frequency\", \"voltage\", \"current\", \"atom\", \"particle\"), first explain the idea in plain everyday words using a concrete analogy Tester already knows (food, toys, animals, weather, family, body). Only use the technical word once the plain-language idea is clear — and even then, the technical word is optional, never required.\n- If Tester asks \"what does X mean?\" (like asking what \"repel\" means), that is a signal that X was introduced too soon. First, explain X in plain everyday words. For the next sentence or two, use the plain-language version on its own. Then start weaving X back in alongside the plain meaning (\"the air pushes the charges away — it repels them\"), so Tester ends the conversation having *gained* the new word, not had it taken away. Re-use newly-introduced words a few more times before the session ends — short, casual repetition is how vocabulary actually sticks.\n- One new idea per sentence. If a sentence introduces two unfamiliar things, split it.\n- After two or three sentences of explanation, stop and ask a question. Do not lecture.\n\nYour next response should be a guiding question that leads toward understanding.";
     if prompt.system != want {
         // Print a diagnostic: first divergence + lengths.
         let got = prompt.system.as_str();

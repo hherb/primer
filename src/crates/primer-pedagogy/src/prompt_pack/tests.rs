@@ -78,6 +78,26 @@ fn german_pack_age_band_selection() {
 }
 
 #[test]
+fn all_intents_slice_covers_every_pedagogical_intent() {
+    // `ALL_INTENTS` is hand-maintained alongside `PedagogicalIntent::ALL`.
+    // The pack-load and pack-lookup tests iterate `ALL_INTENTS`, so a new
+    // enum variant forgotten here would silently skip pack-instruction
+    // validation (the `name()`/`intent_key` matches are compiler-forced,
+    // but this slice is not). This guard makes that drift a test failure.
+    assert_eq!(
+        ALL_INTENTS.len(),
+        primer_core::conversation::PedagogicalIntent::ALL.len(),
+        "ALL_INTENTS is out of sync with PedagogicalIntent::ALL"
+    );
+    for &intent in primer_core::conversation::PedagogicalIntent::ALL {
+        assert!(
+            ALL_INTENTS.contains(&intent),
+            "ALL_INTENTS is missing {intent:?}"
+        );
+    }
+}
+
+#[test]
 fn german_pack_intent_lookups_all_populated() {
     let pack = german_pack();
     for &intent in ALL_INTENTS {
@@ -125,6 +145,25 @@ fn german_pack_factual_prefixes_are_german() {
         !prefixes.contains(&"what is "),
         "english prefix leaked into german pack: {prefixes:?}"
     );
+}
+
+#[test]
+fn shipping_packs_populate_assertion_detection_openers() {
+    // The `[assertion_detection]` section is `#[serde(default)]`, so a pack
+    // that omits it loads with empty lists and silently keeps the broad
+    // ProbeReasoning routing. The stable shipping packs (en, de) must
+    // populate both lists, or the "how do you know?" route would fire on
+    // requests/confusion in those locales. This guards that gap.
+    for (name, pack) in [("en", english_pack()), ("de", german_pack())] {
+        assert!(
+            !pack.confusion_openers().is_empty(),
+            "{name} pack confusion_openers must not be empty"
+        );
+        assert!(
+            !pack.request_openers().is_empty(),
+            "{name} pack request_openers must not be empty"
+        );
+    }
 }
 
 #[test]

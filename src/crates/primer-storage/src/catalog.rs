@@ -40,6 +40,7 @@ pub fn intent_id(intent: PedagogicalIntent) -> i64 {
         PedagogicalIntent::AnswerThenPivot => 7,
         PedagogicalIntent::SessionClose => 8,
         PedagogicalIntent::SuggestBreak => 9,
+        PedagogicalIntent::ProbeReasoning => 10,
     }
 }
 
@@ -54,6 +55,7 @@ pub fn intent_name(intent: PedagogicalIntent) -> &'static str {
         PedagogicalIntent::AnswerThenPivot => "AnswerThenPivot",
         PedagogicalIntent::SessionClose => "SessionClose",
         PedagogicalIntent::SuggestBreak => "SuggestBreak",
+        PedagogicalIntent::ProbeReasoning => "ProbeReasoning",
     }
 }
 
