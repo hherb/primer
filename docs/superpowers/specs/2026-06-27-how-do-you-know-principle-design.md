@@ -147,6 +147,54 @@ Engagement-state overrides and the break gate continue to fire before any
 turn analysis, so a frustrated child still gets `Scaffolding`, not
 `ProbeReasoning`.
 
+### Post-review refinement (PR #296 follow-up)
+
+The `is_assertion` helper above (`!ends_with('?')`) shipped too broad: it
+fired `ProbeReasoning` on *any* long non-question turn, so a topic request
+("I want to learn about volcanoes…") or a confusion signal ("I don't really
+know how volcanoes work") got an inappropriate "how do you know?" probe. It
+was replaced with two pack-driven, locale-aware speech-act classifiers that
+generalise the existing `factual_prefixes` mechanism (shared `matches_opener`
+helper, lowercased trimmed `starts_with`):
+
+```text
+if last child turn:
+    if is_factual_question                 -> DirectAnswer / AnswerThenPivot
+    if word_count < 10                     -> ComprehensionCheck
+    if is_confusion(pack, text)            -> ComprehensionCheck   (NEW: long hedges)
+    compute has_understood
+    if has_understood                      -> Extension
+    if is_probeable_assertion(pack, text)  -> ProbeReasoning       (NARROWED)
+default                                     -> SocraticQuestion
+```
+
+- `pack.confusion_openers()` — epistemic hedges ("I don't know", "I'm not
+  sure", "I don't really understand"). A confused child is scaffolded via
+  `ComprehensionCheck`, not probed. Also fixes a latent bug where a *long*
+  hedge previously hit `ProbeReasoning`.
+- `pack.request_openers()` — requests / meta-talk ("I want", "tell me",
+  "let's", "I'm bored"). Not a claim, so it stays on the `SocraticQuestion`
+  default.
+- `is_probeable_assertion` = not a `?`-question **and** not a request opener.
+
+Design bias is deliberately toward **not** firing: the principle is also
+stated as prompt prose (Layer 1), so a missed claim is still nudged by the
+LLM, whereas a false probe at a child's story request has no backstop. The
+new `[assertion_detection]` TOML section is `#[serde(default)]` (empty =
+broad fallback, backward-compatible for synthetic/older packs); en/de are
+populated and guarded by a test, hi is populated as preview-quality.
+
+**Why still a heuristic (not an LLM call):** `decide_intent` runs
+synchronously *before* any background classifier has seen the just-submitted
+turn, so an LLM-based detector here would be a blocking call on the hot path.
+Prefix heuristics are the zero-latency, deterministic choice — at the cost of
+residual misses (mid-sentence requests, sarcasm) that the prose layer covers.
+**Future direction:** once the conversational behaviour and the on-device
+hardware envelope have stabilised toward production specs, replace this
+heuristic (and the sibling `factual_prefixes` classifier) with a small, fast
+locally-run classifier model. Deferred deliberately — premature while the
+heuristic is cheap, debuggable, and good enough.
+
 ## Testing
 
 Add characterization tests to `prompt_builder/tests.rs` (the 18-test suite
@@ -171,15 +219,20 @@ check covers the new key in all three packs.
   exhaustive match; weight `0.25`, matching `ComprehensionCheck`).
 - `primer-storage/src/catalog.rs` — `intent_id` (id 10) + `intent_name`
   arms (compiler-forced); two `pedagogical_intents` count tests 9 → 10.
-- `primer-pedagogy/src/prompt_pack.rs` — `ALL_INTENTS`, `intent_key`.
-- `primer-pedagogy/src/prompt_builder.rs` — `is_assertion` helper + routing
-  branch.
+- `primer-pedagogy/src/prompt_pack.rs` — `ALL_INTENTS`, `intent_key`; plus
+  (post-review) `confusion_openers()` / `request_openers()` accessors + the
+  `[assertion_detection]` raw section.
+- `primer-pedagogy/src/prompt_builder.rs` — routing branch; the helper is
+  `is_probeable_assertion_with_pack` + `is_confusion_with_pack` + shared
+  `matches_opener` (post-review; the original `is_assertion` was removed).
 - `primer-pedagogy/src/prompt_builder/tests.rs` — characterization tests.
+- `primer-pedagogy/src/prompt_pack/tests.rs` — shipping-pack opener guard
+  (post-review).
 - `primer-pedagogy/prompts/en.toml` — core-principle bullet + `[intent]`
-  key.
+  key + `[assertion_detection]` openers.
 - `primer-pedagogy/prompts/de.toml` — natural-register equivalents.
-- `primer-pedagogy/prompts/hi.toml` — natural-register equivalents.
+- `primer-pedagogy/prompts/hi.toml` — natural-register equivalents (preview).
 - `CLAUDE.md` — fifth pedagogical-principle bullet.
 
 No schema migration. No new constants (reuses `SHORT_TURN_WORD_BOUNDARY`,
-`ACTIVE_CONCEPT_LOOKBACK`).
+`ACTIVE_CONCEPT_LOOKBACK`; the opener lists are pack data, not constants).

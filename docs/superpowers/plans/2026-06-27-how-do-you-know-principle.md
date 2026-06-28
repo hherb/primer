@@ -180,6 +180,16 @@ git commit -m "feat(pedagogy): add ProbeReasoning intent (enum, ids, pack keys)"
 
 ## Task 2: Route substantive declarative claims to `ProbeReasoning`
 
+> **⚠️ Superseded in part (PR #296 follow-up).** The `is_assertion` helper
+> described below (`!ends_with('?')`) shipped too broad and was replaced after
+> review with two pack-driven classifiers — `is_confusion_with_pack`
+> (→ `ComprehensionCheck`) and `is_probeable_assertion_with_pack`
+> (request-opener-aware) — sharing a `matches_opener` helper, plus an
+> `[assertion_detection]` TOML section. The steps below are kept as the
+> as-built record of the *first* cut; see the design doc's **"Post-review
+> refinement"** section for the current behaviour. The enum/storage/pack-key
+> scaffolding in Task 1 is unchanged.
+
 Add the `is_assertion` helper and a routing branch in `decide_intent_at_with_pack`, sitting after the `Extension` gate and before the `SocraticQuestion` default. Update the three existing characterization tests that this reclassifies, and add new ones for the new route and its guards.
 
 **Files:**
