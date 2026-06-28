@@ -154,6 +154,11 @@ jobs:
         # that transitively reference Tauri's optional deps when the
         # workspace is checked. Match the default-test job's deps to
         # keep the resolution identical.
+        #
+        # libasound2-dev: the portable `--features speech` clippy step
+        # below pulls cpal, whose Linux backend links against ALSA
+        # (alsa-sys needs the dev headers at build time). macOS uses
+        # CoreAudio so the macOS feature-combos job needs no equivalent.
         run: |
           sudo apt-get update
           sudo apt-get install -y --no-install-recommends \
@@ -161,7 +166,8 @@ jobs:
             libxdo-dev \
             libssl-dev \
             libayatana-appindicator3-dev \
-            librsvg2-dev
+            librsvg2-dev \
+            libasound2-dev
 
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@stable
@@ -223,6 +229,35 @@ jobs:
         # (already-warm) ort-runtime compile-time download shared with the
         # `cargo check --features fastembed` step above.
         run: cargo clippy -p primer-kb-load --features fastembed --all-targets -- -D warnings
+
+      - name: cargo clippy -p primer-cli --features speech
+        # Closes the long-flagged gap (raised across ~24 next-session
+        # briefs): the PORTABLE speech build of the CLI — silero + whisper
+        # + piper + cpal, the stack that ships to Linux/Android-adjacent
+        # devices — was clippy'd NOWHERE. The macOS feature-combos-macos
+        # job runs `primer-cli --features speech,macos-native`, but that's
+        # the Apple-native variant; the portable `--features speech` path
+        # had no CI coverage.
+        #
+        # The concrete bug class this guards: exhaustive `match` arms over
+        # the platform-native `TtsBackend`/`SttBackend` variants
+        # (`MacosNative`/`AndroidNative`) in the portable CLI path — e.g.
+        # `cli_support.rs`'s deliberately-exhaustive TtsBackend match,
+        # whose own comment says it exists "so the portable `--features
+        # speech` build stays green when new platform-native variants
+        # land." The `AndroidNative` non-exhaustive match (fixed in PR
+        # #269) slipped to a developer's local run precisely because no CI
+        # step compiled this combo. With this step, the next platform-native
+        # variant fails CI on the PR introducing it.
+        #
+        # clippy (not check): catches lint rot as well as build breaks,
+        # matching every other feature-combo step. `--all-targets` lints
+        # the test modules too. No espeak-ng needed — it's a runtime data
+        # dependency for phoneme synthesis, not a build/link dep (the
+        # macOS speech clippy step likewise installs no espeak-ng). The
+        # ort runtime download is shared with the fastembed/supertonic
+        # steps above and stays warm via the rust-cache layer.
+        run: cargo clippy -p primer-cli --features speech --all-targets -- -D warnings
 
   # macOS feature-combo drift-guard. The Apple-native speech backends
   # (`macos-native`, `macos-native-26`) and the `voice-loop` state
