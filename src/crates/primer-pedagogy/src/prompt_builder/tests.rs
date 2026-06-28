@@ -492,6 +492,57 @@ fn frustrated_with_substantive_claim_still_scaffolding() {
     );
 }
 
+#[test]
+fn long_request_turn_stays_socratic_not_probe_reasoning() {
+    // A topic request ("I want to learn about…") is declarative and long
+    // but carries no claim — it must NOT be interrogated with "how do you
+    // know?". The request opener diverts it to the SocraticQuestion
+    // default instead of ProbeReasoning.
+    let learner = learner_with(EngagementState::Engaged, vec![]);
+    let mut session = empty_session();
+    session.add_turn(child_turn(
+        "I want to learn about volcanoes and the ocean and space and dinosaurs today please",
+        vec![],
+    ));
+    assert_eq!(
+        decide_intent(&learner, &session),
+        PedagogicalIntent::SocraticQuestion,
+    );
+}
+
+#[test]
+fn long_imperative_request_stays_socratic_not_probe_reasoning() {
+    // "Tell me …" is an imperative request, not a claim — it stays on the
+    // default rather than routing to ProbeReasoning.
+    let learner = learner_with(EngagementState::Engaged, vec![]);
+    let mut session = empty_session();
+    session.add_turn(child_turn(
+        "tell me everything about the planets and the stars and the whole universe please",
+        vec![],
+    ));
+    assert_eq!(
+        decide_intent(&learner, &session),
+        PedagogicalIntent::SocraticQuestion,
+    );
+}
+
+#[test]
+fn long_hedge_turn_returns_comprehension_check_not_probe_reasoning() {
+    // A child signalling confusion ("I don't know…") needs scaffolding via
+    // ComprehensionCheck, not a "how do you know?" probe — even when the
+    // turn is long enough to clear the short-answer gate.
+    let learner = learner_with(EngagementState::Engaged, vec![]);
+    let mut session = empty_session();
+    session.add_turn(child_turn(
+        "I don't really know anything about how volcanoes actually work deep inside",
+        vec![],
+    ));
+    assert_eq!(
+        decide_intent(&learner, &session),
+        PedagogicalIntent::ComprehensionCheck,
+    );
+}
+
 // ─── Long-term memory injection (summary + retrieved older) ──────
 
 fn build_default_prompt(summary: &str, retrieved_older: &[Turn]) -> primer_core::inference::Prompt {

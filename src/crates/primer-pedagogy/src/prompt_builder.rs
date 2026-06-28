@@ -499,7 +499,14 @@ pub fn extract_active_concepts(session: &Session, last_n: usize) -> Vec<String> 
 /// questions are intentionally excluded — those are Socratic-richer
 /// and should not be short-circuited with a direct answer.
 fn is_factual_question_with_pack(pack: &dyn PromptPack, text: &str) -> bool {
-    let prefixes = pack.factual_prefixes();
+    matches_opener(pack.factual_prefixes(), text)
+}
+
+/// True when `text`'s lowercased, trimmed opening matches any prefix in
+/// `prefixes`. Empty list ⇒ `false` (the locale opts out). Shared by the
+/// factual-question, confusion, and request classifiers so all three use
+/// one matching rule.
+fn matches_opener(prefixes: &[String], text: &str) -> bool {
     if prefixes.is_empty() {
         return false;
     }
@@ -515,15 +522,35 @@ fn is_factual_question(text: &str) -> bool {
     is_factual_question_with_pack(english_pack(), text)
 }
 
-/// True when `text` is a declarative claim rather than a question.
+/// True when `text` is an epistemic hedge / non-answer ("I don't know",
+/// "I'm not sure"), per `pack.confusion_openers()`. Such a turn routes to
+/// `ComprehensionCheck`, not `ProbeReasoning` — a confused child needs
+/// scaffolding, not "how do you know?".
+fn is_confusion_with_pack(pack: &dyn PromptPack, text: &str) -> bool {
+    matches_opener(pack.confusion_openers(), text)
+}
+
+/// True when `text` is a *probe-able assertion*: a substantive declarative
+/// claim worth a "how do you know?" response, rather than a question or a
+/// request directed at the Primer.
 ///
-/// Used to route a substantive, not-yet-understood child assertion to
-/// `ProbeReasoning` ("how do you know?") instead of the Socratic-question
-/// default. A trailing `?` (after trimming) marks a question, which stays
-/// on the default path; factual questions are already diverted earlier in
-/// `decide_intent_at_with_pack`.
-fn is_assertion(text: &str) -> bool {
-    !text.trim_end().ends_with('?')
+/// A turn qualifies only when it is **not** a question (no trailing `?`
+/// after trimming) **and** does not open with a request / meta-talk marker
+/// from `pack.request_openers()` ("I want", "tell me", "let's"…). Questions
+/// and requests stay on the `SocraticQuestion` default; only genuine claims
+/// route to `ProbeReasoning`. Factual questions are already diverted earlier
+/// in `decide_intent_at_with_pack`, and confusion hedges are handled by
+/// `is_confusion_with_pack` before this is consulted.
+///
+/// The bias is deliberately toward *not* firing: the principle is also
+/// stated as prose in the system prompt, so a missed claim is still nudged
+/// by the LLM, whereas a false "how do you know?" at a child's story
+/// request has no backstop.
+fn is_probeable_assertion_with_pack(pack: &dyn PromptPack, text: &str) -> bool {
+    if text.trim_end().ends_with('?') {
+        return false;
+    }
+    !matches_opener(pack.request_openers(), text)
 }
 
 /// Decide the next pedagogical intent based on the learner model
@@ -639,6 +666,14 @@ pub fn decide_intent_at_with_pack(
                 return PedagogicalIntent::ComprehensionCheck;
             }
 
+            // A long turn that opens with a confusion/non-answer marker
+            // ("I don't know…") is a signal to scaffold, not to probe
+            // reasoning — route it to ComprehensionCheck like a short
+            // answer rather than asking "how do you know?".
+            if is_confusion_with_pack(pack, &last.text) {
+                return PedagogicalIntent::ComprehensionCheck;
+            }
+
             // Check if any active concepts are at Comprehension level
             // or above — if so, extend.
             let active = extract_active_concepts(session, crate::consts::ACTIVE_CONCEPT_LOOKBACK);
@@ -656,9 +691,10 @@ pub fn decide_intent_at_with_pack(
             // The child asserted a substantive claim they have not yet
             // shown they understand. Ask how they know / how they could
             // check, rather than defaulting to a fresh Socratic question.
-            // (Questions — including non-factual ones — fail is_assertion
-            // and stay on the default path below.)
-            if is_assertion(&last.text) {
+            // Questions and requests/meta-talk ("tell me…", "I want…")
+            // fail is_probeable_assertion_with_pack and stay on the
+            // default path below.
+            if is_probeable_assertion_with_pack(pack, &last.text) {
                 return PedagogicalIntent::ProbeReasoning;
             }
         }

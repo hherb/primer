@@ -206,6 +206,41 @@ factual_prefixes = [
     "कौन है ",
 ]
 
+# --- SPEECH-ACT CLASSIFICATION FOR INTENT ROUTING ---
+# REVIEW (preview locale): lowercased openers that classify the child's
+# last turn so a real claim ("how do you know?") is not confused with a
+# request or an uncertainty signal. Match is a trimmed starts_with. These
+# are best-effort and await native-speaker review like the rest of this
+# pack; bias is toward NOT firing the probe.
+[assertion_detection]
+# Uncertainty / non-answers → ComprehensionCheck (scaffold, don't probe).
+confusion_openers = [
+    "मुझे नहीं पता",
+    "मुझे नहीं मालूम",
+    "मुझे नहीं मालूम है",
+    "मुझे ठीक से नहीं पता",
+    "पता नहीं",
+    "मुझे समझ नहीं आया",
+    "मुझे समझ नहीं आ रहा",
+    "मुझे यकीन नहीं",
+    "मैं उलझन में हूँ",
+]
+# Requests / meta-talk directed at the Primer → stay on the Socratic default.
+request_openers = [
+    "मुझे बताओ ",
+    "मुझे बताओ कि ",
+    "मुझे दिखाओ ",
+    "मुझे सिखाओ ",
+    "क्या हम ",
+    "क्या तुम ",
+    "चलो ",
+    "मेरी मदद करो",
+    "मुझे बोर हो रहा है",
+    "मैं थक गया",
+    "मैं थक गई",
+    "यह बोरिंग है",
+]
+
 # --- वॉइस-मोड यूआई स्टेट कॉपी ---
 # REVIEW: keep both fields short and gentle. The label sits on one line;
 # the hint is a soft reassurance to the child ("take your time", "let

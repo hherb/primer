@@ -118,6 +118,19 @@ pub trait PromptPack: Send + Sync {
     /// matching doesn't apply — `decide_intent` falls back to the
     /// LLM-based classifier in that case.
     fn factual_prefixes(&self) -> &[String];
+    /// Lowercased openers that mark a child turn as an epistemic hedge /
+    /// non-answer ("I don't know", "I'm not sure"). Such a turn routes to
+    /// `ComprehensionCheck` rather than `ProbeReasoning` — a child
+    /// signalling confusion needs scaffolding, not a "how do you know?"
+    /// probe. Empty disables the check for that locale (the turn falls
+    /// through to the normal claim/Socratic routing).
+    fn confusion_openers(&self) -> &[String];
+    /// Lowercased openers that mark a child turn as a request or meta-talk
+    /// directed at the Primer ("I want", "tell me", "let's"). Such a turn
+    /// is not a probe-able claim, so it stays on the `SocraticQuestion`
+    /// default instead of routing to `ProbeReasoning`. Empty disables the
+    /// check for that locale.
+    fn request_openers(&self) -> &[String];
     /// Display strings for the three voice-mode UI states
     /// (LISTEN / LATENT_THINK / SPEAK). Locale-keyed. Consumed by the
     /// GUI's `get_voice_state_copy` Tauri command. No placeholders —
@@ -310,6 +323,8 @@ pub struct TomlPromptPack {
     child_label: String,
     primer_label: String,
     factual_prefixes: Vec<String>,
+    confusion_openers: Vec<String>,
+    request_openers: Vec<String>,
     voice_state_labels: VoiceStateLabels,
     status: PackStatus,
 }
@@ -509,6 +524,18 @@ impl TomlPromptPack {
                 .iter()
                 .map(|p| unescape_braces(p))
                 .collect(),
+            confusion_openers: raw
+                .assertion_detection
+                .confusion_openers
+                .iter()
+                .map(|p| unescape_braces(p))
+                .collect(),
+            request_openers: raw
+                .assertion_detection
+                .request_openers
+                .iter()
+                .map(|p| unescape_braces(p))
+                .collect(),
             voice_state_labels: VoiceStateLabels {
                 listen_label: unescape_braces(&raw.voice_state.listen_label),
                 listen_hint: unescape_braces(&raw.voice_state.listen_hint),
@@ -599,6 +626,12 @@ impl PromptPack for TomlPromptPack {
     fn factual_prefixes(&self) -> &[String] {
         &self.factual_prefixes
     }
+    fn confusion_openers(&self) -> &[String] {
+        &self.confusion_openers
+    }
+    fn request_openers(&self) -> &[String] {
+        &self.request_openers
+    }
     fn voice_state_labels(&self) -> &VoiceStateLabels {
         &self.voice_state_labels
     }
@@ -619,6 +652,8 @@ struct PackFile {
     sections: SectionsSection,
     labels: LabelsSection,
     question_detection: QuestionDetectionSection,
+    #[serde(default)]
+    assertion_detection: AssertionDetectionSection,
     voice_state: VoiceStateSection,
 }
 
@@ -674,6 +709,19 @@ struct LabelsSection {
 #[derive(Deserialize)]
 struct QuestionDetectionSection {
     factual_prefixes: Vec<String>,
+}
+
+/// Openers that classify a child turn's speech-act for intent routing.
+/// Optional section (`#[serde(default)]` at the use site) so packs that
+/// predate it — and synthetic test packs — load with empty lists, which
+/// disables the exclusions and falls back to the broader claim routing.
+/// The shipping en/de/hi packs populate both lists; a test guards that.
+#[derive(Deserialize, Default)]
+struct AssertionDetectionSection {
+    #[serde(default)]
+    confusion_openers: Vec<String>,
+    #[serde(default)]
+    request_openers: Vec<String>,
 }
 
 #[derive(Deserialize)]

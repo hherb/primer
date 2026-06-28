@@ -148,6 +148,25 @@ fn german_pack_factual_prefixes_are_german() {
 }
 
 #[test]
+fn shipping_packs_populate_assertion_detection_openers() {
+    // The `[assertion_detection]` section is `#[serde(default)]`, so a pack
+    // that omits it loads with empty lists and silently keeps the broad
+    // ProbeReasoning routing. The stable shipping packs (en, de) must
+    // populate both lists, or the "how do you know?" route would fire on
+    // requests/confusion in those locales. This guards that gap.
+    for (name, pack) in [("en", english_pack()), ("de", german_pack())] {
+        assert!(
+            !pack.confusion_openers().is_empty(),
+            "{name} pack confusion_openers must not be empty"
+        );
+        assert!(
+            !pack.request_openers().is_empty(),
+            "{name} pack request_openers must not be empty"
+        );
+    }
+}
+
+#[test]
 fn german_pack_knowledge_intro_substitutes_age() {
     let pack = german_pack();
     let s = pack.knowledge_intro(8);

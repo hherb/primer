@@ -220,6 +220,53 @@ factual_prefixes = [
     "wer ist ",
 ]
 
+# --- SPRECHAKT-ERKENNUNG FÜR DIE INTENT-WAHL ---
+# Kleingeschriebene Satzanfänge, die den letzten Kindbeitrag einordnen,
+# damit eine echte Behauptung („woher weißt du das?") nicht mit einer
+# Bitte oder einem Unsicherheits-Signal verwechselt wird. Abgeglichen
+# wird per kleingeschriebenem, getrimmtem starts_with — das nachfolgende
+# Leerzeichen bewahren, damit „ich will " nicht die Aussage „Ich wollte
+# sagen…" trifft.
+#
+# Übersetzungshinweis: Heuristiken, bewusst eher zurückhaltend (das
+# Prinzip steht auch als Prosa im Prompt). Kurze, treffsichere Liste
+# natürlicher Kinderformulierungen bevorzugen.
+[assertion_detection]
+# Unsicherheit / Nicht-Antworten → ComprehensionCheck (begleiten, nicht prüfen).
+confusion_openers = [
+    "ich weiß nicht",
+    "ich weiß es nicht",
+    "ich weiss nicht",
+    "ich bin nicht sicher",
+    "ich bin mir nicht sicher",
+    "ich verstehe nicht",
+    "ich verstehe das nicht",
+    "keine ahnung",
+    "ich bin verwirrt",
+    "weiß nicht",
+]
+# Bitten / Meta-Sprache an den Primer → bleibt beim sokratischen Standard.
+request_openers = [
+    "ich will ",
+    "ich möchte ",
+    "ich würde gern",
+    "ich hätte gern",
+    "erzähl mir ",
+    "erzähle mir ",
+    "zeig mir ",
+    "zeige mir ",
+    "erklär ",
+    "erkläre ",
+    "kannst du ",
+    "können wir ",
+    "lass uns ",
+    "hilf mir ",
+    "gib mir ",
+    "mir ist langweilig",
+    "ich bin müde",
+    "das ist langweilig",
+]
+
 # --- BEDIENOBERFLÄCHEN-TEXT FÜR DEN SPRACHMODUS ---
 # Anzeigetexte für die drei Sprachmodus-Zustände der GUI (LISTEN,
 # LATENT_THINK, SPEAK). Jeder Zustand hat eine kurze Bezeichnung
