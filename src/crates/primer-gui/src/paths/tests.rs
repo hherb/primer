@@ -226,3 +226,59 @@ fn subdir_traversal_is_sorted() {
         "expected sorted DFS to pick 'aaa' first, got {found:?}"
     );
 }
+
+// --- seed extraction (write_seed_files) ---
+
+#[test]
+fn write_seed_files_creates_and_skips_when_corpus_unchanged() {
+    let tmp = std::env::temp_dir().join(format!("primer_seed_test_{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&tmp);
+    let files: &[(&str, &[u8])] = &[
+        ("seed_passages.en.jsonl", b"{\"id\":\"a\"}\n"),
+        ("wiki_passages.en.jsonl", b"{\"id\":\"b\"}\n"),
+    ];
+
+    // First write creates both files plus the version marker.
+    write_seed_files(&tmp, files).unwrap();
+    assert_eq!(
+        std::fs::read(tmp.join("seed_passages.en.jsonl")).unwrap(),
+        b"{\"id\":\"a\"}\n"
+    );
+    assert_eq!(
+        std::fs::read(tmp.join("wiki_passages.en.jsonl")).unwrap(),
+        b"{\"id\":\"b\"}\n"
+    );
+    assert!(tmp.join(SEED_VERSION_MARKER).exists());
+
+    // Mutate one file, then re-run with the SAME corpus: the fingerprint
+    // matches the marker, so nothing is rewritten and the edit survives.
+    std::fs::write(tmp.join("seed_passages.en.jsonl"), b"USER_EDIT").unwrap();
+    write_seed_files(&tmp, files).unwrap();
+    assert_eq!(
+        std::fs::read(tmp.join("seed_passages.en.jsonl")).unwrap(),
+        b"USER_EDIT"
+    );
+
+    std::fs::remove_dir_all(&tmp).unwrap();
+}
+
+#[test]
+fn write_seed_files_reextracts_when_corpus_changes() {
+    let tmp = std::env::temp_dir().join(format!("primer_seed_change_{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&tmp);
+
+    // v1 of the corpus (a first install).
+    let v1: &[(&str, &[u8])] = &[("seed_passages.en.jsonl", b"{\"id\":\"a\"}\n")];
+    write_seed_files(&tmp, v1).unwrap();
+
+    // v2 carries changed bytes under the same filename (an app update).
+    // The fingerprint differs, so the stale file is refreshed.
+    let v2: &[(&str, &[u8])] = &[("seed_passages.en.jsonl", b"{\"id\":\"a2\"}\n")];
+    write_seed_files(&tmp, v2).unwrap();
+    assert_eq!(
+        std::fs::read(tmp.join("seed_passages.en.jsonl")).unwrap(),
+        b"{\"id\":\"a2\"}\n"
+    );
+
+    std::fs::remove_dir_all(&tmp).unwrap();
+}
