@@ -90,10 +90,18 @@ This exercises the Android-only code paths that no host build covers: the
 `#[cfg(target_os = "android")]` first-run seed extraction both compile and link
 for `aarch64-linux-android`.
 
-**Seed-refresh caveat:** the seed JSONL is embedded at compile time via
-`include_dir!`. After editing `data/seed/*.jsonl` (which `build.rs` re-copies
-into `resources/seed/`), do a clean rebuild of `primer-gui` so the embedded
-bytes refresh — an incremental build may not re-expand the macro.
+**Seed-refresh caveat (build side):** the seed JSONL is embedded at compile
+time via `include_dir!`. After editing `data/seed/*.jsonl` (which `build.rs`
+re-copies into `resources/seed/`), do a clean rebuild of `primer-gui` so the
+embedded bytes refresh — an incremental build may not re-expand the macro.
+
+**Seed refresh on device (update side):** first-run extraction writes a
+`.seed_version` marker (an FNV fingerprint of the embedded corpus) next to the
+staged `*.jsonl`. On a later boot the marker is compared against the current
+embedded corpus: an unchanged corpus is skipped (nothing rewritten, any staged
+edit preserved), and a changed corpus — i.e. a new APK carrying a revised
+corpus installed over an already-run one — is re-extracted so the child sees
+the current corpus rather than the stale first-install copy.
 
 ## Next step
 
