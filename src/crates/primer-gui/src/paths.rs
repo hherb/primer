@@ -460,7 +460,6 @@ pub fn extract_bundled_seed_if_absent(
 #[cfg(test)]
 mod tests;
 
-#[cfg(any(target_os = "android", test))]
 #[cfg(test)]
 mod seed_extract_tests {
     use super::*;
