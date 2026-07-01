@@ -1,4 +1,13 @@
 use super::*;
+// These helpers moved into responsibility submodules during the split;
+// `use super::*` (crate root) no longer carries them, so import explicitly.
+// `LocaleSql`, `USER_VERSION`, `Locale`, `Connection`, and the
+// `primer_core::knowledge::*` types still arrive via `super::*`.
+use crate::schema::table_exists;
+use crate::vector::{blob_to_vec, vec_to_blob};
+// `Embedder` trait methods (`dim`, `model_id`, `embed`) are called on the
+// `StubEmbedder` in the embedding tests; the trait must be in scope.
+use primer_core::embedder::Embedder;
 use tempfile::NamedTempFile;
 
 /// Allocate a fresh sqlite path inside a `tempfile::NamedTempFile`. The
