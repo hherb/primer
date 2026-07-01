@@ -1,9 +1,15 @@
 //! Unit tests for [`super`] (the prompt-pack loader).
 //!
-//! Extracted verbatim from `prompt_pack.rs` to keep that file under the
-//! ~500-line module guideline. As a child module of `prompt_pack`, these
-//! tests see every private item of the parent via `use super::*`.
+//! Extracted from the original flat `prompt_pack.rs` to keep each module
+//! under the ~500-line guideline. `use super::*` carries the public
+//! surface re-exported from `prompt_pack::mod`; the internal helpers now
+//! live in sibling submodules, so they are imported explicitly below.
 
+use std::sync::Arc;
+
+use super::intents::{ALL_INTENTS, intent_key};
+use super::loader::{emit_preview_warning_if_first, reset_preview_warn_once_for_test};
+use super::render::{render_template, unescape_braces, validate_placeholders};
 use super::*;
 
 fn english_pack() -> Arc<dyn PromptPack> {
