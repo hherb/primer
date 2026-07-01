@@ -128,8 +128,38 @@ async function main() {
   setupSidebarToggle();
   setupUuidCopy();
   setupSettingsButton();
+  setupSetupNudge();
   setupSwitchSessionButton();
   showPicker();
+}
+
+/// Show a one-line nudge when no real LLM is configured (backend still on
+/// the `stub` default), so the supervising adult wires an API key in Settings
+/// before handing the phone to the child. Best-effort: any error just hides it.
+async function refreshSetupNudge() {
+  const nudge = document.getElementById("setup-nudge");
+  if (!nudge) return;
+  try {
+    const settings = await invoke("get_settings");
+    const kind = settings?.backend?.kind ?? "stub";
+    nudge.hidden = kind !== "stub";
+  } catch (_e) {
+    nudge.hidden = true;
+  }
+}
+
+/// Wire the nudge banner's "Open Settings" button once at init: it
+/// delegates to the header's existing `#settings-open` control (so the
+/// modal opens through its one normal entry point) and hides itself
+/// immediately, since the click is itself the user acting on the nudge.
+function setupSetupNudge() {
+  const nudgeOpen = document.getElementById("setup-nudge-open");
+  if (nudgeOpen) {
+    nudgeOpen.addEventListener("click", () => {
+      document.getElementById("settings-open")?.click();
+      document.getElementById("setup-nudge").hidden = true;
+    });
+  }
 }
 
 /// Open (or re-open) the launch-screen picker. The picker manages its
@@ -219,6 +249,7 @@ async function handleSessionReady({ info, shouldReplay }) {
 
   setComposerState("idle");
   refreshSidebar();
+  refreshSetupNudge();
 
   // If voice mode was active before this session switch, re-enter it
   // under the new locale. The backend's `prepare_for_session_change`
