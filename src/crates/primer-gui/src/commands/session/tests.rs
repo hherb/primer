@@ -1,5 +1,16 @@
 use super::*;
+// The `pub use {lifecycle,readers,turn}::*` façade in mod.rs re-exports
+// the session commands + `pub(crate)` helpers, but NOT the private `use`
+// aliases the submodules keep for their own bodies. These four were
+// previously reached through the flat module's `use super::*`; import
+// them explicitly now that the helpers live in sibling submodules.
+use std::sync::Arc;
+
+use chrono::Utc;
+use uuid::Uuid;
+
 use crate::config::GuiConfig;
+use crate::state::AppState;
 use crate::wiring::build_active_session;
 use primer_core::conversation::PedagogicalIntent;
 use primer_core::learner::EngagementState;
