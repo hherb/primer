@@ -70,6 +70,11 @@ chrono.workspace = true
 # `adb logcat`. Desktop builds never pull this in.
 [target.'cfg(target_os = "android")'.dependencies]
 paranoid-android = { workspace = true }
+# Embeds resources/seed/*.jsonl into the binary so first-run extraction to
+# <app_data>/seed/ works without `adb push` (volunteer sideload builds have
+# no adb access). Android-only — desktop resolves the seed dir from the
+# .app bundle or CARGO_MANIFEST_DIR instead.
+include_dir = { workspace = true }
 
 [dev-dependencies]
 tempfile.workspace = true

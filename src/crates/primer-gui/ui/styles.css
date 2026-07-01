@@ -314,6 +314,31 @@ body.sidebar-collapsed {
   flex: 0 0 auto;
 }
 
+/* ─── First-run "set up the AI" nudge ───────────────────────────────
+   Shown when the effective backend is still the `stub` default (see
+   refreshSetupNudge() in app.js) so the supervising adult configures a
+   real backend + API key in Settings before handing the phone to the
+   child. */
+.setup-nudge {
+  display: flex;
+  align-items: center;
+  gap: 0.75rem;
+  padding: 0.6rem 1rem;
+  background: #fff4d6;
+  color: #5a4300;
+  font-size: 0.95rem;
+}
+.setup-nudge[hidden] { display: none; }
+.setup-nudge-btn {
+  margin-left: auto;
+  padding: 0.35rem 0.8rem;
+  border: 0;
+  border-radius: 6px;
+  background: #5a4300;
+  color: #fff;
+  cursor: pointer;
+}
+
 /* ─── Composer ──────────────────────────────────────────────────── */
 
 .composer {

@@ -127,6 +127,12 @@ llama-cpp-2 = "0.1.146"
 # does not populate for our call path (Plan 1 gate finding, 2026-06-18).
 jni = "0.21"
 
+# Embeds primer-gui's small (~280 KB) seed-corpus JSONL tree into the
+# Android binary at compile time, so a first-run extraction step (no
+# `adb push` required) can stage it to <app_data>/seed/. Android-target-only
+# dependency (see primer-gui/Cargo.toml) — never pulled into desktop builds.
+include_dir = "0.7"
+
 # Workspace crates
 primer-core = { path = "crates/primer-core" }
 primer-qnn-sys = { path = "crates/primer-qnn-sys" }

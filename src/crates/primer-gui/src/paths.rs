@@ -199,6 +199,16 @@ pub fn init_mobile_state(app: &tauri::App) -> Result<(), Box<dyn std::error::Err
     let qnn_metrics_opt_in = config.diagnostics.qnn_metrics_enabled;
     app.manage(crate::state::AppState::new(home.clone(), config));
 
+    // Volunteer sideload builds have no `adb push`, so stage the embedded
+    // seed corpus to <app_data>/seed/ on first run (and refresh it when an app
+    // update carries a revised corpus); the discovery call below then points
+    // PRIMER_SEED_DIR at it. Failure degrades to an empty KB (the prompt
+    // builder omits the knowledge section) rather than blocking boot.
+    #[cfg(target_os = "android")]
+    if let Err(e) = extract_bundled_seed(&home) {
+        tracing::warn!("seed extraction failed: {e}; continuing without knowledge base");
+    }
+
     set_mobile_seed_dir_if_present(&home);
     set_adsp_library_path_if_present();
     set_genie_log_path(&home);
@@ -402,5 +412,140 @@ fn find_jsonl_dir(dir: &Path, depth: u32, max_depth: u32) -> Option<PathBuf> {
     None
 }
 
+/// Filename of the corpus-version marker written alongside the staged seed
+/// files. Holds the [`seed_fingerprint`] of the corpus that produced the
+/// current staged files, so a later run can tell whether an app update
+/// carries a revised corpus. Not a `*.jsonl` file, so [`find_jsonl_dir`]
+/// never treats it as seed content.
+#[cfg(any(target_os = "android", test))]
+const SEED_VERSION_MARKER: &str = ".seed_version";
+
+/// FNV-1a digest (hex) over each `(name, contents)` pair — a compile-time
+/// fingerprint of the embedded corpus. It changes whenever a bundled file's
+/// name or bytes change across builds, which is what drives re-extraction on
+/// an app update. Cheap enough (~280 KB) to recompute on every boot.
+#[cfg(any(target_os = "android", test))]
+fn seed_fingerprint(files: &[(&str, &[u8])]) -> String {
+    let mut hash: u64 = 0xcbf2_9ce4_8422_2325;
+    for (name, bytes) in files {
+        for b in name.as_bytes().iter().chain(bytes.iter()) {
+            hash ^= u64::from(*b);
+            hash = hash.wrapping_mul(0x0000_0100_0000_01b3);
+        }
+    }
+    format!("{hash:016x}")
+}
+
+/// Stage `(filename, contents)` pairs into `dir`. When the on-disk version
+/// marker already matches the corpus [`seed_fingerprint`], this is a total
+/// no-op — nothing is written, so an unchanged corpus is never re-extracted
+/// and any file already staged (e.g. an `adb push`) is preserved. When the
+/// fingerprint differs (fresh install, or an app update carrying a revised
+/// corpus) every bundled file is (re)written and the marker is updated, so
+/// the child sees the current corpus rather than a stale one. Host-testable;
+/// the android-only [`extract_bundled_seed`] feeds it the embedded corpus.
+#[cfg(any(target_os = "android", test))]
+fn write_seed_files(dir: &std::path::Path, files: &[(&str, &[u8])]) -> std::io::Result<()> {
+    let fingerprint = seed_fingerprint(files);
+    let marker = dir.join(SEED_VERSION_MARKER);
+    if std::fs::read_to_string(&marker).ok().as_deref() == Some(fingerprint.as_str()) {
+        return Ok(());
+    }
+    std::fs::create_dir_all(dir)?;
+    for (name, bytes) in files {
+        std::fs::write(dir.join(name), bytes)?;
+    }
+    std::fs::write(&marker, &fingerprint)?;
+    Ok(())
+}
+
+/// The seed corpus embedded at compile time from `primer-gui/resources/seed/`.
+/// ~280 KB of JSONL; extracted to `<app_data>/seed/` on first run so
+/// `PRIMER_SEED_DIR` discovery works without `adb push`. Android-only — the
+/// desktop `.app` bundle path and the `CARGO_MANIFEST_DIR` dev fallback cover
+/// the other targets.
+#[cfg(target_os = "android")]
+static BUNDLED_SEED: include_dir::Dir<'_> =
+    include_dir::include_dir!("$CARGO_MANIFEST_DIR/resources/seed");
+
+/// Extract the embedded seed corpus into `<app_data>/seed/`, returning that
+/// directory. Skips the write when the staged corpus is already current and
+/// refreshes it when an app update carries a revised corpus (see
+/// [`write_seed_files`]).
+#[cfg(target_os = "android")]
+pub fn extract_bundled_seed(app_data: &std::path::Path) -> std::io::Result<std::path::PathBuf> {
+    let dir = mobile_seed_dir(app_data);
+    let files: Vec<(&str, &[u8])> = BUNDLED_SEED
+        .files()
+        .filter_map(|f| {
+            f.path()
+                .file_name()
+                .and_then(|n| n.to_str())
+                .map(|name| (name, f.contents()))
+        })
+        .collect();
+    write_seed_files(&dir, &files)?;
+    Ok(dir)
+}
+
 #[cfg(test)]
 mod tests;
+
+#[cfg(test)]
+mod seed_extract_tests {
+    use super::*;
+
+    #[test]
+    fn write_seed_files_creates_and_skips_when_corpus_unchanged() {
+        let tmp = std::env::temp_dir().join(format!("primer_seed_test_{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&tmp);
+        let files: &[(&str, &[u8])] = &[
+            ("seed_passages.en.jsonl", b"{\"id\":\"a\"}\n"),
+            ("wiki_passages.en.jsonl", b"{\"id\":\"b\"}\n"),
+        ];
+
+        // First write creates both files plus the version marker.
+        write_seed_files(&tmp, files).unwrap();
+        assert_eq!(
+            std::fs::read(tmp.join("seed_passages.en.jsonl")).unwrap(),
+            b"{\"id\":\"a\"}\n"
+        );
+        assert_eq!(
+            std::fs::read(tmp.join("wiki_passages.en.jsonl")).unwrap(),
+            b"{\"id\":\"b\"}\n"
+        );
+        assert!(tmp.join(SEED_VERSION_MARKER).exists());
+
+        // Mutate one file, then re-run with the SAME corpus: the fingerprint
+        // matches the marker, so nothing is rewritten and the edit survives.
+        std::fs::write(tmp.join("seed_passages.en.jsonl"), b"USER_EDIT").unwrap();
+        write_seed_files(&tmp, files).unwrap();
+        assert_eq!(
+            std::fs::read(tmp.join("seed_passages.en.jsonl")).unwrap(),
+            b"USER_EDIT"
+        );
+
+        std::fs::remove_dir_all(&tmp).unwrap();
+    }
+
+    #[test]
+    fn write_seed_files_reextracts_when_corpus_changes() {
+        let tmp = std::env::temp_dir().join(format!("primer_seed_change_{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&tmp);
+
+        // v1 of the corpus (a first install).
+        let v1: &[(&str, &[u8])] = &[("seed_passages.en.jsonl", b"{\"id\":\"a\"}\n")];
+        write_seed_files(&tmp, v1).unwrap();
+
+        // v2 carries changed bytes under the same filename (an app update).
+        // The fingerprint differs, so the stale file is refreshed.
+        let v2: &[(&str, &[u8])] = &[("seed_passages.en.jsonl", b"{\"id\":\"a2\"}\n")];
+        write_seed_files(&tmp, v2).unwrap();
+        assert_eq!(
+            std::fs::read(tmp.join("seed_passages.en.jsonl")).unwrap(),
+            b"{\"id\":\"a2\"}\n"
+        );
+
+        std::fs::remove_dir_all(&tmp).unwrap();
+    }
+}
