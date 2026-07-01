@@ -111,7 +111,7 @@ A few orientation notes that the table can't carry on its own:
 - **The three "classifier" crates** (`primer-classifier`, `primer-extractor`, `primer-comprehension`) all share a structural pattern: a trait, an LLM-backed implementation that wraps `Arc<dyn InferenceBackend>`, and a stub for tests. They run *off* the main turn loop (spawned tasks, awaited at the start of the next turn), which is what keeps inference latency from compounding.
 - **`primer-storage` and `primer-knowledge` are deliberately separate.** Sessions (one DB per child, in `~/.primer/`) hold private learner data; the knowledge base holds the public RAG corpus. Privacy is the reason — see chapter 5.
 
-## The four pedagogical principles
+## The five pedagogical principles
 
 These are constraints on every change; if a change makes the Primer more answer-y or more engagement-maximising, it is wrong.
 
@@ -119,8 +119,9 @@ These are constraints on every change; if a change makes the Primer more answer-
 2. The Primer never tries to maximise engagement. It detects frustration/disengagement and offers breaks, scaffolding, or session close — never guilt.
 3. All learner data is local; cloud inference sends turns per-request only.
 4. Comprehension is verified through transfer questions, application, and contradiction probing — not assumed from a confident-sounding response.
+5. When the child asserts a claim, the Primer asks how she knows or how she could check — it does not confirm or correct outright. A child who is told she is wrong learns to defend; a child who is asked how she knows learns to look again. This is routed deterministically via `PedagogicalIntent::ProbeReasoning` (a substantive declarative claim not yet at `Comprehension` depth) and stated in every prompt pack's core-principles list.
 
-If a proposed change in code review feels off and you can't articulate why, check it against these four. They are not aspirational — they are encoded in the system prompt, in `decide_intent()`, in the retry budget, in the storage schema. Changes that quietly drift the product away from them are the most important ones to catch.
+If a proposed change in code review feels off and you can't articulate why, check it against these five. They are not aspirational — they are encoded in the system prompt, in `decide_intent()`, in the retry budget, in the storage schema. Changes that quietly drift the product away from them are the most important ones to catch.
 
 ## Status
 
