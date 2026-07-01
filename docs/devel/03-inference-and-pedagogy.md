@@ -150,7 +150,7 @@ It lives at [src/crates/primer-pedagogy/src/dialogue_manager/](../../src/crates/
 
 `decide_intent` is the brain of the Socratic behaviour: a deterministic heuristic that reads the learner model and the recent session turns and returns a `PedagogicalIntent`. It is the single most important function to test rigorously when adding pedagogical features, because every turn passes through it and every changed branch shifts what the Primer says next. The function has three layers of fallback (`decide_intent` → `decide_intent_at` → `decide_intent_at_with_pack`) so callers without a clock or a locale pack still get sensible defaults. It lives in [prompt_builder.rs](../../src/crates/primer-pedagogy/src/prompt_builder.rs).
 
-Characterization tests in the inline `prompt_builder::tests` module pin the current behaviour — eighteen cases at the time of writing, covering factual-question routing, the `Encouragement` / `SessionClose` split for sustained disengagement, time-driven `SuggestBreak`, and the engagement-state overrides that always win over wallclock cadence. These tests are how the codebase keeps the Socratic principle from drifting under refactoring pressure.
+Characterization tests in the `prompt_builder::tests` module (in the sibling file [prompt_builder/tests.rs](../../src/crates/primer-pedagogy/src/prompt_builder/tests.rs)) pin the current behaviour — 40 cases pinning intent routing (68 total in the module at the time of writing), covering factual-question routing, the `Encouragement` / `SessionClose` split for sustained disengagement, time-driven `SuggestBreak`, `ProbeReasoning` for a substantive declarative claim the child hasn't yet shown deep understanding of (the Primer asks *how she knows* rather than confirming or correcting — pure `is_probeable_assertion` heuristic + a per-pack instruction string), and the engagement-state overrides that always win over wallclock cadence. These tests are how the codebase keeps the Socratic principle from drifting under refactoring pressure.
 
 > **Note:** When you change intent routing, add a characterization test for the new branch BEFORE the implementation. The test pins the routing case so a future refactor can't quietly regress it; the order — test first — is what makes this work, because writing the test against an existing implementation tends to encode the bug rather than the intent.
 
@@ -221,7 +221,7 @@ Worked example: adding `Celebrate` (acknowledge a breakthrough moment, then pivo
    }
    ```
 
-3. **Bump the length assertion.** The test at `conversation.rs:146` pins the count. Change `assert_eq!(PedagogicalIntent::ALL.len(), 9);` to match your new total.
+3. **Bump the length assertion.** The `all_contains_every_variant`-style test in `conversation.rs` (search for `PedagogicalIntent::ALL.len()`) pins the count. Change `assert_eq!(PedagogicalIntent::ALL.len(), 10);` to match your new total.
 
 4. **Assign the integer ID.** Edit [catalog.rs](../../src/crates/primer-storage/src/catalog.rs). Add a match arm to BOTH `intent_id()` and `intent_name()` (they have to stay in sync — there's a unit test for that). Pick the next unused id; never reuse a retired one — historical rows in the session DB carry the old id, and reusing the integer would silently rewrite history.
 
@@ -230,7 +230,7 @@ Worked example: adding `Celebrate` (acknowledge a breakthrough moment, then pivo
    pub fn intent_id(intent: PedagogicalIntent) -> i64 {
        match intent {
            // ...existing arms...
-           PedagogicalIntent::Celebrate => 10,
+           PedagogicalIntent::Celebrate => 11,
        }
    }
 
@@ -246,10 +246,10 @@ Worked example: adding `Celebrate` (acknowledge a breakthrough moment, then pivo
 
 6. **Extend the prompt builder.** In `build_system_prompt_with_pack_and_vocab`, add a section for the `Celebrate` intent describing how the Primer should celebrate (briefly, then pivot back to inquiry — never break principle 2).
 
-7. **Add a characterization test.** In `prompt_builder.rs`'s `tests` module:
+7. **Add a characterization test.** In the `prompt_builder::tests` module (in the sibling file `prompt_builder/tests.rs`):
 
    ```rust
-   // src/crates/primer-pedagogy/src/prompt_builder.rs (tests module)
+   // src/crates/primer-pedagogy/src/prompt_builder/tests.rs
    #[test]
    fn celebrate_when_child_makes_correct_synthesis() {
        let intent = decide_intent(&fixture_for_synthesis_moment());
