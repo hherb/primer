@@ -199,6 +199,15 @@ pub fn init_mobile_state(app: &tauri::App) -> Result<(), Box<dyn std::error::Err
     let qnn_metrics_opt_in = config.diagnostics.qnn_metrics_enabled;
     app.manage(crate::state::AppState::new(home.clone(), config));
 
+    // Volunteer sideload builds have no `adb push`, so stage the embedded
+    // seed corpus to <app_data>/seed/ on first run; the discovery call below
+    // then points PRIMER_SEED_DIR at it. Failure degrades to an empty KB
+    // (the prompt builder omits the knowledge section) rather than blocking boot.
+    #[cfg(target_os = "android")]
+    if let Err(e) = extract_bundled_seed_if_absent(&home) {
+        tracing::warn!("seed extraction failed: {e}; continuing without knowledge base");
+    }
+
     set_mobile_seed_dir_if_present(&home);
     set_adsp_library_path_if_present();
     set_genie_log_path(&home);
@@ -402,5 +411,88 @@ fn find_jsonl_dir(dir: &Path, depth: u32, max_depth: u32) -> Option<PathBuf> {
     None
 }
 
+/// Write `(filename, contents)` pairs into `dir`, creating `dir` first and
+/// skipping any file that already exists. Idempotent — a re-run never
+/// overwrites a file a user (or a prior run) already placed. Host-testable;
+/// the android-only [`extract_bundled_seed_if_absent`] feeds it the embedded
+/// corpus.
+#[cfg(any(target_os = "android", test))]
+fn write_seed_files(dir: &std::path::Path, files: &[(&str, &[u8])]) -> std::io::Result<()> {
+    std::fs::create_dir_all(dir)?;
+    for (name, bytes) in files {
+        let dest = dir.join(name);
+        if !dest.exists() {
+            std::fs::write(&dest, bytes)?;
+        }
+    }
+    Ok(())
+}
+
+/// The seed corpus embedded at compile time from `primer-gui/resources/seed/`.
+/// ~280 KB of JSONL; extracted to `<app_data>/seed/` on first run so
+/// `PRIMER_SEED_DIR` discovery works without `adb push`. Android-only — the
+/// desktop `.app` bundle path and the `CARGO_MANIFEST_DIR` dev fallback cover
+/// the other targets.
+#[cfg(target_os = "android")]
+static BUNDLED_SEED: include_dir::Dir<'_> =
+    include_dir::include_dir!("$CARGO_MANIFEST_DIR/resources/seed");
+
+/// Extract the embedded seed corpus into `<app_data>/seed/` if not already
+/// present, returning that directory. Idempotent (see [`write_seed_files`]).
+#[cfg(target_os = "android")]
+pub fn extract_bundled_seed_if_absent(
+    app_data: &std::path::Path,
+) -> std::io::Result<std::path::PathBuf> {
+    let dir = mobile_seed_dir(app_data);
+    let files: Vec<(&str, &[u8])> = BUNDLED_SEED
+        .files()
+        .filter_map(|f| {
+            f.path()
+                .file_name()
+                .and_then(|n| n.to_str())
+                .map(|name| (name, f.contents()))
+        })
+        .collect();
+    write_seed_files(&dir, &files)?;
+    Ok(dir)
+}
+
 #[cfg(test)]
 mod tests;
+
+#[cfg(any(target_os = "android", test))]
+#[cfg(test)]
+mod seed_extract_tests {
+    use super::*;
+
+    #[test]
+    fn write_seed_files_creates_and_is_idempotent() {
+        let tmp = std::env::temp_dir().join(format!("primer_seed_test_{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&tmp);
+        let files: &[(&str, &[u8])] = &[
+            ("seed_passages.en.jsonl", b"{\"id\":\"a\"}\n"),
+            ("wiki_passages.en.jsonl", b"{\"id\":\"b\"}\n"),
+        ];
+
+        // First write creates both files.
+        write_seed_files(&tmp, files).unwrap();
+        assert_eq!(
+            std::fs::read(tmp.join("seed_passages.en.jsonl")).unwrap(),
+            b"{\"id\":\"a\"}\n"
+        );
+        assert_eq!(
+            std::fs::read(tmp.join("wiki_passages.en.jsonl")).unwrap(),
+            b"{\"id\":\"b\"}\n"
+        );
+
+        // Mutate one file, then re-run: existing files are left untouched (idempotent skip).
+        std::fs::write(tmp.join("seed_passages.en.jsonl"), b"USER_EDIT").unwrap();
+        write_seed_files(&tmp, files).unwrap();
+        assert_eq!(
+            std::fs::read(tmp.join("seed_passages.en.jsonl")).unwrap(),
+            b"USER_EDIT"
+        );
+
+        std::fs::remove_dir_all(&tmp).unwrap();
+    }
+}
