@@ -10,8 +10,44 @@ use crate::voice_loop::observer::{ExitReason, LoopObserver, TurnCompletePayload,
 use crate::voice_loop::quit_detect::is_quit_phrase;
 use crate::voice_loop::tts_markdown::strip_markdown_for_tts;
 
-use super::handle_llm_err;
-use super::{DrainHook, LoopBackends, Responder};
+use super::{DrainHook, FALLBACK_LINE, LoopBackends, Responder};
+
+/// Handle an LLM error inside the LATENT_THINK select arms.
+///
+/// Surfaces the typed error to the observer, then **drops** any chunks
+/// the partial attempt managed to push into `chunk_buffer` and replaces
+/// them with a single synthetic FALLBACK_LINE chunk. The replay loop
+/// downstream will deliver that one chunk to the observer, so the GUI
+/// chat bubble shows exactly the text TTS will speak — no truncated
+/// pre-error stream stuck on screen.
+///
+/// Preserves the typed `InferenceError` variant when the responder
+/// returned a `PrimerError::Inference(_)` so the i18n layer can render
+/// the variant-specific user-facing copy (`Auth` / `RateLimited` /
+/// `ServiceUnavailable` / `NetworkUnavailable` / `ModelNotFound`). Only
+/// non-Inference `PrimerError` variants fall back to `Other` (carrying
+/// the dev-facing display string, which the i18n layer redacts before
+/// it ever reaches the user). CLAUDE.md's i18n contract forbids
+/// reintroducing a `to_string().into()` wrap on the inference path —
+/// it would flatten every typed variant to `Other`.
+///
+/// Returns the text the caller should set `accumulated` to (which then
+/// flows into TTS synthesis).
+fn handle_llm_err<O: LoopObserver>(
+    err: primer_core::error::PrimerError,
+    chunk_buffer: &std::sync::Arc<std::sync::Mutex<Vec<String>>>,
+    observer: &mut O,
+) -> String {
+    let inference_err = match err {
+        primer_core::error::PrimerError::Inference(inf) => inf,
+        other => other.to_string().into(),
+    };
+    observer.on_inference_error(&inference_err);
+    let mut chunks = chunk_buffer.lock().unwrap();
+    chunks.clear();
+    chunks.push(FALLBACK_LINE.to_string());
+    FALLBACK_LINE.to_string()
+}
 
 /// Internal state-machine body shared by [`run_loop`] (spawn) and
 /// [`run_loop_borrowed`] (in-place).

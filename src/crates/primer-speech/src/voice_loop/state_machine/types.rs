@@ -8,12 +8,12 @@ use std::sync::Arc;
 use primer_core::error::Result;
 use primer_core::speech::{StreamingSpeechToText, StreamingTextToSpeech};
 
-/// Configuration passed into [`run_loop`] / the higher-level `run` entry
-/// point in `primer-cli`.
+/// Configuration passed into [`super::run_loop`] / the higher-level `run`
+/// entry point in `primer-cli`.
 ///
 /// Owns its paths and the voice id so the entire config is `'static` and
 /// can be moved into a spawned task. Previously borrowed (`&'a Path` /
-/// `&'a str`) — the spawn-based [`run_loop`] requires `'static`.
+/// `&'a str`) — the spawn-based [`super::run_loop`] requires `'static`.
 pub struct LoopConfig {
     pub whisper_model: PathBuf,
     pub voice_onnx: PathBuf,
@@ -169,7 +169,7 @@ pub trait Responder: Send {
     ) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<String>> + Send + 'a>>;
 }
 
-/// Handle returned by [`run_loop`] for external control.
+/// Handle returned by [`super::run_loop`] for external control.
 ///
 /// `stop_tx` ends the loop entirely (CLI Ctrl+C / GUI End-voice-mode).
 /// `cancel_response_tx` aborts the in-flight LLM call + TTS synthesis
