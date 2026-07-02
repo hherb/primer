@@ -1,4 +1,5 @@
 use super::*;
+use primer_classifier::ClassifierSettings;
 
 /// Build a minimal `BackendParams` for testing.
 fn params_with(classifier_backend: Option<&str>, classifier_model: Option<&str>) -> BackendParams {
