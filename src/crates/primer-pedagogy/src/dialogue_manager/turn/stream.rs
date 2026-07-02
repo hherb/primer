@@ -11,7 +11,7 @@ use crate::dialogue_manager::{DialogueManager, PromptBudgetTier};
 
 /// Outcome of one streaming attempt: the accumulated text plus why the
 /// stream ended (drives the context-limit retry decision).
-pub(super) struct StreamOutcome {
+struct StreamOutcome {
     pub text: String,
     pub finish_reason: primer_core::inference::FinishReason,
 }
