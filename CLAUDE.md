@@ -2,6 +2,10 @@
 
 This file provides guidance to Claude Code (claude.ai/code) when working with code in this repository.
 
+## Working principle: fix it or file it
+
+When a flaw, error, or issue is happened upon — during a review, while implementing something else, while investigating — either **address it right away** if it's in scope and safe to fix, or **lodge it as a GitHub issue as soon as it is confirmed** to be real. Never leave a confirmed finding recorded only in a PR body, a code comment, a chat transcript, or your head: those don't get tracked, and the finding is lost. An issue should carry the file references, a concrete failure scenario, and (where known) a suggested resolution, and cite where it was found.
+
 ## Project shape
 
 The Primer is a Socratic AI learning companion for children. The codebase is a **Rust workspace under `src/`** (not the repo root) — every cargo command must be run from `src/`. The workspace targets Rust **edition 2024** and pins toolchain **1.88** in `rust-toolchain.toml` (raised from 1.87 once `primer-gui` pulled in Tauri 2.11, whose transitive deps — darling 0.23, plist 1.9, serde_with 3.20, time 0.3.47 — require 1.88+; the speech vendor's earlier 1.87 floor is satisfied by any 1.88+ build). No system dependencies for default builds: SQLite is bundled, TLS uses rustls. `--speech` mode additionally needs system `espeak-ng`.
