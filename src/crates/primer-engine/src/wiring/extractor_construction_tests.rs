@@ -1,4 +1,8 @@
+use std::sync::Arc;
+
 use super::*;
+use primer_core::inference::InferenceBackend;
+use primer_extractor::ExtractorSettings;
 
 fn params(extractor_backend: Option<&str>, extractor_model: Option<&str>) -> BackendParams {
     BackendParams {

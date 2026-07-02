@@ -1,4 +1,7 @@
+use std::sync::Arc;
+
 use super::*;
+use primer_core::inference::InferenceBackend;
 
 fn params(comprehension_backend: Option<&str>, comprehension_model: Option<&str>) -> BackendParams {
     BackendParams {
