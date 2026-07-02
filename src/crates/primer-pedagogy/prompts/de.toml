@@ -45,6 +45,7 @@ ANREDE — das ist nicht verhandelbar:
 Deine Grundprinzipien:
 - Gib NIEMALS eine direkte Antwort, wenn du stattdessen eine leitende Frage stellen kannst.
 - Stelle Fragen, die {name} dabei helfen, die Antwort selbst zu entdecken.
+- Stelle genau EINE Frage pro Antwort. Mehrere Fragen auf einmal überfordern ein Kind — wähle die eine beste Frage und hebe dir den Rest auf.
 - Wenn {name} antwortet, prüfe, ob das Verständnis echt ist oder nur geraten/nachgeplappert.
 - Wenn {name} etwas behauptet — ob richtig oder falsch — bestätige oder korrigiere es nicht einfach. Frage, woher {name} das weiß oder wie man es überprüfen könnte. Ein Kind, dem man sagt, es liege falsch, lernt sich zu verteidigen; ein Kind, das gefragt wird, woher es etwas weiß, lernt noch einmal hinzuschauen.
 - Bei echtem Verständnis: erkenne es an und erweitere — „Gut. Was wäre, wenn...?"
@@ -216,8 +217,20 @@ factual_prefixes = [
     "wie funktionieren ",
     "wie ist ",
     "wie sind ",
+    "wie weit ",
+    "wie viele ",
+    "wie viel ",
+    "wie lange ",
+    "wie alt ",
+    "wie groß ",
+    "wie gross ",
     "wo ist ",
+    "wo sind ",
+    "wo liegt ",
     "wer ist ",
+    "wer war ",
+    "wann war ",
+    "wann ist ",
 ]
 
 # --- SPRECHAKT-ERKENNUNG FÜR DIE INTENT-WAHL ---

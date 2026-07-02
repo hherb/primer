@@ -111,22 +111,25 @@ fn build_extraction_prompt(ctx: &ExtractionContext) -> Prompt {
             .join("\n")
     };
 
-    let system = "You extract conceptual topics from a Socratic learning \
-        conversation between a child and a teaching companion (the Primer). \
-        Output ONLY valid JSON of the form: \
-        {\"child_concepts\": [\"<topic>\", ...], \"primer_concepts\": [\"<topic>\", ...]} — \
-        no other text. Each topic is a short noun phrase (1–3 words, lowercase). \
-        For child_concepts, list topics the child surfaced or engaged with — \
-        what they brought up, asked about, or attempted to reason about. \
-        For primer_concepts, list topics the Primer introduced — what the \
-        child was exposed to via the Primer's response. A topic the Primer \
-        asks about counts as Primer-introduced even if the child only \
-        acknowledged it. Use [] when a speaker introduced no clear topics. \
-        Do not invent topics absent from the text."
+    // Written for small local models: short numbered-style rules, a
+    // literal example output, and the JSON-only instruction repeated at
+    // the end of the user message where recency keeps it salient.
+    let system = "You extract learning topics from a conversation between a child and a \
+        teaching companion called the Primer.\n\n\
+        Rules:\n\
+        - Each topic is a short noun phrase: 1 to 3 words, lowercase.\n\
+        - Write each topic in the same language the conversation uses.\n\
+        - child_concepts: topics the child brought up, asked about, or tried to reason about.\n\
+        - primer_concepts: topics the Primer introduced or asked about, even if the child only said \"yeah\" or \"ok\" to them.\n\
+        - Only include topics actually present in the text. Do not invent topics. Do not include greetings, feelings, or requests.\n\
+        - Use [] for a speaker who introduced no clear topics.\n\
+        - Output ONLY one JSON object. No other text, no markdown fences.\n\n\
+        Example output:\n\
+        {\"child_concepts\": [\"volcanoes\", \"lava\"], \"primer_concepts\": [\"magma\"]}"
         .to_string();
 
     let user = format!(
-        "Prior context (oldest first):\n{context_section}\n\nTurn to analyse:\n{}: {}\n{}: {}\n\nExtract concepts now.",
+        "Prior context (oldest first):\n{context_section}\n\nTurn to analyse:\n{}: {}\n{}: {}\n\nExtract the topics now. Answer with the JSON object only.",
         speaker_label(ctx.child_turn.speaker),
         ctx.child_turn.text,
         speaker_label(ctx.primer_turn.speaker),

@@ -100,23 +100,44 @@ fn build_classification_prompt(ctx: &EngagementContext) -> Prompt {
             .join("\n")
     };
 
-    let recent = ctx
-        .recent_child_turns
-        .iter()
-        .filter(|t| t.speaker == Speaker::Child)
-        .map(|t| t.text.as_str())
-        .collect::<Vec<_>>()
-        .join("\n---\n");
+    let recent = {
+        let joined = ctx
+            .recent_child_turns
+            .iter()
+            .filter(|t| t.speaker == Speaker::Child)
+            .map(|t| t.text.as_str())
+            .collect::<Vec<_>>()
+            .join("\n---\n");
+        if joined.is_empty() {
+            "(none)".to_string()
+        } else {
+            joined
+        }
+    };
 
-    let system = "You classify a child's engagement state in a Socratic learning \
-        conversation. Output ONLY valid JSON of the form: \
-        {\"state\": \"<one of: Engaged, Reflecting, FrustratedStuck, FrustratedTrying, \
-        Disengaging, Unknown>\", \"confidence\": 0.0-1.0, \"reasoning\": \
-        \"<one short sentence>\"} — no other text."
+    // Written for small local models: every allowed state is defined in
+    // one line, a literal example output is shown, and the JSON-only
+    // instruction is repeated at the end of the user message where
+    // recency keeps it salient.
+    let system = "You classify a child's engagement state in a learning conversation.\n\n\
+        The states:\n\
+        - Engaged: actively participating — asking, answering, building on ideas.\n\
+        - Reflecting: thinking something over — slower, tentative, but still working on the idea.\n\
+        - FrustratedStuck: upset or giving up (\"this is too hard\", \"I can't\") and no longer trying.\n\
+        - FrustratedTrying: finding it hard or annoying but still making attempts.\n\
+        - Disengaging: drifting away — flat one-word replies, changing the subject, boredom, asking to stop.\n\
+        - Unknown: not enough signal to tell.\n\n\
+        Rules:\n\
+        - Pick exactly one state from the list above, spelled exactly as shown.\n\
+        - \"confidence\" is a number between 0.0 and 1.0.\n\
+        - \"reasoning\" is one short sentence.\n\
+        - Output ONLY one JSON object. No other text, no markdown fences.\n\n\
+        Example output:\n\
+        {\"state\": \"FrustratedTrying\", \"confidence\": 0.7, \"reasoning\": \"Says it is hard but keeps offering new guesses.\"}"
         .to_string();
 
     let user = format!(
-        "Recent trajectory (oldest first):\n{trajectory}\n\nMost recent child responses:\n{recent}\n\nClassify the CURRENT engagement state."
+        "Recent trajectory (oldest first):\n{trajectory}\n\nMost recent child responses (newest last):\n{recent}\n\nClassify the CURRENT engagement state. Answer with the JSON object only."
     );
 
     Prompt {

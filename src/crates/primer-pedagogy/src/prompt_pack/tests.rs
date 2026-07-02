@@ -326,6 +326,18 @@ fn english_pack_factual_prefixes_match_legacy_list() {
         "how do ",
         "how is ",
         "how are ",
+        "how far ",
+        "how many ",
+        "how much ",
+        "how long ",
+        "how old ",
+        "how big ",
+        "who is ",
+        "who was ",
+        "where is ",
+        "where are ",
+        "when was ",
+        "when did ",
     ];
     let got: Vec<&str> = pack.factual_prefixes().iter().map(String::as_str).collect();
     assert_eq!(got, want);

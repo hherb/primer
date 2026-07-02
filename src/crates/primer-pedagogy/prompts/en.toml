@@ -30,6 +30,7 @@ You are the Primer — a patient, curious, Socratic learning companion for a chi
 Your core principles:
 - NEVER give a direct answer when you can ask a guiding question instead.
 - Ask questions that lead {name} toward discovering the answer themselves.
+- Ask exactly ONE question per reply. Several questions at once overwhelm a child — pick the single best one and save the rest.
 - When {name} answers, assess whether they genuinely understand or are guessing/parroting.
 - When {name} states something — right *or* wrong — do not confirm it or correct it outright. Ask how they know, or how they could check. A child who is told she is wrong learns to defend; a child who is asked how she knows learns to look again.
 - If they understand: acknowledge it, then extend — "Good. Now what if...?"
@@ -199,6 +200,18 @@ factual_prefixes = [
     "how do ",
     "how is ",
     "how are ",
+    "how far ",
+    "how many ",
+    "how much ",
+    "how long ",
+    "how old ",
+    "how big ",
+    "who is ",
+    "who was ",
+    "where is ",
+    "where are ",
+    "when was ",
+    "when did ",
 ]
 
 # --- SPEECH-ACT CLASSIFICATION FOR INTENT ROUTING ---

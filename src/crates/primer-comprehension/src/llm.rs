@@ -111,35 +111,47 @@ fn build_classification_prompt(ctx: &ComprehensionContext) -> Prompt {
         .collect::<Vec<_>>()
         .join("\n");
 
+    // The depth ladder offered to the model deliberately excludes
+    // `Unknown`: a small model told "use Unknown when unsure" emits
+    // noise rows instead of omitting. The parser still accepts
+    // "Unknown" defensively (monotonic-max apply means it can never
+    // demote), but the prompt only ever asks for the five real levels.
     let depth_levels = UnderstandingDepth::ALL
         .iter()
+        .filter(|d| **d != UnderstandingDepth::Unknown)
         .map(|d| d.name())
         .collect::<Vec<_>>()
         .join(", ");
 
+    // Written for small local models: one-line rules, a literal example
+    // output, and the JSON-only instruction repeated at the end of the
+    // user message where recency keeps it salient.
     let system = format!(
-        "You assess a child's depth of understanding for specific concepts in a Socratic \
-        learning conversation. Output ONLY valid JSON of the form: \
-        {{\"assessments\": [{{\"concept\": \"<from candidates>\", \"depth\": \"<one of: {depth_levels}>\", \
-        \"confidence\": 0.0-1.0, \"evidence\": \"<one short sentence>\"}}]}} — no other text. \
-        \
-        Only emit assessments for concepts where the CHILD's turn shows actual demonstration. \
-        Concepts the Primer introduced but the child did not engage with should be OMITTED — not \
-        assessed at the lowest level. A bare acknowledgement (\"yeah\", \"ok\", \"I see\") is not \
-        evidence; omit those concepts too. \
-        \
-        Depth meanings: \
-        - Aware: child shows the concept registered (named it back, asked about it). \
-        - Recall: child stated a fact about it. \
-        - Comprehension: child explained it in their own words. \
-        - Application: child transferred it to a new context they hadn't seen. \
-        - Analysis: child compared, contrasted, or reasoned about it. \
-        \
-        Use Unknown only if you have no evidence at all (you should normally omit instead)."
+        "You assess how deeply a child understands specific concepts, based on what the \
+        child actually said in a learning conversation.\n\n\
+        Depth levels (shallowest to deepest):\n\
+        - Aware: the concept registered — the child named it back or asked about it.\n\
+        - Recall: the child stated a fact about it.\n\
+        - Comprehension: the child explained it in their own words.\n\
+        - Application: the child applied it to a new situation.\n\
+        - Analysis: the child compared, contrasted, or reasoned about it.\n\n\
+        Rules:\n\
+        - Judge ONLY from the child's own words. What the Primer said is not evidence.\n\
+        - Copy each concept name EXACTLY as it appears in the candidate list.\n\
+        - \"depth\" is exactly one of: {depth_levels}.\n\
+        - \"confidence\" is a number between 0.0 and 1.0.\n\
+        - \"evidence\" is one short sentence quoting or paraphrasing what the child said.\n\
+        - If the child did not engage with a concept, or only said \"yeah\"/\"ok\"/\"I see\", \
+        leave that concept out of the list. When unsure, leave it out.\n\
+        - It is fine to return {{\"assessments\": []}}.\n\
+        - Output ONLY one JSON object. No other text, no markdown fences.\n\n\
+        Example output:\n\
+        {{\"assessments\": [{{\"concept\": \"gravity\", \"depth\": \"Comprehension\", \
+        \"confidence\": 0.8, \"evidence\": \"Explained in their own words that heavier things do not fall faster.\"}}]}}"
     );
 
     let user = format!(
-        "Prior context (oldest first):\n{context_section}\n\nExchange to analyse:\n{}: {}\n{}: {}\n\nCandidate concepts to assess (only these — do not invent others):\n{candidates_section}\n\nAssess now.",
+        "Prior context (oldest first):\n{context_section}\n\nExchange to analyse:\n{}: {}\n{}: {}\n\nCandidate concepts to assess (only these — do not invent others):\n{candidates_section}\n\nAssess now. Answer with the JSON object only.",
         speaker_label(ctx.child_turn.speaker),
         ctx.child_turn.text,
         speaker_label(ctx.primer_turn.speaker),
@@ -191,11 +203,21 @@ fn parse_classification_output(
 
     let mut out: Vec<ComprehensionAssessment> = Vec::with_capacity(parsed.assessments.len());
     for a in parsed.assessments {
-        // Drop assessments whose concept name isn't in the candidate
-        // list (defends against the LLM inventing concepts).
-        if !candidates.iter().any(|c| c == &a.concept) {
-            continue;
-        }
+        // Match the concept against the candidate list (defends against
+        // the LLM inventing concepts). Matching is trimmed and
+        // case-insensitive — small local models routinely echo
+        // "Photosynthesis" for the candidate "photosynthesis" — but the
+        // *canonical* candidate string is what lands in the assessment,
+        // so downstream concept ids stay consistent with the extractor's
+        // normalized form.
+        let concept_returned = a.concept.trim().to_lowercase();
+        let canonical = match candidates
+            .iter()
+            .find(|c| c.trim().to_lowercase() == concept_returned)
+        {
+            Some(c) => c.clone(),
+            None => continue,
+        };
         // Drop assessments with out-of-range confidence.
         if !(0.0..=1.0).contains(&a.confidence) {
             continue;
@@ -210,7 +232,7 @@ fn parse_classification_output(
             trimmed.to_string()
         });
         out.push(ComprehensionAssessment {
-            concept: a.concept,
+            concept: canonical,
             depth,
             confidence: a.confidence,
             evidence,
@@ -381,6 +403,30 @@ mod tests {
         let candidates: Vec<String> = vec!["other".into()];
         let r = c.classify(ctx(&child, &primer, &candidates)).await.unwrap();
         assert!(r.assessments.is_empty());
+    }
+
+    #[tokio::test]
+    async fn classify_matches_candidates_case_insensitively_and_canonicalizes() {
+        // Small local models routinely echo "Photosynthesis" for the
+        // candidate "photosynthesis". The match is case-insensitive and
+        // the *canonical* candidate string is what lands in the
+        // assessment, keeping concept ids consistent downstream.
+        let backend = Arc::new(CannedBackend {
+            name: "x",
+            text: r#"{"assessments": [{"concept": " Photosynthesis ", "depth": "Recall", "confidence": 0.7}]}"#.into(),
+        }) as Arc<dyn InferenceBackend>;
+        let c = LlmComprehensionClassifier::new(
+            backend,
+            "test".into(),
+            ComprehensionSettings::default(),
+        );
+        let child = turn(Speaker::Child, "?");
+        let primer = turn(Speaker::Primer, "?");
+        let candidates: Vec<String> = vec!["photosynthesis".into()];
+        let r = c.classify(ctx(&child, &primer, &candidates)).await.unwrap();
+        assert_eq!(r.assessments.len(), 1);
+        assert_eq!(r.assessments[0].concept, "photosynthesis");
+        assert_eq!(r.assessments[0].depth, UnderstandingDepth::Recall);
     }
 
     #[tokio::test]
