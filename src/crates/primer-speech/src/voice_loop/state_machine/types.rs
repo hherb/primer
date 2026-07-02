@@ -129,7 +129,7 @@ impl LoopBackends {
 
 /// Awaitable hook that blocks until the speaker has finished playing
 /// every queued sample. Production wires this to a `spawn_blocking`
-/// around [`primer_speech::wait_for_drain`]; tests pass `None`.
+/// around [`crate::wait_for_drain`]; tests pass `None`.
 ///
 /// `FnMut` (not `FnOnce`) so it can be reused across SPEAK phases. The
 /// returned future is a `'static` boxed future so the hook does not
