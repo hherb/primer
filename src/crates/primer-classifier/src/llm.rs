@@ -81,6 +81,14 @@ use primer_core::conversation::Speaker;
 use primer_core::inference::{Message, Prompt, Role};
 use primer_core::learner::EngagementState;
 
+/// Literal example JSON embedded in the classification prompt. Kept as
+/// a const so the parser can excise a verbatim echo of it from the
+/// model output before extracting the first JSON object — small local
+/// models sometimes restate the example before answering, and
+/// first-object-wins parsing would otherwise adopt the example (an
+/// above-threshold, intent-changing value) as the real classification.
+const EXAMPLE_OUTPUT: &str = r#"{"state": "FrustratedTrying", "confidence": 0.7, "reasoning": "Says it is hard but keeps offering new guesses."}"#;
+
 fn build_classification_prompt(ctx: &EngagementContext) -> Prompt {
     let trajectory = if ctx.prior_assessments.is_empty() {
         "(no prior trajectory)".to_string()
@@ -119,7 +127,8 @@ fn build_classification_prompt(ctx: &EngagementContext) -> Prompt {
     // one line, a literal example output is shown, and the JSON-only
     // instruction is repeated at the end of the user message where
     // recency keeps it salient.
-    let system = "You classify a child's engagement state in a learning conversation.\n\n\
+    let system = format!(
+        "You classify a child's engagement state in a learning conversation.\n\n\
         The states:\n\
         - Engaged: actively participating — asking, answering, building on ideas.\n\
         - Reflecting: thinking something over — slower, tentative, but still working on the idea.\n\
@@ -133,8 +142,8 @@ fn build_classification_prompt(ctx: &EngagementContext) -> Prompt {
         - \"reasoning\" is one short sentence.\n\
         - Output ONLY one JSON object. No other text, no markdown fences.\n\n\
         Example output:\n\
-        {\"state\": \"FrustratedTrying\", \"confidence\": 0.7, \"reasoning\": \"Says it is hard but keeps offering new guesses.\"}"
-        .to_string();
+        {EXAMPLE_OUTPUT}"
+    );
 
     let user = format!(
         "Recent trajectory (oldest first):\n{trajectory}\n\nMost recent child responses (newest last):\n{recent}\n\nClassify the CURRENT engagement state. Answer with the JSON object only."
@@ -160,8 +169,18 @@ struct ClassifierOutput {
 }
 
 fn parse_classification_output(raw: &str) -> std::result::Result<EngagementAssessment, String> {
-    let json_str = extract_first_json_object(raw)
-        .ok_or_else(|| "no JSON object found in output".to_string())?;
+    // Excise any verbatim echo of the prompt's example before extracting:
+    // with first-object-wins parsing, an echoed example would otherwise be
+    // adopted as the real classification. If nothing parseable remains,
+    // the model's entire output WAS the example — indistinguishable from
+    // a genuine identical answer — so fall back to the raw output rather
+    // than soft-failing.
+    let cleaned = raw.replace(EXAMPLE_OUTPUT, "");
+    let json_str = match extract_first_json_object(&cleaned) {
+        Some(s) => s,
+        None => extract_first_json_object(raw)
+            .ok_or_else(|| "no JSON object found in output".to_string())?,
+    };
     let parsed: ClassifierOutput =
         serde_json::from_str(json_str).map_err(|e| format!("JSON parse error: {e}"))?;
 
@@ -274,6 +293,50 @@ mod tests {
         };
         let a = c.classify(ctx).await.unwrap();
         assert_eq!(a.state, EngagementState::Engaged);
+    }
+
+    #[tokio::test]
+    async fn classify_ignores_echoed_prompt_example_before_real_answer() {
+        // Small local models sometimes restate the prompt's example
+        // before answering. First-object-wins parsing must not adopt
+        // the echoed example (FrustratedTrying at 0.7 — an
+        // above-threshold, intent-changing value) as the classification.
+        let backend = Arc::new(CannedBackend(format!(
+            "{EXAMPLE_OUTPUT}\n{{\"state\": \"Engaged\", \"confidence\": 0.9, \"reasoning\": \"asks a follow-up\"}}"
+        ))) as Arc<dyn InferenceBackend>;
+        let c = LlmEngagementClassifier::new(
+            backend,
+            "test-model".into(),
+            ClassifierSettings::default(),
+        );
+        let ctx = EngagementContext {
+            recent_child_turns: &[],
+            prior_assessments: &[],
+        };
+        let a = c.classify(ctx).await.unwrap();
+        assert_eq!(a.state, EngagementState::Engaged);
+        assert!((a.confidence - 0.9).abs() < 1e-6);
+    }
+
+    #[tokio::test]
+    async fn classify_accepts_output_that_is_exactly_the_example() {
+        // A model whose entire output is byte-identical to the prompt's
+        // example is indistinguishable from a genuine identical answer.
+        // The excision must fall back to the raw output instead of
+        // soft-failing to Unknown.
+        let backend =
+            Arc::new(CannedBackend(EXAMPLE_OUTPUT.to_string())) as Arc<dyn InferenceBackend>;
+        let c = LlmEngagementClassifier::new(
+            backend,
+            "test-model".into(),
+            ClassifierSettings::default(),
+        );
+        let ctx = EngagementContext {
+            recent_child_turns: &[],
+            prior_assessments: &[],
+        };
+        let a = c.classify(ctx).await.unwrap();
+        assert_eq!(a.state, EngagementState::FrustratedTrying);
     }
 
     #[tokio::test]

@@ -161,23 +161,6 @@ fn parse_ollama_line(line: &str) -> Result<TokenChunk> {
     })
 }
 
-/// Detect Ollama's post-handshake failure shape. After a 2xx handshake,
-/// Ollama reports a generation failure (runner crash, OOM, model
-/// unloaded) as an NDJSON line `{"error":"..."}`. That shape does not
-/// deserialize as a `ChatChunk`, so without this check it was
-/// warn-skipped as "unparseable", the connection closed, and the
-/// abrupt-EOF flush finished the truncated reply as a clean turn —
-/// bypassing the partial-turn-drops-on-error invariant.
-fn parse_ollama_error_line(line: &str) -> Option<String> {
-    #[derive(serde::Deserialize)]
-    struct ErrorLine {
-        error: String,
-    }
-    serde_json::from_str::<ErrorLine>(line)
-        .ok()
-        .map(|e| e.error)
-}
-
 #[async_trait]
 impl InferenceBackend for OllamaBackend {
     fn name(&self) -> &str {
@@ -274,22 +257,27 @@ impl InferenceBackend for OllamaBackend {
                             if line.trim().is_empty() {
                                 continue;
                             }
+                            // A mid-stream `{"error":"..."}` payload is a real
+                            // generation failure (runner crash, OOM, model
+                            // unloaded), not line noise: surface it so the
+                            // partial turn drops at the dialogue-manager layer
+                            // instead of the reply finishing as a clean
+                            // truncated turn. Probed on every line — not only
+                            // on parse failure — so an error attached to an
+                            // otherwise chunk-shaped payload is caught too.
+                            if let Some(msg) =
+                                crate::stream_error::parse_stream_error_payload(&line)
+                            {
+                                let _ = tx
+                                    .send(Err(PrimerError::Inference(
+                                        format!("Ollama mid-stream error: {msg}").into(),
+                                    )))
+                                    .await;
+                                break 'outer;
+                            }
                             let chunk = match parse_ollama_line(&line) {
                                 Ok(c) => c,
                                 Err(e) => {
-                                    // A mid-stream `{"error":"..."}` payload is a
-                                    // real generation failure, not line noise:
-                                    // surface it so the partial turn drops at the
-                                    // dialogue-manager layer instead of the reply
-                                    // finishing as a clean truncated turn.
-                                    if let Some(msg) = parse_ollama_error_line(&line) {
-                                        let _ = tx
-                                            .send(Err(PrimerError::Inference(
-                                                format!("Ollama mid-stream error: {msg}").into(),
-                                            )))
-                                            .await;
-                                        break 'outer;
-                                    }
                                     tracing::warn!("Skipping unparseable Ollama line: {e}");
                                     continue;
                                 }

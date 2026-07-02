@@ -304,16 +304,17 @@ impl KnowledgeBase for SqliteKnowledgeBase {
     /// `Arc<dyn KnowledgeBase>`) fell through to the trait's DEFAULT
     /// impl, which ignores the embedder and runs BM25-only — silently
     /// disabling hybrid retrieval in production even with an embedder
-    /// wired. Delegates to the inherent `retrieve_hybrid` in
-    /// `retrieval.rs` (inherent methods win name resolution on the
-    /// concrete type, so this is not self-recursive).
+    /// wired. Delegates to `retrieve_hybrid_inner` in `retrieval.rs`;
+    /// the distinct `_inner` name (the `primer-storage` convention)
+    /// makes the delegation unambiguous — a same-name inherent method
+    /// is exactly what masked the trait default originally.
     async fn retrieve_hybrid(
         &self,
         query: &str,
         embedder: &dyn primer_core::embedder::Embedder,
         params: &HybridParams,
     ) -> Result<Vec<Passage>> {
-        SqliteKnowledgeBase::retrieve_hybrid(self, query, embedder, params).await
+        self.retrieve_hybrid_inner(query, embedder, params).await
     }
 }
 

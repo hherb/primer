@@ -25,6 +25,7 @@ pub mod ollama;
 pub mod openai_compat;
 mod reasoning_stream;
 pub mod router;
+mod stream_error;
 pub mod stub;
 
 #[cfg(feature = "qnn")]

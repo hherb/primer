@@ -11,7 +11,7 @@ use primer_core::conversation::Speaker;
 use primer_core::error::Result;
 use primer_core::extractor::{ConceptExtraction, ExtractionContext};
 use primer_core::inference::{InferenceBackend, Message, Prompt, Role};
-use primer_core::llm_util::{extract_first_json_object, truncate_to_chars};
+use primer_core::llm_util::{extract_first_json_object, normalize_concept_key, truncate_to_chars};
 
 use crate::ConceptExtractor;
 use crate::consts;
@@ -100,6 +100,14 @@ fn truncate_concept_lists(e: &mut ConceptExtraction, max_per_speaker: usize) {
 
 // ── Prompt builder ────────────────────────────────────────────────────────────
 
+/// Literal example JSON embedded in the extraction prompt. Kept as a
+/// const so the parser can excise a verbatim echo of it from the model
+/// output before extracting the first JSON object — small local models
+/// sometimes restate the example before answering, and first-object-wins
+/// parsing would otherwise store the example's topics as real concepts.
+const EXAMPLE_OUTPUT: &str =
+    r#"{"child_concepts": ["volcanoes", "lava"], "primer_concepts": ["magma"]}"#;
+
 fn build_extraction_prompt(ctx: &ExtractionContext) -> Prompt {
     let context_section = if ctx.recent_turns.is_empty() {
         "(no prior context)".to_string()
@@ -114,7 +122,8 @@ fn build_extraction_prompt(ctx: &ExtractionContext) -> Prompt {
     // Written for small local models: short numbered-style rules, a
     // literal example output, and the JSON-only instruction repeated at
     // the end of the user message where recency keeps it salient.
-    let system = "You extract learning topics from a conversation between a child and a \
+    let system = format!(
+        "You extract learning topics from a conversation between a child and a \
         teaching companion called the Primer.\n\n\
         Rules:\n\
         - Each topic is a short noun phrase: 1 to 3 words, lowercase.\n\
@@ -125,8 +134,8 @@ fn build_extraction_prompt(ctx: &ExtractionContext) -> Prompt {
         - Use [] for a speaker who introduced no clear topics.\n\
         - Output ONLY one JSON object. No other text, no markdown fences.\n\n\
         Example output:\n\
-        {\"child_concepts\": [\"volcanoes\", \"lava\"], \"primer_concepts\": [\"magma\"]}"
-        .to_string();
+        {EXAMPLE_OUTPUT}"
+    );
 
     let user = format!(
         "Prior context (oldest first):\n{context_section}\n\nTurn to analyse:\n{}: {}\n{}: {}\n\nExtract the topics now. Answer with the JSON object only.",
@@ -166,8 +175,18 @@ fn parse_extraction_output(
     raw: &str,
     per_concept_chars: usize,
 ) -> std::result::Result<ConceptExtraction, String> {
-    let json_str = extract_first_json_object(raw)
-        .ok_or_else(|| "no JSON object found in output".to_string())?;
+    // Excise any verbatim echo of the prompt's example before extracting:
+    // with first-object-wins parsing, an echoed example would otherwise
+    // land its topics in the learner model as real concepts. If nothing
+    // parseable remains, the model's entire output WAS the example —
+    // indistinguishable from a genuine identical answer — so fall back
+    // to the raw output rather than soft-failing.
+    let cleaned = raw.replace(EXAMPLE_OUTPUT, "");
+    let json_str = match extract_first_json_object(&cleaned) {
+        Some(s) => s,
+        None => extract_first_json_object(raw)
+            .ok_or_else(|| "no JSON object found in output".to_string())?,
+    };
     let parsed: ExtractorOutput =
         serde_json::from_str(json_str).map_err(|e| format!("JSON parse error: {e}"))?;
 
@@ -177,7 +196,9 @@ fn parse_extraction_output(
     })
 }
 
-/// Lower-case, trim, drop empty/over-cap entries, dedupe (preserving
+/// Lower-case, trim (via the shared `normalize_concept_key` — the
+/// concept-identity rule `primer-comprehension`'s candidate matcher
+/// must agree with), drop empty/over-cap entries, dedupe (preserving
 /// first occurrence). The per-concept char cap defends against
 /// pathological "concept = entire sentence" outputs from a
 /// misbehaving LLM. The cap is configurable via `ExtractorSettings`
@@ -187,7 +208,7 @@ fn normalize_concepts(input: Vec<String>, per_concept_chars: usize) -> Vec<Strin
     let mut seen = std::collections::HashSet::new();
     let mut out = Vec::with_capacity(input.len());
     for c in input {
-        let trimmed = c.trim().to_lowercase();
+        let trimmed = normalize_concept_key(&c);
         if trimmed.is_empty() || trimmed.chars().count() > per_concept_chars {
             continue;
         }
@@ -296,6 +317,40 @@ mod tests {
         let r = e.extract(ctx(&c, &p)).await.unwrap();
         assert_eq!(r.child_concepts, vec!["gravity"]);
         assert!(r.primer_concepts.is_empty());
+    }
+
+    #[tokio::test]
+    async fn extract_ignores_echoed_prompt_example_before_real_answer() {
+        // Small local models sometimes restate the prompt's example
+        // before answering. First-object-wins parsing must not store
+        // the example's topics as real concepts.
+        let backend = Arc::new(CannedBackend(format!(
+            "{EXAMPLE_OUTPUT}\n{{\"child_concepts\": [\"gravity\"], \"primer_concepts\": []}}"
+        ))) as Arc<dyn InferenceBackend>;
+        let e =
+            LlmConceptExtractor::new(backend, "test-model".into(), ExtractorSettings::default());
+        let c = turn(Speaker::Child, "?");
+        let p = turn(Speaker::Primer, "?");
+        let r = e.extract(ctx(&c, &p)).await.unwrap();
+        assert_eq!(r.child_concepts, vec!["gravity"]);
+        assert!(r.primer_concepts.is_empty());
+    }
+
+    #[tokio::test]
+    async fn extract_accepts_output_that_is_exactly_the_example() {
+        // A model whose entire output is byte-identical to the prompt's
+        // example is indistinguishable from a genuine identical answer
+        // (the conversation may really be about volcanoes). The excision
+        // must fall back to the raw output instead of soft-failing.
+        let backend =
+            Arc::new(CannedBackend(EXAMPLE_OUTPUT.to_string())) as Arc<dyn InferenceBackend>;
+        let e =
+            LlmConceptExtractor::new(backend, "test-model".into(), ExtractorSettings::default());
+        let c = turn(Speaker::Child, "?");
+        let p = turn(Speaker::Primer, "?");
+        let r = e.extract(ctx(&c, &p)).await.unwrap();
+        assert_eq!(r.child_concepts, vec!["volcanoes", "lava"]);
+        assert_eq!(r.primer_concepts, vec!["magma"]);
     }
 
     #[tokio::test]

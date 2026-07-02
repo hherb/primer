@@ -368,6 +368,41 @@ fn apply_comprehension_resets_box_on_aware_assessment() {
 }
 
 #[test]
+fn apply_comprehension_skips_unknown_depth_entirely() {
+    // An `Unknown` assessment asserts NO evidence of understanding.
+    // Monotonic max already protects depth (Unknown is the lowest
+    // variant), but `apply_box_transition` only special-cases `Aware`
+    // — without the explicit guard a high-confidence Unknown row would
+    // ADVANCE the Leitner box off a no-evidence reading.
+    use primer_comprehension::ComprehensionSettings;
+    use primer_core::comprehension::{ComprehensionAssessment, ComprehensionResult};
+    use primer_core::learner::{ConceptState, UnderstandingDepth};
+
+    let mut learner = test_learner();
+    learner.concepts.push(ConceptState {
+        concept_id: "x".into(),
+        depth: UnderstandingDepth::Recall,
+        confidence: 0.7,
+        encounter_count: 2,
+        last_encountered: Some(Utc::now()),
+        notes: vec![],
+        box_level: 1,
+    });
+    let result = ComprehensionResult {
+        assessments: vec![ComprehensionAssessment {
+            concept: "x".into(),
+            depth: UnderstandingDepth::Unknown,
+            confidence: 0.9, // confidently asserting "no evidence"
+            evidence: None,
+        }],
+    };
+    let changed = apply_comprehension(&mut learner, &result, &ComprehensionSettings::default());
+    assert!(!changed);
+    assert_eq!(learner.concepts[0].depth, UnderstandingDepth::Recall);
+    assert_eq!(learner.concepts[0].box_level, 1);
+}
+
+#[test]
 fn apply_comprehension_leaves_box_unchanged_on_subthreshold_assessment() {
     use primer_comprehension::ComprehensionSettings;
     use primer_core::comprehension::{ComprehensionAssessment, ComprehensionResult};

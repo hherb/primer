@@ -43,10 +43,11 @@ pub(crate) fn process_filtered_chunk(
     backend: &'static str,
 ) -> FilterAction {
     if chunk.done {
+        // No `had_visible` update here: the done chunk's own text is part
+        // of the tail handed to `finalize_visible` below, whose own
+        // whitespace-trimmed check covers it — and the flag is never read
+        // after this call. (Non-final chunks update the flag below.)
         let mut visible = filter.push(&chunk.text);
-        // Whitespace-only text is not a "visible answer" — see the
-        // matching trim in `finalize_visible` and on the non-final arm.
-        *had_visible |= !visible.trim().is_empty();
         visible.push_str(&filter.finish());
         log_suppressed(filter, backend);
         match finalize_visible(*had_visible, &visible, filter.did_suppress()) {

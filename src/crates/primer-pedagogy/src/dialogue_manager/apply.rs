@@ -118,9 +118,22 @@ pub(super) fn apply_comprehension(
     result: &primer_core::comprehension::ComprehensionResult,
     settings: &primer_comprehension::ComprehensionSettings,
 ) -> bool {
+    use primer_core::learner::UnderstandingDepth;
+
     let mut changed = false;
     for a in &result.assessments {
         if a.confidence < settings.confidence_threshold {
+            continue;
+        }
+        // An `Unknown` assessment asserts NO evidence of understanding.
+        // The parser tolerates the label defensively (the prompt no
+        // longer offers it), but it must not touch learner state: the
+        // monotonic max below already can't demote depth, and
+        // `apply_box_transition` only special-cases `Aware` — without
+        // this guard a high-confidence Unknown row would ADVANCE the
+        // Leitner box (vocab.rs pins that contract), expanding the
+        // review interval off a no-evidence reading.
+        if a.depth == UnderstandingDepth::Unknown {
             continue;
         }
         if let Some(c) = learner

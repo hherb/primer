@@ -21,6 +21,19 @@ pub fn truncate_to_chars(s: &str, max_chars: usize) -> &str {
     &s[..end]
 }
 
+/// Canonical key form of a concept name: trimmed and lowercased.
+///
+/// This is the concept-identity rule shared between the producer
+/// (`primer-extractor`, which stores concepts in this form) and every
+/// consumer that matches model output back against those concepts
+/// (`primer-comprehension`'s candidate matcher). Keep both sides on
+/// this one function: a one-sided change to the folding rule (e.g.
+/// adding Unicode casefold or NFC normalization) would silently break
+/// candidate matching and drop valid assessments.
+pub fn normalize_concept_key(s: &str) -> String {
+    s.trim().to_lowercase()
+}
+
 /// Extract the first balanced JSON object from `raw`. Tolerates
 /// wrapper text before/after, and JSON containing nested braces.
 /// Returns the substring including the outer braces, or `None` if no

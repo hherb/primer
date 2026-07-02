@@ -647,6 +647,52 @@ fn is_factual_question_matches_quantity_and_identity_lookups() {
 }
 
 #[test]
+fn is_factual_question_with_pack_matches_german_quantity_and_identity_lookups() {
+    // The German pack's expanded prefixes route intent for every
+    // German-locale session; pin the routing (not just the list shape)
+    // the same way the EN additions are pinned above.
+    let pack = prompt_pack::load(primer_core::i18n::Locale::German).expect("german pack loads");
+    assert!(is_factual_question_with_pack(
+        pack.as_ref(),
+        "Wie weit ist der Mond entfernt?"
+    ));
+    assert!(is_factual_question_with_pack(
+        pack.as_ref(),
+        "wie viele Beine hat eine Spinne"
+    ));
+    assert!(is_factual_question_with_pack(
+        pack.as_ref(),
+        "wie lange leben Schildkröten?"
+    ));
+    assert!(is_factual_question_with_pack(
+        pack.as_ref(),
+        "Wie alt ist die Erde?"
+    ));
+    assert!(is_factual_question_with_pack(
+        pack.as_ref(),
+        "wie groß ist ein Blauwal?"
+    ));
+    assert!(is_factual_question_with_pack(
+        pack.as_ref(),
+        "wer war Albert Einstein?"
+    ));
+    assert!(is_factual_question_with_pack(
+        pack.as_ref(),
+        "wo liegt der höchste Berg"
+    ));
+    assert!(is_factual_question_with_pack(
+        pack.as_ref(),
+        "wann war das Zeitalter der Dinosaurier?"
+    ));
+    // "warum" forms stay Socratic-richer — deliberately unmatched,
+    // mirroring the EN "why" exclusion.
+    assert!(!is_factual_question_with_pack(
+        pack.as_ref(),
+        "warum ist der Himmel blau"
+    ));
+}
+
+#[test]
 fn is_factual_question_does_not_match_partial_words() {
     // "whatever" must NOT trigger "what" — the prefix list uses trailing space.
     assert!(!is_factual_question("whatever"));
