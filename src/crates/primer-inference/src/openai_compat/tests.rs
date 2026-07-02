@@ -5,6 +5,10 @@
 
 use super::*;
 
+// Mid-stream `{"error": ...}` detection is shared across streaming
+// backends; its shape coverage (object, string, error-alongside-choices)
+// lives in `crate::stream_error::tests`.
+
 // -- SSE buffer ---------------------------------------------------------
 
 #[test]

@@ -154,6 +154,40 @@ fn german_pack_factual_prefixes_are_german() {
 }
 
 #[test]
+fn german_pack_factual_prefixes_match_canonical_list() {
+    // Full pin, mirroring `english_pack_factual_prefixes_match_legacy_list`:
+    // these prefixes drive intent routing for every German session, so a
+    // dropped entry (or a missing trailing space, which would cause
+    // partial-word matches) must fail a test rather than silently
+    // re-route German children's questions.
+    let pack = german_pack();
+    let want: &[&str] = &[
+        "was ist ",
+        "was sind ",
+        "wie funktioniert ",
+        "wie funktionieren ",
+        "wie ist ",
+        "wie sind ",
+        "wie weit ",
+        "wie viele ",
+        "wie viel ",
+        "wie lange ",
+        "wie alt ",
+        "wie groß ",
+        "wie gross ",
+        "wo ist ",
+        "wo sind ",
+        "wo liegt ",
+        "wer ist ",
+        "wer war ",
+        "wann war ",
+        "wann ist ",
+    ];
+    let got: Vec<&str> = pack.factual_prefixes().iter().map(String::as_str).collect();
+    assert_eq!(got, want);
+}
+
+#[test]
 fn shipping_packs_populate_assertion_detection_openers() {
     // The `[assertion_detection]` section is `#[serde(default)]`, so a pack
     // that omits it loads with empty lists and silently keeps the broad
@@ -326,6 +360,18 @@ fn english_pack_factual_prefixes_match_legacy_list() {
         "how do ",
         "how is ",
         "how are ",
+        "how far ",
+        "how many ",
+        "how much ",
+        "how long ",
+        "how old ",
+        "how big ",
+        "who is ",
+        "who was ",
+        "where is ",
+        "where are ",
+        "when was ",
+        "when did ",
     ];
     let got: Vec<&str> = pack.factual_prefixes().iter().map(String::as_str).collect();
     assert_eq!(got, want);

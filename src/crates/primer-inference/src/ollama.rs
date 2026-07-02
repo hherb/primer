@@ -257,6 +257,24 @@ impl InferenceBackend for OllamaBackend {
                             if line.trim().is_empty() {
                                 continue;
                             }
+                            // A mid-stream `{"error":"..."}` payload is a real
+                            // generation failure (runner crash, OOM, model
+                            // unloaded), not line noise: surface it so the
+                            // partial turn drops at the dialogue-manager layer
+                            // instead of the reply finishing as a clean
+                            // truncated turn. Probed on every line — not only
+                            // on parse failure — so an error attached to an
+                            // otherwise chunk-shaped payload is caught too.
+                            if let Some(msg) =
+                                crate::stream_error::parse_stream_error_payload(&line)
+                            {
+                                let _ = tx
+                                    .send(Err(PrimerError::Inference(
+                                        format!("Ollama mid-stream error: {msg}").into(),
+                                    )))
+                                    .await;
+                                break 'outer;
+                            }
                             let chunk = match parse_ollama_line(&line) {
                                 Ok(c) => c,
                                 Err(e) => {

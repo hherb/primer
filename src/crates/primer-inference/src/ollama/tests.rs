@@ -58,6 +58,9 @@ fn parse_ollama_line_returns_err_on_garbage() {
     assert!(parse_ollama_line("not json").is_err());
 }
 
+// Mid-stream `{"error":"..."}` detection is shared across streaming
+// backends; its shape coverage lives in `crate::stream_error::tests`.
+
 #[test]
 fn map_ollama_finish_reason_length_is_length() {
     assert_eq!(

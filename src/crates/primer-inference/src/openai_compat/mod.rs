@@ -332,6 +332,26 @@ impl InferenceBackend for OpenAiCompatBackend {
                     Some(Ok(bytes)) => {
                         buf.extend(&bytes);
                         while let Some(data) = buf.pop_data() {
+                            // A mid-stream `{"error": ...}` payload is a real
+                            // generation failure, not line noise: surface it so
+                            // the partial turn drops at the dialogue-manager
+                            // layer instead of the reply finishing as a clean
+                            // truncated turn. Probed on EVERY payload — not
+                            // only on chunk-parse failure — because some
+                            // servers (OpenRouter, proxies) attach the error
+                            // object to an otherwise well-formed chunk that
+                            // still deserializes cleanly (e.g. with an empty
+                            // `choices` array or `finish_reason: "error"`).
+                            if let Some(msg) =
+                                crate::stream_error::parse_stream_error_payload(&data)
+                            {
+                                let _ = tx
+                                    .send(Err(PrimerError::Inference(
+                                        format!("OpenAI-compat mid-stream error: {msg}").into(),
+                                    )))
+                                    .await;
+                                break 'outer;
+                            }
                             let chunk = match parse_openai_compat_chunk(&data) {
                                 Ok(Some(c)) => c,
                                 Ok(None) => continue,

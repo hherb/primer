@@ -11,7 +11,7 @@ use std::sync::Arc;
 use crate::common::BenchQuery;
 use primer_core::embedder::Embedder;
 use primer_core::i18n::Locale;
-use primer_core::knowledge::HybridParams;
+use primer_core::knowledge::{HybridParams, KnowledgeBase};
 use primer_embedding::FastEmbedBackend;
 use primer_kb_load::{auto_seed_if_empty, reembed_kb};
 use primer_knowledge::SqliteKnowledgeBase;

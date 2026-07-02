@@ -14,7 +14,7 @@ use primer_core::conversation::Speaker;
 use primer_core::error::Result;
 use primer_core::inference::{InferenceBackend, Message, Prompt, Role};
 use primer_core::learner::UnderstandingDepth;
-use primer_core::llm_util::{extract_first_json_object, truncate_to_chars};
+use primer_core::llm_util::{extract_first_json_object, normalize_concept_key, truncate_to_chars};
 
 use crate::ComprehensionClassifier;
 use crate::consts;
@@ -77,6 +77,7 @@ impl ComprehensionClassifier for LlmComprehensionClassifier {
             truncated,
             ctx.candidate_concepts,
             self.settings.evidence_max_chars,
+            self.settings.confidence_threshold,
         ) {
             Ok(r) => Ok(r),
             Err(reason) => {
@@ -92,6 +93,14 @@ impl ComprehensionClassifier for LlmComprehensionClassifier {
 }
 
 // ─── Prompt builder ───────────────────────────────────────────────────────────
+
+/// Literal example JSON embedded in the classification prompt. Kept as
+/// a const so the parser can excise a verbatim echo of it from the
+/// model output before extracting the first JSON object — small local
+/// models sometimes restate the example before answering, and
+/// first-object-wins parsing would otherwise adopt the example as a
+/// real assessment whenever "gravity" happens to be a candidate.
+const EXAMPLE_OUTPUT: &str = r#"{"assessments": [{"concept": "gravity", "depth": "Comprehension", "confidence": 0.8, "evidence": "Explained in their own words that heavier things do not fall faster."}]}"#;
 
 fn build_classification_prompt(ctx: &ComprehensionContext) -> Prompt {
     let context_section = if ctx.recent_turns.is_empty() {
@@ -111,35 +120,50 @@ fn build_classification_prompt(ctx: &ComprehensionContext) -> Prompt {
         .collect::<Vec<_>>()
         .join("\n");
 
+    // The depth ladder offered to the model deliberately excludes
+    // `Unknown`: a small model told "use Unknown when unsure" emits
+    // noise rows instead of omitting. The parser still accepts
+    // "Unknown" defensively (so the row is preserved for the
+    // longitudinal record), but the apply step skips Unknown rows
+    // entirely — monotonic max alone would protect depth, yet the
+    // Leitner-box transition would otherwise treat a high-confidence
+    // Unknown as a success and advance the box off a no-evidence
+    // reading. The prompt only ever asks for the five real levels.
     let depth_levels = UnderstandingDepth::ALL
         .iter()
+        .filter(|d| **d != UnderstandingDepth::Unknown)
         .map(|d| d.name())
         .collect::<Vec<_>>()
         .join(", ");
 
+    // Written for small local models: one-line rules, a literal example
+    // output, and the JSON-only instruction repeated at the end of the
+    // user message where recency keeps it salient.
     let system = format!(
-        "You assess a child's depth of understanding for specific concepts in a Socratic \
-        learning conversation. Output ONLY valid JSON of the form: \
-        {{\"assessments\": [{{\"concept\": \"<from candidates>\", \"depth\": \"<one of: {depth_levels}>\", \
-        \"confidence\": 0.0-1.0, \"evidence\": \"<one short sentence>\"}}]}} — no other text. \
-        \
-        Only emit assessments for concepts where the CHILD's turn shows actual demonstration. \
-        Concepts the Primer introduced but the child did not engage with should be OMITTED — not \
-        assessed at the lowest level. A bare acknowledgement (\"yeah\", \"ok\", \"I see\") is not \
-        evidence; omit those concepts too. \
-        \
-        Depth meanings: \
-        - Aware: child shows the concept registered (named it back, asked about it). \
-        - Recall: child stated a fact about it. \
-        - Comprehension: child explained it in their own words. \
-        - Application: child transferred it to a new context they hadn't seen. \
-        - Analysis: child compared, contrasted, or reasoned about it. \
-        \
-        Use Unknown only if you have no evidence at all (you should normally omit instead)."
+        "You assess how deeply a child understands specific concepts, based on what the \
+        child actually said in a learning conversation.\n\n\
+        Depth levels (shallowest to deepest):\n\
+        - Aware: the concept registered — the child named it back or asked about it.\n\
+        - Recall: the child stated a fact about it.\n\
+        - Comprehension: the child explained it in their own words.\n\
+        - Application: the child applied it to a new situation.\n\
+        - Analysis: the child compared, contrasted, or reasoned about it.\n\n\
+        Rules:\n\
+        - Judge ONLY from the child's own words. What the Primer said is not evidence.\n\
+        - Copy each concept name EXACTLY as it appears in the candidate list.\n\
+        - \"depth\" is exactly one of: {depth_levels}.\n\
+        - \"confidence\" is a number between 0.0 and 1.0.\n\
+        - \"evidence\" is one short sentence quoting or paraphrasing what the child said.\n\
+        - If the child did not engage with a concept, or only said \"yeah\"/\"ok\"/\"I see\", \
+        leave that concept out of the list. When unsure, leave it out.\n\
+        - It is fine to return {{\"assessments\": []}}.\n\
+        - Output ONLY one JSON object. No other text, no markdown fences.\n\n\
+        Example output:\n\
+        {EXAMPLE_OUTPUT}"
     );
 
     let user = format!(
-        "Prior context (oldest first):\n{context_section}\n\nExchange to analyse:\n{}: {}\n{}: {}\n\nCandidate concepts to assess (only these — do not invent others):\n{candidates_section}\n\nAssess now.",
+        "Prior context (oldest first):\n{context_section}\n\nExchange to analyse:\n{}: {}\n{}: {}\n\nCandidate concepts to assess (only these — do not invent others):\n{candidates_section}\n\nAssess now. Answer with the JSON object only.",
         speaker_label(ctx.child_turn.speaker),
         ctx.child_turn.text,
         speaker_label(ctx.primer_turn.speaker),
@@ -183,19 +207,51 @@ fn parse_classification_output(
     raw: &str,
     candidates: &[String],
     evidence_max_chars: usize,
+    confidence_threshold: f32,
 ) -> std::result::Result<ComprehensionResult, String> {
-    let json_str = extract_first_json_object(raw)
-        .ok_or_else(|| "no JSON object found in output".to_string())?;
+    // Excise any verbatim echo of the prompt's example before extracting:
+    // with first-object-wins parsing, an echoed example would otherwise
+    // be adopted as a real assessment whenever "gravity" is a candidate.
+    // If nothing parseable remains, the model's entire output WAS the
+    // example — indistinguishable from a genuine identical answer — so
+    // fall back to the raw output rather than soft-failing.
+    let cleaned = raw.replace(EXAMPLE_OUTPUT, "");
+    let json_str = match extract_first_json_object(&cleaned) {
+        Some(s) => s,
+        None => extract_first_json_object(raw)
+            .ok_or_else(|| "no JSON object found in output".to_string())?,
+    };
     let parsed: ClassifierOutput =
         serde_json::from_str(json_str).map_err(|e| format!("JSON parse error: {e}"))?;
 
+    // Normalize the candidate list once (not per assessment). The
+    // shared `normalize_concept_key` is the same rule the extractor
+    // applies when producing candidates, so matching stays in lockstep
+    // with the producer.
+    let normalized_candidates: Vec<(String, &String)> = candidates
+        .iter()
+        .map(|c| (normalize_concept_key(c), c))
+        .collect();
+
     let mut out: Vec<ComprehensionAssessment> = Vec::with_capacity(parsed.assessments.len());
+    let mut index_by_concept: std::collections::HashMap<String, usize> =
+        std::collections::HashMap::new();
     for a in parsed.assessments {
-        // Drop assessments whose concept name isn't in the candidate
-        // list (defends against the LLM inventing concepts).
-        if !candidates.iter().any(|c| c == &a.concept) {
-            continue;
-        }
+        // Match the concept against the candidate list (defends against
+        // the LLM inventing concepts). Matching is trimmed and
+        // case-insensitive — small local models routinely echo
+        // "Photosynthesis" for the candidate "photosynthesis" — but the
+        // *canonical* candidate string is what lands in the assessment,
+        // so downstream concept ids stay consistent with the extractor's
+        // normalized form.
+        let concept_returned = normalize_concept_key(&a.concept);
+        let canonical = match normalized_candidates
+            .iter()
+            .find(|(n, _)| *n == concept_returned)
+        {
+            Some((_, c)) => (*c).clone(),
+            None => continue,
+        };
         // Drop assessments with out-of-range confidence.
         if !(0.0..=1.0).contains(&a.confidence) {
             continue;
@@ -209,12 +265,40 @@ fn parse_classification_output(
             let trimmed = truncate_to_chars(&e, evidence_max_chars);
             trimmed.to_string()
         });
-        out.push(ComprehensionAssessment {
-            concept: a.concept,
+        let assessment = ComprehensionAssessment {
+            concept: canonical,
             depth,
             confidence: a.confidence,
             evidence,
-        });
+        };
+        // At most ONE assessment per canonical concept. Duplicate rows
+        // (e.g. the model returns both "Gravity" and "gravity") would
+        // each run the Leitner-box transition downstream, advancing the
+        // box twice off a single exchange. Keep the strongest reading:
+        // a row that will actually apply (confidence >= threshold)
+        // always beats one that won't — otherwise a sub-threshold
+        // Analysis row could displace an above-threshold Recall row and
+        // silently drop the turn's learner update — then deepest depth,
+        // then highest confidence (the monotonic-max spirit of apply).
+        match index_by_concept.get(&assessment.concept) {
+            None => {
+                index_by_concept.insert(assessment.concept.clone(), out.len());
+                out.push(assessment);
+            }
+            Some(&i) => {
+                let existing = &mut out[i];
+                let new_applies = assessment.confidence >= confidence_threshold;
+                let old_applies = existing.confidence >= confidence_threshold;
+                let stronger = (new_applies && !old_applies)
+                    || (new_applies == old_applies
+                        && (assessment.depth > existing.depth
+                            || (assessment.depth == existing.depth
+                                && assessment.confidence > existing.confidence)));
+                if stronger {
+                    *existing = assessment;
+                }
+            }
+        }
     }
 
     Ok(ComprehensionResult { assessments: out })
@@ -381,6 +465,139 @@ mod tests {
         let candidates: Vec<String> = vec!["other".into()];
         let r = c.classify(ctx(&child, &primer, &candidates)).await.unwrap();
         assert!(r.assessments.is_empty());
+    }
+
+    #[tokio::test]
+    async fn classify_matches_candidates_case_insensitively_and_canonicalizes() {
+        // Small local models routinely echo "Photosynthesis" for the
+        // candidate "photosynthesis". The match is case-insensitive and
+        // the *canonical* candidate string is what lands in the
+        // assessment, keeping concept ids consistent downstream.
+        let backend = Arc::new(CannedBackend {
+            name: "x",
+            text: r#"{"assessments": [{"concept": " Photosynthesis ", "depth": "Recall", "confidence": 0.7}]}"#.into(),
+        }) as Arc<dyn InferenceBackend>;
+        let c = LlmComprehensionClassifier::new(
+            backend,
+            "test".into(),
+            ComprehensionSettings::default(),
+        );
+        let child = turn(Speaker::Child, "?");
+        let primer = turn(Speaker::Primer, "?");
+        let candidates: Vec<String> = vec!["photosynthesis".into()];
+        let r = c.classify(ctx(&child, &primer, &candidates)).await.unwrap();
+        assert_eq!(r.assessments.len(), 1);
+        assert_eq!(r.assessments[0].concept, "photosynthesis");
+        assert_eq!(r.assessments[0].depth, UnderstandingDepth::Recall);
+    }
+
+    #[tokio::test]
+    async fn classify_ignores_echoed_prompt_example_before_real_answer() {
+        // Small local models sometimes restate the prompt's example
+        // before answering. First-object-wins parsing must not adopt
+        // the echoed example as a real assessment — here "gravity" IS a
+        // candidate, so without excision the example's Comprehension@0.8
+        // row would win over the model's actual Aware@0.9 reading.
+        let backend = Arc::new(CannedBackend {
+            name: "x",
+            text: format!(
+                "{EXAMPLE_OUTPUT}\n{{\"assessments\": [{{\"concept\": \"gravity\", \"depth\": \"Aware\", \"confidence\": 0.9}}]}}"
+            ),
+        }) as Arc<dyn InferenceBackend>;
+        let c = LlmComprehensionClassifier::new(
+            backend,
+            "test".into(),
+            ComprehensionSettings::default(),
+        );
+        let child = turn(Speaker::Child, "?");
+        let primer = turn(Speaker::Primer, "?");
+        let candidates: Vec<String> = vec!["gravity".into()];
+        let r = c.classify(ctx(&child, &primer, &candidates)).await.unwrap();
+        assert_eq!(r.assessments.len(), 1);
+        assert_eq!(r.assessments[0].depth, UnderstandingDepth::Aware);
+        assert!((r.assessments[0].confidence - 0.9).abs() < 1e-6);
+    }
+
+    #[tokio::test]
+    async fn classify_collapses_duplicate_rows_to_strongest_reading() {
+        // Case-insensitive matching means "Gravity" and "gravity" both
+        // canonicalise to the candidate "gravity". Two surviving rows
+        // would each run the Leitner-box transition downstream (a
+        // double advance off one exchange), so duplicates collapse to
+        // one assessment keeping the deepest depth (then highest
+        // confidence).
+        let backend = Arc::new(CannedBackend {
+            name: "x",
+            text: r#"{"assessments": [
+                {"concept": "Gravity", "depth": "Recall", "confidence": 0.9},
+                {"concept": "gravity", "depth": "Comprehension", "confidence": 0.7}
+            ]}"#
+            .into(),
+        }) as Arc<dyn InferenceBackend>;
+        let c = LlmComprehensionClassifier::new(
+            backend,
+            "test".into(),
+            ComprehensionSettings::default(),
+        );
+        let child = turn(Speaker::Child, "?");
+        let primer = turn(Speaker::Primer, "?");
+        let candidates: Vec<String> = vec!["gravity".into()];
+        let r = c.classify(ctx(&child, &primer, &candidates)).await.unwrap();
+        assert_eq!(r.assessments.len(), 1);
+        assert_eq!(r.assessments[0].concept, "gravity");
+        assert_eq!(r.assessments[0].depth, UnderstandingDepth::Comprehension);
+        assert!((r.assessments[0].confidence - 0.7).abs() < 1e-6);
+    }
+
+    #[tokio::test]
+    async fn classify_duplicate_dedup_prefers_above_threshold_row_over_deeper_subthreshold_row() {
+        // The dedup must be threshold-aware: a sub-threshold Analysis
+        // row must not displace an above-threshold Recall row, or the
+        // turn's learner update (depth promotion + box advance) is
+        // silently dropped in apply_comprehension's confidence gate.
+        let backend = Arc::new(CannedBackend {
+            name: "x",
+            text: r#"{"assessments": [
+                {"concept": "gravity", "depth": "Analysis", "confidence": 0.4},
+                {"concept": "Gravity", "depth": "Recall", "confidence": 0.9}
+            ]}"#
+            .into(),
+        }) as Arc<dyn InferenceBackend>;
+        let c = LlmComprehensionClassifier::new(
+            backend,
+            "test".into(),
+            ComprehensionSettings::default(), // confidence_threshold 0.6
+        );
+        let child = turn(Speaker::Child, "?");
+        let primer = turn(Speaker::Primer, "?");
+        let candidates: Vec<String> = vec!["gravity".into()];
+        let r = c.classify(ctx(&child, &primer, &candidates)).await.unwrap();
+        assert_eq!(r.assessments.len(), 1);
+        assert_eq!(r.assessments[0].depth, UnderstandingDepth::Recall);
+        assert!((r.assessments[0].confidence - 0.9).abs() < 1e-6);
+    }
+
+    #[tokio::test]
+    async fn classify_accepts_output_that_is_exactly_the_example() {
+        // A model whose entire output is byte-identical to the prompt's
+        // example is indistinguishable from a genuine identical answer.
+        // The excision must fall back to the raw output instead of
+        // soft-failing and dropping a possibly-correct assessment.
+        let backend = Arc::new(CannedBackend {
+            name: "x",
+            text: EXAMPLE_OUTPUT.to_string(),
+        }) as Arc<dyn InferenceBackend>;
+        let c = LlmComprehensionClassifier::new(
+            backend,
+            "test".into(),
+            ComprehensionSettings::default(),
+        );
+        let child = turn(Speaker::Child, "?");
+        let primer = turn(Speaker::Primer, "?");
+        let candidates: Vec<String> = vec!["gravity".into()];
+        let r = c.classify(ctx(&child, &primer, &candidates)).await.unwrap();
+        assert_eq!(r.assessments.len(), 1);
+        assert_eq!(r.assessments[0].depth, UnderstandingDepth::Comprehension);
     }
 
     #[tokio::test]

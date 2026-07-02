@@ -99,6 +99,15 @@ impl SqliteKnowledgeBase {
         let conn = Connection::open(path)
             .map_err(|e| PrimerError::Knowledge(format!("Failed to open DB: {e}")))?;
 
+        // SQLite defaults foreign_keys to OFF per-connection. The schema
+        // declares FKs (`sources.parent_source_id`, the embeddings
+        // ON DELETE CASCADE) whose enforcement the loader's
+        // umbrella-before-child upsert ordering exists to satisfy —
+        // without this pragma they were silently unenforced. Mirrors
+        // `primer-storage`'s open path.
+        conn.pragma_update(None, "foreign_keys", "ON")
+            .map_err(|e| PrimerError::Knowledge(format!("enable foreign_keys: {e}")))?;
+
         let pack = locale.pack_id();
         migrate_or_create(&conn, pack)?;
 
@@ -288,6 +297,24 @@ impl KnowledgeBase for SqliteKnowledgeBase {
             .collect();
 
         Ok(passages)
+    }
+
+    /// Trait-object dispatch for the hybrid path. Without this override,
+    /// callers holding `&dyn KnowledgeBase` (the dialogue manager holds
+    /// `Arc<dyn KnowledgeBase>`) fell through to the trait's DEFAULT
+    /// impl, which ignores the embedder and runs BM25-only — silently
+    /// disabling hybrid retrieval in production even with an embedder
+    /// wired. Delegates to `retrieve_hybrid_inner` in `retrieval.rs`;
+    /// the distinct `_inner` name (the `primer-storage` convention)
+    /// makes the delegation unambiguous — a same-name inherent method
+    /// is exactly what masked the trait default originally.
+    async fn retrieve_hybrid(
+        &self,
+        query: &str,
+        embedder: &dyn primer_core::embedder::Embedder,
+        params: &HybridParams,
+    ) -> Result<Vec<Passage>> {
+        self.retrieve_hybrid_inner(query, embedder, params).await
     }
 }
 

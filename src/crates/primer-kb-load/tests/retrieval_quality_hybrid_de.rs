@@ -24,7 +24,7 @@ mod common;
 
 use common::de::QUERIES_DE;
 use primer_core::i18n::Locale;
-use primer_core::knowledge::HybridParams;
+use primer_core::knowledge::{HybridParams, KnowledgeBase};
 use primer_embedding::StubEmbedder;
 use primer_kb_load::{auto_seed_if_empty, reembed_kb};
 use primer_knowledge::SqliteKnowledgeBase;

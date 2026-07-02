@@ -43,8 +43,11 @@ pub(crate) fn process_filtered_chunk(
     backend: &'static str,
 ) -> FilterAction {
     if chunk.done {
+        // No `had_visible` update here: the done chunk's own text is part
+        // of the tail handed to `finalize_visible` below, whose own
+        // whitespace-trimmed check covers it — and the flag is never read
+        // after this call. (Non-final chunks update the flag below.)
         let mut visible = filter.push(&chunk.text);
-        *had_visible |= !visible.is_empty();
         visible.push_str(&filter.finish());
         log_suppressed(filter, backend);
         match finalize_visible(*had_visible, &visible, filter.did_suppress()) {
@@ -85,7 +88,13 @@ pub(crate) fn process_filtered_chunk(
         if visible.is_empty() {
             FilterAction::Nothing
         } else {
-            *had_visible = true;
+            // Forward the text (a leading "\n" before a think-block is
+            // harmless to display), but only count it as a visible
+            // ANSWER if it has non-whitespace content. Chat templates
+            // that emit `"\n<think>…"` would otherwise defeat the
+            // `ReasoningWithoutAnswer` detection and end an
+            // all-reasoning reply as a blank turn.
+            *had_visible |= !visible.trim().is_empty();
             FilterAction::Forward(Ok(TokenChunk {
                 text: visible,
                 done: false,
@@ -152,6 +161,20 @@ mod tests {
         );
         assert_eq!(visible, "Hi there");
         assert!(!err);
+    }
+
+    #[test]
+    fn whitespace_prefix_before_reasoning_only_reply_still_errors() {
+        // Qwen3/R1-style chat templates emit a bare "\n" before the
+        // opening <think> marker. That newline is forwarded but must not
+        // count as a visible answer: an all-reasoning reply that ends
+        // cleanly should surface ReasoningWithoutAnswer, not a blank turn.
+        let (visible, err) = drive(
+            default_markers(),
+            &[("\n", false), ("<think>only thinking", false), ("", true)],
+        );
+        assert_eq!(visible, "\n");
+        assert!(err);
     }
 
     #[test]

@@ -178,7 +178,9 @@ pub fn build_summarize_prompt(turns: &[Turn], target_chars: usize) -> Prompt {
          - The emotional arc (curious, frustrated, distracted, energised).\n\n\
          Write a single paragraph of about {target_chars} characters. No bullet lists, \
          no headings, no quotation marks. Refer to the child as \"the child\" — the \
-         summary will be read by the Primer in a future session.",
+         summary will be read by the Primer in a future session. Write the summary in \
+         the same language the conversation is in. Begin directly with the summary \
+         itself — no preamble like \"Here is a summary\".",
     );
     let messages = turns
         .iter()

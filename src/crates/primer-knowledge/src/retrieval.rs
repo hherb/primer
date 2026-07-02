@@ -1,9 +1,16 @@
 //! Hybrid (BM25 + vector cosine) retrieval read path.
 //!
-//! `retrieve_hybrid` fuses the FTS5 BM25 leg (via the `KnowledgeBase::retrieve`
-//! trait method) with an in-Rust cosine k-NN leg (`knn_scan`) through
-//! Reciprocal Rank Fusion. The BM25-only trait impl lives with the struct in
-//! `lib.rs`; this module is the hybrid extension on top of it.
+//! `retrieve_hybrid_inner` fuses the FTS5 BM25 leg (via the
+//! `KnowledgeBase::retrieve` trait method) with an in-Rust cosine k-NN leg
+//! (`knn_scan`) through Reciprocal Rank Fusion. The BM25-only trait impl and
+//! the `KnowledgeBase::retrieve_hybrid` override that forwards here live with
+//! the struct in `lib.rs`; this module is the hybrid extension on top of it.
+//! The `_inner` name (mirroring `primer-storage`'s
+//! `retrieve_session_turns_hybrid_inner`) keeps the inherent method from
+//! shadowing the trait method — a same-name inherent silently masked the
+//! trait's BM25-only default for every `dyn KnowledgeBase` caller once, and
+//! would turn into infinite recursion if the forwarding impl ever re-resolved
+//! to the trait.
 
 use crate::SqliteKnowledgeBase;
 use crate::embedding_model::validate_embedder_against_db;
@@ -27,7 +34,7 @@ impl SqliteKnowledgeBase {
     /// and returns an empty vec leg (effective BM25-only fallback) —
     /// silent degradation would invisibly hurt retrieval. A `min_score`
     /// floor and a `source_filter` allow-list apply post-fusion.
-    pub async fn retrieve_hybrid(
+    pub(crate) async fn retrieve_hybrid_inner(
         &self,
         query: &str,
         embedder: &dyn Embedder,

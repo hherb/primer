@@ -175,8 +175,13 @@ impl ReasoningFilter {
 /// signal the backend should emit an `InferenceError` "reasoning without
 /// answer" variant (added in a later task) instead — i.e. the model
 /// reasoned but produced no visible answer.
+///
+/// A whitespace-only `tail` counts as "no visible answer": many chat
+/// templates emit a bare `"\n"` before the opening reasoning marker, and
+/// treating that newline as an answer would end an all-reasoning reply
+/// as a blank turn instead of the friendly retry error.
 pub fn finalize_visible(had_visible: bool, tail: &str, did_suppress: bool) -> Option<String> {
-    if !had_visible && tail.is_empty() && did_suppress {
+    if !had_visible && tail.trim().is_empty() && did_suppress {
         None
     } else {
         Some(tail.to_string())
