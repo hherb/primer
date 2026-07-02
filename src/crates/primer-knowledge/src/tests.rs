@@ -580,6 +580,39 @@ async fn retrieve_hybrid_returns_relevant_passage() {
 }
 
 #[tokio::test]
+async fn retrieve_hybrid_via_trait_object_uses_vector_leg() {
+    // Regression: production holds `Arc<dyn KnowledgeBase>`, so hybrid
+    // retrieval MUST be reachable through trait-object dispatch. Before
+    // the trait impl gained a `retrieve_hybrid` override, this call fell
+    // through to the trait's BM25-only default and silently disabled
+    // hybrid retrieval in production (the inherent method shadowed the
+    // gap for every concrete-type test). The query below has no BM25
+    // overlap with the corpus, so any hit proves the vector leg ran.
+    use primer_core::knowledge::KnowledgeBase;
+    use primer_embedding::StubEmbedder;
+    let db = tmp_db();
+    let kb = SqliteKnowledgeBase::open_for_locale(db.path(), Locale::English).unwrap();
+    let stub = StubEmbedder::with_dim(32);
+    kb.insert_passage_with_embedding("p1", "src", "alpha beta gamma", &stub)
+        .await
+        .unwrap();
+
+    let dyn_kb: &dyn KnowledgeBase = &kb;
+    let hits = dyn_kb
+        .retrieve_hybrid(
+            "completely unrelated query",
+            &stub,
+            &HybridParams::default(),
+        )
+        .await
+        .unwrap();
+    assert!(
+        !hits.is_empty(),
+        "trait-object dispatch must reach the hybrid (vector-leg) implementation"
+    );
+}
+
+#[tokio::test]
 async fn retrieve_hybrid_falls_back_when_only_one_leg_hits() {
     // The vector leg always returns up-to-K candidates regardless
     // of relevance; the BM25 leg may return zero. Hybrid should

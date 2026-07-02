@@ -45,8 +45,8 @@ impl DialogueManager {
     /// and write to disjoint fields of `self.learner` (engagement vs
     /// concepts/comprehension). Awaiting them with `tokio::join!` caps
     /// wallclock at `max(classifier_timeout, extractor_timeout +
-    /// comprehension_timeout)` — at default settings, 5s instead of
-    /// `3 + 5 + 5 = 13s` on a worst-case full-timeout exchange.
+    /// comprehension_timeout)` — at default settings, `max(3, 5 + 5)` = 10s
+    /// instead of `3 + 5 + 5 = 13s` on a worst-case full-timeout exchange.
     pub(super) async fn await_pending_background(&mut self) {
         let post_response_timeout =
             self.extractor_settings.blocking_timeout + self.comprehension_settings.blocking_timeout;

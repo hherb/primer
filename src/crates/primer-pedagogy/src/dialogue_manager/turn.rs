@@ -94,10 +94,6 @@ impl DialogueManager {
             break_gate,
         );
 
-        if intent == primer_core::conversation::PedagogicalIntent::SuggestBreak {
-            self.last_break_suggested_at = Some(now);
-        }
-
         // 2+3. Progressive-shrink recovery loop: build the prompt at the
         // current budget tier, stream the reply, and on a context-limit
         // truncation notify the child and retry with a smaller prompt.
@@ -109,8 +105,15 @@ impl DialogueManager {
             .await;
 
         // 4. On success, record the Primer turn, update the learner,
-        //    and refresh the rolling summary if due.
+        //    and refresh the rolling summary if due. The break gate is
+        //    stamped here rather than at intent selection: if the turn
+        //    errors, the child never heard the break suggestion, and
+        //    stamping early would suppress any re-suggestion for a full
+        //    interval (default 30 min).
         if let Ok(accumulated) = &result {
+            if intent == primer_core::conversation::PedagogicalIntent::SuggestBreak {
+                self.last_break_suggested_at = Some(now);
+            }
             self.record_primer_turn(accumulated, intent);
             self.update_learner_model(child_input, &intent);
             self.refresh_summary_if_due().await;

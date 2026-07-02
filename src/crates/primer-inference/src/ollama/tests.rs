@@ -59,6 +59,20 @@ fn parse_ollama_line_returns_err_on_garbage() {
 }
 
 #[test]
+fn parse_ollama_error_line_detects_error_payload() {
+    assert_eq!(
+        parse_ollama_error_line(r#"{"error":"runner process has terminated"}"#).as_deref(),
+        Some("runner process has terminated")
+    );
+}
+
+#[test]
+fn parse_ollama_error_line_ignores_normal_and_garbage_lines() {
+    assert!(parse_ollama_error_line(r#"{"message":{"content":"Hello"},"done":false}"#).is_none());
+    assert!(parse_ollama_error_line("not json").is_none());
+}
+
+#[test]
 fn map_ollama_finish_reason_length_is_length() {
     assert_eq!(
         map_ollama_finish_reason(Some("length")),

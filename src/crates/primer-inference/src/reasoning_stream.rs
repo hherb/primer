@@ -44,7 +44,9 @@ pub(crate) fn process_filtered_chunk(
 ) -> FilterAction {
     if chunk.done {
         let mut visible = filter.push(&chunk.text);
-        *had_visible |= !visible.is_empty();
+        // Whitespace-only text is not a "visible answer" — see the
+        // matching trim in `finalize_visible` and on the non-final arm.
+        *had_visible |= !visible.trim().is_empty();
         visible.push_str(&filter.finish());
         log_suppressed(filter, backend);
         match finalize_visible(*had_visible, &visible, filter.did_suppress()) {
@@ -85,7 +87,13 @@ pub(crate) fn process_filtered_chunk(
         if visible.is_empty() {
             FilterAction::Nothing
         } else {
-            *had_visible = true;
+            // Forward the text (a leading "\n" before a think-block is
+            // harmless to display), but only count it as a visible
+            // ANSWER if it has non-whitespace content. Chat templates
+            // that emit `"\n<think>…"` would otherwise defeat the
+            // `ReasoningWithoutAnswer` detection and end an
+            // all-reasoning reply as a blank turn.
+            *had_visible |= !visible.trim().is_empty();
             FilterAction::Forward(Ok(TokenChunk {
                 text: visible,
                 done: false,
@@ -152,6 +160,20 @@ mod tests {
         );
         assert_eq!(visible, "Hi there");
         assert!(!err);
+    }
+
+    #[test]
+    fn whitespace_prefix_before_reasoning_only_reply_still_errors() {
+        // Qwen3/R1-style chat templates emit a bare "\n" before the
+        // opening <think> marker. That newline is forwarded but must not
+        // count as a visible answer: an all-reasoning reply that ends
+        // cleanly should surface ReasoningWithoutAnswer, not a blank turn.
+        let (visible, err) = drive(
+            default_markers(),
+            &[("\n", false), ("<think>only thinking", false), ("", true)],
+        );
+        assert_eq!(visible, "\n");
+        assert!(err);
     }
 
     #[test]

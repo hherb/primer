@@ -135,17 +135,40 @@ impl DialogueManager {
         // resuming with a different classifier starts a fresh trajectory rather
         // than mixing outputs from different classifiers.
         if let Some(store) = self.storage.as_ref() {
-            let recent = store
+            match store
                 .load_recent_assessments(
                     self.session.id,
                     self.classifier.identifier(),
                     self.classifier_settings.history_depth,
                 )
-                .await?;
-            if let Some(latest) = recent.last() {
-                self.learner.current_engagement = latest.state;
+                .await
+            {
+                Ok(recent) => {
+                    // Mirror the live path's confidence gate (`apply_assessment`):
+                    // every Ok classification is persisted, including
+                    // sub-threshold ones the live session correctly ignored.
+                    // Adopting an unfiltered `latest.state` here could resume
+                    // straight into e.g. a noisy low-confidence `Disengaging`,
+                    // which — combined with the original `started_at` being
+                    // hours old — would route the first resumed turn to
+                    // `SessionClose`.
+                    if let Some(latest) = recent
+                        .iter()
+                        .rev()
+                        .find(|a| a.confidence >= self.classifier_settings.confidence_threshold)
+                    {
+                        self.learner.current_engagement = latest.state;
+                    }
+                    self.learner.recent_assessments = recent;
+                }
+                Err(e) => {
+                    // Soft-fail like every other store call on this path: a
+                    // resume with an empty trajectory beats aborting with the
+                    // manager half-mutated (session already swapped in,
+                    // summary possibly refreshed but not yet saved).
+                    tracing::warn!("loading recent assessments failed during resume: {e}");
+                }
             }
-            self.learner.recent_assessments = recent;
         }
 
         if let Some(ref store) = self.storage {

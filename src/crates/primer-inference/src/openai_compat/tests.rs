@@ -5,6 +5,35 @@
 
 use super::*;
 
+// -- Mid-stream error payloads ------------------------------------------
+
+#[test]
+fn parse_error_data_detects_object_shape() {
+    assert_eq!(
+        parse_openai_compat_error_data(
+            r#"{"error": {"message": "upstream unavailable", "code": 502}}"#
+        )
+        .as_deref(),
+        Some("upstream unavailable")
+    );
+}
+
+#[test]
+fn parse_error_data_detects_string_shape() {
+    assert_eq!(
+        parse_openai_compat_error_data(r#"{"error": "model crashed"}"#).as_deref(),
+        Some("model crashed")
+    );
+}
+
+#[test]
+fn parse_error_data_ignores_normal_chunks_and_garbage() {
+    assert!(
+        parse_openai_compat_error_data(r#"{"choices":[{"delta":{"content":"hi"}}]}"#).is_none()
+    );
+    assert!(parse_openai_compat_error_data("not json").is_none());
+}
+
 // -- SSE buffer ---------------------------------------------------------
 
 #[test]

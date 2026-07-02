@@ -123,6 +123,32 @@ fn parse_openai_compat_chunk(data: &str) -> Result<Option<TokenChunk>> {
     }))
 }
 
+/// Detect a mid-stream error payload. After a 2xx handshake, many
+/// OpenAI-compatible servers (OpenRouter, vLLM, proxies) report failure
+/// as a `data:` event of the form `{"error": {"message": "...", ...}}`
+/// (or `{"error": "..."}`). That shape does not deserialize as a
+/// `ChatCompletionChunk`, so without this check it was warn-skipped as
+/// "unparseable" and the truncated reply finished as a clean turn —
+/// bypassing the partial-turn-drops-on-error invariant.
+fn parse_openai_compat_error_data(data: &str) -> Option<String> {
+    #[derive(Deserialize)]
+    struct ErrorPayload {
+        error: ErrorBody,
+    }
+    #[derive(Deserialize)]
+    #[serde(untagged)]
+    enum ErrorBody {
+        Object { message: String },
+        Text(String),
+    }
+    serde_json::from_str::<ErrorPayload>(data)
+        .ok()
+        .map(|p| match p.error {
+            ErrorBody::Object { message } => message,
+            ErrorBody::Text(t) => t,
+        })
+}
+
 // ---------------------------------------------------------------------------
 // Error classification
 // ---------------------------------------------------------------------------
@@ -336,6 +362,20 @@ impl InferenceBackend for OpenAiCompatBackend {
                                 Ok(Some(c)) => c,
                                 Ok(None) => continue,
                                 Err(e) => {
+                                    // A mid-stream `{"error": ...}` payload is a
+                                    // real generation failure, not line noise:
+                                    // surface it so the partial turn drops at the
+                                    // dialogue-manager layer instead of the reply
+                                    // finishing as a clean truncated turn.
+                                    if let Some(msg) = parse_openai_compat_error_data(&data) {
+                                        let _ = tx
+                                            .send(Err(PrimerError::Inference(
+                                                format!("OpenAI-compat mid-stream error: {msg}")
+                                                    .into(),
+                                            )))
+                                            .await;
+                                        break 'outer;
+                                    }
                                     tracing::warn!(
                                         "Skipping unparseable OpenAI-compat SSE line: {e}"
                                     );

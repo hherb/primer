@@ -759,6 +759,35 @@ async fn respond_after_threshold_yields_suggest_break_intent() {
 }
 
 #[tokio::test]
+async fn failed_turn_does_not_consume_break_gate() {
+    // If the SuggestBreak turn errors, the child never heard the
+    // suggestion — the gate must stay open so the next successful turn
+    // can re-suggest, instead of being suppressed for a full interval.
+    let backend = std::sync::Arc::new(ScriptedBackend::new(vec![Err(
+        primer_core::error::PrimerError::Inference("simulated mid-stream failure".into()),
+    )]));
+    let knowledge = std::sync::Arc::new(EmptyKnowledge);
+    let mut dm = DialogueManager::new(
+        test_learner(),
+        backend.clone(),
+        knowledge.clone(),
+        DialogueManagerStores::default(),
+        default_subsystems(),
+        primer_core::config::PedagogyConfig::default(),
+    );
+
+    let advanced = dm.session.started_at + chrono::Duration::minutes(31);
+    dm.set_clock_for_test(advanced);
+
+    let result = dm.respond_to("hello").await;
+    assert!(result.is_err(), "scripted backend error should propagate");
+    assert!(
+        dm.last_break_suggested_at_for_test().is_none(),
+        "a failed turn must not consume the break gate"
+    );
+}
+
+#[tokio::test]
 async fn respond_to_streaming_threads_routing_signals() {
     use std::sync::{Arc, Mutex};
 
