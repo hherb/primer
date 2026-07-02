@@ -4,10 +4,11 @@
 //! `#[cfg(test)] mod mocks;`) to keep that file focused on the loop itself.
 //! `super::` resolves to the `state_machine` module, exactly as when this code
 //! lived inline — so the mock backends and the `#[tokio::test]` cases reach the
-//! loop's public types (`LoopBackends`, `VoiceState`, `run_loop_borrowed`, …)
-//! unchanged.
+//! loop's public types (`LoopBackends`, `run_loop_borrowed`, …) unchanged.
 
 use std::sync::{Arc, Mutex};
+
+use crate::voice_loop::observer::{ExitReason, LoopObserver, TurnCompletePayload, VoiceState};
 
 use primer_core::error::Result;
 use primer_core::speech::{
@@ -242,7 +243,7 @@ impl SynthesisSession for TimedMockTtsSession {
 #[derive(Debug, Clone)]
 pub enum MockEvent {
     StateChange {
-        state: super::VoiceState,
+        state: VoiceState,
         hint: Option<String>,
     },
     Transcript(String),
@@ -250,9 +251,9 @@ pub enum MockEvent {
         primer_turn_index: usize,
         text: String,
     },
-    Complete(super::TurnCompletePayload),
+    Complete(TurnCompletePayload),
     InferenceError(String),
-    Exit(super::ExitReason),
+    Exit(ExitReason),
 }
 
 /// Test observer that records every callback into a shared `Vec`.
@@ -268,8 +269,8 @@ impl MockObserver {
     }
 }
 
-impl super::LoopObserver for MockObserver {
-    fn on_state_change(&mut self, state: super::VoiceState, hint: Option<&str>) {
+impl LoopObserver for MockObserver {
+    fn on_state_change(&mut self, state: VoiceState, hint: Option<&str>) {
         self.0.lock().unwrap().push(MockEvent::StateChange {
             state,
             hint: hint.map(String::from),
@@ -287,7 +288,7 @@ impl super::LoopObserver for MockObserver {
             text: chunk.to_string(),
         });
     }
-    fn on_response_complete(&mut self, payload: super::TurnCompletePayload) {
+    fn on_response_complete(&mut self, payload: TurnCompletePayload) {
         self.0.lock().unwrap().push(MockEvent::Complete(payload));
     }
     fn on_inference_error(&mut self, err: &primer_core::error::InferenceError) {
@@ -296,7 +297,7 @@ impl super::LoopObserver for MockObserver {
             .unwrap()
             .push(MockEvent::InferenceError(format!("{err:?}")));
     }
-    fn on_exit(&mut self, reason: super::ExitReason) {
+    fn on_exit(&mut self, reason: ExitReason) {
         self.0.lock().unwrap().push(MockEvent::Exit(reason));
     }
 }
@@ -528,7 +529,7 @@ async fn happy_path_records_one_round_trip() {
         events.iter().any(|e| matches!(
             e,
             MockEvent::StateChange {
-                state: super::VoiceState::Listen,
+                state: VoiceState::Listen,
                 ..
             }
         )),
@@ -544,7 +545,7 @@ async fn happy_path_records_one_round_trip() {
         events.iter().any(|e| matches!(
             e,
             MockEvent::StateChange {
-                state: super::VoiceState::Speak,
+                state: VoiceState::Speak,
                 ..
             }
         )),
@@ -622,14 +623,14 @@ async fn quit_phrase_short_circuits_speak() {
     assert!(
         events
             .iter()
-            .any(|e| matches!(e, MockEvent::Exit(super::ExitReason::Keyword))),
+            .any(|e| matches!(e, MockEvent::Exit(ExitReason::Keyword))),
         "Exit(Keyword) fired: {events:?}"
     );
     assert!(
         !events.iter().any(|e| matches!(
             e,
             MockEvent::StateChange {
-                state: super::VoiceState::Speak,
+                state: VoiceState::Speak,
                 ..
             }
         )),
@@ -778,7 +779,7 @@ async fn cancel_on_resumed_speech_retries_after_continuation() {
         events.iter().any(|e| matches!(
             e,
             MockEvent::StateChange {
-                state: super::VoiceState::Listen,
+                state: VoiceState::Listen,
                 hint: Some(h),
             } if h == "child_resumed"
         )),
