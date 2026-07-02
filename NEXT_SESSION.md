@@ -26,7 +26,7 @@ This session ran the standard sweep FIRST: the oversized-file sweep found the ex
 ## What's next (concrete acceptance criteria)
 
 ### 0. PR #320 — owner review/merge
-CI was pending at session close — watch `gh pr checks 320` (touches `.rs`, so the full Rust matrix runs). Acceptance: all checks green, owner merges.
+**CI fully green at session close (all 11 checks pass, including the full Rust matrix).** Acceptance: owner merges.
 
 ### CHEAP TEST EXTRACTIONS: detector was CLEAN this session — but re-run it EVERY session
 The sweep + detector are cheap and between-sessions PRs have pushed files over 500 lines five times before. Commands in the resume block. Watch-list: `primer-classifier/src/llm.rs` (~460) and `primer-extractor/src/llm.rs` (~470) both carry inline test modules and sit near the threshold — the next feature PR touching them likely trips the detector.
@@ -66,7 +66,7 @@ The >500 test-support files (`store/tests/session_tests.rs` 2442, `state_machine
 
 ## Open decisions / risks
 
-- **PR #320 open, awaiting owner review/merge.** Pure refactor, no runtime behaviour change; CI pending at close.
+- **PR #320 open, awaiting owner review/merge.** Pure refactor, no runtime behaviour change; CI fully green.
 - **The production-split lane stays open and owner-approved.** Recommended next: `primer-pedagogy/src/prompt_builder.rs` (708) — no feature gates, but it holds `decide_intent()`; treat the 40 intent-routing characterization tests as the hard guard and prefer the test-extraction shape first if the file is mostly tests.
 - **The inline-test detector was clean this session (first time in six).** Between-sessions PRs can still push near-threshold files (`primer-classifier/src/llm.rs` ~460, `primer-extractor/src/llm.rs` ~470) over 500. The sweep + detector are cheap — run both before picking work.
 - **Machine load / build times:** deps were warm — `cargo test -p primer-pedagogy` seconds, workspace clippy ~2 min, full workspace test ~7 min. Cold-start budget remains ~35 min for the first cargo pass. Run ONE cargo pass at a time; don't run fmt (source-modifying) while clippy is mid-flight on the same crate.
@@ -85,7 +85,7 @@ The >500 test-support files (`store/tests/session_tests.rs` 2442, `state_machine
 
 ```bash
 cd /Users/hherb/src/primer && git fetch && git log --oneline -4 && gh pr list --state open
-# One PR open at close: #320 (turn.rs split, CI was pending). After it merges, start fresh off main.
+# One PR open at close: #320 (turn.rs split, CI fully green). After it merges, start fresh off main.
 
 # === Standard workspace gate (run from src/ if you touch .rs) — one cargo pass at a time, grep twice ===
 cd /Users/hherb/src/primer/src
