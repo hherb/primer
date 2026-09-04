@@ -36,8 +36,8 @@ Verified 2026-07-01 on macOS arm64 host: compiles cleanly, no warnings, in
 
 ## Step 2: embedder default is feature-aware
 
-`crates/primer-gui/src/config/types.rs` defines `default_embedder_kind()`
-twice, cfg-gated:
+`crates/primer-gui/src/config/types/subsystems.rs` defines
+`default_embedder_kind()` twice, cfg-gated:
 
 ```rust
 #[cfg(feature = "embedding")]
