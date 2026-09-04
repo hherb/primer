@@ -13,10 +13,14 @@ mod migrations;
 
 pub use lookup::validate_and_seed_lookup;
 pub use migrations::apply_v2_migrations;
-pub(crate) use migrations::{
-    apply_v3_migrations, apply_v4_migrations, apply_v5_migrations, apply_v6_migrations,
-    apply_v7_migrations, apply_v8_migrations,
-};
+// Deliberately a glob, not an explicit name list: `mod migrations` is
+// private to `schema`, so the open path can only reach a migration
+// through this re-export. A glob means adding `vN.rs` needs no edit
+// here — which is what keeps the "adding a version" checklist in
+// `migrations/mod.rs` true. Spelling the names out again would add a
+// second edit site that a new version can silently miss (the resulting
+// E0425 in `store/mod.rs` points at `apply_v2_migrations`, not here).
+pub(crate) use migrations::*;
 
 /// The on-disk schema version this build understands. Stored in
 /// `PRAGMA user_version`. A mismatch on `open()` is a hard error.
@@ -49,6 +53,13 @@ pub(crate) use migrations::{
 /// (INTEGER NOT NULL DEFAULT 0) backing the spaced-repetition
 /// vocabulary feature (Phase 0.3). Existing rows default to box 0 — no
 /// backfill needed at this stage (Phase 0.3 has no field-deployed users).
+///
+/// Bumped to 8 when we added the `embedding_models` registry plus the
+/// `embeddings_turns` table (one little-endian f32 BLOB per turn) that
+/// back hybrid long-term-memory retrieval (Phase 0.2.5).
+/// `embedding_models` mirrors the registry in `primer-knowledge`, so a
+/// DB re-opened under a different embedder is a detectable hard error
+/// rather than a silent retrieval-quality regression.
 pub const USER_VERSION: i64 = 8;
 
 /// Idempotent CREATE statements for the base (v1) schema. Run on every

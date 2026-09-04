@@ -47,7 +47,8 @@ const CREATE_TURN_CLASSIFICATIONS_INDEX: &str = "
 /// back to the pre-migration state.
 ///
 /// v3 adds:
-/// - `engagement_states` lookup table (seeded by Task 7 validate pass).
+/// - `engagement_states` lookup table (seeded by the validate pass in
+///   `open()` after this migration runs).
 /// - `classifiers` table for named classifier identifiers.
 /// - `turn_classifications` junction table recording per-turn engagement
 ///   state labels (FK into `turns`, `engagement_states`, `classifiers`).

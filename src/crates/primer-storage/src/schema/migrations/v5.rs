@@ -28,8 +28,9 @@ const CREATE_COMPREHENSION_CLASSIFIERS_TABLE: &str = "
 /// not possible without one of the two FKs cascading directly. This is a
 /// deliberate divergence from v3's `turn_classifications`, which omitted
 /// `session_id` and consequently cannot cascade-delete a session whose turns
-/// still hold classifications. Future Phase 0.3 work may bring v3 in line
-/// via a v6 migration; v5 is correct as-is.
+/// still hold classifications. That gap in v3 is real and still unaddressed as
+/// of v8 (v6 added only the locale columns) — it is tracked as issue #331, not
+/// planned here. v5 is correct as-is; v3 is the one that would need the change.
 const CREATE_TURN_COMPREHENSIONS_TABLE: &str = "
     CREATE TABLE IF NOT EXISTS turn_comprehensions (
         id              INTEGER PRIMARY KEY AUTOINCREMENT,

@@ -30,8 +30,8 @@ The sweep + detector are cheap and between-sessions PRs have pushed files over 5
 
 ### Production-code splits — the open, owner-approved lane (pick the next one, lowest-risk first)
 Remaining oversized **production** (non-test) files after #322 (post-split sweep):
-- **`primer-storage/src/schema.rs` (623)** — **recommended next pick.** The additive migration chain (`apply_vN_migrations` v2…v8) + lookup-table seeding + `USER_VERSION`. Natural split: `schema/mod.rs` (open path, `USER_VERSION`, lookup-table seed/validate) + `schema/migrations.rs` (or one file per version group). `cargo test -p primer-storage` guard (the store tests exercise every migration); no feature gates. Check what `schema.rs` re-exports that `store/` reaches and keep those paths (`pub`/`pub(crate)`) stable — the pub-surface diff is the gate.
-- **`primer-gui/src/wiring.rs` (591)** / **`primer-gui/src/config/types.rs` (539)** — no feature gates, GUI-heavy; `cargo test -p primer-gui` + workspace guard.
+- **`primer-gui/src/wiring.rs` (591)** / **`primer-gui/src/config/types.rs` (539)** — **recommended next pick.** No feature gates, GUI-heavy; `cargo test -p primer-gui` + workspace guard.
+- `primer-storage/src/schema.rs` — **NO LONGER on the list** (done in #328: `schema/mod.rs` + `schema/migrations/v2..v8.rs` + `schema/lookup.rs`, all ≤ 104 lines).
 - **`primer-inference/src/qnn/genie/real.rs` (566, qnn-gated)** / **`primer-gui/src/commands/voice.rs` (559, speech-gated)** / **`primer-speech/src/voice_loop/state_machine/inner.rs` (506)** / **`primer-speech/src/macos/{tts.rs 668, stt.rs 504}` (macos-native-gated)** — feature-gated (dual-verify; the macos ones need a macOS host for the feature build).
 - Hardest: `primer-cli/src/main.rs` (1357, heavily `cfg(feature)`-gated — needs the per-feature clippy+test matrix).
 - `consts.rs` — **NO LONGER on the list** (fixed by #322). `prompt_builder.rs` — off since #321. `dialogue_manager/turn.rs` — off since #320.
@@ -65,7 +65,7 @@ The >500 test-support files (`store/tests/session_tests.rs` 2442, `state_machine
 ## Open decisions / risks
 
 - **PR #322 open, awaiting owner review/merge.** Pure refactor, no runtime behaviour change; CI pending at close.
-- **The production-split lane stays open and owner-approved.** Recommended next: `primer-storage/src/schema.rs` (623) — the additive migration chain, `cargo test -p primer-storage` guard, no feature gates. Slightly higher risk than consts (real `pub`/`pub(crate)` surface that `store/` reaches) but still no feature gates.
+- **The production-split lane stays open and owner-approved.** Recommended next: `primer-gui/src/wiring.rs` (591) / `primer-gui/src/config/types.rs` (539) — no feature gates, `cargo test -p primer-gui` + workspace guard. (`schema.rs` was the prior recommendation; done in #328.)
 - **The inline-test detector was clean this session (third consecutive).** Between-sessions PRs can still push near-threshold files (`primer-classifier/src/llm.rs` ~460, `primer-extractor/src/llm.rs` ~470) over 500. The sweep + detector are cheap — run both before picking work.
 - **Machine load / build times:** deps warm — `cargo test -p primer-core` seconds, workspace clippy ~4m, full workspace test ~7 min. Cold-start budget ~35 min for the first cargo pass. Run ONE cargo pass at a time; don't run fmt (source-modifying) while clippy is mid-flight on the same crate.
 
@@ -100,12 +100,12 @@ for f in $(find crates -name '*.rs' -not -path '*/vendor/*' -not -name 'tests.rs
   awk '/#\[cfg\(test\)\]/{ln=NR} ln && NR==ln+1 && /^[[:space:]]*mod .*\{/{print FILENAME" inline mod @"NR}' "$f"; done
 # Empty inline output = no cheap pick. Next host-actionable work = next production split (owner-approved lane).
 
-# === Recommended next split: primer-storage/src/schema.rs (623). Baseline FIRST: ===
+# === Recommended next split: primer-gui/src/wiring.rs (591) or config/types.rs (539). Baseline FIRST: ===
 cd /Users/hherb/src/primer/src
-~/.cargo/bin/cargo test -p primer-storage 2>&1 | grep 'test result: ok'   # record pass count BEFORE splitting
-# schema.rs is the migration chain (apply_vN_migrations v2..v8) + lookup-table seed/validate + USER_VERSION.
-# Split into schema/mod.rs (open path + USER_VERSION + lookup seeding) + schema/migrations.rs. Check what
-# store/ reaches via `pub`/`pub(crate)`, keep those paths stable. Then re-verify same count + pub-surface
+~/.cargo/bin/cargo test -p primer-gui 2>&1 | grep 'test result: ok'   # record pass count BEFORE splitting
+# (primer-storage/src/schema.rs was the prior recommendation — done in #328.)
+# Split by responsibility, keep the external pub surface stable, and prefer a GLOB re-export in the
+# facade over a name list so a new submodule needs no second edit site. Then re-verify same count + pub-surface
 # diff + clippy + fmt + workspace.
 
 # === Behaviour-preserving pub-surface diff (repo-root-relative git path; note `mod` AND `type` in the regex) ===
@@ -125,5 +125,5 @@ PRIMER_WHISPER_AUDIO_B=/path/to/utterance_b.wav \
 
 - **PR #322 (consts.rs split):** the recommended pick from the prior brief. 562 → `{mod 25, speech 199, retrieval 100, router 46, vocab 32, prompt_budget 32, inference 23, retry 20, pedagogy 20, reasoning 16, qnn 14, learner 14, break_suggest 12}` — 77-symbol external pub surface byte-identical, 176/176 crate tests (baseline match), zero churn in the 40-line `tests.rs` (it reaches submodules by name), workspace clippy/fmt clean, workspace suite green (51 ok). The easiest split yet — every area was already a `pub mod` block, so no visibility work at all.
 - **Prior session's PR #321 merged between sessions** — the inline-test detector came up clean for the third consecutive session.
-- **The production-split lane is open and owner-approved** — next pick `primer-storage/src/schema.rs` (623; the migration chain) without re-asking.
+- **The production-split lane is open and owner-approved** — next pick `primer-gui/src/wiring.rs` (591) or `primer-gui/src/config/types.rs` (539) without re-asking. (`schema.rs` done in #328.)
 - The GUI is a full app, not a scaffold.
