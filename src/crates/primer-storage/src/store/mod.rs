@@ -125,7 +125,8 @@ impl SqliteSessionStore {
             .map_err(|e| PrimerError::Storage(format!("PRAGMA foreign_keys failed: {e}")))?;
 
         // Read existing user_version. A fresh DB returns 0; v1 DBs from
-        // before the rolling-summary work return 1; current builds stamp 2.
+        // before the rolling-summary work return 1; current builds stamp
+        // `USER_VERSION` (8 today) once the migration chain below has run.
         let existing_version: i64 = conn
             .query_row("PRAGMA user_version", [], |row| row.get(0))
             .map_err(|e| PrimerError::Storage(format!("read user_version failed: {e}")))?;
