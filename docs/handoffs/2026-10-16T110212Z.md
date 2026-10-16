@@ -1,7 +1,7 @@
 # Primer — Next Session Brief
 
 **Audience:** future Claude Code session continuing work on this repo.
-**Last updated:** 2026-10-16 11:02 UTC. Branch `refactor/split-gui-wiring`. **One PR open against `main`: #333 (GUI `wiring.rs` stage split).** `main` was at `b47bf89` when this session branched; every PR from the prior brief (#322, #323, #324, #327, #328, #329) had merged between sessions. Issue **#330** (43 broken rustdoc intra-doc links) is still open.
+**Last updated:** 2026-10-16 11:02 UTC. Branch `refactor/split-gui-wiring`. **Two PRs open against `main`, both branched independently off `main`: #333 (GUI `wiring.rs` stage split) and #334 (`quinn-proto` lockfile bump for Dependabot alert #6).** `main` was at `b47bf89` when this session branched; every PR from the prior brief (#322, #323, #324, #327, #328, #329) had merged between sessions. Issue **#330** (43 broken rustdoc intra-doc links) is still open.
 
 This session ran the standard sweep first. The oversized-file sweep matched expectations, and the inline-test detector was **clean for the fifth session running**. `schema.rs` (#328) and `config/types.rs` (#329) had already been split between sessions, so this session took the remaining no-feature-gate production file, `primer-gui/src/wiring.rs`. The prior brief had flagged it as *not mechanical*, so it got stage-level verification plus new tests (details below).
 
@@ -38,7 +38,13 @@ The file was **one ~395-line `build_with_strategy` function** with 11 `// ──
 
   Every test sets `cfg.embedder.kind = "none"`, because the default build's embedder is fastembed (a ~570 MB download).
 
-### Verification
+### PR #334 (branch `chore/bump-quinn-proto`): Dependabot alert #6
+Commit **`c14cabf`**, a two-line `Cargo.lock` bump of `quinn-proto` 0.11.14 → 0.11.15, which clears GHSA-4w2j-m93h-cj5j (high: memory exhaustion from unbounded out-of-order stream reassembly).
+- **Not exploitable today.** `quinn-proto` is a lockfile-only entry, reachable only via `reqwest`'s optional `http3` feature (which also needs `--cfg reqwest_unstable`). Neither locked `reqwest` enables it: 0.12.28 (ours: json/stream/rustls-tls) and 0.13.3 (via tauri: json/stream). `cargo tree -i quinn-proto --workspace --all-features --target all` prints nothing, and no quinn artifact exists in `target/`.
+- `cargo check --workspace --all-targets --locked` clean; nothing recompiled.
+- **Dependabot state after this lands: zero open alerts.** History: #1/#3 openssl, #4 tar and #7 serde_with (merged dependabot PR #323) are all fixed. **#2 glib was dismissed earlier as `tolerable_risk`**; it is tracked by issue #135 (glib 0.18 → 0.20+ is blocked on Tauri 3).
+
+### Verification (#333)
 - `cargo test -p primer-gui`: baseline **207** → **217 passed / 0 failed** (+10 new).
 - `cargo test --workspace`: **51 × `test result: ok`**, 0 FAILED/error. This ran before the stage tests were added; only `primer-gui` changed afterwards, and its suite and clippy were re-run.
 - `cargo clippy --workspace --all-targets -- -D warnings` clean; `cargo clippy -p primer-gui --all-targets -- -D warnings` clean after the tests landed; `cargo fmt --all -- --check` clean; `cargo check -p primer-gui --no-default-features --all-targets` clean.
@@ -50,8 +56,14 @@ The file was **one ~395-line `build_with_strategy` function** with 11 `// ──
 
 ## What's next (concrete acceptance criteria)
 
-### 0. PR #333: owner review/merge
-Pure refactor plus tests, no runtime behaviour change. Acceptance: all CI checks green, owner merges.
+### 0. PRs #333 and #334: owner review/merge
+#333 is a pure refactor plus tests, with no runtime behaviour change. #334 is a lockfile-only bump. They are independent; merge in either order. Acceptance: all CI checks green, owner merges.
+
+**Dependabot triage recipe** (for future alerts):
+1. List open alerts: `gh api 'repos/hherb/primer/dependabot/alerts?state=open' --jq '.[] | {n:.number, sev:.security_advisory.severity, pkg:.dependency.package.name, fix:.security_vulnerability.first_patched_version.identifier}'`.
+2. Check reachability with `cargo tree -i <pkg> --workspace --all-features --target all`. Empty output means a lockfile-only entry, so the alert can't be exploited.
+3. Fix with `cargo update -p <pkg> --precise <fix>` on its own branch off `main`.
+4. Verify with `cargo check --workspace --all-targets --locked`.
 
 ### 1. Sweep + inline-test detector: re-run EVERY session (clean five sessions running)
 Commands are in the resume block. Watch-list: `primer-classifier/src/llm.rs` (441) and `primer-extractor/src/llm.rs` (454) carry inline test modules and sit near the 500 threshold.
@@ -83,7 +95,7 @@ Acceptance: `RUSTDOCFLAGS="-D warnings" cargo doc --workspace --no-deps --docume
 ## Open decisions / risks
 
 - **PR #333 open, awaiting owner review.** The pub-surface gate is weak for this split, so review leans on the line-diff audit (in the PR body) and the 10 new stage tests. Worth a careful read of `stores.rs`, which holds the locale-mismatch hard-fail and the resume re-tag logic.
-- **Dependabot security alerts:** GitHub still reports vulnerability alerts on `main` on every push (most recent push linked `security/dependabot/6`). Not triaged this session. Owner look recommended.
+- **Dependabot: triaged this session.** The only open alert (#6, `quinn-proto`, high) is a lockfile-only entry that is never compiled; PR #334 bumps it. Once #334 merges, zero alerts remain open. The dismissed #2 (glib, `tolerable_risk`) stays tied to #135 / Tauri 3.
 - **The `github` MCP server failed to connect** (bad Authorization header). The `gh` CLI worked fine for PRs and issues.
 - **Build times (warm):** `cargo test -p primer-gui` ~25 s, workspace clippy ~1–4 min, full workspace test ~7 min. Run ONE cargo pass at a time. **Don't edit sources while a baseline `cargo test` is still compiling**: if rustc reaches the crate after your edit, the "baseline" silently tests the new code.
 
@@ -131,7 +143,7 @@ The `sed` de-indent matters for stage extraction: code moved one indentation lev
 
 ```bash
 cd /Users/hherb/src/primer && git checkout main && git pull --ff-only && git log --oneline -4 && gh pr list --state open
-# Then re-read NEXT_SESSION.md (it may have changed in the pull). One PR open at close: #333.
+# Then re-read NEXT_SESSION.md (it may have changed in the pull). Two PRs open at close: #333 (wiring split), #334 (quinn-proto bump).
 SCRATCH="${TMPDIR:-/tmp}/primer-scratch"; mkdir -p "$SCRATCH"   # or the session's scratchpad dir
 
 # === Oversized-file sweep + inline-test detector (re-verify EVERY session) ===
@@ -174,6 +186,7 @@ PRIMER_WHISPER_AUDIO_B=/path/to/utterance_b.wav \
 ## Reporting back
 
 - **PR #333 (`wiring.rs` split):** 591 lines became `{mod 212, stores 185, backend_params 173, subsystems 145}` + new `stage_tests.rs` (236, 10 tests). This was a stage extraction from one ~395-line function, not a mechanical split, so it was verified with an audited line diff plus per-stage tests. 207 → 217 tests, 0 failed; workspace green; clippy/fmt clean.
+- **PR #334 (Dependabot #6):** `quinn-proto` lockfile bump. Not exploitable, since it is never compiled (only reachable via reqwest's unused `http3` feature). Once it merges, zero open alerts remain.
 - **All prior-brief PRs merged between sessions.** The inline-test detector has been clean five sessions running.
 - **Next:** `commands/voice.rs` (speech-gated, dual-verify), or issue #330 (rustdoc links + CI guard).
 - The GUI is a full app, not a scaffold.
