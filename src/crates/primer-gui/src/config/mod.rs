@@ -21,6 +21,12 @@
 //! here so external callers keep using the flat `crate::config::Foo`
 //! path regardless of which sub-module a symbol lives in.
 
+// The `//!` docs above link the private submodules behind this module's
+// `pub use` façade. They resolve under `cargo doc --document-private-items`
+// (the contributor view), so keep them as links rather than escaping them
+// (issue #330). Making the submodules `pub` would defeat the façade.
+#![allow(rustdoc::private_intra_doc_links)]
+
 mod persistence;
 mod types;
 mod view;

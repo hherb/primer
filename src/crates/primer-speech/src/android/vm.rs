@@ -12,7 +12,7 @@
 //! [`VmCache`] is generic purely so its set-once / unset-is-an-error
 //! semantics are host-testable without a real `JavaVM`; the production
 //! instantiations are `VmCache<jni::JavaVM>` and `VmCache<GlobalRef>`
-//! (the cached `PrimerSpeech` class — see [`imp::primer_speech_class`];
+//! (the cached `PrimerSpeech` class — see `imp::primer_speech_class`;
 //! both android-only).
 
 use std::sync::OnceLock;

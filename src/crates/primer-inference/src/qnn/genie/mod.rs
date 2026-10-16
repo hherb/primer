@@ -12,13 +12,13 @@
 //! - [`GenieDialog`] — query the dialog (per-token streaming as of step 1.2.3);
 //!   `Drop` releases the underlying handle.
 //!
-//! The real (`libGenie.so`-backed) implementation lives in [`real`] and is
+//! The real (`libGenie.so`-backed) implementation lives in the private `real` module and is
 //! reachable on every target — on non-Android hosts, [`RealGenieLibrary::open`]
 //! returns a typed [`GenieCallError::PlatformUnsupported`] without touching
 //! the filesystem (delegated to [`primer_qnn_sys::GenieLibrary::open`]).
 //!
-//! A [`mock`] module ships under `#[cfg(test)]` with a programmable
-//! [`mock::MockGenieLibrary`] that records calls and replays scripted
+//! A `mock` module ships under `#[cfg(test)]` with a programmable
+//! `mock::MockGenieLibrary` that records calls and replays scripted
 //! token sequences (one body chunk per token + a final done chunk; or
 //! N body chunks + a mid-stream `Err`). The [`super::backend::QnnBackend`]
 //! is generic over `dyn GenieLibrary` so tests can substitute the mock
@@ -90,7 +90,7 @@ pub trait GenieDialog: Send {
     ///
     /// This method is synchronous and potentially long-running. The
     /// real implementation is invoked from `tokio::task::spawn_blocking`
-    /// in [`super::backend::QnnBackend::generate_stream`]; the mock
+    /// in `QnnBackend::generate_stream`; the mock
     /// returns essentially instantly and is safe to call from any
     /// context.
     fn query_streaming(&self, prompt: &str, sender: UnboundedSender<PrimerResult<TokenChunk>>);
@@ -156,7 +156,7 @@ pub enum GenieCallError {
 
 impl GenieCallError {
     /// Render this error into a `PrimerError::Inference(...)`. The string
-    /// is dev-facing per [[project_multilingual_intent]] — user-visible
+    /// is dev-facing per the multilingual-intent principle (`project_multilingual_intent`) — user-visible
     /// translation happens via `primer_core::i18n::render_inference_error`
     /// downstream. This helper keeps the dev string consistent across the
     /// three or four call sites that wrap a Genie error.

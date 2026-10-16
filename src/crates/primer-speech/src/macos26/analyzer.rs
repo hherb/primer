@@ -37,7 +37,7 @@ use crate::macos26::vad::DerivedVadStateMachine;
 /// site rather than at `tokio::spawn`.
 ///
 /// Production impl: `Macos26Pipeline` (immediately below).
-/// Test impls: see [`tests::ScriptedPipeline`].
+/// Test impls: see `tests::ScriptedPipeline`.
 pub(crate) trait PipelineSource: Send {
     /// Push captured PCM samples into the analyzer.
     fn feed_audio(&mut self, samples: Vec<f32>);
@@ -158,7 +158,7 @@ impl PartialBuffer {
 /// `stream_done == true`.
 ///
 /// The `pipeline` is moved in; the caller does not retain access.
-/// `audio_rx` is the inbound 16 kHz mono Float32 audio (Vec<f32> per
+/// `audio_rx` is the inbound 16 kHz mono Float32 audio (`Vec<f32>` per
 /// chunk; chunk size is up to the producer). `text_tx` and `event_tx`
 /// are the outbound channels consumed by voice_loop.
 pub async fn run_consumer_loop(
@@ -182,7 +182,7 @@ pub async fn run_consumer_loop(
 /// inactivity timings can be shrunk for fast unit tests.
 ///
 /// Production paths call [`run_consumer_loop`] (the thin wrapper above);
-/// tests call this directly with a [`tests::ScriptedPipeline`] and a
+/// tests call this directly with a `tests::ScriptedPipeline` and a
 /// short-timeout [`ConsumerConfig`].
 pub(crate) async fn run_consumer_loop_with_config<P: PipelineSource>(
     mut pipeline: P,

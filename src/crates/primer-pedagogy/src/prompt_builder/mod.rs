@@ -20,6 +20,12 @@
 //! three submodules share, and re-exports every public function so the external
 //! `prompt_builder::<name>` paths are unchanged.
 
+// The `//!` docs above link the private submodules behind this module's
+// `pub use` façade. They resolve under `cargo doc --document-private-items`
+// (the contributor view), so keep them as links rather than escaping them
+// (issue #330). Making the submodules `pub` would defeat the façade.
+#![allow(rustdoc::private_intra_doc_links)]
+
 use std::sync::OnceLock;
 
 use primer_core::i18n::Locale;

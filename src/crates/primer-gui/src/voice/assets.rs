@@ -55,7 +55,7 @@ pub struct AssetMissing {
     pub approx_total_mb: u32,
 }
 
-/// Per [[project_personal_device_model]], cache lives in the user's home.
+/// Per the personal-device model (`project_personal_device_model`), cache lives in the user's home.
 pub fn cache_root(home: &std::path::Path) -> PathBuf {
     home.join(".cache").join("primer").join("models")
 }

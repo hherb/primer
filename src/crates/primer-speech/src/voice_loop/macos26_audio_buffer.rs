@@ -23,8 +23,8 @@
 //! on every speaking iteration (not just the `!is_speaking → is_speaking`
 //! edge) so the helper stays stateless beyond the buffer itself — same
 //! shape as the matching `raw_buf.clear()` in
-//! [`super::backends::run_audio_thread`] (the whisper path) and
-//! [`super::backends_macos_native::run_audio_thread_stt`] (the
+//! `super::backends::run_audio_thread` (the whisper path) and
+//! `super::backends_macos_native::run_audio_thread_stt` (the
 //! SFSpeechRecognizer path), both of which have always handled this
 //! correctly.
 //!
