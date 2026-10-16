@@ -26,7 +26,8 @@ use crate::config::{EmbedderConfig, GuiConfig};
 /// Build every subsystem the dialogue manager needs from the GUI config.
 ///
 /// `backend` is the (possibly fallback/router-wrapped) main backend;
-/// subsystems without an explicit override inherit it via `Arc::clone`.
+/// subsystems with neither a kind nor a model override reuse it via
+/// `Arc::clone`.
 /// `main_model` is the post-construction model id (already rebound from
 /// any `*-pending` placeholder). The openai-compat embedder reuses the
 /// key the main backend resolved in `params`.
@@ -109,7 +110,8 @@ pub(super) async fn build_subsystems(
 
 /// Embedder construction, mirroring `primer-cli`'s dispatch matrix.
 ///
-/// `fastembed` / `ollama` require their respective cargo features; the
+/// `fastembed` / `ollama` / `openai-compat` require their respective cargo
+/// features (`embedding`, `ollama-embedding`, `openai-compat-embedding`); the
 /// `primer-engine` helpers return an `Err(String)` when the feature is
 /// missing so this command path can surface it to the frontend instead
 /// of killing the GUI process (the CLI maps the same Err to a clean

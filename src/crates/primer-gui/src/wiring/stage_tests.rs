@@ -15,9 +15,12 @@ use tempfile::TempDir;
 use super::*;
 use crate::config::{ApiKeySource, SubsystemConfig};
 
-/// Classifier timeout distinct from the 3000 ms default, so the test
-/// proves the GUI value (not the default) reached the settings.
+/// Per-subsystem timeouts, distinct from each other and from the
+/// `*Settings::default().blocking_timeout` values, so the test proves each
+/// GUI value (not a default, not a sibling's) reached its settings.
 const CUSTOM_CLASSIFIER_TIMEOUT_MS: u64 = 1234;
+const CUSTOM_EXTRACTOR_TIMEOUT_MS: u64 = 2345;
+const CUSTOM_COMPREHENSION_TIMEOUT_MS: u64 = 3456;
 /// Vocab cap distinct from `DEFAULT_VOCAB_MAX_PER_PROMPT`.
 const CUSTOM_VOCAB_MAX_PER_PROMPT: u64 = 2;
 /// An arbitrary non-`None` latency budget for the pass-through check.
@@ -196,10 +199,15 @@ async fn stub_backend(cfg: &GuiConfig) -> (Arc<dyn InferenceBackend>, BackendPar
     (backend, params)
 }
 
+/// With a stub main backend `primer-engine` takes its `("stub", None)` arm
+/// and builds a fresh stub per subsystem, so this pins the GUI-settings
+/// plumbing, not `Arc::clone` inheritance (that gap is tracked in #340).
 #[tokio::test]
-async fn subsystems_inherit_main_backend_and_apply_gui_settings() {
+async fn subsystems_match_main_stub_and_apply_gui_settings() {
     let mut cfg = stub_config();
     cfg.classifier.timeout_ms = CUSTOM_CLASSIFIER_TIMEOUT_MS;
+    cfg.extractor.timeout_ms = CUSTOM_EXTRACTOR_TIMEOUT_MS;
+    cfg.comprehension.timeout_ms = CUSTOM_COMPREHENSION_TIMEOUT_MS;
     cfg.vocab.max_per_prompt = Some(CUSTOM_VOCAB_MAX_PER_PROMPT);
     let (backend, params) = stub_backend(&cfg).await;
 
@@ -211,6 +219,14 @@ async fn subsystems_inherit_main_backend_and_apply_gui_settings() {
     assert_eq!(
         s.classifier_settings.blocking_timeout,
         Duration::from_millis(CUSTOM_CLASSIFIER_TIMEOUT_MS)
+    );
+    assert_eq!(
+        s.extractor_settings.blocking_timeout,
+        Duration::from_millis(CUSTOM_EXTRACTOR_TIMEOUT_MS)
+    );
+    assert_eq!(
+        s.comprehension_settings.blocking_timeout,
+        Duration::from_millis(CUSTOM_COMPREHENSION_TIMEOUT_MS)
     );
     assert_eq!(
         s.vocab_settings.max_per_prompt,

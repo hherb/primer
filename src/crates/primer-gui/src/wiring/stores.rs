@@ -36,8 +36,9 @@ pub(super) async fn open_session_store_and_learner(
 ) -> Result<(SqliteSessionStore, Locale, LearnerModel), String> {
     let learner_config = &config.learner;
 
-    // Opens under cfg_locale; the in-place set_locale call below switches
-    // the tag field if the persisted learner has a different locale.
+    // Opens under cfg_locale; under the resume strategy the in-place
+    // set_locale call below switches the tag field if the persisted learner
+    // has a different locale (`UseCfg` errors on a mismatch instead).
     let session_path = resolve_session_db_path(
         config.persistence.session_db.clone(),
         home,
@@ -174,7 +175,7 @@ pub(super) async fn open_knowledge_base(
         .map_err(|e| format!("auto-seeding knowledge base: {e}"))?
     {
         tracing::info!(
-            target = "primer-gui::startup",
+            target: "primer-gui::startup",
             inserted = stats.inserted,
             sources = stats.sources_seen,
             "auto-seeded knowledge base for locale {}",

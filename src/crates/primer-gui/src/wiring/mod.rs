@@ -1,14 +1,16 @@
 //! Build an [`ActiveSession`] from a [`GuiConfig`].
 //!
-//! Mirrors the wiring code in `primer-cli`'s `async_main` — same call
-//! sequence, same defaults, same error semantics — but returns a
-//! constructed `ActiveSession` instead of a `DialogueManager` so the
-//! GUI can manage the lifetime itself (DM is built lazily per command;
-//! see [`crate::state`] for the rationale).
+//! Mirrors the wiring code in `primer-cli`'s `async_main` — same defaults,
+//! same error semantics — except that the session store opens *before*
+//! the knowledge base, so the persisted learner's locale is known before
+//! the KB is opened under it (issue #86). Returns an `ActiveSession` that
+//! owns the long-lived `DialogueManager` (see [`crate::state`] for why it
+//! is long-lived).
 //!
 //! Errors surface as `String` so the Tauri command can forward them
-//! to the frontend directly. Per-field validation belongs to the
-//! settings modal (step 8); here we fail fast on construction errors.
+//! to the frontend directly. Per-field validation lives in
+//! [`crate::validation`] and the settings modal; here we fail fast on
+//! construction errors.
 //!
 //! Layout: this file holds the two public entry points and the
 //! orchestrating `build_with_strategy`; the steps live in
@@ -36,8 +38,8 @@ use backend_params::{build_backend_params, resolve_main_model};
 use stores::{open_knowledge_base, open_session_store_and_learner};
 use subsystems::build_subsystems;
 
-// The test child reaches this helper by bare name via `use super::*`;
-// it now lives in the `backend_params` sibling, so re-import it here.
+// `tests.rs` calls `cloud_backend_in_use` by bare name via `use super::*`;
+// production code in this file doesn't call it, so the import is test-only.
 #[cfg(test)]
 use backend_params::cloud_backend_in_use;
 
@@ -59,13 +61,13 @@ enum LocaleStrategy {
 /// Construct everything `DialogueManager::new` would need from a single
 /// `GuiConfig`.
 ///
-/// Side effects mirror `primer-cli`:
-/// - Opens or creates the per-locale knowledge DB and auto-seeds it
-///   from the bundled JSONL if empty.
+/// Side effects, in order:
 /// - Opens (or creates the parent dir for) the per-learner session DB
 ///   under `<home>/.primer/<slug>.db` unless an explicit path is given.
 /// - Loads or mints a `LearnerModel`; reconciles with the GUI settings
 ///   (age refresh + name-mismatch warning) when one is already on disk.
+/// - Opens or creates the per-locale knowledge DB and auto-seeds it
+///   from the bundled JSONL if empty.
 ///
 /// `home` is the user's home directory. Tests can pass a synthetic dir
 /// from `tempfile::TempDir`. The function never reads `$HOME` directly.
@@ -124,8 +126,9 @@ async fn build_with_strategy(
     let params = build_backend_params(config);
 
     // ─── Main backend (locale-independent) ───────────────────────────
-    // `build_main_backend` is `build_backend` plus the opt-in fallback wrap;
-    // with no fallback configured it is byte-for-byte today's behavior.
+    // `build_main_backend` is `build_backend` plus the opt-in fallback /
+    // router wrap; with no fallback configured and `router_mode =
+    // LocalOnly` it is equivalent to `build_backend`.
     let backend = build_main_backend(&backend_config.kind, main_model.clone(), &params)
         .await
         .map_err(|e| format!("constructing inference backend: {e}"))?;

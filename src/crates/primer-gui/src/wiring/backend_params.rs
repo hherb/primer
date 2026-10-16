@@ -24,8 +24,8 @@ use crate::config::{ApiKeySource, GuiConfig, SubsystemConfig};
 /// a cloud fallback even when the primary is local).
 ///
 /// The resolved openai-compat key lands in
-/// `BackendParams::openai_compat_api_key`; the caller reuses that same
-/// value for the openai-compat embedder.
+/// `BackendParams::openai_compat_api_key`; `build_subsystems` reads that
+/// same value back from `params` for the openai-compat embedder.
 pub(super) fn build_backend_params(config: &GuiConfig) -> BackendParams {
     let backend_config = &config.backend;
 
@@ -124,13 +124,16 @@ pub(super) fn cloud_backend_in_use(primary_kind: &str, fallback_backend: Option<
 }
 
 /// Resolve the main backend's model id from the GUI's optional override.
-/// Mirrors `primer-cli`: cloud defaults to claude-sonnet-4-6, ollama
-/// requires an explicit value, stub falls back to the literal "stub".
+/// Mirrors `primer-cli`: cloud defaults to
+/// [`DEFAULT_CLOUD_MODEL`](primer_core::consts::inference::DEFAULT_CLOUD_MODEL),
+/// ollama and openai-compat require an explicit value, stub falls back to
+/// the literal "stub", and qnn / llamacpp return a `*-pending` placeholder
+/// that `build_with_strategy` rebinds to `backend.name()`.
 pub(super) fn resolve_main_model(kind: &str, model: Option<&str>) -> Result<String, String> {
     match kind {
         "cloud" => Ok(model
             .map(String::from)
-            .unwrap_or_else(|| "claude-sonnet-4-6".to_string())),
+            .unwrap_or_else(|| primer_core::consts::inference::DEFAULT_CLOUD_MODEL.to_string())),
         "ollama" => model.map(String::from).ok_or_else(|| {
             "ollama backend requires a model name (e.g. \"llama3.2\") in settings".to_string()
         }),
@@ -164,10 +167,11 @@ pub(super) fn resolve_main_model(kind: &str, model: Option<&str>) -> Result<Stri
     }
 }
 
-/// For a subsystem set to "match the main backend" we leave the
-/// override fields empty — the wiring helpers in `primer-engine` then
-/// reuse the main backend via `Arc::clone`. Only an explicit override
-/// produces a non-None kind here.
+/// For a subsystem set to "match the main backend" we leave the *kind*
+/// override empty. Only an explicit override produces a non-None kind
+/// here. Note the `*_model` fields are still copied through regardless
+/// of `match_main` (issue #335), so `primer-engine` reuses the main
+/// backend via `Arc::clone` only when the model override is also unset.
 fn subsystem_kind(s: &SubsystemConfig) -> Option<String> {
     if s.match_main { None } else { s.kind.clone() }
 }

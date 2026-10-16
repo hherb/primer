@@ -34,7 +34,7 @@ The file was **one ~395-line `build_with_strategy` function** with 11 `// ──
   - reasoning-marker parsing; fallback/router/TTFT passthrough;
   - fresh-learner minting under the cfg locale; the resume strategy re-tags the store to the persisted locale;
   - the in-memory KB is auto-seeded;
-  - subsystems inherit the stub backend and pick up GUI timeouts and the vocab cap; the vocab cap falls back to `DEFAULT_VOCAB_MAX_PER_PROMPT`.
+  - subsystems built on a stub main backend pick up all three GUI timeouts and the vocab cap (real `Arc::clone` inheritance is untested — #340); the vocab cap falls back to `DEFAULT_VOCAB_MAX_PER_PROMPT`.
 
   Every test sets `cfg.embedder.kind = "none"`, because the default build's embedder is fastembed (a ~570 MB download).
 
