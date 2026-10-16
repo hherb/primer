@@ -12,7 +12,7 @@ use uuid::Uuid;
 #[derive(Debug, Clone, Serialize)]
 pub struct SessionInfo {
     /// `None` until the first `send_message` opens the underlying
-    /// `Session`. See [`ActiveSession::session_id`](crate::state::ActiveSession::session_id).
+    /// `Session`. See [`SessionSnapshot::session_id`](crate::state::SessionSnapshot::session_id).
     pub session_id: Option<Uuid>,
     pub learner: LearnerSummary,
     /// Backend kind: "stub" | "cloud" | "ollama".

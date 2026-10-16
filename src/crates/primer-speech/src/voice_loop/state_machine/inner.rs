@@ -49,8 +49,8 @@ fn handle_llm_err<O: LoopObserver>(
     FALLBACK_LINE.to_string()
 }
 
-/// Internal state-machine body shared by [`run_loop`] (spawn) and
-/// [`run_loop_borrowed`] (in-place).
+/// Internal state-machine body shared by [`super::run_loop`] (spawn) and
+/// [`super::run_loop_borrowed`] (in-place).
 ///
 /// `verbose` gates `[stt]` debug lines on stderr (the only
 /// stderr-printing site left after observer integration). Per-state
@@ -65,7 +65,7 @@ fn handle_llm_err<O: LoopObserver>(
 ///
 /// `wait_for_speaker_drain` is awaited (in production) after the flush
 /// sentinel returns and before `is_speaking` is cleared. Production wires
-/// it to a `spawn_blocking` around [`primer_speech::wait_for_drain`];
+/// it to a `spawn_blocking` around `primer_speech::wait_for_drain` (`cpal`-gated);
 /// tests pass `None` (mock speakers have no real ringbuf to drain).
 ///
 /// `external_stop` ends the loop entirely (LISTEN, LATENT_THINK, SPEAK

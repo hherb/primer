@@ -8,11 +8,11 @@
 //! `MacosTextToSpeech` (AVSpeechSynthesizer) from the `macos-native`
 //! path — AVSpeechSynthesizer is unchanged on macOS 26.
 //!
-//! Sibling of [`super::backends_macos_native`]; both consume the shared
+//! Sibling of `super::backends_macos_native`; both consume the shared
 //! mic/speaker/closure helpers in [`super::backends_common`] so the only
 //! thing that differs between the two macOS builders is the STT/VAD
 //! pipeline and the audio-thread body. The audio thread here delegates
-//! buffering to [`crate::voice_loop::macos26_audio_buffer::PendingMicBuffer`]
+//! buffering to `crate::voice_loop::macos26_audio_buffer::PendingMicBuffer`
 //! so the pre-speak / post-speak transition behaviour is unit-tested
 //! without an audio-backend dep (closes #139).
 
@@ -34,16 +34,16 @@ use crate::voice_loop::{LoopBackends, VAD_EVENT_CHANNEL_CAPACITY};
 /// injected by the caller (production wires AVSpeechSynthesizer via
 /// `MacosTextToSpeech`), so STT (native) and TTS are decoupled — this
 /// builder no longer constructs `MacosTextToSpeech` itself. Sibling of
-/// [`super::backends_macos_native::build_local_backends_macos_native`] —
+/// `super::backends_macos_native::build_local_backends_macos_native` —
 /// same signature, same return type; the audio thread's STT/VAD pipeline
 /// is what differs.
 ///
 /// Audio flow: cpal mic → std::thread (resample) → tokio mpsc → Swift
 /// SpeechAnalyzer → DerivedVadStateMachine → VadEvent + TextMessage →
-/// bridge task → std::sync::mpsc<String> → ChannelStt → voice loop.
+/// bridge task → `std::sync::mpsc<String>` → ChannelStt → voice loop.
 ///
 /// `_mic_silence_ms` is a Silero-VAD knob used by the sibling
-/// [`super::backends_macos_native::build_local_backends_macos_native`];
+/// `super::backends_macos_native::build_local_backends_macos_native`;
 /// the macos-26 path uses transcript-derived VAD instead. The parameter
 /// is kept for signature parity with the sibling builder; the leading
 /// underscore tells the compiler the unused-variable is deliberate.

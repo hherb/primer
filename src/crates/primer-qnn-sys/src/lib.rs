@@ -184,7 +184,7 @@ impl GenieLibrary {
     /// 2. `Library::get::<T>(name)` — transmutes the resolved symbol to
     ///    the typed function pointer. Sound as long as the typedef in
     ///    [`bindings`] matches the upstream Genie ABI. The
-    ///    [`bindings::tests::handle_aliases_are_pointer_sized`] test
+    ///    `bindings::tests::handle_aliases_are_pointer_sized` test
     ///    catches ABI-shape drift; full type-fidelity verification
     ///    happens at the first real call on the device (Phase 1.2
     ///    step 1.2.6 benchmark).

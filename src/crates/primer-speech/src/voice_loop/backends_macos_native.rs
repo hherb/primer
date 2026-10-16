@@ -6,7 +6,7 @@
 //! SFSpeechRecognizer doesn't expose a "speech started / ended" stream
 //! and the macOS 26 `SpeechDetector` would break our macOS 13 floor.
 //!
-//! Sibling of [`super::backends_macos_native_26`] (SpeechAnalyzer +
+//! Sibling of `super::backends_macos_native_26` (SpeechAnalyzer +
 //! derived VAD); both consume the shared mic/speaker/closure helpers in
 //! [`super::backends_common`] so the only thing that differs between the
 //! two macOS builders is the STT/VAD pipeline and the audio-thread body.

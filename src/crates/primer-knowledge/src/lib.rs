@@ -41,6 +41,12 @@
 //! corpus was in the locale being opened — which is the only sound
 //! assumption when the locale wasn't tracked at write time.
 
+// The `//!` docs above link the private submodules behind this module's
+// `pub use` façade. They resolve under `cargo doc --document-private-items`
+// (the contributor view), so keep them as links rather than escaping them
+// (issue #330). Making the submodules `pub` would defeat the façade.
+#![allow(rustdoc::private_intra_doc_links)]
+
 mod embedding_model;
 mod fts;
 mod ingest;

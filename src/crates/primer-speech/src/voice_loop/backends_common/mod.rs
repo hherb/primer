@@ -3,13 +3,13 @@
 //! Holds [`LocalBackends`] (the bundle every builder returns) and
 //! [`ChannelStt`] (the streaming-STT adapter that decouples the audio
 //! capture thread from the voice loop), plus a small set of factories
-//! ([`SpeakerPipeline::start`], [`MicPipeline::start`],
-//! [`make_on_audio`], [`make_drain_hook`]) that absorb the ~250-line
+//! (`SpeakerPipeline::start`, `MicPipeline::start`,
+//! `make_on_audio`, `make_drain_hook`, all crate-private) that absorb the ~250-line
 //! tail every concrete builder used to copy verbatim.
 //!
-//! All concrete backend builders — whisper+piper in [`super::backends`],
-//! SFSpeechRecognizer + Silero in [`super::backends_macos_native`], and
-//! SpeechAnalyzer + derived VAD in [`super::backends_macos_native_26`] —
+//! All concrete backend builders — whisper+piper in `super::backends`,
+//! SFSpeechRecognizer + Silero in `super::backends_macos_native`, and
+//! SpeechAnalyzer + derived VAD in `super::backends_macos_native_26` —
 //! share these types and helpers.
 //!
 //! Gated by the parent `voice_loop` module on `cpal` (the lowest common
@@ -19,7 +19,7 @@
 //!
 //! The production helpers read well together and stay under the 500-line
 //! guideline; the `make_on_audio` unit tests live in the sibling
-//! [`tests`] child module (closes #163).
+//! `tests` child module (closes #163).
 
 use std::sync::Arc;
 use std::sync::Mutex;

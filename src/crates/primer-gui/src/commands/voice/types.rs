@@ -60,8 +60,8 @@ pub enum StartVoiceModeError {
 /// **IPC direction is server→webview only.** `Deserialize` is deliberately
 /// NOT derived: the frontend echoes back only the `kind` strings, and the
 /// server re-resolves `path` + `suggested_url` server-side via
-/// [`crate::voice::assets::resolve_requested_kinds`]. This keeps the IPC
-/// trust boundary tight — a compromised webview cannot direct the host to
+/// `crate::voice::assets::resolve_requested_kinds` (`speech`-gated). This
+/// keeps the IPC trust boundary tight — a compromised webview cannot direct the host to
 /// write outside `~/.cache/primer/models/` or to fetch from a non-canonical
 /// URL because those fields never cross the trust boundary as input.
 #[derive(Serialize, Clone, Debug)]

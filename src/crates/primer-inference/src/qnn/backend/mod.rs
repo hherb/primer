@@ -69,7 +69,7 @@ pub struct QnnBackend {
     /// a `&str` without allocating on the hot path.
     name: String,
     /// Parsed `primer-meta.json` — `model_id` and `context_length` are
-    /// already read by [`Self::fmt`]; `vocab_size` and `stop_sequences`
+    /// already read by the `Debug` impl; `vocab_size` and `stop_sequences`
     /// will be wired into the per-backend context-budget logic in step
     /// 1.2.5 and the streaming generation halt path in step 1.2.3
     /// respectively. Held by value because the meta is small (<1 KB)
@@ -220,7 +220,7 @@ pub fn validate_bundle_dir(
 /// Fire the smoke-check streaming query synchronously and return the
 /// receiver end. Borrow on `dialog` ends with this function's return.
 ///
-/// Split from [`smoke_check`] so the `&dyn GenieDialog` borrow does
+/// Split from [`drain_smoke_check_receiver`] so the `&dyn GenieDialog` borrow does
 /// NOT cross an `.await` boundary — that's what lets
 /// [`QnnBackend::new`]'s future remain `Send` even though
 /// `dyn GenieDialog` deliberately omits the `Sync` bound (the trait

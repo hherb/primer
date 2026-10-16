@@ -1,13 +1,13 @@
 //! Voice-mode wiring for the GUI.
 //!
-//! - [`observer`] — `TauriEventObserver` impl that emits `primer://voice/*`
+//! - `observer` — `TauriEventObserver` impl that emits `primer://voice/*`
 //!   events for the frontend.
-//! - [`assets`] — voice-asset path resolver + `AssetMissing` shape.
-//! - [`backends`] — thin wrapper around
+//! - `assets` — voice-asset path resolver + `AssetMissing` shape.
+//! - `backends` — thin wrapper around
 //!   `primer_speech::voice_loop::build_local_backends` (cpal + VAD + STT + TTS).
-//! - [`download`] — streaming voice-asset downloader powering the
+//! - `download` — streaming voice-asset downloader powering the
 //!   `download_voice_assets` Tauri command.
-//! - [`responder`] — `ArcDmResponder`: a `Responder` impl that locks a
+//! - `responder` — `ArcDmResponder`: a `Responder` impl that locks a
 //!   shared `Arc<Mutex<DialogueManager>>` per turn.
 //!
 //! All sub-modules are gated by `#[cfg(feature = "speech")]`; when the

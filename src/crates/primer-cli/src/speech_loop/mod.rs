@@ -1,6 +1,6 @@
 //! CLI adapter for the shared `primer_speech::voice_loop`.
 //!
-//! Builds [`LoopBackends`] + the audio thread + cpal mic/speaker via the
+//! Builds [`primer_speech::voice_loop::LoopBackends`] + the audio thread + cpal mic/speaker via the
 //! shared `primer_speech::voice_loop::build_local_backends` helper,
 //! instantiates a [`StdoutObserver`] that preserves the existing CLI
 //! print formatting, and calls
