@@ -156,7 +156,8 @@ pub enum GenieCallError {
 
 impl GenieCallError {
     /// Render this error into a `PrimerError::Inference(...)`. The string
-    /// is dev-facing per the multilingual-intent principle (`project_multilingual_intent`) — user-visible
+    /// is dev-facing per the i18n discipline (see
+    /// `docs/background_research/i18n_design.md`) — user-visible
     /// translation happens via `primer_core::i18n::render_inference_error`
     /// downstream. This helper keeps the dev string consistent across the
     /// three or four call sites that wrap a Genie error.

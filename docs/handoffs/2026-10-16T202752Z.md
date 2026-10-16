@@ -50,7 +50,7 @@ Commit **`932cf4b`**. `rustls` → **0.23.45** (GHSA-2mjx-qc3c-rqvc, medium: TLS
 
 ### PR #344 (`docs/fix-rustdoc-links`, stacked on #342): closes #330 and #319
 Commit **`598176d`**, plus a follow-up with the PR-number citations in CLAUDE.md and this brief. `RUSTDOCFLAGS="-D warnings" cargo doc --no-deps --document-private-items` is now **clean on the default workspace build AND on every feature arm**:
-- speech/supertonic, android-native ×2, qnn, llamacpp, gui speech, cli speech;
+- speech/supertonic, android-native ×3 (incl. the cpal-free `primer-speech --features android-native` the APK ships — added after review; it caught one more cpal-crossing link), qnn, llamacpp, gui speech, cli speech;
 - macos-native and macos-native-26.
 
 That was 47 default-arm failures plus about 45 in feature-gated code.
@@ -208,7 +208,7 @@ grep -E 'test result: FAILED|^error' $S/ws.log  # expect empty
 
 # === Rustdoc gate (CI-enforced once #344 merges); feature arms mirror ci.yml ===
 RUSTDOCFLAGS="-D warnings" ~/.cargo/bin/cargo doc --workspace --no-deps --document-private-items
-for spec in "-p primer-speech --features voice-loop,silero,whisper,piper,cpal,supertonic" "-p primer-speech --features voice-loop,android-native" \
+for spec in "-p primer-speech --features voice-loop,silero,whisper,piper,cpal,supertonic" "-p primer-speech --features android-native" "-p primer-speech --features voice-loop,android-native" \
   "-p primer-inference --features qnn" "-p primer-inference --features llamacpp" "-p primer-gui --features speech" "-p primer-gui --features android-native" \
   "-p primer-cli --features speech" "-p primer-speech --features voice-loop,silero,cpal,macos-native" "-p primer-speech --features voice-loop,silero,cpal,macos-native-26"; do \
   RUSTDOCFLAGS="-D warnings" ~/.cargo/bin/cargo doc ${=spec} --no-deps --document-private-items >/dev/null 2>&1; echo "$spec exit=$?"; done

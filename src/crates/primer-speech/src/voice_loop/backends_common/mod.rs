@@ -1,10 +1,12 @@
 //! Shared backend types and helpers for the voice loop.
 //!
-//! Holds [`LocalBackends`] (the bundle every builder returns) and
-//! [`ChannelStt`] (the streaming-STT adapter that decouples the audio
-//! capture thread from the voice loop), plus a small set of factories
+//! Holds [`LocalBackends`] (the bundle every builder returns) and a
+//! back-compat re-export of [`ChannelStt`] (the streaming-STT adapter that
+//! decouples the audio capture thread from the voice loop; it now lives in
+//! the cpal-free `super::channel_stt`), plus a small set of factories
 //! (`SpeakerPipeline::start`, `MicPipeline::start`,
-//! `make_on_audio`, `make_drain_hook`, all crate-private) that absorb the ~250-line
+//! `make_on_audio`, `make_drain_hook`, all `pub(super)`, i.e.
+//! `voice_loop`-private) that absorb the ~250-line
 //! tail every concrete builder used to copy verbatim.
 //!
 //! All concrete backend builders — whisper+piper in `super::backends`,
