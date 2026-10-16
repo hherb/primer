@@ -270,12 +270,19 @@ jobs:
 
       - name: cargo doc (non-default feature arms, rustdoc -D warnings)
         # Broken intra-doc links drift-guard for cfg-gated code the default
-        # `cargo doc` step never sees (closes #330, #319). Every dep here is
-        # already built by the clippy/check steps above.
+        # `cargo doc` step never sees (closes #330, #319). Most deps are
+        # shared with the clippy/check steps above; the primer-gui arms add a
+        # one-time Tauri check build (cached thereafter by rust-cache), and
+        # the android-native / qnn arms add `jni` / `primer-qnn-sys`.
+        # android-native is documented twice: bare (the cpal-free config the
+        # APK ships via `primer-gui/android-native`) and with `voice-loop`
+        # (cpal on top). Links that cross the `cpal` gate only break in the
+        # bare arm.
         env:
           RUSTDOCFLAGS: -D warnings
         run: |
           cargo doc --no-deps --document-private-items -p primer-speech --features voice-loop,silero,whisper,piper,cpal,supertonic
+          cargo doc --no-deps --document-private-items -p primer-speech --features android-native
           cargo doc --no-deps --document-private-items -p primer-speech --features voice-loop,android-native
           cargo doc --no-deps --document-private-items -p primer-inference --features qnn
           cargo doc --no-deps --document-private-items -p primer-inference --features llamacpp

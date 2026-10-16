@@ -227,7 +227,8 @@ pub fn validate_bundle_dir(
 /// is `Send` only by design; concurrent access is mediated by the
 /// `tokio::sync::Mutex` in the backend, never by sharing `&dyn` across
 /// threads). Without this split, holding the parameter in
-/// `smoke_check`'s `async fn` state past the `rx.next().await` would
+/// a single unsplit `async fn`'s state (the former `smoke_check`) past
+/// the `rx.next().await` would
 /// force `&dyn GenieDialog: Send`, which in turn forces
 /// `dyn GenieDialog: Sync` — a contract the C-side cannot legally
 /// provide.

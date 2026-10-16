@@ -13,14 +13,14 @@
 //! and `docs/superpowers/specs/2026-05-13-gui-voice-mode-design.md` for
 //! the full design.
 
-/// Channel-backed STT adapter — cpal-free, reachable from android-native.
-/// Lives outside the cpal-gated `backends_common` so the OS-owned-mic
-/// Android build can reuse it (Plan 2 Task 4).
+// Channel-backed STT adapter — cpal-free, reachable from android-native.
+// Lives outside the cpal-gated `backends_common` so the OS-owned-mic
+// Android build can reuse it (Plan 2 Task 4).
 pub mod channel_stt;
 pub mod observer;
-/// Runtime STT/TTS backend selector enums (pure data; never feature-gated).
-/// Single source of truth for the decoupled voice-loop wiring — the CLI uses
-/// them directly and the GUI mirrors them in its own config layer.
+// Runtime STT/TTS backend selector enums (pure data; never feature-gated).
+// Single source of truth for the decoupled voice-loop wiring — the CLI uses
+// them directly and the GUI mirrors them in its own config layer.
 pub mod selectors;
 pub mod state_machine;
 
@@ -31,7 +31,8 @@ mod quit_detect;
 // the TTS engine.
 mod tts_markdown;
 
-// Shared [`LocalBackends`] / [`ChannelStt`] types — gated only on `cpal`
+// Shared `LocalBackends` type (+ a back-compat re-export of `ChannelStt`,
+// which now lives in `channel_stt`) and the mic/speaker factories — gated only on `cpal`
 // because every concrete backend builder (whisper+piper or macOS-native)
 // needs the cpal-owned `MicCapture`/`SpeakerSink` but nothing else.
 #[cfg(feature = "cpal")]
@@ -40,7 +41,7 @@ pub mod backends_common;
 // Whisper STT backend builder — gated on `silero + whisper + cpal`.
 // The TTS is injected by the caller (Piper / Supertonic / …), so this
 // module no longer needs the `piper` feature. Shares `LocalBackends` /
-// `ChannelStt` with the macOS builders via [`backends_common`].
+// `ChannelStt` with the macOS builders via `backends_common`.
 #[cfg(all(feature = "silero", feature = "whisper", feature = "cpal"))]
 pub mod backends;
 

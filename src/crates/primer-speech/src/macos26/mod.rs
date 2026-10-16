@@ -1,11 +1,11 @@
 //! macOS 26 SpeechAnalyzer-backed STT + VAD.
 //!
-//! See [`docs/superpowers/specs/2026-05-20-macos-native-26-design.md`].
+//! See `docs/superpowers/specs/2026-05-20-macos-native-26-design.md`.
 //!
 //! **Today this module is macOS-only.** The parent cfg gate in
 //! `lib.rs` is `target_os = "macos"`, and the TTS re-export below
 //! depends on [`crate::macos`] which is itself macOS-gated. The
-//! [`build.rs`] also hardcodes the `apple-macos26.0` Swift target triple.
+//! `build.rs` also hardcodes the `apple-macos26.0` Swift target triple.
 //!
 //! Internal files use `target_vendor = "apple"` cfg gates as structural
 //! preparation for an eventual iOS-26 host: the underlying APIs

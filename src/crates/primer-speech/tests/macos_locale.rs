@@ -16,7 +16,7 @@ fn en_us_is_available_on_device() {
 /// where German is configured; it is deliberately skipped in CI and on
 /// plain English-only Macs to avoid flakiness.
 ///
-/// The probe itself is the load-bearing [[project_strict_offline_first]]
+/// The probe itself is the load-bearing strict-offline-first
 /// gate — `is_on_device_available` returns `false` on this machine rather
 /// than silently allowing a network fallback, which is correct behaviour.
 #[test]

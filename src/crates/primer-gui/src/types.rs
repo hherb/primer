@@ -15,7 +15,8 @@ pub struct SessionInfo {
     /// `Session`. See [`SessionSnapshot::session_id`](crate::state::SessionSnapshot::session_id).
     pub session_id: Option<Uuid>,
     pub learner: LearnerSummary,
-    /// Backend kind: "stub" | "cloud" | "ollama".
+    /// Backend kind: "stub" | "cloud" | "ollama" | "openai-compat" | "qnn" |
+    /// "llamacpp".
     pub backend_kind: String,
     /// Main model id (e.g. "claude-sonnet-4-6", "llama3.2", "stub").
     pub main_model: String,
