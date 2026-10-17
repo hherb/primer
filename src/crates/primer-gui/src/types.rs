@@ -12,10 +12,11 @@ use uuid::Uuid;
 #[derive(Debug, Clone, Serialize)]
 pub struct SessionInfo {
     /// `None` until the first `send_message` opens the underlying
-    /// `Session`. See [`ActiveSession::session_id`](crate::state::ActiveSession::session_id).
+    /// `Session`. See [`SessionSnapshot::session_id`](crate::state::SessionSnapshot::session_id).
     pub session_id: Option<Uuid>,
     pub learner: LearnerSummary,
-    /// Backend kind: "stub" | "cloud" | "ollama".
+    /// Backend kind: "stub" | "cloud" | "ollama" | "openai-compat" | "qnn" |
+    /// "llamacpp".
     pub backend_kind: String,
     /// Main model id (e.g. "claude-sonnet-4-6", "llama3.2", "stub").
     pub main_model: String,

@@ -92,7 +92,7 @@ pub fn format_metric_line(ts_unix_ms: u64, timing: &StreamTiming) -> String {
 }
 
 /// The path the live metrics file is rotated to: its name with
-/// [`ROTATED_SUFFIX`] appended (e.g. `qnn_metrics.jsonl` →
+/// the private `ROTATED_SUFFIX` appended (e.g. `qnn_metrics.jsonl` →
 /// `qnn_metrics.jsonl.1`). Pure — host-tested.
 pub fn rotated_metrics_path(path: &Path) -> PathBuf {
     let mut name = path

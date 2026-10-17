@@ -128,7 +128,7 @@ const BACKEND_NAME: &str = "whisper-cpp";
 /// matches the call site.
 ///
 /// Streaming sessions reuse a single [`WhisperStream`] across utterances
-/// via [`StreamCache`] — `WhisperStream::new` allocates ≈75 MB of KV
+/// via the private `StreamCache` — `WhisperStream::new` allocates ≈75 MB of KV
 /// cache + GPU compute buffers (≈500 ms wallclock on Apple Silicon),
 /// while [`WhisperStream::reset`] just clears per-utterance state
 /// (audio_buf, prompt_tokens, n_iter). The single-slot cache is sized
@@ -162,7 +162,7 @@ impl WhisperStt {
     }
 
     /// Currently-configured transcription language (ISO 639-1).
-    /// Returns the default (`"en"`) when [`with_language`] was never called.
+    /// Returns the default (`"en"`) when [`Self::with_language`] was never called.
     /// Public so callers — most importantly `build_local_backends` — can
     /// be tested for correct locale propagation without loading a real
     /// Whisper context end-to-end.

@@ -124,7 +124,7 @@ impl MacosSpeechToText {
                 })?;
 
         // Enforce on-device-only: fail loudly rather than silently falling
-        // back to network, which would violate [[project_strict_offline_first]].
+        // back to network, which would violate the strict offline-first rule.
         // SAFETY: `supportsOnDeviceRecognition` is an immutable property read.
         if !unsafe { recognizer.supportsOnDeviceRecognition() } {
             return Err(PrimerError::Speech(format!(

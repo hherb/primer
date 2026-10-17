@@ -30,7 +30,7 @@
 //! `VoiceProfile` doesn't carry a language field (Piper voices are
 //! locale-specific; the language is implicit in the loaded `.onnx.json`'s
 //! phoneme map). Supertonic is multilingual — one model speaks 31 languages —
-//! so the language is set at backend-construction via [`Self::with_language`]
+//! so the language is set at backend-construction via [`SupertonicTts::with_language`]
 //! and reused for every utterance from that instance. The voice loop's
 //! `locale_defaults` wires this from `Locale::pack_id()`.
 //!
@@ -186,12 +186,12 @@ impl SupertonicTts {
     }
 
     /// Override the denoising step count (default
-    /// [`DEFAULT_TOTAL_STEPS`] = 8). Upstream treats this as a free quality
+    /// `DEFAULT_TOTAL_STEPS` = 8). Upstream treats this as a free quality
     /// knob — more steps trade compute for fidelity — with a *recommended*
     /// range of 5..=12; the vendored helper neither validates nor rejects
     /// values outside it, so a developer may legitimately push past 12 for
     /// quality. The value is clamped to
-    /// [`MIN_TOTAL_STEPS`]..=[`MAX_TOTAL_STEPS`] purely as a sanity guard:
+    /// `MIN_TOTAL_STEPS..=MAX_TOTAL_STEPS` purely as a sanity guard:
     /// `0` would mean no denoising at all (degenerate output) and an
     /// unbounded upper end could waste arbitrary compute on a typo. Values
     /// inside the guard but outside the recommended range are honoured as

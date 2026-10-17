@@ -216,7 +216,7 @@ pub trait SessionStore: Send + Sync {
     }
 
     /// Hybrid (BM25 + vector cosine) variant of
-    /// [`retrieve_session_turns`]. Embeds the query, runs an in-store
+    /// [`Self::retrieve_session_turns`]. Embeds the query, runs an in-store
     /// vector top-K, runs the existing BM25 path, and fuses both lists
     /// via Reciprocal Rank Fusion using `params.rrf_k`. Implementations
     /// without vector support should fall back to the BM25-only path —

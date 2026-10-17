@@ -17,6 +17,12 @@
 //! stay in this file: they are the common vocabulary the submodules (and
 //! the `qnn_dispatch_tests`) borrow via `super::`.
 
+// The `//!` docs above link the private submodules behind this module's
+// `pub use` façade. They resolve under `cargo doc --document-private-items`
+// (the contributor view), so keep them as links rather than escaping them
+// (issue #330). Making the submodules `pub` would defeat the façade.
+#![allow(rustdoc::private_intra_doc_links)]
+
 use std::path::{Path, PathBuf};
 
 mod backend;
@@ -136,13 +142,13 @@ pub fn default_qairt_lib_dir(bundle_dir: &Path) -> PathBuf {
 /// Resolve the QAIRT runtime-library directory to hand the QNN backend,
 /// given the user's optional override and the bundle dir.
 ///
-/// Platform-aware (delegates to the pure [`resolve_qairt_lib_dir_for`]):
+/// Platform-aware (delegates to the pure private `resolve_qairt_lib_dir_for`):
 ///
 /// - **Android:** the 9 QAIRT `.so`s ship inside the APK's
 ///   `lib/arm64-v8a/` and are extracted to the app's `nativeLibraryDir`,
 ///   which the system linker already searches. An absent override
 ///   therefore resolves to an **empty** path, signalling
-///   [`primer_inference::QnnBackend`] to dlopen `libGenie.so` by
+///   `primer_inference::qnn::QnnBackend` (`qnn`-gated) to dlopen `libGenie.so` by
 ///   *basename* (so the linker finds it and its DT_NEEDED deps in
 ///   nativeLibraryDir). `qnn_qairt_lib_dir` is thus unnecessary on-device.
 /// - **Desktop / non-Android:** an absent override falls back to the
