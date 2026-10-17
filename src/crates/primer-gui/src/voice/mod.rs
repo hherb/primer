@@ -12,7 +12,7 @@
 //!
 //! All sub-modules are gated by `#[cfg(feature = "speech")]`; when the
 //! feature is off, the module is empty and the Tauri command stubs in
-//! `commands/voice.rs` return `Err(StartVoiceModeError::NotBuilt)`.
+//! `commands/voice/` return `Err(StartVoiceModeError::NotBuilt)`.
 
 #[cfg(feature = "speech")]
 pub mod assets;
