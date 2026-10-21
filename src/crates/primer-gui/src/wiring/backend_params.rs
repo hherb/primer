@@ -32,8 +32,8 @@ fn env_key(name: &str) -> Option<String> {
 /// (issue #205 follow-up). A local-primary → cloud-fallback setup (the
 /// supported fallback direction) needs the key even though the primary
 /// `kind` is not "cloud"; without this the cloud secondary fails to
-/// build with an Auth error and the fallback silently degrades to
-/// PrimaryAlone. An Inline key is kind-agnostic (it may be entered for
+/// build with an Auth error and the fallback degrades to PrimaryAlone
+/// (reported as a `BackendNotice::FallbackDropped`). An Inline key is kind-agnostic (it may be entered for
 /// a cloud fallback even when the primary is local).
 ///
 /// The resolved openai-compat key lands in

@@ -139,8 +139,8 @@ pub struct ActiveSession {
     /// "llama3.2"). Kept outside the DM mutex for the same reason.
     pub main_model: String,
 
-    /// Rendered [`primer_engine::BackendNotice`] when the configured
-    /// fallback / router leg degraded at startup (issue #347); the
+    /// Rendered [`primer_engine::BackendNotice`] when the primary or the
+    /// fallback leg failed to build at startup (issues #347, #338); the
     /// frontend shows it as a persistent banner. `None` when healthy.
     pub backend_notice: Option<String>,
 

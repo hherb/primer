@@ -233,6 +233,8 @@ function setupSettingsButton() {
 /// place until the first message lands.
 async function handleSessionReady({ info, shouldReplay }) {
   resetChatSurface();
+  // A failed info fetch below must not leave the previous session's notice up.
+  dom.backendNoticeBanner.hidden = true;
 
   const sessionInfo =
     info ?? (await invoke("current_session_info").catch(() => null));
@@ -1293,6 +1295,7 @@ window.primerAppendPrimerChunk  = appendPrimerChunk;
 window.primerRefreshSidebar     = refreshSidebar;
 window.primerShowError          = showError;
 window.primerShowToast          = showToast;
+window.primerRenderSessionInfo  = renderSessionInfo;
 
 // Boot. Invoked last so every module-level `const` (notably `mobileQuery`,
 // used by `setupSidebarToggle`) is initialised before `main()` runs.

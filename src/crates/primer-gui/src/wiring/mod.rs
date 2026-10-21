@@ -190,7 +190,8 @@ async fn build_with_strategy(
     };
 
     // What the sidebar shows; differs from the config when the fallback
-    // serves alone (#338). `main_model` above stays the subsystem identifier.
+    // serves alone (#338). The subsystems above still get the primary's
+    // `main_model` as their identifier even then — a known mislabel (#351).
     let (backend_name, display_model) = served_identity(
         &backend_config.kind,
         &main_model,

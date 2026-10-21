@@ -169,34 +169,25 @@ async fn build_secondary_leg(
     }
 }
 
-/// The notice for a degraded plan; `None` for `Wrapped` / `Fail`. `failed`
-/// is the error of whichever leg did not build.
-fn degraded_notice(
-    plan: MainBackendPlan,
+/// The `SecondaryAlone` notice: `e` is the primary's construction error.
+fn primary_unavailable(
     primary_name: &str,
-    fb_name: &str,
+    fb_name: String,
     fb_model: Option<String>,
-    failed: Option<&PrimerError>,
-) -> Option<BackendNotice> {
-    let reason = failed.map(ToString::to_string).unwrap_or_default();
-    match plan {
-        MainBackendPlan::PrimaryAlone => Some(BackendNotice::FallbackDropped {
-            fallback: fb_name.to_string(),
-            reason,
-        }),
-        MainBackendPlan::SecondaryAlone => Some(BackendNotice::PrimaryUnavailable {
-            primary: primary_name.to_string(),
-            fallback: fb_name.to_string(),
-            fallback_model: fb_model,
-            reason,
-        }),
-        MainBackendPlan::Wrapped | MainBackendPlan::Fail => None,
+    e: &PrimerError,
+) -> BackendNotice {
+    BackendNotice::PrimaryUnavailable {
+        primary: primary_name.to_string(),
+        fallback: fb_name,
+        fallback_model: fb_model,
+        reason: e.to_string(),
     }
 }
 
 /// Construct the main inference backend, applying the opt-in construction
-/// fallback. When `params.fallback_backend` is `None`, this is exactly
-/// `build_backend(primary_name, primary_model, params)`.
+/// fallback. When `params.fallback_backend` is `None` (and `router_mode` is
+/// `LocalOnly`), this is `build_backend(primary_name, primary_model, params)`
+/// with no notice.
 ///
 /// Otherwise it builds both legs and applies [`plan_main_backend`]:
 /// - `Wrapped` ⇒ `FallbackBackend { primary, secondary }`;
@@ -244,8 +235,7 @@ pub async fn build_main_backend(
     // error surfaces.
     let (secondary, fb_model) = build_secondary_leg(&fb_name, params).await;
 
-    let plan = plan_main_backend(primary.is_ok(), true, secondary.is_ok());
-    match plan {
+    match plan_main_backend(primary.is_ok(), true, secondary.is_ok()) {
         MainBackendPlan::Wrapped => {
             // Both built — wrap. expect() is safe: plan returned Wrapped only
             // because both is_ok() were true.
@@ -259,34 +249,29 @@ pub async fn build_main_backend(
                 secondary = %fb_name,
                 "primary backend unavailable at startup; using fallback backend alone"
             );
-            let notice = degraded_notice(
-                plan,
-                primary_name,
-                &fb_name,
-                fb_model,
-                primary.err().as_ref(),
-            );
-            secondary.map(|b| (b, notice))
+            let e = primary
+                .err()
+                .expect("SecondaryAlone implies primary failed");
+            let notice = primary_unavailable(primary_name, fb_name, fb_model, &e);
+            secondary.map(|b| (b, Some(notice)))
         }
         MainBackendPlan::PrimaryAlone => {
             // Reached only when primary built but the secondary did not — either
             // unbuildable or misconfigured (e.g. ollama fallback without a
             // model). The broken opt-in fallback is dropped, not fatal.
-            if let Err(ref e) = secondary {
-                tracing::warn!(
-                    secondary = %fb_name,
-                    error = %e,
-                    "fallback backend unusable (misconfigured or failed to construct); using primary alone"
-                );
-            }
-            let notice = degraded_notice(
-                plan,
-                primary_name,
-                &fb_name,
-                fb_model,
-                secondary.err().as_ref(),
+            let e = secondary
+                .err()
+                .expect("PrimaryAlone implies secondary failed");
+            tracing::warn!(
+                secondary = %fb_name,
+                error = %e,
+                "fallback backend unusable (misconfigured or failed to construct); using primary alone"
             );
-            primary.map(|b| (b, notice))
+            let notice = BackendNotice::FallbackDropped {
+                fallback: fb_name,
+                reason: e.to_string(),
+            };
+            primary.map(|b| (b, Some(notice)))
         }
         MainBackendPlan::Fail => {
             // Both failed: surface the primary's (most informative) error.
@@ -321,8 +306,7 @@ async fn build_router_backend(
     let primary = build_backend(primary_name, primary_model, params).await;
     let (secondary, fb_model) = build_secondary_leg(&fb_name, params).await;
 
-    let plan = plan_main_backend(primary.is_ok(), true, secondary.is_ok());
-    match plan {
+    match plan_main_backend(primary.is_ok(), true, secondary.is_ok()) {
         MainBackendPlan::Wrapped => {
             let primary = primary.expect("Wrapped implies primary built");
             let secondary = secondary.expect("Wrapped implies secondary built");
@@ -340,31 +324,26 @@ async fn build_router_backend(
                 secondary = %fb_name,
                 "router: primary unavailable at startup; using secondary alone (no routing)"
             );
-            let notice = degraded_notice(
-                plan,
-                primary_name,
-                &fb_name,
-                fb_model,
-                primary.err().as_ref(),
-            );
-            secondary.map(|b| (b, notice))
+            let e = primary
+                .err()
+                .expect("SecondaryAlone implies primary failed");
+            let notice = primary_unavailable(primary_name, fb_name, fb_model, &e);
+            secondary.map(|b| (b, Some(notice)))
         }
         MainBackendPlan::PrimaryAlone => {
-            if let Err(ref e) = secondary {
-                tracing::warn!(
-                    secondary = %fb_name,
-                    error = %e,
-                    "router: secondary unusable; using primary alone (routing disabled)"
-                );
-            }
-            let notice = degraded_notice(
-                plan,
-                primary_name,
-                &fb_name,
-                fb_model,
-                secondary.err().as_ref(),
+            let e = secondary
+                .err()
+                .expect("PrimaryAlone implies secondary failed");
+            tracing::warn!(
+                secondary = %fb_name,
+                error = %e,
+                "router: secondary unusable; using primary alone (routing disabled)"
             );
-            primary.map(|b| (b, notice))
+            let notice = BackendNotice::FallbackDropped {
+                fallback: fb_name,
+                reason: e.to_string(),
+            };
+            primary.map(|b| (b, Some(notice)))
         }
         // Both legs failed: surface the primary's (most informative) error.
         MainBackendPlan::Fail => primary.map(|b| (b, None)),

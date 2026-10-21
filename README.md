@@ -132,8 +132,9 @@ an optional cloud `--fallback-backend`:
 
 If one leg fails to build at startup, for example because the cloud API key is
 missing, the Primer still starts on the other leg and tells you which one: a
-`Warning:` line in the CLI, a banner in the desktop app. The desktop sidebar
-always names the backend that is actually answering.
+`Warning:` line in the CLI, a banner in the desktop app. When the fallback
+answers every turn because the primary could not start, the desktop sidebar
+names the fallback.
 
 **For absolute privacy, do nothing:** leave `--router-mode` at its `local-only`
 default and/or never provide an API key. With no API key the cloud leg cannot be

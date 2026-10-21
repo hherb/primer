@@ -769,7 +769,7 @@ async fn async_main() -> anyhow::Result<()> {
     let backend: Arc<dyn InferenceBackend> =
         match build_main_backend(&cli.backend, main_model.clone(), &backend_params).await {
             Ok((b, notice)) => {
-                // A dropped or substituted fallback leg (issues #347, #338).
+                // A dropped fallback leg, or a primary replaced by the fallback (#347, #338).
                 if let Some(notice) = notice {
                     eprintln!("Warning: {notice}");
                 }

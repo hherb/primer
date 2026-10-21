@@ -229,3 +229,31 @@ fn notice_messages_name_legs_and_reason() {
         "{msg}"
     );
 }
+
+/// A cloud fallback carries its *resolved* model in the notice (the default
+/// when unset, an explicit one when given), for both paths — this is what the
+/// GUI sidebar shows instead of the backend's `name()` (#338).
+#[tokio::test]
+async fn primary_unavailable_notice_carries_resolved_fallback_model() {
+    use primer_core::consts::inference::DEFAULT_CLOUD_MODEL;
+    for mode in [RouterMode::LocalOnly, RouterMode::Hybrid] {
+        for (configured, expected) in [
+            (None, DEFAULT_CLOUD_MODEL),
+            (Some("claude-opus-4-7"), "claude-opus-4-7"),
+        ] {
+            let mut p = params(Some("cloud"), configured, mode);
+            p.api_key = Some("test-key".into());
+            let (_, notice) = build_main_backend("unknown-primary", "m".into(), &p)
+                .await
+                .unwrap();
+            assert!(
+                matches!(
+                    &notice,
+                    Some(BackendNotice::PrimaryUnavailable { fallback, fallback_model: Some(m), .. })
+                        if fallback == "cloud" && m == expected
+                ),
+                "mode {mode}, configured {configured:?}: got {notice:?}"
+            );
+        }
+    }
+}

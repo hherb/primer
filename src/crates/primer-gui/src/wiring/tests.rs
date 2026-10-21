@@ -447,3 +447,28 @@ async fn no_fallback_has_no_backend_notice() {
         .unwrap();
     assert_eq!(s.backend_notice, None);
 }
+
+/// Primary unbuildable (qnn always fails on a host build), cloud fallback
+/// serves every turn ⇒ the session names the fallback and its resolved
+/// model, not the configured primary (#338), and carries the notice.
+#[tokio::test]
+async fn primary_unavailable_session_shows_served_fallback() {
+    let home = TempDir::new().unwrap();
+    let mut cfg = stub_config();
+    cfg.backend.kind = "qnn".to_string();
+    cfg.backend.fallback_backend = Some("cloud".to_string());
+    cfg.backend.fallback_model = None;
+    // Inline, not Env: the test must not depend on the developer's shell.
+    cfg.backend.api_key_source = crate::config::ApiKeySource::Inline {
+        key: "test-key".into(),
+    };
+    let s = build_active_session(home.path(), &cfg).await.unwrap();
+
+    assert_eq!(s.backend_name, "cloud");
+    assert_eq!(
+        s.main_model,
+        primer_core::consts::inference::DEFAULT_CLOUD_MODEL
+    );
+    let notice = s.backend_notice.as_deref().expect("primary-down notice");
+    assert!(notice.contains("qnn"), "notice: {notice}");
+}
