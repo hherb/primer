@@ -3520,7 +3520,6 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "clap",
- "dotenvy",
  "primer-classifier",
  "primer-comprehension",
  "primer-core",
@@ -3594,6 +3593,7 @@ name = "primer-engine"
 version = "0.1.0"
 dependencies = [
  "chrono",
+ "dotenvy",
  "primer-classifier",
  "primer-comprehension",
  "primer-core",
@@ -3601,6 +3601,7 @@ dependencies = [
  "primer-extractor",
  "primer-inference",
  "primer-storage",
+ "tempfile",
  "tokio",
  "tracing",
  "unicode-normalization",

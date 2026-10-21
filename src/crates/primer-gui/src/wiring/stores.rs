@@ -11,12 +11,11 @@ use primer_core::i18n::Locale;
 use primer_core::learner::LearnerModel;
 use primer_core::storage::{LearnerStore, SessionStore};
 use primer_engine::{
-    IN_MEMORY, create_learner_with_id, parse_languages, reconcile_persisted_learner,
-    resolve_session_db_path,
+    IN_MEMORY, adopt_or_mint_learner_id, create_learner_with_id, parse_languages,
+    reconcile_persisted_learner, resolve_session_db_path,
 };
 use primer_knowledge::SqliteKnowledgeBase;
 use primer_storage::SqliteSessionStore;
-use uuid::Uuid;
 
 use super::LocaleStrategy;
 use crate::config::GuiConfig;
@@ -123,19 +122,15 @@ pub(super) async fn open_session_store_and_learner(
             // Adopt the most-recent session's learner_id so existing
             // sessions are not orphaned. No inheritance possible — cfg
             // wins regardless of strategy.
-            let id = match session_store_inner.most_recent_session_learner_id().await {
-                Ok(Some(uuid)) => {
-                    tracing::info!("adopted learner_id {uuid} from existing sessions");
-                    uuid
-                }
-                Ok(None) => Uuid::new_v4(),
-                Err(e) => {
-                    tracing::warn!(
-                        "most_recent_session_learner_id failed: {e}; minting fresh UUID"
-                    );
-                    Uuid::new_v4()
-                }
-            };
+            let id = adopt_or_mint_learner_id(
+                session_store_inner.most_recent_session_learner_id().await,
+            )
+            .map_err(|e| {
+                format!(
+                    "reading existing sessions' learner_id from {}: {e}",
+                    session_path.display()
+                )
+            })?;
             // The GUI has no `--languages` field yet (out of scope for the
             // CLI-titled issue #21); pass the locale-derived default so the
             // preference list matches the historical behaviour exactly.

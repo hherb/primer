@@ -24,7 +24,7 @@ const MOBILE_SEED_SUBDIR: &str = "seed";
 /// On Android the seed `*.jsonl` are staged under
 /// `<app_data_dir>/seed/` rather than bundled into the APK assets, since
 /// the asset namespace is not directly readable with `std::fs`. See
-/// [`set_mobile_seed_dir_if_present`] for the discovery + env wiring.
+/// `set_mobile_seed_dir_if_present` (`cfg(mobile)`) for the discovery + env wiring.
 pub fn mobile_seed_dir(app_data: &Path) -> PathBuf {
     app_data.join(MOBILE_SEED_SUBDIR)
 }

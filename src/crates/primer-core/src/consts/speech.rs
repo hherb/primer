@@ -15,7 +15,7 @@ pub const DEFAULT_MIC_SILENCE_MS: u32 = 600;
 /// Milliseconds of silence the state machine inserts between
 /// consecutive phrases during TTS playback. The voice loop's SPEAK
 /// phase fires this much zero-sample audio into the speaker after
-/// each [`primer_core::speech::SynthesisEvent::PhraseEnd`], giving
+/// each [`crate::speech::SynthesisEvent::PhraseEnd`], giving
 /// the listener a perceptible pause at sentence boundaries.
 ///
 /// User-tunable: lower if the voice feels too halting, higher if

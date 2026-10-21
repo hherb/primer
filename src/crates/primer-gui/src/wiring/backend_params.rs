@@ -26,6 +26,19 @@ use crate::config::{ApiKeySource, GuiConfig, SubsystemConfig};
 /// The resolved openai-compat key lands in
 /// `BackendParams::openai_compat_api_key`; `build_subsystems` reads that
 /// same value back from `params` for the openai-compat embedder.
+/// Read an API-key env var. Unset → `None`; a non-Unicode value is also
+/// unusable but is logged rather than silently treated as unset (#337).
+fn env_key(name: &str) -> Option<String> {
+    match std::env::var(name) {
+        Ok(v) => Some(v),
+        Err(std::env::VarError::NotPresent) => None,
+        Err(std::env::VarError::NotUnicode(_)) => {
+            tracing::warn!("{name} is set but not valid UTF-8; ignoring it");
+            None
+        }
+    }
+}
+
 pub(super) fn build_backend_params(config: &GuiConfig) -> BackendParams {
     let backend_config = &config.backend;
 
@@ -37,7 +50,7 @@ pub(super) fn build_backend_params(config: &GuiConfig) -> BackendParams {
                 backend_config.fallback_backend.as_deref(),
             ) =>
         {
-            std::env::var("ANTHROPIC_API_KEY").ok()
+            env_key("ANTHROPIC_API_KEY")
         }
         ApiKeySource::Env => None,
     };
@@ -49,7 +62,7 @@ pub(super) fn build_backend_params(config: &GuiConfig) -> BackendParams {
     // CLI's reuse of `--openai-compat-api-key` across both.
     let openai_compat_api_key = match &backend_config.openai_compat_api_key_source {
         ApiKeySource::Inline { key } => Some(key.clone()),
-        ApiKeySource::Env => std::env::var("OPENAI_COMPAT_API_KEY").ok(),
+        ApiKeySource::Env => env_key("OPENAI_COMPAT_API_KEY"),
     };
 
     BackendParams {

@@ -298,7 +298,7 @@ This is a working POC, not production-grade. Latency, voice quality, and edge-ca
 
 ### Configuring secrets
 
-Both `.env` (project-local) and `~/.primer_env` (user-global) are auto-loaded at startup. Drop your `ANTHROPIC_API_KEY` into either:
+Both `.env` (project-local) and `~/.primer_env` (user-global) are auto-loaded at startup by the CLI and the desktop GUI. `~/.primer_env` is the reliable choice for the GUI, since an app launched from the Dock has no project working directory. Drop your `ANTHROPIC_API_KEY` into either:
 
 ```
 ANTHROPIC_API_KEY=sk-ant-...

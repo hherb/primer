@@ -13,8 +13,8 @@
 //! helpers (`SpeakerPipeline::start`, `MicPipeline::start`,
 //! `make_on_audio`, `make_drain_hook`) live in
 //! [`super::backends_common`] so the macOS-native builders in
-//! [`super::backends_macos_native`] and
-//! [`super::backends_macos_native_26`] can share them without
+//! `super::backends_macos_native` and
+//! `super::backends_macos_native_26` can share them without
 //! inheriting the whisper dependency this module pulls in.
 //!
 //! Lifecycle: callers receive a [`LocalBackends`] struct that holds the

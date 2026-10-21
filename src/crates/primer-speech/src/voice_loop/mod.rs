@@ -13,59 +13,60 @@
 //! and `docs/superpowers/specs/2026-05-13-gui-voice-mode-design.md` for
 //! the full design.
 
-/// Channel-backed STT adapter — cpal-free, reachable from android-native.
-/// Lives outside the cpal-gated `backends_common` so the OS-owned-mic
-/// Android build can reuse it (Plan 2 Task 4).
+// Channel-backed STT adapter — cpal-free, reachable from android-native.
+// Lives outside the cpal-gated `backends_common` so the OS-owned-mic
+// Android build can reuse it (Plan 2 Task 4).
 pub mod channel_stt;
 pub mod observer;
-/// Runtime STT/TTS backend selector enums (pure data; never feature-gated).
-/// Single source of truth for the decoupled voice-loop wiring — the CLI uses
-/// them directly and the GUI mirrors them in its own config layer.
+// Runtime STT/TTS backend selector enums (pure data; never feature-gated).
+// Single source of truth for the decoupled voice-loop wiring — the CLI uses
+// them directly and the GUI mirrors them in its own config layer.
 pub mod selectors;
 pub mod state_machine;
 
-/// Pure quit-phrase detection helpers (locale-aware), consumed by the
-/// state machine to decide when a child asked to end the session.
+// Pure quit-phrase detection helpers (locale-aware), consumed by the
+// state machine to decide when a child asked to end the session.
 mod quit_detect;
-/// Pure markdown-stripping helpers run on Primer text before it reaches
-/// the TTS engine.
+// Pure markdown-stripping helpers run on Primer text before it reaches
+// the TTS engine.
 mod tts_markdown;
 
-/// Shared [`LocalBackends`] / [`ChannelStt`] types — gated only on `cpal`
-/// because every concrete backend builder (whisper+piper or macOS-native)
-/// needs the cpal-owned `MicCapture`/`SpeakerSink` but nothing else.
+// Shared `LocalBackends` type (+ a back-compat re-export of `ChannelStt`,
+// which now lives in `channel_stt`) and the mic/speaker factories — gated only on `cpal`
+// because every concrete backend builder (whisper+piper or macOS-native)
+// needs the cpal-owned `MicCapture`/`SpeakerSink` but nothing else.
 #[cfg(feature = "cpal")]
 pub mod backends_common;
 
-/// Whisper STT backend builder — gated on `silero + whisper + cpal`.
-/// The TTS is injected by the caller (Piper / Supertonic / …), so this
-/// module no longer needs the `piper` feature. Shares `LocalBackends` /
-/// `ChannelStt` with the macOS builders via [`backends_common`].
+// Whisper STT backend builder — gated on `silero + whisper + cpal`.
+// The TTS is injected by the caller (Piper / Supertonic / …), so this
+// module no longer needs the `piper` feature. Shares `LocalBackends` /
+// `ChannelStt` with the macOS builders via `backends_common`.
 #[cfg(all(feature = "silero", feature = "whisper", feature = "cpal"))]
 pub mod backends;
 
-/// macOS-native backend builder (SFSpeechRecognizer + Silero VAD). One
-/// file per builder so each `pub` item lives behind exactly the narrow
-/// feature gate that reflects its body, and each file stays well under
-/// the 500-line guideline. Closes #149.
+// macOS-native backend builder (SFSpeechRecognizer + Silero VAD). One
+// file per builder so each `pub` item lives behind exactly the narrow
+// feature gate that reflects its body, and each file stays well under
+// the 500-line guideline. Closes #149.
 #[cfg(all(target_os = "macos", feature = "cpal", feature = "macos-native"))]
 pub mod backends_macos_native;
 
-/// macOS 26 native backend builder (SpeechAnalyzer + derived VAD).
-/// Sibling of [`backends_macos_native`]; both share the mic/speaker/
-/// closure helpers in [`backends_common`].
+// macOS 26 native backend builder (SpeechAnalyzer + derived VAD).
+// Sibling of [`backends_macos_native`]; both share the mic/speaker/
+// closure helpers in [`backends_common`].
 #[cfg(all(target_os = "macos", feature = "cpal", feature = "macos-native-26"))]
 pub mod backends_macos_native_26;
 
-/// Android-native voice backend builder (OS-owned mic + speaker). Cpal-free
-/// — see [`backends_android_native::build_android_voice_backends`] (Plan 2
-/// Task 6).
+// Android-native voice backend builder (OS-owned mic + speaker). Cpal-free
+// — see [`backends_android_native::build_android_voice_backends`] (Plan 2
+// Task 6).
 #[cfg(feature = "android-native")]
 pub mod backends_android_native;
 
-/// Pure helper for the macos-native-26 audio thread's pre-resample
-/// chunk buffer; clears on `is_speaking` to prevent pre-speak audio
-/// leaking into the post-speak transcription (closes #139).
+// Pure helper for the macos-native-26 audio thread's pre-resample
+// chunk buffer; clears on `is_speaking` to prevent pre-speak audio
+// leaking into the post-speak transcription (closes #139).
 #[cfg(all(target_os = "macos", feature = "cpal", feature = "macos-native-26"))]
 pub(crate) mod macos26_audio_buffer;
 

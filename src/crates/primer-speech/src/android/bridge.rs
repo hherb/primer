@@ -1,6 +1,6 @@
 //! The bridge seam. The Android voice loop routes every device call through
 //! an `AndroidSpeechBridge`; the real impl is JNI (android-only,
-//! [`crate::android::jni_bridge`]), the `MockBridge` makes the surrounding
+//! `crate::android::jni_bridge`), the `MockBridge` makes the surrounding
 //! logic host-testable — the `primer-inference::qnn`
 //! `GenieLibrary`/`GenieDialog` pattern.
 
@@ -9,7 +9,7 @@ use crate::android::events::SpeechEvent;
 use primer_core::error::Result;
 
 /// Everything the Android voice loop needs from the device. The real impl is
-/// JNI ([`crate::android::jni_bridge::JniSpeechBridge`], android-only);
+/// JNI (`crate::android::jni_bridge::JniSpeechBridge`, android-only);
 /// `MockBridge` (test) drives the host-side logic. All calls are Rust→Kotlin
 /// (one direction) — events flow back via [`Self::poll_event`] (the D4 poll
 /// model), not Kotlin upcalls.

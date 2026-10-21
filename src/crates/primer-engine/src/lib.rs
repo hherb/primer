@@ -9,12 +9,13 @@
 //! without code duplication. The helpers are pure (or near-pure) and
 //! carry no behaviour change versus their previous home in `primer-cli`.
 
+pub mod env_files;
 pub mod learner;
 pub mod paths;
 pub mod wiring;
 
 pub use learner::{
-    create_learner_with_id, parse_languages, reconcile_persisted_learner,
+    adopt_or_mint_learner_id, create_learner_with_id, parse_languages, reconcile_persisted_learner,
     verify_resume_locale_match,
 };
 pub use paths::{

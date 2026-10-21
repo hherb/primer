@@ -3,6 +3,8 @@
 //! E Ink display). Just a terminal and a conversation.
 //!
 //! Usage:
+//!
+//! ```text
 //!   primer                                              # Stub backend (canned responses, no model needed)
 //!   primer --backend cloud                              # Anthropic Claude API (default model)
 //!   primer --backend cloud --model claude-opus-4-7      # Override the cloud model
@@ -10,6 +12,7 @@
 //!   primer --backend qnn --qnn-bundle-dir <path>        # Qualcomm NPU (Android only; --features qnn)
 //!   primer --name Binti --age 8                         # Set learner profile
 //!   primer --resume <uuid>                              # Resume a past session
+//! ```
 
 mod cli_support;
 
@@ -35,8 +38,8 @@ use primer_core::inference::InferenceBackend;
 use primer_core::knowledge::KnowledgeBase;
 use primer_core::storage::{LearnerStore, SessionStore};
 use primer_engine::{
-    BackendParams, IN_MEMORY, build_classifier, build_comprehension, build_extractor,
-    build_fastembed_embedder, build_main_backend, build_ollama_embedder,
+    BackendParams, IN_MEMORY, adopt_or_mint_learner_id, build_classifier, build_comprehension,
+    build_extractor, build_fastembed_embedder, build_main_backend, build_ollama_embedder,
     build_openai_compat_embedder, create_learner_with_id, parse_languages,
     reconcile_persisted_learner, resolve_session_db_path, should_show_first_run_banner,
     verify_resume_locale_match,
@@ -545,15 +548,9 @@ fn probe_espeak_ng_data(verbose: bool) {
 }
 
 fn main() -> anyhow::Result<()> {
-    // Load env files. Project-local `.env` first (searches cwd and ancestors),
-    // then a user-global `~/.primer_env` for secrets that should live outside
-    // any single repo. Earlier sources win — `from_path` does not override
-    // existing env vars by default. Must run before clap parses `--api-key`.
-    let _ = dotenvy::dotenv();
-    if let Ok(home) = std::env::var("HOME") {
-        let path = std::path::PathBuf::from(home).join(".primer_env");
-        let _ = dotenvy::from_path(&path);
-    }
+    // Load `.env` then `~/.primer_env` (earlier sources win). Must run
+    // before clap parses `--api-key` and before any thread is spawned.
+    primer_engine::env_files::load_env_files();
 
     // Probe for system espeak-ng-data BEFORE the tokio runtime spawns
     // worker threads — `set_var` requires a single-threaded context.
@@ -579,7 +576,7 @@ fn main() -> anyhow::Result<()> {
 /// dispatches AVSpeechSynthesizer synthesis on whatever thread it's
 /// called from. With current-thread tokio on main, all awaits stay on
 /// main, so `push_text` runs on main and takes the main-thread
-/// synthesis path ([`primer_speech::macos::tts::synthesize_to_chunks_main_thread`]) —
+/// synthesis path (`primer_speech::macos::tts::synthesize_streaming_main_thread`, private) —
 /// the path that drives `NSRunLoop::runUntilDate` from inside the call
 /// and drains the GCD main queue (AVFoundation primes the
 /// queue→runloop integration on its first AVSpeechSynthesizer
@@ -950,19 +947,8 @@ async fn async_main() -> anyhow::Result<()> {
             //   2. v3 DB with sessions but no learners row → adopt the
             //      most-recent session's learner_id so existing sessions
             //      are not orphaned.
-            let id = match session_store.most_recent_session_learner_id().await {
-                Ok(Some(uuid)) => {
-                    tracing::info!("adopted learner_id {uuid} from existing sessions");
-                    uuid
-                }
-                Ok(None) => Uuid::new_v4(),
-                Err(e) => {
-                    tracing::warn!(
-                        "most_recent_session_learner_id failed: {e}; minting fresh UUID"
-                    );
-                    Uuid::new_v4()
-                }
-            };
+            let id = adopt_or_mint_learner_id(session_store.most_recent_session_learner_id().await)
+                .map_err(|e| anyhow::anyhow!("reading existing sessions' learner_id: {e}"))?;
             let languages = parse_languages(cli.languages.as_deref(), cli_locale);
             let fresh = create_learner_with_id(id, &cli.name, cli.age, cli_locale, languages);
             if let Err(e) = session_store.save_learner(&fresh).await {

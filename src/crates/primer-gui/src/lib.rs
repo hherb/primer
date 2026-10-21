@@ -52,6 +52,11 @@ pub fn run() -> Result<(), Box<dyn std::error::Error>> {
     // therefore starts un-managed on mobile.
     #[cfg(not(mobile))]
     let builder = {
+        // `.env` + `~/.primer_env`, mirroring the CLI (issue #337): a
+        // Dock-launched app does not inherit the shell profile, so the
+        // default `ApiKeySource::Env` would otherwise never see
+        // `ANTHROPIC_API_KEY`. Before any thread spawns (`set_var`).
+        primer_engine::env_files::load_env_files();
         paths::set_packaged_seed_dir_if_present();
         // Must run before Tauri spawns any worker threads — `set_var` is
         // unsafe under concurrent libc-getenv on Unix. The Piper TTS in
