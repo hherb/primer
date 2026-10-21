@@ -23,7 +23,6 @@ primer-storage = { path = "../primer-storage" }
 primer-engine = { path = "../primer-engine" }
 tokio.workspace = true
 clap.workspace = true
-dotenvy.workspace = true
 tracing.workspace = true
 tracing-subscriber.workspace = true
 uuid.workspace = true

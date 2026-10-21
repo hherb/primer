@@ -12,11 +12,13 @@ primer-comprehension.workspace = true
 primer-inference = { path = "../primer-inference" }
 primer-embedding = { path = "../primer-embedding" }
 chrono.workspace = true
+dotenvy.workspace = true
 tracing.workspace = true
 unicode-normalization.workspace = true
 uuid.workspace = true
 
 [dev-dependencies]
+tempfile.workspace = true
 primer-storage = { path = "../primer-storage" }
 tokio.workspace = true
 
