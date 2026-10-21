@@ -548,15 +548,9 @@ fn probe_espeak_ng_data(verbose: bool) {
 }
 
 fn main() -> anyhow::Result<()> {
-    // Load env files. Project-local `.env` first (searches cwd and ancestors),
-    // then a user-global `~/.primer_env` for secrets that should live outside
-    // any single repo. Earlier sources win — `from_path` does not override
-    // existing env vars by default. Must run before clap parses `--api-key`.
-    let _ = dotenvy::dotenv();
-    if let Ok(home) = std::env::var("HOME") {
-        let path = std::path::PathBuf::from(home).join(".primer_env");
-        let _ = dotenvy::from_path(&path);
-    }
+    // Load `.env` then `~/.primer_env` (earlier sources win). Must run
+    // before clap parses `--api-key` and before any thread is spawned.
+    primer_engine::env_files::load_env_files();
 
     // Probe for system espeak-ng-data BEFORE the tokio runtime spawns
     // worker threads — `set_var` requires a single-threaded context.

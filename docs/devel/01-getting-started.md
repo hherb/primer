@@ -44,7 +44,7 @@ You will see a greeting and a prompt. Type a question, hit return, and a stub re
 
 The cloud backend streams responses from the Anthropic Messages API. It needs an `ANTHROPIC_API_KEY` in your environment.
 
-The CLI auto-loads `.env` files at startup from two locations: a project-local `.env` (searched up from the current working directory) and a user-global `~/.primer_env`. Project-local wins over the home file, so a per-repo `.env` overrides anything you have set globally. Both `.env` and `~/.primer_env` are gitignored.
+The CLI and the desktop GUI auto-load `.env` files at startup (shared helper `primer_engine::env_files::load_env_files`) from two locations: a project-local `.env` (searched up from the current working directory) and a user-global `~/.primer_env`. Project-local wins over the home file, so a per-repo `.env` overrides anything you have set globally. Both `.env` and `~/.primer_env` are gitignored.
 
 ```bash
 cp ../.env.example ../.env
