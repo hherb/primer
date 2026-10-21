@@ -10,9 +10,10 @@ use serde::{Deserialize, Serialize};
 
 /// Settings for the classifier / extractor / comprehension subsystems.
 ///
-/// `match_main = true` collapses all override fields — the subsystem
-/// uses the main backend and main model. `match_main = false` requires
-/// the kind/model/timeout fields to be respected.
+/// `match_main = true` ignores the `kind`/`model` override fields — the
+/// subsystem reuses the main backend and main model (enforced in
+/// `wiring::backend_params`, not only by the frontend; issue #335).
+/// `timeout_ms` always applies. `match_main = false` respects all three.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct SubsystemConfig {

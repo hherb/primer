@@ -71,11 +71,11 @@ pub(super) fn build_backend_params(config: &GuiConfig) -> BackendParams {
         openai_compat_url: backend_config.openai_compat_url.clone(),
         openai_compat_api_key,
         classifier_backend: subsystem_kind(&config.classifier),
-        classifier_model: config.classifier.model.clone(),
+        classifier_model: subsystem_model(&config.classifier),
         extractor_backend: subsystem_kind(&config.extractor),
-        extractor_model: config.extractor.model.clone(),
+        extractor_model: subsystem_model(&config.extractor),
         comprehension_backend: subsystem_kind(&config.comprehension),
-        comprehension_model: config.comprehension.model.clone(),
+        comprehension_model: subsystem_model(&config.comprehension),
         // QNN backend (Phase 1.2 step 1.2.4): the bundle / QAIRT-lib
         // paths come straight from Settings → Inference backend. On a
         // default (non-`qnn`-feature) GUI build, `build_qnn_backend`'s
@@ -180,11 +180,17 @@ pub(super) fn resolve_main_model(kind: &str, model: Option<&str>) -> Result<Stri
     }
 }
 
-/// For a subsystem set to "match the main backend" we leave the *kind*
-/// override empty. Only an explicit override produces a non-None kind
-/// here. Note the `*_model` fields are still copied through regardless
-/// of `match_main` (issue #335), so `primer-engine` reuses the main
-/// backend via `Arc::clone` only when the model override is also unset.
+/// For a subsystem set to "match the main backend" both override fields
+/// ([`subsystem_kind`], [`subsystem_model`]) are left empty, whatever stale
+/// values `gui-config.json` still holds. That is what lets `primer-engine`
+/// reuse the main backend (and its fallback/router wrapper) via
+/// `Arc::clone`: a model override alone would build a separate backend
+/// (issue #335).
 fn subsystem_kind(s: &SubsystemConfig) -> Option<String> {
     if s.match_main { None } else { s.kind.clone() }
+}
+
+/// Model-override counterpart of [`subsystem_kind`].
+fn subsystem_model(s: &SubsystemConfig) -> Option<String> {
+    if s.match_main { None } else { s.model.clone() }
 }

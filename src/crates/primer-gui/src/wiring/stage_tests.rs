@@ -40,16 +40,24 @@ fn stub_config() -> GuiConfig {
 #[test]
 fn backend_params_match_main_subsystems_carry_no_kind_override() {
     let mut cfg = stub_config();
-    // A stale `kind` left behind while "match main" is ticked must be
-    // ignored — otherwise the subsystem silently stops inheriting.
+    // A stale `kind` or `model` left behind while "match main" is ticked
+    // must be ignored — otherwise the subsystem silently stops inheriting
+    // (a model override alone builds a separate backend; issue #335).
     cfg.extractor.kind = Some("cloud".to_string());
+    cfg.classifier.model = Some("stale-model".to_string());
+    cfg.comprehension.model = Some("stale-model".to_string());
     assert!(cfg.extractor.match_main);
+    assert!(cfg.classifier.match_main);
+    assert!(cfg.comprehension.match_main);
 
     let p = build_backend_params(&cfg);
 
     assert_eq!(p.classifier_backend, None);
     assert_eq!(p.extractor_backend, None);
     assert_eq!(p.comprehension_backend, None);
+    assert_eq!(p.classifier_model, None);
+    assert_eq!(p.extractor_model, None);
+    assert_eq!(p.comprehension_model, None);
 }
 
 #[test]
