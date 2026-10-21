@@ -69,7 +69,7 @@ pub struct QnnBackend {
     /// a `&str` without allocating on the hot path.
     name: String,
     /// Parsed `primer-meta.json` — `model_id` and `context_length` are
-    /// already read by [`Self::fmt`]; `vocab_size` and `stop_sequences`
+    /// already read by the `Debug` impl; `vocab_size` and `stop_sequences`
     /// will be wired into the per-backend context-budget logic in step
     /// 1.2.5 and the streaming generation halt path in step 1.2.3
     /// respectively. Held by value because the meta is small (<1 KB)
@@ -220,14 +220,15 @@ pub fn validate_bundle_dir(
 /// Fire the smoke-check streaming query synchronously and return the
 /// receiver end. Borrow on `dialog` ends with this function's return.
 ///
-/// Split from [`smoke_check`] so the `&dyn GenieDialog` borrow does
+/// Split from [`drain_smoke_check_receiver`] so the `&dyn GenieDialog` borrow does
 /// NOT cross an `.await` boundary — that's what lets
 /// [`QnnBackend::new`]'s future remain `Send` even though
 /// `dyn GenieDialog` deliberately omits the `Sync` bound (the trait
 /// is `Send` only by design; concurrent access is mediated by the
 /// `tokio::sync::Mutex` in the backend, never by sharing `&dyn` across
 /// threads). Without this split, holding the parameter in
-/// `smoke_check`'s `async fn` state past the `rx.next().await` would
+/// a single unsplit `async fn`'s state (the former `smoke_check`) past
+/// the `rx.next().await` would
 /// force `&dyn GenieDialog: Send`, which in turn forces
 /// `dyn GenieDialog: Sync` — a contract the C-side cannot legally
 /// provide.

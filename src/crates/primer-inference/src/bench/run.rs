@@ -141,8 +141,8 @@ pub fn format_report(
 /// example.
 ///
 /// Returns a stop sender and the sampler's join handle. The task ticks every
-/// [`THERMAL_SAMPLE_INTERVAL`](super::THERMAL_SAMPLE_INTERVAL), reading every
-/// `thermal_zone*/temp` under [`THERMAL_SYSFS_DIR`](super::THERMAL_SYSFS_DIR)
+/// [`THERMAL_SAMPLE_INTERVAL`], reading every
+/// `thermal_zone*/temp` under [`THERMAL_SYSFS_DIR`]
 /// (timestamped relative to `started`), until the stop signal fires or its
 /// sender drops. Awaiting the handle yields every collected sample — empty on
 /// hosts with no sysfs thermal nodes (e.g. macOS), which is a vacuous thermal
