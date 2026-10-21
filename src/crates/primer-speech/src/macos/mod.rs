@@ -2,8 +2,8 @@
 //!
 //! Drops the espeak-ng / whisper / piper / silero stack in favour of
 //! SFSpeechRecognizer + AVSpeechSynthesizer. Silero is kept for VAD
-//! to preserve the no-barge-in semantics from
-//! `[[project_no_barge_in_pedagogy]]` — Apple's SpeechDetector is
+//! to preserve the voice loop's no-barge-in semantics (LISTEN → THINK →
+//! SPEAK is pedagogical, not a POC shortcut) — Apple's SpeechDetector is
 //! macOS-26-only and we target macOS 13.
 //!
 //! Closed under `cfg(target_os = "macos", feature = "macos-native")`.

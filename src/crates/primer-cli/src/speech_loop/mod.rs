@@ -1,7 +1,8 @@
 //! CLI adapter for the shared `primer_speech::voice_loop`.
 //!
-//! Builds [`LoopBackends`] + the audio thread + cpal mic/speaker via the
-//! shared `primer_speech::voice_loop::build_local_backends` helper,
+//! Builds [`primer_speech::voice_loop::LoopBackends`] + the audio thread + cpal mic/speaker via the
+//! shared `primer_speech::voice_loop::build_tts` + `build_voice_backends`
+//! helpers (or `build_tts` + the macOS-native builder on those builds),
 //! instantiates a [`StdoutObserver`] that preserves the existing CLI
 //! print formatting, and calls
 //! `primer_speech::voice_loop::run_loop_borrowed` (the
@@ -85,9 +86,10 @@ pub struct SpeechLoopConfig {
 /// CLI entry point for `--speech` mode.
 ///
 /// Builds the local speech backends via the shared
-/// `primer_speech::voice_loop::build_local_backends` helper (or the
-/// macOS-native variant when `--features primer-cli/macos-native` is
-/// set at compile time on macOS), instantiates a [`StdoutObserver`],
+/// `primer_speech::voice_loop::build_tts` + `build_voice_backends` helpers
+/// (or `build_tts` + `build_local_backends_macos_native{,_26}` when
+/// `--features primer-cli/macos-native{,-26}` is set at compile time on
+/// macOS), instantiates a [`StdoutObserver`],
 /// and calls [`primer_speech::voice_loop::run_loop_borrowed`] (the
 /// borrowed-`&mut DialogueManager` variant; the CLI owns the DM
 /// directly so no Arc<Mutex<>> is needed here).

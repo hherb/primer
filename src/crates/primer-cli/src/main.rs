@@ -3,6 +3,8 @@
 //! E Ink display). Just a terminal and a conversation.
 //!
 //! Usage:
+//!
+//! ```text
 //!   primer                                              # Stub backend (canned responses, no model needed)
 //!   primer --backend cloud                              # Anthropic Claude API (default model)
 //!   primer --backend cloud --model claude-opus-4-7      # Override the cloud model
@@ -10,6 +12,7 @@
 //!   primer --backend qnn --qnn-bundle-dir <path>        # Qualcomm NPU (Android only; --features qnn)
 //!   primer --name Binti --age 8                         # Set learner profile
 //!   primer --resume <uuid>                              # Resume a past session
+//! ```
 
 mod cli_support;
 
@@ -579,7 +582,7 @@ fn main() -> anyhow::Result<()> {
 /// dispatches AVSpeechSynthesizer synthesis on whatever thread it's
 /// called from. With current-thread tokio on main, all awaits stay on
 /// main, so `push_text` runs on main and takes the main-thread
-/// synthesis path ([`primer_speech::macos::tts::synthesize_to_chunks_main_thread`]) —
+/// synthesis path (`primer_speech::macos::tts::synthesize_streaming_main_thread`, private) —
 /// the path that drives `NSRunLoop::runUntilDate` from inside the call
 /// and drains the GCD main queue (AVFoundation primes the
 /// queue→runloop integration on its first AVSpeechSynthesizer

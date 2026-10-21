@@ -25,7 +25,7 @@ use primer_core::i18n::Locale;
 /// the recognizer could not be constructed for an otherwise-valid locale,
 /// or (c) the locale is valid but the on-device model is not installed on
 /// this Mac. Callers must therefore emit a generic "on-device speech
-/// recognition unavailable for <locale>" error rather than trying to guess
+/// recognition unavailable for `<locale>`" error rather than trying to guess
 /// which of the three cases occurred. The most common case in practice
 /// is (c) — the user can resolve it via System Settings → Keyboard →
 /// Dictation → Languages.

@@ -19,7 +19,7 @@
 //! that the sidebar overlays as a drawer. The value is a single source
 //! of truth that must appear identically in BOTH the stylesheet's
 //! `@media` query and the JS `matchMedia` string — the
-//! [`tests::mobile_breakpoint_is_consistent_between_css_and_js`] test
+//! `tests::mobile_breakpoint_is_consistent_between_css_and_js` test
 //! pins that alignment so the two can never drift.
 
 /// The phone breakpoint, in CSS pixels, shared by the stylesheet's
