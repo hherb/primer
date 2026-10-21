@@ -22,6 +22,7 @@ const dom = {
   chatScroll: document.getElementById("chat-scroll"),
   emptyState: document.getElementById("empty-state"),
   errorBanner: document.getElementById("error-banner"),
+  backendNoticeBanner: document.getElementById("backend-notice-banner"),
   composer: document.getElementById("composer"),
   input: document.getElementById("input"),
   send: document.getElementById("send"),
@@ -199,6 +200,7 @@ async function onSwitchSession() {
 function resetSessionHeader() {
   dom.sessionInfo.dataset.state = "loading";
   dom.sessionInfo.innerHTML = `<span class="muted">No session</span>`;
+  dom.backendNoticeBanner.hidden = true;
 }
 
 function setupSettingsButton() {
@@ -327,6 +329,9 @@ function renderSessionInfo(info) {
     </span>
     <span class="pill" title="locale">${escapeHtml(locale)}</span>
   `;
+  // textContent, not innerHTML: the notice embeds a backend error string.
+  dom.backendNoticeBanner.textContent = info.backend_notice || "";
+  dom.backendNoticeBanner.hidden = !info.backend_notice;
 }
 
 /// Drive the composer's three-state UI from a single function so the

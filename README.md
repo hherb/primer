@@ -130,6 +130,11 @@ an optional cloud `--fallback-backend`:
 - `hybrid` — routes routine turns to local and complex/knowledge-intensive turns
   (a struggling child, hard factual questions) to the stronger cloud model.
 
+If one leg fails to build at startup, for example because the cloud API key is
+missing, the Primer still starts on the other leg and tells you which one: a
+`Warning:` line in the CLI, a banner in the desktop app. The desktop sidebar
+always names the backend that is actually answering.
+
 **For absolute privacy, do nothing:** leave `--router-mode` at its `local-only`
 default and/or never provide an API key. With no API key the cloud leg cannot be
 built, so even a mis-set `hybrid` degrades to local-only. Routing to the cloud

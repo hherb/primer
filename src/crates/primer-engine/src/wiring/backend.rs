@@ -29,6 +29,46 @@ pub enum MainBackendPlan {
     Fail,
 }
 
+/// A non-fatal degradation of the configured fallback / router legs,
+/// returned by [`build_main_backend`] so a UI can tell the user instead of
+/// leaving it in a `tracing::warn!` nobody sees (issues #347, #338).
+/// `reason` is the failed leg's construction error, rendered verbatim.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum BackendNotice {
+    /// The configured fallback could not be built; the primary serves alone,
+    /// so there is no fallback if it fails mid-session (plan `PrimaryAlone`).
+    FallbackDropped { fallback: String, reason: String },
+    /// The primary could not be built; every turn goes to the fallback
+    /// (plan `SecondaryAlone`). `fallback_model` is its resolved model.
+    PrimaryUnavailable {
+        primary: String,
+        fallback: String,
+        fallback_model: Option<String>,
+        reason: String,
+    },
+}
+
+impl std::fmt::Display for BackendNotice {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::FallbackDropped { fallback, reason } => write!(
+                f,
+                "Fallback backend '{fallback}' is disabled for this session: {reason}"
+            ),
+            Self::PrimaryUnavailable {
+                primary,
+                fallback,
+                reason,
+                ..
+            } => write!(
+                f,
+                "Backend '{primary}' is unavailable, so this session uses the \
+                 fallback backend '{fallback}': {reason}"
+            ),
+        }
+    }
+}
+
 /// Pure decision: given whether each leg built and whether a fallback was
 /// configured, choose how to assemble the main backend. No I/O.
 pub fn plan_main_backend(
@@ -113,6 +153,47 @@ pub async fn build_backend(
     }
 }
 
+/// Build the secondary leg named `fb_name`. A model-resolve error becomes the
+/// leg's `Err` (never `?`-propagated: a broken opt-in fallback must not abort
+/// a healthy primary). Also returns the resolved model for [`BackendNotice`].
+async fn build_secondary_leg(
+    fb_name: &str,
+    params: &BackendParams,
+) -> (Result<Arc<dyn InferenceBackend>>, Option<String>) {
+    match resolve_fallback_model(fb_name, params.fallback_model.clone()) {
+        Ok(fb_model) => (
+            build_backend(fb_name, fb_model.clone().unwrap_or_default(), params).await,
+            fb_model,
+        ),
+        Err(msg) => (Err(PrimerError::Inference(msg.into())), None),
+    }
+}
+
+/// The notice for a degraded plan; `None` for `Wrapped` / `Fail`. `failed`
+/// is the error of whichever leg did not build.
+fn degraded_notice(
+    plan: MainBackendPlan,
+    primary_name: &str,
+    fb_name: &str,
+    fb_model: Option<String>,
+    failed: Option<&PrimerError>,
+) -> Option<BackendNotice> {
+    let reason = failed.map(ToString::to_string).unwrap_or_default();
+    match plan {
+        MainBackendPlan::PrimaryAlone => Some(BackendNotice::FallbackDropped {
+            fallback: fb_name.to_string(),
+            reason,
+        }),
+        MainBackendPlan::SecondaryAlone => Some(BackendNotice::PrimaryUnavailable {
+            primary: primary_name.to_string(),
+            fallback: fb_name.to_string(),
+            fallback_model: fb_model,
+            reason,
+        }),
+        MainBackendPlan::Wrapped | MainBackendPlan::Fail => None,
+    }
+}
+
 /// Construct the main inference backend, applying the opt-in construction
 /// fallback. When `params.fallback_backend` is `None`, this is exactly
 /// `build_backend(primary_name, primary_model, params)`.
@@ -124,11 +205,15 @@ pub async fn build_backend(
 ///   unbuildable/misconfigured — a broken opt-in fallback never aborts a
 ///   healthy primary);
 /// - `Fail` ⇒ the primary's construction error.
+///
+/// The second tuple element reports a `PrimaryAlone` / `SecondaryAlone`
+/// degradation of a configured fallback (or router) as a [`BackendNotice`];
+/// it is `None` when nothing was configured or both legs built.
 pub async fn build_main_backend(
     primary_name: &str,
     primary_model: String,
     params: &BackendParams,
-) -> Result<Arc<dyn InferenceBackend>> {
+) -> Result<(Arc<dyn InferenceBackend>, Option<BackendNotice>)> {
     use primer_inference::FallbackBackend;
 
     // Routing modes build a RouterBackend over the same two legs the fallback
@@ -151,28 +236,22 @@ pub async fn build_main_backend(
 
     let Some(fb_name) = params.fallback_backend.clone() else {
         // No fallback configured: today's behavior verbatim.
-        return primary;
+        return primary.map(|b| (b, None));
     };
 
-    // A fallback IS configured. Resolve the secondary model (may fail for a
-    // required-model backend like ollama/openai-compat) and try to build it.
-    // A misconfigured or unbuildable *opt-in* fallback must NEVER abort startup
-    // when the primary is healthy — it degrades to `PrimaryAlone` in the match
-    // below — so a resolve error is folded into the `secondary` Result rather
-    // than `?`-propagated. When the primary ALSO failed, `plan_main_backend`
-    // returns `Fail` and the primary's (more actionable) error surfaces.
-    let secondary = match resolve_fallback_model(&fb_name, params.fallback_model.clone()) {
-        Ok(fb_model) => build_backend(&fb_name, fb_model.unwrap_or_default(), params).await,
-        Err(msg) => Err(PrimerError::Inference(msg.into())),
-    };
+    // A fallback IS configured. When the primary ALSO failed,
+    // `plan_main_backend` returns `Fail` and the primary's (more actionable)
+    // error surfaces.
+    let (secondary, fb_model) = build_secondary_leg(&fb_name, params).await;
 
-    match plan_main_backend(primary.is_ok(), true, secondary.is_ok()) {
+    let plan = plan_main_backend(primary.is_ok(), true, secondary.is_ok());
+    match plan {
         MainBackendPlan::Wrapped => {
             // Both built — wrap. expect() is safe: plan returned Wrapped only
             // because both is_ok() were true.
             let primary = primary.expect("Wrapped implies primary built");
             let secondary = secondary.expect("Wrapped implies secondary built");
-            Ok(Arc::new(FallbackBackend::new(primary, secondary)))
+            Ok((Arc::new(FallbackBackend::new(primary, secondary)), None))
         }
         MainBackendPlan::SecondaryAlone => {
             tracing::warn!(
@@ -180,7 +259,14 @@ pub async fn build_main_backend(
                 secondary = %fb_name,
                 "primary backend unavailable at startup; using fallback backend alone"
             );
-            secondary
+            let notice = degraded_notice(
+                plan,
+                primary_name,
+                &fb_name,
+                fb_model,
+                primary.err().as_ref(),
+            );
+            secondary.map(|b| (b, notice))
         }
         MainBackendPlan::PrimaryAlone => {
             // Reached only when primary built but the secondary did not — either
@@ -193,11 +279,18 @@ pub async fn build_main_backend(
                     "fallback backend unusable (misconfigured or failed to construct); using primary alone"
                 );
             }
-            primary
+            let notice = degraded_notice(
+                plan,
+                primary_name,
+                &fb_name,
+                fb_model,
+                secondary.err().as_ref(),
+            );
+            primary.map(|b| (b, notice))
         }
         MainBackendPlan::Fail => {
             // Both failed: surface the primary's (most informative) error.
-            primary
+            primary.map(|b| (b, None))
         }
     }
 }
@@ -211,7 +304,7 @@ async fn build_router_backend(
     primary_name: &str,
     primary_model: String,
     params: &BackendParams,
-) -> Result<Arc<dyn InferenceBackend>> {
+) -> Result<(Arc<dyn InferenceBackend>, Option<BackendNotice>)> {
     use primer_inference::RouterBackend;
 
     let Some(fb_name) = params.fallback_backend.clone() else {
@@ -226,21 +319,20 @@ async fn build_router_backend(
     };
 
     let primary = build_backend(primary_name, primary_model, params).await;
-    let secondary = match resolve_fallback_model(&fb_name, params.fallback_model.clone()) {
-        Ok(fb_model) => build_backend(&fb_name, fb_model.unwrap_or_default(), params).await,
-        Err(msg) => Err(PrimerError::Inference(msg.into())),
-    };
+    let (secondary, fb_model) = build_secondary_leg(&fb_name, params).await;
 
-    match plan_main_backend(primary.is_ok(), true, secondary.is_ok()) {
+    let plan = plan_main_backend(primary.is_ok(), true, secondary.is_ok());
+    match plan {
         MainBackendPlan::Wrapped => {
             let primary = primary.expect("Wrapped implies primary built");
             let secondary = secondary.expect("Wrapped implies secondary built");
-            Ok(Arc::new(RouterBackend::with_ttft_budget(
+            let router = RouterBackend::with_ttft_budget(
                 primary,
                 secondary,
                 params.router_mode,
                 params.primary_ttft_budget_ms,
-            )))
+            );
+            Ok((Arc::new(router), None))
         }
         MainBackendPlan::SecondaryAlone => {
             tracing::warn!(
@@ -248,7 +340,14 @@ async fn build_router_backend(
                 secondary = %fb_name,
                 "router: primary unavailable at startup; using secondary alone (no routing)"
             );
-            secondary
+            let notice = degraded_notice(
+                plan,
+                primary_name,
+                &fb_name,
+                fb_model,
+                primary.err().as_ref(),
+            );
+            secondary.map(|b| (b, notice))
         }
         MainBackendPlan::PrimaryAlone => {
             if let Err(ref e) = secondary {
@@ -258,10 +357,17 @@ async fn build_router_backend(
                     "router: secondary unusable; using primary alone (routing disabled)"
                 );
             }
-            primary
+            let notice = degraded_notice(
+                plan,
+                primary_name,
+                &fb_name,
+                fb_model,
+                secondary.err().as_ref(),
+            );
+            primary.map(|b| (b, notice))
         }
         // Both legs failed: surface the primary's (most informative) error.
-        MainBackendPlan::Fail => primary,
+        MainBackendPlan::Fail => primary.map(|b| (b, None)),
     }
 }
 
