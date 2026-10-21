@@ -15,7 +15,7 @@ pub mod paths;
 pub mod wiring;
 
 pub use learner::{
-    create_learner_with_id, parse_languages, reconcile_persisted_learner,
+    adopt_or_mint_learner_id, create_learner_with_id, parse_languages, reconcile_persisted_learner,
     verify_resume_locale_match,
 };
 pub use paths::{

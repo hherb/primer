@@ -1,192 +1,164 @@
 # Primer — Next Session Brief
 
 **Audience:** future Claude Code session continuing work on this repo.
-**Last updated:** 2026-10-16 11:02 UTC. Branch `refactor/split-gui-wiring`. **Two PRs open against `main`, both branched independently off `main`: #333 (GUI `wiring.rs` stage split) and #334 (`quinn-proto` lockfile bump for Dependabot alert #6).** `main` was at `b47bf89` when this session branched; every PR from the prior brief (#322, #323, #324, #327, #328, #329) had merged between sessions. Issue **#330** (43 broken rustdoc intra-doc links) is still open.
+**Last updated:** 2026-10-21 06:05 UTC. **Four PRs are open against `main`, all independent:**
 
-This session ran the standard sweep first. The oversized-file sweep matched expectations, and the inline-test detector was **clean for the fifth session running**. `schema.rs` (#328) and `config/types.rs` (#329) had already been split between sessions, so this session took the remaining no-feature-gate production file, `primer-gui/src/wiring.rs`. The prior brief had flagged it as *not mechanical*, so it got stage-level verification plus new tests (details below).
+| PR | Branch | What | Closes |
+|---|---|---|---|
+| **#345** | `docs/reland-rustdoc-gate` | Re-land of #344 (rustdoc fixes + `cargo doc` CI gate); also carries this brief | #330, #319 |
+| **#346** | `fix/learner-id-adoption-339` | A learner-id lookup error now propagates instead of minting and persisting a UUID | #339 |
+| **#348** | `fix/gui-env-files-337` | The GUI loads `.env` and `~/.primer_env` at startup, like the CLI | #337 |
+| **#349** | `fix/match-main-model-335` | "Match main" also ignores a stale subsystem `model` override | #335 |
+
+`main` is at `252b224` (#343, rustls). Since the last brief, #342 and #343 merged. **#344 did NOT land on `main`** (see below).
 
 ## What we shipped this session
 
-### PR #333 (branch `refactor/split-gui-wiring`): `primer-gui/src/wiring.rs`, 591 lines
-Commits **`7b58445`** (the split + stage tests + CLAUDE.md) and a follow-up commit citing the PR number in CLAUDE.md (bundled with this brief).
+### #344 was lost to the stacked-PR trap, so it is re-landed as #345
+- **What happened:** #342 squash-merged to `main` at 02:50:35. #344, stacked on #342, merged **52 s later into the now-stale `refactor/split-gui-voice-commands` branch**. GitHub had not yet retargeted it to `main`. None of #344's rustdoc fixes or CI gate reached `main`, and #330 and #319 stayed open.
+- **Fix:** I cherry-picked its three commits unchanged onto `origin/main`:
+  - `fa2d24c`: link fixes + CI gate;
+  - `70bfe2a`: CLAUDE.md citations + the old brief;
+  - `fcb7d75`: review follow-up (the cpal-free android-native doc arm, stale docs, `[[memory]]` refs).
+- **Verified:** the doc arms re-run clean on the new base, and fmt is clean.
+- **#345's CI ran the `cargo doc` steps on Linux for the first time, and they passed** in the `test` job, `feature-combos` and macOS. The "unproven on Linux" risk from the last brief is retired.
+- CLAUDE.md's gate entry now cites #345.
+- **Earlier in this session (before the brief), I reviewed #344 and applied all the findings.** The notable one: the cpal-free `primer-speech --features android-native` config (what the APK ships) failed rustdoc on a cpal-gated link, and CI never documented that config. Both are fixed, and CI now documents android-native bare **and** with `voice-loop`.
 
-The file was **one ~395-line `build_with_strategy` function** with 11 `// ─── stage ───` banners, plus ~90 lines of helpers. The stages became functions in sibling submodules; `mod.rs` is now a thin orchestrator that calls them in the original order:
+### #346 (`1b7f71b`): closes #339
+- New pure helper `primer_engine::adopt_or_mint_learner_id(Result<Option<Uuid>>) -> Result<Uuid>`:
+  - `Ok(Some)` → adopt;
+  - `Ok(None)` → mint;
+  - `Err` → **propagate**.
+- The GUI (`wiring/stores.rs`) and CLI (`main.rs`) replace their duplicated `match` with it, adding error context and `?`.
+- TDD: 3 unit tests in `primer-engine/src/learner.rs`, red then green.
+- Tests: engine 75, CLI 23, GUI 217; clippy and fmt clean. CI green apart from the CodeQL rust scan, which was still pending.
 
-| File | Lines | Holds |
-|---|---:|---|
-| `wiring/mod.rs` | 212 | 2 `pub` entry points, private `LocaleStrategy`, orchestrating `build_with_strategy` |
-| `wiring/backend_params.rs` | 173 | `build_backend_params(&GuiConfig) -> BackendParams` (both API-key env reads) + `resolve_main_model` / `cloud_backend_in_use` / `subsystem_kind` |
-| `wiring/stores.rs` | 185 | `open_session_store_and_learner(..) -> (SqliteSessionStore, Locale, LearnerModel)` + `open_knowledge_base` |
-| `wiring/subsystems.rs` | 145 | `build_subsystems(..) -> DialogueManagerSubsystems` + private `build_embedder` |
-| `wiring/stage_tests.rs` | 236 | **new:** 10 per-stage unit tests |
-| `wiring/tests.rs` | 423 | **untouched** (end-to-end) |
+### #348 (`b32059e`): closes #337, env-file half
+- New `primer_engine::env_files`:
+  - `load_env_files()`: `.env`, then `$HOME/.primer_env`; earlier sources win;
+  - `load_user_env_file(home) -> bool`;
+  - `USER_ENV_FILE`.
+- Both binaries call it. `primer-cli` drops its direct `dotenvy` dep.
+- The GUI calls it first in its desktop setup block, before any thread spawns (`set_var` safety). Mobile is untouched.
+- A malformed `~/.primer_env` is now logged, and a non-UTF-8 API-key env value warns via `env_key`.
+- Docs: CLAUDE.md, README and `docs/devel/01-getting-started.md`.
+- TDD: 2 tests in `env_files::tests`.
+- **The banner half is filed as #347:** report `build_main_backend`'s `PrimaryAlone` outcome to the GUI.
 
-- **Visibility:** the stage functions are `pub(super)`. `LocaleStrategy` stays plain-private in `mod.rs`; the child `stores.rs` reaches it via `super::LocaleStrategy` for free, since children can see their ancestors' private items. `cloud_backend_in_use` is no longer called from `mod.rs`, so it gets a `#[cfg(test)] use backend_params::cloud_backend_in_use;` re-import for `tests.rs` (case 5 of the recipe).
-- **Verification beyond the pub-surface diff:** the pub-surface diff is nearly meaningless for this kind of split, since everything that moved was inside one private fn. So I ran the **order-insensitive substantive-line diff** and audited every difference. All of them were:
-  - parameter renames that keep the same value;
-  - new signatures and `Ok(..)` wrapping;
-  - the embedder key now reading `params.openai_compat_api_key.clone()`, the same value as before.
+### #349 (`64dac6a`): closes #335
+- New `subsystem_model()` mirrors `subsystem_kind()`, and the three `*_model` `BackendParams` fields use it.
+- The `SubsystemConfig` doc now says `timeout_ms` still applies under match-main. That is intentional; it's a per-subsystem tunable.
+- TDD: the existing stage test, extended with stale models, went red (`Some("stale-model")`) then green. GUI tests: 217.
 
-  No literal, error message, `tracing` call or match arm changed. Side-effect order is unchanged; the only reorder is `VocabSettings` vs `PedagogyConfig`, both pure.
-- **Stage tests** (`stage_tests.rs`):
-  - a stale subsystem `kind` is ignored while `match_main` is set; explicit overrides pass through;
-  - inline keys are used whatever the backend kind; the env cloud key is not read when cloud is unreachable (deterministic, no env mutation);
-  - reasoning-marker parsing; fallback/router/TTFT passthrough;
-  - fresh-learner minting under the cfg locale; the resume strategy re-tags the store to the persisted locale;
-  - the in-memory KB is auto-seeded;
-  - subsystems built on a stub main backend pick up all three GUI timeouts and the vocab cap (real `Arc::clone` inheritance is untested — #340); the vocab cap falls back to `DEFAULT_VOCAB_MAX_PER_PROMPT`.
-
-  Every test sets `cfg.embedder.kind = "none"`, because the default build's embedder is fastembed (a ~570 MB download).
-
-### PR #334 (branch `chore/bump-quinn-proto`): Dependabot alert #6
-Commit **`c14cabf`**, a two-line `Cargo.lock` bump of `quinn-proto` 0.11.14 → 0.11.15, which clears GHSA-4w2j-m93h-cj5j (high: memory exhaustion from unbounded out-of-order stream reassembly).
-- **Not exploitable today.** `quinn-proto` is a lockfile-only entry, reachable only via `reqwest`'s optional `http3` feature (which also needs `--cfg reqwest_unstable`). Neither locked `reqwest` enables it: 0.12.28 (ours: json/stream/rustls-tls) and 0.13.3 (via tauri: json/stream). `cargo tree -i quinn-proto --workspace --all-features --target all` prints nothing, and no quinn artifact exists in `target/`.
-- `cargo check --workspace --all-targets --locked` clean; nothing recompiled.
-- **Dependabot state after this lands: zero open alerts.** History: #1/#3 openssl, #4 tar and #7 serde_with (merged dependabot PR #323) are all fixed. **#2 glib was dismissed earlier as `tolerable_risk`**; it is tracked by issue #135 (glib 0.18 → 0.20+ is blocked on Tauri 3).
-
-### Verification (#333)
-- `cargo test -p primer-gui`: baseline **207** → **217 passed / 0 failed** (+10 new).
-- `cargo test --workspace`: **51 × `test result: ok`**, 0 FAILED/error. This ran before the stage tests were added; only `primer-gui` changed afterwards, and its suite and clippy were re-run.
-- `cargo clippy --workspace --all-targets -- -D warnings` clean; `cargo clippy -p primer-gui --all-targets -- -D warnings` clean after the tests landed; `cargo fmt --all -- --check` clean; `cargo check -p primer-gui --no-default-features --all-targets` clean.
-- CI at close: 2 checks passing (Cloudflare Pages, gradle wrapper), 8 pending, **none failing**.
-
-### Docs
-- **CLAUDE.md:** four stale `wiring.rs::…` paths repointed (`resolve_main_model` and `build_backend_params` in `backend_params.rs`; `build_with_strategy` in `wiring/mod.rs`). A new paragraph in the `primer-gui` section describes the layout and the stage-test rationale (cites PR #333).
-- **README.md / ROADMAP.md deliberately unchanged:** they describe capabilities, not file layout. Grep-verified: no reference to `wiring.rs`, `build_with_strategy` or `resolve_main_model`.
+### Per-session sweep
+- The oversized list is unchanged from last session.
+- The **inline-test detector is clean for the seventh session running**.
+- Watch-list: `primer-classifier/src/llm.rs` (441), `primer-extractor/src/llm.rs` (454).
 
 ## What's next (concrete acceptance criteria)
 
-### 0. PRs #333 and #334: owner review/merge
-#333 is a pure refactor plus tests, with no runtime behaviour change. #334 is a lockfile-only bump. They are independent; merge in either order. Acceptance: all CI checks green, owner merges.
+### 0. Owner review/merge: #345, #346, #348, #349
+- All four are independent and branch from `main`.
+- **Expect merge conflicts:**
+  - #345 and #348 both touch `CLAUDE.md`, in different hunks: line ~41 (env files) and the `cargo doc` / `primer-speech` bullets. They should auto-merge.
+  - #346 and #348 both touch `primer-engine/src/lib.rs` (the `pub use learner::{…}` list vs. a `pub mod env_files;` line) and `primer-cli/src/main.rs` (the imports vs. the env block). Adjacent edits, so a trivial rebase may be needed for whichever merges second.
+- **Acceptance:** CI green and the owner merges. After #345 merges, confirm on `main` that #330 and #319 auto-closed; close them by hand if not.
+- **Lesson, now in the habits list:** never merge a stacked PR within a minute of its base PR. Retarget it first or rebase it.
 
-**Dependabot triage recipe** (for future alerts):
-1. List open alerts: `gh api 'repos/hherb/primer/dependabot/alerts?state=open' --jq '.[] | {n:.number, sev:.security_advisory.severity, pkg:.dependency.package.name, fix:.security_vulnerability.first_patched_version.identifier}'`.
-2. Check reachability with `cargo tree -i <pkg> --workspace --all-features --target all`. Empty output means a lockfile-only entry, so the alert can't be exploited.
-3. Fix with `cargo update -p <pkg> --precise <fix>` on its own branch off `main`.
-4. Verify with `cargo check --workspace --all-targets --locked`.
+### 1. Sweep + inline-test detector: re-run EVERY session
+Commands are in the resume block.
 
-### 1. Sweep + inline-test detector: re-run EVERY session (clean five sessions running)
-Commands are in the resume block. Watch-list: `primer-classifier/src/llm.rs` (441) and `primer-extractor/src/llm.rs` (454) carry inline test modules and sit near the 500 threshold.
+### 2. Remaining review-filed bugs (all host-completable; TDD each: failing test, fix, `Closes #N` PR)
+- **#347** (new): surface a dropped cloud fallback to the GUI user.
+  - Have `build_main_backend` return its plan outcome, then show a banner.
+  - Pure-test the plan → message mapping.
+- **#338:** the sidebar shows the local primary while the cloud fallback serves turns.
+- **#336:** use `tracing::warn!` instead of `eprintln!` for embedder fallback notices.
+- **#341:** CLI-flag wording in engine errors reaches GUI users.
+- **#340:** stage-test gaps.
+- Older ones: #307–#316 (retrieval/storage/streaming), #325/#326 (voice), #331/#332 (storage).
 
-### 2. Production-code splits (the open, owner-approved lane)
-Remaining oversized **production** files (post-#333 sweep), lowest-risk first. **All remaining ones are feature-gated → dual-verify.**
-- **`primer-gui/src/commands/voice.rs` (559, `speech`-gated)**, recommended next. Baseline both `cargo test -p primer-gui` and `cargo test -p primer-gui --features speech`, plus `cargo clippy -p primer-gui --features speech --all-targets -- -D warnings`. Check its shape first: N Tauri commands (mechanical) or one big function (needs stage extraction + stage tests, like #333).
-- **`primer-inference/src/qnn/genie/real.rs` (566, `qnn`-gated)**: the default build covers the host-mock path, and `--features qnn` covers the real arm (`cargo clippy -p primer-inference --features qnn --all-targets -- -D warnings`). The file is Android-only at runtime, so the host can only *compile* the real arm.
-- **`primer-speech/src/voice_loop/state_machine/inner.rs` (506)**: already inside a split dir; `mocks.rs` reaches siblings via `super::`. Only 6 lines over. Likely one big `run_loop_inner` function, so it would be a stage extraction, not mechanical. Low value for the risk; consider leaving it.
-- **`primer-speech/src/macos/{tts.rs 668, stt.rs 504}`** (`macos-native`-gated; this host is macOS so the feature build works here).
-- Hardest: `primer-cli/src/main.rs` (1357, heavily `cfg(feature)`-gated, needs the per-feature clippy+test matrix).
-- **Off the list:** `consts.rs` (#322), `prompt_builder.rs` (#321), `dialogue_manager/turn.rs` (#320), `state_machine.rs` (#318), `schema.rs` (#328), `config/types.rs` (#329), `wiring.rs` (#333).
-- The >500-line test-support files (`store/tests/session_tests.rs` 2442, `state_machine/mocks.rs` 1381, `dialogue_manager/tests/turn_tests.rs` 1178, `config/tests.rs` 1086, `dialogue_manager/tests/background_tests.rs` 777, `kb-load/tests/common/mod.rs` 677, `dialogue_manager/test_support.rs` 655, `store/tests/learner_tests.rs` 607) remain lower-value than production files.
+### 3. Production-code splits (owner-approved lane, all feature-gated, so dual-verify)
+- **`primer-inference/src/qnn/genie/real.rs` (566, `qnn`)** is the recommended one. Baselines:
+  - `cargo test -p primer-inference`;
+  - `cargo clippy -p primer-inference --features qnn --all-targets -- -D warnings`;
+  - the rustdoc `qnn` arm.
+- `primer-speech/src/macos/{tts.rs 668, stt.rs 504}` (`macos-native`; this host is macOS).
+- Low value: `state_machine/inner.rs` (506). Hardest: `primer-cli/src/main.rs` (~1350, heavily cfg-gated).
+- **The gate for every split includes the rustdoc arms.** An outer `///` plus an inner `//!` on the same module breaks links (CLAUDE.md rule 3).
 
-No re-ask needed: this lane is owner-approved.
-
-### 3. Issue #330: rustdoc link cleanup + CI guard (host-completable, a good break from splits)
-Acceptance: `RUSTDOCFLAGS="-D warnings" cargo doc --workspace --no-deps --document-private-items` exits 0, and that command is a step in `.github/workflows/ci.yml`. `primer-gui` holds about 40% of the 43 links. **Fix by escaping the link text, not by making modules `pub`** (that would defeat the façade pattern). #333 may have shifted the `primer-gui` count slightly: the new modules' docs use plain backticks, not intra-doc links, so it should be no worse, but re-count.
-
-### Carried / owner-or-hardware-gated (none host-completable autonomously)
-- **#260**: Android-voice on-device acceptance (RedMagic 11 Pro + mic + quiet room).
-- **#192**: manual macOS-native STT + injected non-AVSpeech TTS audio path.
-- **#170 Stage B / E / F**: Supertonic voice-mode TTS, in-loop A/B numbers, Hindi preview→stable. The OpenRAIL-M clause (e) disclosure must ship before any default Supertonic flip.
-- **#166 item #1**: owner-run WhisperStream reuse smoke (command at the bottom).
-- **#135**: glib 0.18.5 → 0.20+ (blocked on Tauri 3).
-- **Branch protection**: make `cargo test (default features)` a required check on `main` (owner GitHub-settings call).
-- QNN stable-token-across-reboots gate; NPU pedagogy/answer-quality tuning; latency-routing calibration.
+### Carried / owner-or-hardware-gated
+- **#260**: Android-voice on-device acceptance.
+- **#192**: manual macOS-native STT + injected TTS smoke.
+- **#170 Stages B, E and F**: the OpenRAIL-M disclosure must ship before any default flip.
+- **#166 item #1**: owner-run WhisperStream reuse smoke.
+- **#135**: glib (blocked on Tauri 3).
+- **Branch protection**: make `cargo test (default features)` a required check.
+- QNN token stability, NPU tuning, latency-routing calibration.
 
 ## Open decisions / risks
 
-- **PR #333 open, awaiting owner review.** The pub-surface gate is weak for this split, so review leans on the line-diff audit (in the PR body) and the 10 new stage tests. Worth a careful read of `stores.rs`, which holds the locale-mismatch hard-fail and the resume re-tag logic.
-- **Dependabot: triaged this session.** The only open alert (#6, `quinn-proto`, high) is a lockfile-only entry that is never compiled; PR #334 bumps it. Once #334 merges, zero alerts remain open. The dismissed #2 (glib, `tolerable_risk`) stays tied to #135 / Tauri 3.
-- **The `github` MCP server failed to connect** (bad Authorization header). The `gh` CLI worked fine for PRs and issues.
-- **Build times (warm):** `cargo test -p primer-gui` ~25 s, workspace clippy ~1–4 min, full workspace test ~7 min. Run ONE cargo pass at a time. **Don't edit sources while a baseline `cargo test` is still compiling**: if rustc reaches the crate after your edit, the "baseline" silently tests the new code.
+- **#345 keeps the façade `allow` choice** over #330's "escape the links" suggestion. That is the owner's call; flagged in #344/#345.
+- **#346 changes startup behaviour.** A DB error while reading the most recent session's learner id is now a hard startup error (GUI session-start error; CLI exits), not a silent identity mint. That is the intended trade, since the old path silently corrupted data. It is the same posture as an existing `load_learner` failure.
+- **#348 loads `.env` from the GUI's working directory.** For `cargo tauri dev` that is the repo's `.env`; for a Dock launch it is `/`, which is harmless. Not exercised: a real Dock launch of the bundled `.app`.
+- **Stale CMake cache after Xcode/SDK upgrades.** Symptom: `'<header>' file not found` from a `*-sys` build. Recipe:
+  1. Find the stale caches: `find src/target -name CMakeCache.txt -maxdepth 6 | xargs grep -l 'MacOSX<old>'`.
+  2. `cargo clean -p <those sys crates>`.
+- **The `github` MCP server fails to connect** (bad Authorization header). The `gh` CLI works.
+- **zsh gotchas:**
+  - `$var` is not word-split; use `${=spec}`.
+  - An unquoted `echo ===X` triggers `=` expansion; quote it.
+  - `grep --include=*.rs` globs fail; use `git grep … -- '*.rs'`.
 
 ## Patterns to reuse, not reinvent
 
-### Split recipe
-1. **Baseline:** `cargo test -p <crate>` (plus any `--features` that gate tests) green BEFORE touching anything; record the pass count.
-2. **Check the shape:** N independent top-level items (mechanical; pub-surface + line diff prove it) or one big function (stage extraction; see #333 below).
-3. **Move:** `git mv foo.rs foo/mod.rs`, then write the siblings. With a pristine copy of the original outside the repo (`git show main:src/… > $SCRATCH/orig.rs`), you can `sed -n 'A,Bp'` ranges out of it for byte-exact moves.
-4. **Visibility across the new boundary**, six cases seen so far:
-   1. already-`pub mod` blocks: no work;
-   2. a parent that globs you: `pub use sub::*;` façade;
-   3. private items a test child reaches: keep them in `mod.rs`;
-   4. a `pub(super)` method that parent-level tests call: `pub(in crate::<path>)`;
-   5. a sibling-moved helper a test reaches via `use super::*`: `pub(super)` + `#[cfg(test)] use sub::name;` (plain `use`, E0364 otherwise);
-   6. mixed `pub`/`pub(crate)` façade: re-export each at its own visibility (E0365).
-
-   Children reach ancestors' private items (e.g. `LocaleStrategy`) for free.
-5. **Fix paths:** prefer absolute `crate::…` imports in new submodules. Watch for unused imports (`-D warnings`).
-6. **Verify:** pub-surface diff; the order-insensitive substantive-line diff (snippet below, audit every line); crate count matches baseline; feature-combo checks if cfg arms exist; workspace test; clippy `-D warnings`; fmt `--check` (run fmt AFTER the split).
-
-### Stage extraction (#333), for single-big-function files
-Extract each `// ─── stage ───` block into a `pub(super)` fn that takes `&GuiConfig`-style inputs and returns the locals the next stage needs (a tuple is fine). Keep the orchestrator calling them in the **original order** so the side-effect order is provably unchanged. Then add a `stage_tests.rs` sibling that tests each stage directly. The extraction is what makes those tests possible, and they are what the review relies on instead of the pub-surface diff.
-
-### Substantive-line diff
-```bash
-strip() { grep -vE '^\s*//' | grep -vE '^\s*$' | grep -vE '^\s*(pub |pub\(crate\) |pub\(super\) )?(use |mod ) ?' | sed -E 's/^\s+//'; }
-strip < $SCRATCH/orig.rs | sort > $SCRATCH/old.txt
-cat <new files> | strip | sort > $SCRATCH/new.txt
-diff $SCRATCH/old.txt $SCRATCH/new.txt   # audit EVERY line; mechanical splits → only façade lines
-```
-The `sed` de-indent matters for stage extraction: code moved one indentation level would otherwise show up as a diff on every line.
-
-### Other habits
-- **Doc-drift hunt:** grep the moved file name AND its key symbols across README/ROADMAP/CLAUDE/docs. In CLAUDE.md, `file.rs::symbol` references are the usual casualties.
-- **Cite the PR number in CLAUDE.md** as a follow-up commit, once the PR exists.
-- **Read `NEXT_SESSION.md` AFTER `git pull`.** This session first read a stale copy, before pulling 4 commits, and nearly followed an outdated recommendation.
-- **Shell and cargo habits:**
-  - A trailing `grep` that matches nothing returns exit 1; check the `test result:` lines, not the exit code.
-  - Branch each PR off `main`.
-  - Run long cargo passes with `run_in_background: true`.
-  - To wait for a running cargo, use an `until ! pgrep -f 'cargo test' …; do sleep 2; done` loop inside a Bash call, not a bare `sleep`.
+- **Bug-fix recipe (used 3× this session):**
+  1. Branch off `origin/main`. If you started on the wrong branch: `git stash -u; git checkout -b X origin/main; git stash pop`.
+  2. Write the failing test, confirm red, fix, confirm green.
+  3. Run test + clippy for each touched crate, then fmt.
+  4. Hunt for doc drift: `git grep` the behaviour across `*.md`.
+  5. Commit with `Closes #N`, push, open the PR.
+  6. File any out-of-scope half as a new issue **before** writing the PR body, so the body can cite it.
+- **Duplicated GUI+CLI logic → one pure helper in `primer-engine`** that takes the *result* of the I/O call, not the store. That keeps it mock-free to test, as with `adopt_or_mint_learner_id`.
+- **Split recipe, substantive-line diff, Dependabot triage:** unchanged; see the handoff `docs/handoffs/2026-10-16T202752Z.md` § "Patterns to reuse".
+- **Stacked PRs:** after the base squash-merges, retarget or rebase the child **before** merging it. Otherwise it lands on the dead base branch, which is exactly what happened to #344.
+- Read `NEXT_SESSION.md` AFTER `git pull`, and check `git status` first.
 
 ## Exact commands needed to resume
 
 ```bash
-cd /Users/hherb/src/primer && git checkout main && git pull --ff-only && git log --oneline -4 && gh pr list --state open
-# Then re-read NEXT_SESSION.md (it may have changed in the pull). Two PRs open at close: #333 (wiring split), #334 (quinn-proto bump).
-SCRATCH="${TMPDIR:-/tmp}/primer-scratch"; mkdir -p "$SCRATCH"   # or the session's scratchpad dir
+cd /Users/hherb/src/primer && git status --short && git checkout main && git pull --ff-only && git log --oneline -6 && gh pr list --state open
+# Open at close: #345, #346, #348, #349 (independent). Confirm #330/#319 closed once #345 merges.
+S=/private/tmp/primer-scratch; mkdir -p "$S"   # or the session's scratchpad dir
 
 # === Oversized-file sweep + inline-test detector (re-verify EVERY session) ===
 cd /Users/hherb/src/primer/src
 find crates -name '*.rs' -not -path '*/vendor/*' -not -name 'tests.rs' | xargs wc -l | awk '$1>500 && $2!="total"' | sort -rn
 for f in $(find crates -name '*.rs' -not -path '*/vendor/*' -not -name 'tests.rs' | xargs wc -l | awk '$1>500 && $2!="total"{print $2}'); do \
   awk '/#\[cfg\(test\)\]/{ln=NR} ln && NR==ln+1 && /^[[:space:]]*mod .*\{/{print FILENAME" inline mod @"NR}' "$f"; done
-# Empty inline output = no cheap pick → next production split or issue #330.
 
-# === Recommended next split: primer-gui/src/commands/voice.rs (559, speech-gated). Baselines FIRST: ===
-cd /Users/hherb/src/primer/src
-~/.cargo/bin/cargo test -p primer-gui 2>&1 | grep 'test result: ok'                     # expect 217 after #333 merges
-~/.cargo/bin/cargo test -p primer-gui --features speech 2>&1 | grep 'test result: ok'    # record this count too
-~/.cargo/bin/cargo clippy -p primer-gui --features speech --all-targets -- -D warnings
+# === Next bug (#347): start here ===
+gh issue view 347
+git checkout -b fix/fallback-dropped-banner-347 origin/main
+~/.cargo/bin/cargo test -p primer-engine -p primer-gui 2>&1 | grep 'test result'   # baseline
 
 # === Standard workspace gate (one cargo pass at a time) ===
-~/.cargo/bin/cargo test --workspace 2>&1 | tee $SCRATCH/ws.log | tail -3
-grep -cE 'test result: ok' $SCRATCH/ws.log            # expect 51
-grep -E 'test result: FAILED|^error' $SCRATCH/ws.log  # expect empty
+~/.cargo/bin/cargo test --workspace 2>&1 | tee $S/ws.log | tail -3
+grep -E 'test result: FAILED|^error' $S/ws.log  # expect empty
 ~/.cargo/bin/cargo clippy --workspace --all-targets -- -D warnings
 ~/.cargo/bin/cargo fmt --all -- --check
 
-# === Pub-surface diff (repo-root-relative git path; note `mod` AND `type`) ===
-git show main:src/crates/<path>.rs | grep -oE 'pub (struct|enum|fn|const|async fn|trait|type|mod) [A-Za-z_0-9]+' | sort -u > $SCRATCH/old-pub.txt
-cat <new files> | grep -oE 'pub (struct|enum|fn|const|async fn|trait|type|mod) [A-Za-z_0-9]+' | sort -u > $SCRATCH/new-pub.txt
-diff $SCRATCH/old-pub.txt $SCRATCH/new-pub.txt
-
-# === Issue #330: rustdoc link count ===
-~/.cargo/bin/cargo doc --workspace --no-deps --document-private-items 2>&1 \
-  | grep -E '^warning: (unresolved link|public documentation)' -A1 | grep -oE 'crates/[a-z0-9-]+/src' | sort | uniq -c | sort -rn
-
-# === Carried: owner-run the #166 reuse smoke (needs a model + two 16 kHz mono WAVs) ===
-PRIMER_WHISPER_MODEL=/path/to/ggml-small.en.bin \
-PRIMER_WHISPER_AUDIO_A=/path/to/utterance_a.wav \
-PRIMER_WHISPER_AUDIO_B=/path/to/utterance_b.wav \
-  ~/.cargo/bin/cargo test -p primer-speech --features whisper \
-  --test whisper_stream_reuse -- --ignored --nocapture
+# === Rustdoc gate (CI-enforced once #345 merges); feature arms mirror ci.yml ===
+RUSTDOCFLAGS="-D warnings" ~/.cargo/bin/cargo doc --workspace --no-deps --document-private-items
+for spec in "-p primer-speech --features voice-loop,silero,whisper,piper,cpal,supertonic" "-p primer-speech --features android-native" "-p primer-speech --features voice-loop,android-native" \
+  "-p primer-inference --features qnn" "-p primer-inference --features llamacpp" "-p primer-gui --features speech" "-p primer-gui --features android-native" \
+  "-p primer-cli --features speech" "-p primer-speech --features voice-loop,silero,cpal,macos-native" "-p primer-speech --features voice-loop,silero,cpal,macos-native-26"; do \
+  RUSTDOCFLAGS="-D warnings" ~/.cargo/bin/cargo doc ${=spec} --no-deps --document-private-items >/dev/null 2>&1; echo "$spec exit=$?"; done
 ```
 
 ## Reporting back
 
-- **PR #333 (`wiring.rs` split):** 591 lines became `{mod 212, stores 185, backend_params 173, subsystems 145}` + new `stage_tests.rs` (236, 10 tests). This was a stage extraction from one ~395-line function, not a mechanical split, so it was verified with an audited line diff plus per-stage tests. 207 → 217 tests, 0 failed; workspace green; clippy/fmt clean.
-- **PR #334 (Dependabot #6):** `quinn-proto` lockfile bump. Not exploitable, since it is never compiled (only reachable via reqwest's unused `http3` feature). Once it merges, zero open alerts remain.
-- **All prior-brief PRs merged between sessions.** The inline-test detector has been clean five sessions running.
-- **Next:** `commands/voice.rs` (speech-gated, dual-verify), or issue #330 (rustdoc links + CI guard).
-- The GUI is a full app, not a scaffold.
+- **#345:** re-lands #344, which had merged into its dead stacked base. rustdoc `-D warnings` is clean, and the `cargo doc` CI gate now passes on Linux as well as macOS. Closes #330 and #319.
+- **#346 / #348 / #349:** TDD fixes for #339 (no silent learner-id mint on a DB error), #337 (the GUI now loads `~/.primer_env`) and #335 (match-main ignores a stale model). Each is a small diff with a red-then-green test.
+- **New issue #347:** tell the GUI user when the cloud fallback was dropped. Recommended next.

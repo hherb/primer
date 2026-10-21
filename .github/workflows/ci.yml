@@ -109,6 +109,15 @@ jobs:
         # invisible workflow-env escalation (closes #95).
         run: cargo clippy --workspace --all-targets -- -D warnings
 
+      - name: cargo doc (rustdoc -D warnings)
+        # Broken intra-doc links drift-guard (closes #330). Default features
+        # only; the non-default arms are covered in `feature-combos` and
+        # `feature-combos-macos`. `--document-private-items` is the
+        # contributor view the façade-split docs are written for.
+        env:
+          RUSTDOCFLAGS: -D warnings
+        run: cargo doc --workspace --no-deps --document-private-items
+
       - name: cargo test
         # Includes the retrieval-quality integration test in
         # primer-kb-load/tests/retrieval_quality.rs, which loads the
@@ -259,6 +268,28 @@ jobs:
         # steps above and stays warm via the rust-cache layer.
         run: cargo clippy -p primer-cli --features speech --all-targets -- -D warnings
 
+      - name: cargo doc (non-default feature arms, rustdoc -D warnings)
+        # Broken intra-doc links drift-guard for cfg-gated code the default
+        # `cargo doc` step never sees (closes #330, #319). Most deps are
+        # shared with the clippy/check steps above; the primer-gui arms add a
+        # one-time Tauri check build (cached thereafter by rust-cache), and
+        # the android-native / qnn arms add `jni` / `primer-qnn-sys`.
+        # android-native is documented twice: bare (the cpal-free config the
+        # APK ships via `primer-gui/android-native`) and with `voice-loop`
+        # (cpal on top). Links that cross the `cpal` gate only break in the
+        # bare arm.
+        env:
+          RUSTDOCFLAGS: -D warnings
+        run: |
+          cargo doc --no-deps --document-private-items -p primer-speech --features voice-loop,silero,whisper,piper,cpal,supertonic
+          cargo doc --no-deps --document-private-items -p primer-speech --features android-native
+          cargo doc --no-deps --document-private-items -p primer-speech --features voice-loop,android-native
+          cargo doc --no-deps --document-private-items -p primer-inference --features qnn
+          cargo doc --no-deps --document-private-items -p primer-inference --features llamacpp
+          cargo doc --no-deps --document-private-items -p primer-gui --features speech
+          cargo doc --no-deps --document-private-items -p primer-gui --features android-native
+          cargo doc --no-deps --document-private-items -p primer-cli --features speech
+
   # macOS feature-combo drift-guard. The Apple-native speech backends
   # (`macos-native`, `macos-native-26`) and the `voice-loop` state
   # machine they wire into are platform-specific and invisible to the
@@ -336,6 +367,14 @@ jobs:
         # main-thread tokio runtime selection, and the espeak-ng probe
         # — all of which differ across the macos-native build.
         run: cargo clippy -p primer-cli --features speech,macos-native --all-targets -- -D warnings
+
+      - name: cargo doc -p primer-speech --features voice-loop,macos-native (rustdoc -D warnings)
+        # macOS-only half of the broken-intra-doc-links drift-guard (#330).
+        # `macos-native-26` is not covered: no CI job builds it (needs the
+        # macOS 26 SDK's Swift toolchain); verify it locally instead.
+        env:
+          RUSTDOCFLAGS: -D warnings
+        run: cargo doc --no-deps --document-private-items -p primer-speech --features voice-loop,silero,cpal,macos-native
 
       - name: cargo clippy -p primer-embedding --features fastembed
         # Proves the cdn.pyke.io ort-runtime download + link works on macOS

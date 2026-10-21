@@ -1,6 +1,7 @@
 //! Learner-model lifecycle helpers shared between binaries.
 //!
 //! - `create_learner_with_id` — fresh `LearnerModel` construction
+//! - `adopt_or_mint_learner_id` — pick the id for a DB with no learners row
 //! - `reconcile_persisted_learner` — merge CLI flags into a loaded
 //!   `LearnerModel` on launch (age refresh + name-mismatch warning)
 //! - `verify_resume_locale_match` — guard for `--resume` to prevent
@@ -8,6 +9,7 @@
 //!   differs from the CLI's requested locale.
 
 use chrono::Utc;
+use primer_core::error::Result;
 use primer_core::i18n::Locale;
 use primer_core::learner::{EngagementState, LearnerModel, LearnerProfile, LearningPreferences};
 use uuid::Uuid;
@@ -114,6 +116,25 @@ pub fn parse_languages(csv: Option<&str>, locale: Locale) -> Vec<String> {
     out
 }
 
+/// Choose the learner id for a session DB that has no `learners` row yet,
+/// given the result of `SessionStore::most_recent_session_learner_id`.
+///
+/// - `Ok(Some(id))` — a pre-v4 DB with sessions but no learner row: adopt
+///   that id so the existing sessions stay attached to the learner model.
+/// - `Ok(None)` — a genuinely fresh DB: mint a new UUID.
+/// - `Err(_)` — propagated (issue #339). The caller persists whatever id
+///   this returns, so minting one on a lookup error would permanently
+///   orphan the child's existing sessions.
+pub fn adopt_or_mint_learner_id(found: Result<Option<Uuid>>) -> Result<Uuid> {
+    match found? {
+        Some(id) => {
+            tracing::info!("adopted learner_id {id} from existing sessions");
+            Ok(id)
+        }
+        None => Ok(Uuid::new_v4()),
+    }
+}
+
 /// Construct a fresh `LearnerModel` with the given identity. Used at
 /// session-start when no persisted learner row exists yet. `languages`
 /// is the parsed preference list (see [`parse_languages`]); pass
@@ -146,6 +167,7 @@ pub fn create_learner_with_id(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use primer_core::error::PrimerError;
     use primer_core::storage::LearnerStore;
     use primer_storage::SqliteSessionStore;
     use std::sync::Arc;
@@ -380,5 +402,31 @@ mod tests {
         );
         // Locale is still the bound dispatch key, independent of the list.
         assert_eq!(learner.profile.locale, Locale::German);
+    }
+
+    #[test]
+    fn adopt_or_mint_adopts_existing_session_learner_id() {
+        let existing = Uuid::new_v4();
+        assert_eq!(
+            adopt_or_mint_learner_id(Ok(Some(existing))).unwrap(),
+            existing
+        );
+    }
+
+    #[test]
+    fn adopt_or_mint_mints_fresh_id_on_fresh_db() {
+        let a = adopt_or_mint_learner_id(Ok(None)).unwrap();
+        let b = adopt_or_mint_learner_id(Ok(None)).unwrap();
+        assert_ne!(a, b, "each fresh DB gets its own UUID");
+    }
+
+    /// Issue #339: a lookup error must propagate, never mint a UUID that
+    /// the caller would persist and so permanently orphan the existing
+    /// sessions.
+    #[test]
+    fn adopt_or_mint_propagates_lookup_error() {
+        let err =
+            adopt_or_mint_learner_id(Err(PrimerError::Storage("disk I/O".into()))).unwrap_err();
+        assert!(err.to_string().contains("disk I/O"), "got: {err}");
     }
 }

@@ -38,7 +38,7 @@
 //! failure: the pre-2.45 scaffold expected a separate
 //! `GenieDialog_setTokenCallback` entry point, but 2.45's `libGenie.so`
 //! does not export it. In 2.45 the streaming token callback is passed
-//! **directly to [`GenieDialog_query`]** as the `callback` + `userData`
+//! **directly to `GenieDialog_query`** as the `callback` + `userData`
 //! parameters (see [`GenieDialog_QueryCallback_t`] and
 //! [`GenieDialog_query_fn`]). The Primer therefore resolves **five**
 //! symbols, not six — `setTokenCallback` is gone.

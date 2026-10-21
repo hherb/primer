@@ -1,8 +1,8 @@
 //! Android-native voice-mode Tauri commands.
 //!
 //! Mirror the desktop [`super::voice`] commands but build the cpal-free
-//! [`AndroidVoiceBackends`] (OS-owned mic + speaker) instead of the local
-//! cpal backends, and drive [`run_loop`] with a no-op `on_committed_audio`,
+//! `AndroidVoiceBackends` (OS-owned mic + speaker) instead of the local
+//! cpal backends, and drive [`primer_speech::voice_loop::run_loop`] with a no-op `on_committed_audio`,
 //! `None` speaker-drain, and `None` `is_speaking` (D1 — the OS plays the TTS
 //! itself, so there is no sample stream to forward and no ringbuf to drain).
 //!
@@ -161,7 +161,7 @@ pub async fn start_voice_mode_android(
 }
 
 /// Stop the active Android voice loop, if any. Delegates to the shared
-/// [`super::voice::stop_voice_mode_inner`] (which fires the loop's `stop_tx`,
+/// `super::voice::stop_voice_mode_inner` (which fires the loop's `stop_tx`,
 /// joins with a timeout, flips the sticky toggle off, and drops the active
 /// session). The wrapped join from `start_voice_mode_android` stops the
 /// recognizer consumer once the loop exits.
