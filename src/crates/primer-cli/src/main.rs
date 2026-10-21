@@ -38,8 +38,8 @@ use primer_core::inference::InferenceBackend;
 use primer_core::knowledge::KnowledgeBase;
 use primer_core::storage::{LearnerStore, SessionStore};
 use primer_engine::{
-    BackendParams, IN_MEMORY, build_classifier, build_comprehension, build_extractor,
-    build_fastembed_embedder, build_main_backend, build_ollama_embedder,
+    BackendParams, IN_MEMORY, adopt_or_mint_learner_id, build_classifier, build_comprehension,
+    build_extractor, build_fastembed_embedder, build_main_backend, build_ollama_embedder,
     build_openai_compat_embedder, create_learner_with_id, parse_languages,
     reconcile_persisted_learner, resolve_session_db_path, should_show_first_run_banner,
     verify_resume_locale_match,
@@ -953,19 +953,8 @@ async fn async_main() -> anyhow::Result<()> {
             //   2. v3 DB with sessions but no learners row → adopt the
             //      most-recent session's learner_id so existing sessions
             //      are not orphaned.
-            let id = match session_store.most_recent_session_learner_id().await {
-                Ok(Some(uuid)) => {
-                    tracing::info!("adopted learner_id {uuid} from existing sessions");
-                    uuid
-                }
-                Ok(None) => Uuid::new_v4(),
-                Err(e) => {
-                    tracing::warn!(
-                        "most_recent_session_learner_id failed: {e}; minting fresh UUID"
-                    );
-                    Uuid::new_v4()
-                }
-            };
+            let id = adopt_or_mint_learner_id(session_store.most_recent_session_learner_id().await)
+                .map_err(|e| anyhow::anyhow!("reading existing sessions' learner_id: {e}"))?;
             let languages = parse_languages(cli.languages.as_deref(), cli_locale);
             let fresh = create_learner_with_id(id, &cli.name, cli.age, cli_locale, languages);
             if let Err(e) = session_store.save_learner(&fresh).await {
