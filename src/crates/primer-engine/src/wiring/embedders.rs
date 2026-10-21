@@ -16,7 +16,8 @@ use std::sync::Arc;
 /// - `Ok(Some(arc))` — feature compiled in AND init succeeded.
 /// - `Ok(None)` — feature compiled in but init failed (e.g. model
 ///   download failed). Caller falls back to BM25-only retrieval; a
-///   warning is emitted to stderr so a CLI user sees it.
+///   `tracing::warn!` reports it (issue #336: stderr is invisible in a
+///   Dock-launched GUI, the subscriber reaches both binaries).
 /// - `Err(msg)` — feature not compiled in. The user explicitly asked
 ///   for fastembed; surfacing this as an error lets the binary decide
 ///   whether to exit (CLI) or render it inline (GUI). Earlier
@@ -29,17 +30,17 @@ pub fn build_fastembed_embedder(
     use primer_embedding::FastEmbedBackend;
     let m = model.unwrap_or(primer_embedding::BGE_M3_MODEL_ID);
     if m != primer_embedding::BGE_M3_MODEL_ID {
-        eprintln!(
-            "Note: --embedder-model {m} not yet supported by the CLI dispatch; using bge-m3."
+        tracing::warn!(
+            "embedder model {m} not yet supported by the fastembed backend; using bge-m3."
         );
     }
-    eprintln!(
+    tracing::info!(
         "Loading fastembed model {m}; first run downloads ~570 MB into ~/.cache/primer/models/."
     );
     match FastEmbedBackend::new() {
         Ok(b) => Ok(Some(Arc::new(b) as _)),
         Err(e) => {
-            eprintln!("fastembed init failed ({e}); falling back to BM25-only retrieval.");
+            tracing::warn!("fastembed init failed ({e}); falling back to BM25-only retrieval.");
             Ok(None)
         }
     }
@@ -66,11 +67,13 @@ pub async fn build_ollama_embedder(
     let model = model.unwrap_or(DEFAULT_OLLAMA_MODEL);
     match OllamaEmbedder::with_endpoint(url, model).await {
         Ok(b) => {
-            eprintln!("Embedder: ollama {model} at {url}");
+            tracing::info!("Embedder: ollama {model} at {url}");
             Ok(Some(Arc::new(b) as _))
         }
         Err(e) => {
-            eprintln!("ollama embedder init failed ({e}); falling back to BM25-only retrieval.");
+            tracing::warn!(
+                "ollama embedder init failed ({e}); falling back to BM25-only retrieval."
+            );
             Ok(None)
         }
     }
@@ -102,11 +105,11 @@ pub async fn build_openai_compat_embedder(
     })?;
     match OpenAiCompatEmbedder::new(url, model, api_key).await {
         Ok(b) => {
-            eprintln!("Embedder: openai-compat {model} at {url}");
+            tracing::info!("Embedder: openai-compat {model} at {url}");
             Ok(Some(Arc::new(b) as _))
         }
         Err(e) => {
-            eprintln!(
+            tracing::warn!(
                 "openai-compat embedder init failed ({e}); falling back to BM25-only retrieval."
             );
             Ok(None)
