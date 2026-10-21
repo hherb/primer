@@ -421,3 +421,54 @@ async fn name_reconciles_on_second_open() {
         "persisted name wins over GUI override"
     );
 }
+
+/// A configured-but-unusable fallback no longer vanishes into a
+/// `tracing::warn!`: the session carries a notice for the UI banner (#347).
+#[tokio::test]
+async fn misconfigured_fallback_surfaces_backend_notice() {
+    let home = TempDir::new().unwrap();
+    let mut cfg = stub_config();
+    // ollama requires an explicit fallback model, so this leg can't resolve.
+    cfg.backend.fallback_backend = Some("ollama".to_string());
+    cfg.backend.fallback_model = None;
+    let s = build_active_session(home.path(), &cfg).await.unwrap();
+
+    let notice = s.backend_notice.expect("dropped fallback must be reported");
+    assert!(notice.contains("ollama"), "notice: {notice}");
+    // The primary still serves, so the sidebar identity is unchanged.
+    assert_eq!(s.backend_name, "stub");
+}
+
+#[tokio::test]
+async fn no_fallback_has_no_backend_notice() {
+    let home = TempDir::new().unwrap();
+    let s = build_active_session(home.path(), &stub_config())
+        .await
+        .unwrap();
+    assert_eq!(s.backend_notice, None);
+}
+
+/// Primary unbuildable (qnn always fails on a host build), cloud fallback
+/// serves every turn ⇒ the session names the fallback and its resolved
+/// model, not the configured primary (#338), and carries the notice.
+#[tokio::test]
+async fn primary_unavailable_session_shows_served_fallback() {
+    let home = TempDir::new().unwrap();
+    let mut cfg = stub_config();
+    cfg.backend.kind = "qnn".to_string();
+    cfg.backend.fallback_backend = Some("cloud".to_string());
+    cfg.backend.fallback_model = None;
+    // Inline, not Env: the test must not depend on the developer's shell.
+    cfg.backend.api_key_source = crate::config::ApiKeySource::Inline {
+        key: "test-key".into(),
+    };
+    let s = build_active_session(home.path(), &cfg).await.unwrap();
+
+    assert_eq!(s.backend_name, "cloud");
+    assert_eq!(
+        s.main_model,
+        primer_core::consts::inference::DEFAULT_CLOUD_MODEL
+    );
+    let notice = s.backend_notice.as_deref().expect("primary-down notice");
+    assert!(notice.contains("qnn"), "notice: {notice}");
+}

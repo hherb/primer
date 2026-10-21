@@ -9,7 +9,7 @@ use std::time::Duration;
 
 use primer_core::inference::InferenceBackend;
 use primer_core::router::RouterMode;
-use primer_engine::BackendParams;
+use primer_engine::{BackendNotice, BackendParams};
 use tempfile::TempDir;
 
 use super::*;
@@ -201,7 +201,7 @@ async fn knowledge_base_defaults_to_in_memory_and_auto_seeds() {
 /// Build the stub main backend plus the params it was built from.
 async fn stub_backend(cfg: &GuiConfig) -> (Arc<dyn InferenceBackend>, BackendParams) {
     let params = build_backend_params(cfg);
-    let backend = build_main_backend("stub", "stub".to_string(), &params)
+    let (backend, _) = build_main_backend("stub", "stub".to_string(), &params)
         .await
         .unwrap();
     (backend, params)
@@ -256,5 +256,50 @@ async fn subsystems_vocab_cap_defaults_to_const_when_unset() {
     assert_eq!(
         s.vocab_settings.max_per_prompt,
         primer_core::consts::vocab::DEFAULT_VOCAB_MAX_PER_PROMPT
+    );
+}
+
+// ─── served identity (issue #338) ────────────────────────────────────
+
+/// With no notice, or a dropped fallback, the primary is what serves turns,
+/// so the sidebar keeps showing the configured kind + model.
+#[test]
+fn served_identity_is_primary_unless_primary_unavailable() {
+    let dropped = BackendNotice::FallbackDropped {
+        fallback: "cloud".into(),
+        reason: "no key".into(),
+    };
+    for notice in [None, Some(&dropped)] {
+        assert_eq!(
+            served_identity("ollama", "llama3.2", notice, "ollama"),
+            ("ollama".to_string(), "llama3.2".to_string())
+        );
+    }
+}
+
+/// Primary down ⇒ the sidebar shows the fallback that actually serves turns.
+#[test]
+fn served_identity_shows_fallback_when_primary_unavailable() {
+    let notice = BackendNotice::PrimaryUnavailable {
+        primary: "ollama".into(),
+        fallback: "cloud".into(),
+        fallback_model: Some("claude-sonnet-4-6".into()),
+        reason: "connection refused".into(),
+    };
+    assert_eq!(
+        served_identity("ollama", "llama3.2", Some(&notice), "claude-sonnet-4-6"),
+        ("cloud".to_string(), "claude-sonnet-4-6".to_string())
+    );
+
+    // A model-less fallback (stub) falls back to the served backend's name.
+    let notice = BackendNotice::PrimaryUnavailable {
+        primary: "ollama".into(),
+        fallback: "stub".into(),
+        fallback_model: None,
+        reason: "x".into(),
+    };
+    assert_eq!(
+        served_identity("ollama", "llama3.2", Some(&notice), "stub"),
+        ("stub".to_string(), "stub".to_string())
     );
 }

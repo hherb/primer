@@ -139,6 +139,11 @@ pub struct ActiveSession {
     /// "llama3.2"). Kept outside the DM mutex for the same reason.
     pub main_model: String,
 
+    /// Rendered [`primer_engine::BackendNotice`] when the primary or the
+    /// fallback leg failed to build at startup (issues #347, #338); the
+    /// frontend shows it as a persistent banner. `None` when healthy.
+    pub backend_notice: Option<String>,
+
     /// Snapshot of the DM-owned fields the frontend reads via
     /// `current_session_info`. Refreshed by `send_message` after each
     /// successful turn so readers never have to lock the DM (and queue
@@ -188,6 +193,7 @@ impl std::fmt::Debug for ActiveSession {
             .field("locale", &self.locale)
             .field("backend_name", &self.backend_name)
             .field("main_model", &self.main_model)
+            .field("backend_notice", &self.backend_notice)
             .finish_non_exhaustive()
     }
 }

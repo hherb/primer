@@ -1,81 +1,59 @@
 # Primer — Next Session Brief
 
 **Audience:** future Claude Code session continuing work on this repo.
-**Last updated:** 2026-10-21 06:05 UTC. **Four PRs are open against `main`, all independent:**
+**Last updated:** 2026-10-21 10:33 UTC. **One PR is open against `main`:**
 
 | PR | Branch | What | Closes |
 |---|---|---|---|
-| **#345** | `docs/reland-rustdoc-gate` | Re-land of #344 (rustdoc fixes + `cargo doc` CI gate); also carries this brief | #330, #319 |
-| **#346** | `fix/learner-id-adoption-339` | A learner-id lookup error now propagates instead of minting and persisting a UUID | #339 |
-| **#348** | `fix/gui-env-files-337` | The GUI loads `.env` and `~/.primer_env` at startup, like the CLI | #337 |
-| **#349** | `fix/match-main-model-335` | "Match main" also ignores a stale subsystem `model` override | #335 |
+| **#350** | `fix/fallback-outcome-347-338` | A degraded fallback/router leg is reported to the user, not just logged. Also carries this brief. | #347, #338 |
 
-`main` is at `252b224` (#343, rustls). Since the last brief, #342 and #343 merged. **#344 did NOT land on `main`** (see below).
+`main` is at `e42628f` (#349). Since the last brief, **all four PRs merged**: #345, #346, #348 and #349. **#330 and #319 are confirmed CLOSED.**
 
 ## What we shipped this session
 
-### #344 was lost to the stacked-PR trap, so it is re-landed as #345
-- **What happened:** #342 squash-merged to `main` at 02:50:35. #344, stacked on #342, merged **52 s later into the now-stale `refactor/split-gui-voice-commands` branch**. GitHub had not yet retargeted it to `main`. None of #344's rustdoc fixes or CI gate reached `main`, and #330 and #319 stayed open.
-- **Fix:** I cherry-picked its three commits unchanged onto `origin/main`:
-  - `fa2d24c`: link fixes + CI gate;
-  - `70bfe2a`: CLAUDE.md citations + the old brief;
-  - `fcb7d75`: review follow-up (the cpal-free android-native doc arm, stale docs, `[[memory]]` refs).
-- **Verified:** the doc arms re-run clean on the new base, and fmt is clean.
-- **#345's CI ran the `cargo doc` steps on Linux for the first time, and they passed** in the `test` job, `feature-combos` and macOS. The "unproven on Linux" risk from the last brief is retired.
-- CLAUDE.md's gate entry now cites #345.
-- **Earlier in this session (before the brief), I reviewed #344 and applied all the findings.** The notable one: the cpal-free `primer-speech --features android-native` config (what the APK ships) failed rustdoc on a cpal-gated link, and CI never documented that config. Both are fixed, and CI now documents android-native bare **and** with `voice-loop`.
+### #350 (`68098fd`): closes #347 and #338
+**Engine:** `primer_engine::build_main_backend` now returns `Result<(Arc<dyn InferenceBackend>, Option<BackendNotice>)>`. This applies to the fallback path **and** the router path.
+- `BackendNotice::FallbackDropped { fallback, reason }`: plan `PrimaryAlone`, so there is no safety net.
+- `BackendNotice::PrimaryUnavailable { primary, fallback, fallback_model, reason }`: plan `SecondaryAlone`, so the fallback serves every turn.
+- `Display` is the user-facing line.
+- New private helpers in `wiring/backend.rs` (443 lines): `build_secondary_leg` dedups the leg build shared by the fallback and router paths; `degraded_notice` maps a plan to a notice.
 
-### #346 (`1b7f71b`): closes #339
-- New pure helper `primer_engine::adopt_or_mint_learner_id(Result<Option<Uuid>>) -> Result<Uuid>`:
-  - `Ok(Some)` → adopt;
-  - `Ok(None)` → mint;
-  - `Err` → **propagate**.
-- The GUI (`wiring/stores.rs`) and CLI (`main.rs`) replace their duplicated `match` with it, adding error context and `?`.
-- TDD: 3 unit tests in `primer-engine/src/learner.rs`, red then green.
-- Tests: engine 75, CLI 23, GUI 217; clippy and fmt clean. CI green apart from the CodeQL rust scan, which was still pending.
+**CLI:** prints `Warning: <notice>` on stderr.
 
-### #348 (`b32059e`): closes #337, env-file half
-- New `primer_engine::env_files`:
-  - `load_env_files()`: `.env`, then `$HOME/.primer_env`; earlier sources win;
-  - `load_user_env_file(home) -> bool`;
-  - `USER_ENV_FILE`.
-- Both binaries call it. `primer-cli` drops its direct `dotenvy` dep.
-- The GUI calls it first in its desktop setup block, before any thread spawns (`set_var` safety). Mobile is untouched.
-- A malformed `~/.primer_env` is now logged, and a non-UTF-8 API-key env value warns via `env_key`.
-- Docs: CLAUDE.md, README and `docs/devel/01-getting-started.md`.
-- TDD: 2 tests in `env_files::tests`.
-- **The banner half is filed as #347:** report `build_main_backend`'s `PrimaryAlone` outcome to the GUI.
+**GUI:**
+- `ActiveSession.backend_notice` and `SessionInfo.backend_notice` (`Option<String>`) feed a new persistent `#backend-notice-banner` in `index.html`.
+- `renderSessionInfo` sets it with `textContent`; `resetSessionHeader` hides it.
+- The pure `wiring/backend_params.rs::served_identity` swaps the sidebar's kind/model to the fallback on `PrimaryUnavailable` (#338). `main_model` stays the subsystem identifier.
 
-### #349 (`64dac6a`): closes #335
-- New `subsystem_model()` mirrors `subsystem_kind()`, and the three `*_model` `BackendParams` fields use it.
-- The `SubsystemConfig` doc now says `timeout_ms` still applies under match-main. That is intentional; it's a per-subsystem tunable.
-- TDD: the existing stage test, extended with stale models, went red (`Some("stale-model")`) then green. GUI tests: 217.
+**Drive-by:** moved `build_backend_params`'s doc comment back onto it (#348 had left it stacked above `env_key`).
+
+**Docs:** CLAUDE.md (the FallbackBackend bullet), README (§ Inference routing), ROADMAP (line 64).
+
+**TDD:** 5 new engine tests and 4 new GUI tests.
+
+**Gate results:**
+- workspace tests: 1336 passed, 0 failed;
+- clippy `-D warnings`: clean for the workspace, `primer-gui` with `speech` and with `android-native`, and `primer-cli` with `speech`;
+- fmt and default-arm rustdoc `-D warnings`: clean.
 
 ### Per-session sweep
-- The oversized list is unchanged from last session.
-- The **inline-test detector is clean for the seventh session running**.
-- Watch-list: `primer-classifier/src/llm.rs` (441), `primer-extractor/src/llm.rs` (454).
+- The oversized list is unchanged.
+- The **inline-test detector is clean for the eighth session running**.
+- Watch-list: `primer-classifier/src/llm.rs` (441), `primer-extractor/src/llm.rs` (454), `primer-engine/src/wiring/backend.rs` (443, grew this session).
 
 ## What's next (concrete acceptance criteria)
 
-### 0. Owner review/merge: #345, #346, #348, #349
-- All four are independent and branch from `main`.
-- **Expect merge conflicts:**
-  - #345 and #348 both touch `CLAUDE.md`, in different hunks: line ~41 (env files) and the `cargo doc` / `primer-speech` bullets. They should auto-merge.
-  - #346 and #348 both touch `primer-engine/src/lib.rs` (the `pub use learner::{…}` list vs. a `pub mod env_files;` line) and `primer-cli/src/main.rs` (the imports vs. the env block). Adjacent edits, so a trivial rebase may be needed for whichever merges second.
-- **Acceptance:** CI green and the owner merges. After #345 merges, confirm on `main` that #330 and #319 auto-closed; close them by hand if not.
-- **Lesson, now in the habits list:** never merge a stacked PR within a minute of its base PR. Retarget it first or rebase it.
+### 0. Owner review/merge: #350
+- **Acceptance:** CI green and the owner merges.
+- Then confirm #347 and #338 auto-closed.
+- **Optional manual check:** `cargo tauri dev` with primary `ollama` (not running) and fallback `ollama` without a model → the banner shows "Fallback backend 'ollama' is disabled…".
 
 ### 1. Sweep + inline-test detector: re-run EVERY session
 Commands are in the resume block.
 
-### 2. Remaining review-filed bugs (all host-completable; TDD each: failing test, fix, `Closes #N` PR)
-- **#347** (new): surface a dropped cloud fallback to the GUI user.
-  - Have `build_main_backend` return its plan outcome, then show a banner.
-  - Pure-test the plan → message mapping.
-- **#338:** the sidebar shows the local primary while the cloud fallback serves turns.
-- **#336:** use `tracing::warn!` instead of `eprintln!` for embedder fallback notices.
-- **#341:** CLI-flag wording in engine errors reaches GUI users.
+### 2. Remaining review-filed bugs (host-completable; TDD each: failing test, fix, `Closes #N` PR)
+- **#336:** use `tracing::warn!` instead of `eprintln!` for embedder fallback notices. Small; a good next pick.
+- **#341:** CLI-flag wording in engine errors reaches GUI users. This now also covers `BackendNotice.reason`, which is the raw construction error (e.g. "--fallback-model is required…").
 - **#340:** stage-test gaps.
 - Older ones: #307–#316 (retrieval/storage/streaming), #325/#326 (voice), #331/#332 (storage).
 
@@ -99,9 +77,10 @@ Commands are in the resume block.
 
 ## Open decisions / risks
 
-- **#345 keeps the façade `allow` choice** over #330's "escape the links" suggestion. That is the owner's call; flagged in #344/#345.
-- **#346 changes startup behaviour.** A DB error while reading the most recent session's learner id is now a hard startup error (GUI session-start error; CLI exits), not a silent identity mint. That is the intended trade, since the old path silently corrupted data. It is the same posture as an existing `load_learner` failure.
-- **#348 loads `.env` from the GUI's working directory.** For `cargo tauri dev` that is the repo's `.env`; for a Dock launch it is `/`, which is harmless. Not exercised: a real Dock launch of the bundled `.app`.
+- **#350 shows the raw construction error as the notice `reason`.** The GUI already did the same for fatal construction errors ("constructing inference backend: {e}"), so the posture is unchanged. Wording cleanup belongs to #341.
+- **The #350 banner is English-only.** So is the rest of the GUI chrome. `BackendNotice` is typed with locale-neutral fields, so a future i18n render is mechanical.
+- **The CLI's "Using X backend" line still names the configured primary** when the fallback serves alone. The `Warning:` line printed right above it explains this, so I deliberately left the line alone.
+- **Not exercised:** the banner in a live `cargo tauri dev`; a real Dock launch of the bundled `.app` (carried from #348).
 - **Stale CMake cache after Xcode/SDK upgrades.** Symptom: `'<header>' file not found` from a `*-sys` build. Recipe:
   1. Find the stale caches: `find src/target -name CMakeCache.txt -maxdepth 6 | xargs grep -l 'MacOSX<old>'`.
   2. `cargo clean -p <those sys crates>`.
@@ -113,23 +92,25 @@ Commands are in the resume block.
 
 ## Patterns to reuse, not reinvent
 
-- **Bug-fix recipe (used 3× this session):**
-  1. Branch off `origin/main`. If you started on the wrong branch: `git stash -u; git checkout -b X origin/main; git stash pop`.
+- **Bug-fix recipe:**
+  1. Branch off `origin/main`.
   2. Write the failing test, confirm red, fix, confirm green.
-  3. Run test + clippy for each touched crate, then fmt.
+  3. Run test + clippy for each touched crate (plus the feature arms whose files you touched), then fmt.
   4. Hunt for doc drift: `git grep` the behaviour across `*.md`.
   5. Commit with `Closes #N`, push, open the PR.
-  6. File any out-of-scope half as a new issue **before** writing the PR body, so the body can cite it.
-- **Duplicated GUI+CLI logic → one pure helper in `primer-engine`** that takes the *result* of the I/O call, not the store. That keeps it mock-free to test, as with `adopt_or_mint_learner_id`.
-- **Split recipe, substantive-line diff, Dependabot triage:** unchanged; see the handoff `docs/handoffs/2026-10-16T202752Z.md` § "Patterns to reuse".
-- **Stacked PRs:** after the base squash-merges, retarget or rebase the child **before** merging it. Otherwise it lands on the dead base branch, which is exactly what happened to #344.
+  6. File any out-of-scope half as a new issue before writing the PR body.
+- **Two issues needing the same plumbing → one PR.** #347 (banner) and #338 (sidebar identity) both needed `build_main_backend` to expose its plan outcome, so one typed return value fixed both.
+- **Changing a widely-called signature:** mechanically rewrite test call sites with `perl -pi` (`let b =` → `let (b, _) =`), so the red phase is pure compile errors pointing at the missing type.
+- **Duplicated GUI+CLI logic → one pure helper in `primer-engine`** that takes the *result* of the I/O call, not the store (`adopt_or_mint_learner_id`).
+- **Split recipe, substantive-line diff, Dependabot triage:** unchanged; see `docs/handoffs/2026-10-16T202752Z.md` § "Patterns to reuse".
+- **Stacked PRs:** after the base squash-merges, retarget or rebase the child **before** merging it (the #344 loss).
 - Read `NEXT_SESSION.md` AFTER `git pull`, and check `git status` first.
 
 ## Exact commands needed to resume
 
 ```bash
 cd /Users/hherb/src/primer && git status --short && git checkout main && git pull --ff-only && git log --oneline -6 && gh pr list --state open
-# Open at close: #345, #346, #348, #349 (independent). Confirm #330/#319 closed once #345 merges.
+# Open at close: #350. After merge, confirm #347/#338 closed: gh issue view 347 --json state; gh issue view 338 --json state
 S=/private/tmp/primer-scratch; mkdir -p "$S"   # or the session's scratchpad dir
 
 # === Oversized-file sweep + inline-test detector (re-verify EVERY session) ===
@@ -138,10 +119,10 @@ find crates -name '*.rs' -not -path '*/vendor/*' -not -name 'tests.rs' | xargs w
 for f in $(find crates -name '*.rs' -not -path '*/vendor/*' -not -name 'tests.rs' | xargs wc -l | awk '$1>500 && $2!="total"{print $2}'); do \
   awk '/#\[cfg\(test\)\]/{ln=NR} ln && NR==ln+1 && /^[[:space:]]*mod .*\{/{print FILENAME" inline mod @"NR}' "$f"; done
 
-# === Next bug (#347): start here ===
-gh issue view 347
-git checkout -b fix/fallback-dropped-banner-347 origin/main
-~/.cargo/bin/cargo test -p primer-engine -p primer-gui 2>&1 | grep 'test result'   # baseline
+# === Next bug (#336): start here ===
+gh issue view 336
+git checkout -b fix/embedder-fallback-tracing-336 origin/main
+~/.cargo/bin/cargo test -p primer-engine -p primer-cli -p primer-gui 2>&1 | grep 'test result'   # baseline
 
 # === Standard workspace gate (one cargo pass at a time) ===
 ~/.cargo/bin/cargo test --workspace 2>&1 | tee $S/ws.log | tail -3
@@ -149,7 +130,7 @@ grep -E 'test result: FAILED|^error' $S/ws.log  # expect empty
 ~/.cargo/bin/cargo clippy --workspace --all-targets -- -D warnings
 ~/.cargo/bin/cargo fmt --all -- --check
 
-# === Rustdoc gate (CI-enforced once #345 merges); feature arms mirror ci.yml ===
+# === Rustdoc gate (CI-enforced); feature arms mirror ci.yml ===
 RUSTDOCFLAGS="-D warnings" ~/.cargo/bin/cargo doc --workspace --no-deps --document-private-items
 for spec in "-p primer-speech --features voice-loop,silero,whisper,piper,cpal,supertonic" "-p primer-speech --features android-native" "-p primer-speech --features voice-loop,android-native" \
   "-p primer-inference --features qnn" "-p primer-inference --features llamacpp" "-p primer-gui --features speech" "-p primer-gui --features android-native" \
@@ -159,6 +140,5 @@ for spec in "-p primer-speech --features voice-loop,silero,whisper,piper,cpal,su
 
 ## Reporting back
 
-- **#345:** re-lands #344, which had merged into its dead stacked base. rustdoc `-D warnings` is clean, and the `cargo doc` CI gate now passes on Linux as well as macOS. Closes #330 and #319.
-- **#346 / #348 / #349:** TDD fixes for #339 (no silent learner-id mint on a DB error), #337 (the GUI now loads `~/.primer_env`) and #335 (match-main ignores a stale model). Each is a small diff with a red-then-green test.
-- **New issue #347:** tell the GUI user when the cloud fallback was dropped. Recommended next.
+- **#350:** a configured fallback or router leg that fails to build at startup is now reported, not just logged. The CLI prints a `Warning:` line. The GUI shows a persistent banner, and its sidebar names the backend that is actually answering. Closes #347 and #338, with red-then-green tests; the workspace gate is green (1336 tests).
+- Last session's four PRs (#345, #346, #348, #349) all merged; #330 and #319 are closed.

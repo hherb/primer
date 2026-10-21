@@ -223,6 +223,7 @@ fn make_synthetic_session_info() -> crate::types::SessionInfo {
         },
         backend_kind: "stub".into(),
         main_model: "stub".into(),
+        backend_notice: None,
         locale: "en".into(),
         voice_mode_available: true,
     }

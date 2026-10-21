@@ -22,6 +22,9 @@ pub struct SessionInfo {
     pub main_model: String,
     /// Locale pack id ("en", "de", ...).
     pub locale: String,
+    /// Non-fatal startup degradation of the configured fallback / router
+    /// (e.g. "Fallback backend 'cloud' is disabled…"), shown as a banner.
+    pub backend_notice: Option<String>,
     /// Whether this binary was built with the `speech` cargo feature.
     /// The frontend uses this to enable/disable the header voice-mode
     /// toggle. `false` on default builds.

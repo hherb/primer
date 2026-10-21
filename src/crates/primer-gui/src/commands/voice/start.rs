@@ -152,6 +152,7 @@ pub async fn start_voice_mode(
         learner,
         backend_kind: active_session.backend_name.clone(),
         main_model: active_session.main_model.clone(),
+        backend_notice: active_session.backend_notice.clone(),
         locale: active_session.locale.pack_id().to_string(),
         voice_mode_available: true,
     };

@@ -34,8 +34,9 @@ fn params(
 #[tokio::test]
 async fn no_fallback_returns_primary() {
     let p = params(None, None, RouterMode::LocalOnly);
-    let b = build_main_backend("stub", "m".into(), &p).await.unwrap();
+    let (b, notice) = build_main_backend("stub", "m".into(), &p).await.unwrap();
     assert_eq!(b.name(), "stub");
+    assert_eq!(notice, None);
 }
 
 /// Primary fails to build, fallback (stub) builds ⇒ secondary alone.
@@ -43,7 +44,7 @@ async fn no_fallback_returns_primary() {
 #[tokio::test]
 async fn primary_unbuildable_falls_back_to_secondary() {
     let p = params(Some("stub"), None, RouterMode::LocalOnly);
-    let b = build_main_backend("unknown-backend", "m".into(), &p)
+    let (b, _) = build_main_backend("unknown-backend", "m".into(), &p)
         .await
         .unwrap();
     // Secondary stub served ⇒ its name surfaces.
@@ -54,7 +55,7 @@ async fn primary_unbuildable_falls_back_to_secondary() {
 #[tokio::test]
 async fn fallback_unbuildable_keeps_primary() {
     let p = params(Some("unknown-backend"), Some("m"), RouterMode::LocalOnly);
-    let b = build_main_backend("stub", "m".into(), &p).await.unwrap();
+    let (b, _) = build_main_backend("stub", "m".into(), &p).await.unwrap();
     assert_eq!(b.name(), "stub");
 }
 
@@ -87,7 +88,7 @@ async fn both_unbuildable_errors() {
 #[tokio::test]
 async fn fallback_misconfigured_keeps_primary() {
     let p = params(Some("ollama"), None, RouterMode::LocalOnly);
-    let b = build_main_backend("stub", "m".into(), &p).await.unwrap();
+    let (b, _) = build_main_backend("stub", "m".into(), &p).await.unwrap();
     assert_eq!(b.name(), "stub");
 }
 
@@ -112,7 +113,7 @@ async fn primary_unbuildable_and_fallback_misconfigured_errors() {
 #[tokio::test]
 async fn hybrid_with_secondary_builds_router_named_after_primary() {
     let p = params(Some("stub"), None, RouterMode::Hybrid);
-    let b = build_main_backend("stub", "m".into(), &p).await.unwrap();
+    let (b, _) = build_main_backend("stub", "m".into(), &p).await.unwrap();
     assert_eq!(b.name(), "stub");
 }
 
@@ -133,6 +134,126 @@ async fn hybrid_without_secondary_errors() {
 #[tokio::test]
 async fn local_only_with_fallback_is_unchanged_fallback() {
     let p = params(Some("stub"), None, RouterMode::LocalOnly);
-    let b = build_main_backend("stub", "m".into(), &p).await.unwrap();
+    let (b, _) = build_main_backend("stub", "m".into(), &p).await.unwrap();
     assert_eq!(b.name(), "stub");
+}
+
+/// Primary down, fallback built ⇒ the notice names both legs so the GUI can
+/// show which backend actually serves turns (issue #338).
+#[tokio::test]
+async fn primary_unbuildable_reports_primary_unavailable_notice() {
+    let p = params(Some("stub"), None, RouterMode::LocalOnly);
+    let (_, notice) = build_main_backend("unknown-primary", "m".into(), &p)
+        .await
+        .unwrap();
+    match notice {
+        Some(BackendNotice::PrimaryUnavailable {
+            primary,
+            fallback,
+            fallback_model,
+            reason,
+        }) => {
+            assert_eq!(primary, "unknown-primary");
+            assert_eq!(fallback, "stub");
+            assert_eq!(fallback_model, None);
+            assert!(reason.contains("unknown-primary"), "reason: {reason}");
+        }
+        other => panic!("expected PrimaryUnavailable, got {other:?}"),
+    }
+}
+
+/// Healthy primary, misconfigured fallback ⇒ a FallbackDropped notice carrying
+/// the resolve error, instead of a warn-only log line (issue #347).
+#[tokio::test]
+async fn misconfigured_fallback_reports_fallback_dropped_notice() {
+    let p = params(Some("ollama"), None, RouterMode::LocalOnly);
+    let (_, notice) = build_main_backend("stub", "m".into(), &p).await.unwrap();
+    match notice {
+        Some(BackendNotice::FallbackDropped { fallback, reason }) => {
+            assert_eq!(fallback, "ollama");
+            assert!(reason.contains("--fallback-model"), "reason: {reason}");
+        }
+        other => panic!("expected FallbackDropped, got {other:?}"),
+    }
+}
+
+/// Both legs built ⇒ no notice, for the fallback wrap and the router alike.
+#[tokio::test]
+async fn wrapped_legs_report_no_notice() {
+    for mode in [RouterMode::LocalOnly, RouterMode::Hybrid] {
+        let p = params(Some("stub"), None, mode);
+        let (_, notice) = build_main_backend("stub", "m".into(), &p).await.unwrap();
+        assert_eq!(notice, None, "mode {mode}");
+    }
+}
+
+/// The router path reports the same degradations as the fallback path.
+#[tokio::test]
+async fn router_degradations_report_notices() {
+    let p = params(Some("unknown-fallback"), Some("m"), RouterMode::Hybrid);
+    let (_, notice) = build_main_backend("stub", "m".into(), &p).await.unwrap();
+    assert!(
+        matches!(&notice, Some(BackendNotice::FallbackDropped { fallback, .. }) if fallback == "unknown-fallback"),
+        "got {notice:?}"
+    );
+
+    let p = params(Some("stub"), None, RouterMode::Hybrid);
+    let (_, notice) = build_main_backend("unknown-primary", "m".into(), &p)
+        .await
+        .unwrap();
+    assert!(
+        matches!(notice, Some(BackendNotice::PrimaryUnavailable { .. })),
+        "got {notice:?}"
+    );
+}
+
+/// The user-facing text names the dropped leg and the reason.
+#[test]
+fn notice_messages_name_legs_and_reason() {
+    let dropped = BackendNotice::FallbackDropped {
+        fallback: "cloud".into(),
+        reason: "no API key".into(),
+    };
+    let msg = dropped.to_string();
+    assert!(msg.contains("cloud") && msg.contains("no API key"), "{msg}");
+
+    let down = BackendNotice::PrimaryUnavailable {
+        primary: "ollama".into(),
+        fallback: "cloud".into(),
+        fallback_model: Some("claude-sonnet-4-6".into()),
+        reason: "connection refused".into(),
+    };
+    let msg = down.to_string();
+    assert!(
+        msg.contains("ollama") && msg.contains("cloud") && msg.contains("connection refused"),
+        "{msg}"
+    );
+}
+
+/// A cloud fallback carries its *resolved* model in the notice (the default
+/// when unset, an explicit one when given), for both paths — this is what the
+/// GUI sidebar shows instead of the backend's `name()` (#338).
+#[tokio::test]
+async fn primary_unavailable_notice_carries_resolved_fallback_model() {
+    use primer_core::consts::inference::DEFAULT_CLOUD_MODEL;
+    for mode in [RouterMode::LocalOnly, RouterMode::Hybrid] {
+        for (configured, expected) in [
+            (None, DEFAULT_CLOUD_MODEL),
+            (Some("claude-opus-4-7"), "claude-opus-4-7"),
+        ] {
+            let mut p = params(Some("cloud"), configured, mode);
+            p.api_key = Some("test-key".into());
+            let (_, notice) = build_main_backend("unknown-primary", "m".into(), &p)
+                .await
+                .unwrap();
+            assert!(
+                matches!(
+                    &notice,
+                    Some(BackendNotice::PrimaryUnavailable { fallback, fallback_model: Some(m), .. })
+                        if fallback == "cloud" && m == expected
+                ),
+                "mode {mode}, configured {configured:?}: got {notice:?}"
+            );
+        }
+    }
 }

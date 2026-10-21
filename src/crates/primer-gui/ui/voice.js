@@ -10,6 +10,7 @@
 //   window.primerRefreshSidebar()
 //   window.primerShowError(msg)
 //   window.primerShowToast(msg)
+//   window.primerRenderSessionInfo(info)
 
 (() => {
   const { invoke } = window.__TAURI__.core;
@@ -51,6 +52,12 @@
     return state.android ? `${base}_android` : base;
   }
 
+  // start_voice_mode rebuilds the session (and its backend), so its
+  // SessionInfo carries a fresh backend notice + served identity (#347).
+  function renderStartedSession(info) {
+    if (info && window.primerRenderSessionInfo) window.primerRenderSessionInfo(info);
+  }
+
   function setActive(active) {
     state.active = active;
     const toggle = $("voice-mode-toggle");
@@ -87,7 +94,7 @@
       return;
     }
     try {
-      await invoke(vcmd("start_voice_mode"));
+      renderStartedSession(await invoke(vcmd("start_voice_mode")));
       hidePermissionDenied();
       setActive(true);
     } catch (err) {
@@ -219,7 +226,7 @@
           cleanup();
           // Retry start_voice_mode now that assets are local.
           try {
-            await invoke(vcmd("start_voice_mode"));
+            renderStartedSession(await invoke(vcmd("start_voice_mode")));
             setActive(true);
           } catch (err) {
             showError(`start after download: ${(err && (err.message || JSON.stringify(err))) || String(err)}`);
@@ -371,7 +378,7 @@
     if (!cfg || !cfg.speech || cfg.speech.voice_mode_enabled !== true) return;
     state.starting = true;
     try {
-      await invoke(vcmd("start_voice_mode"));
+      renderStartedSession(await invoke(vcmd("start_voice_mode")));
       hidePermissionDenied();
       setActive(true);
     } catch (err) {

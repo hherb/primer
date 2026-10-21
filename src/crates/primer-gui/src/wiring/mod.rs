@@ -34,7 +34,7 @@ use tokio::sync::Mutex;
 use crate::config::GuiConfig;
 use crate::state::{ActiveSession, SessionSnapshot};
 
-use backend_params::{build_backend_params, resolve_main_model};
+use backend_params::{build_backend_params, resolve_main_model, served_identity};
 use stores::{open_knowledge_base, open_session_store_and_learner};
 use subsystems::build_subsystems;
 
@@ -129,7 +129,7 @@ async fn build_with_strategy(
     // `build_main_backend` is `build_backend` plus the opt-in fallback /
     // router wrap; with no fallback configured and `router_mode =
     // LocalOnly` it is equivalent to `build_backend`.
-    let backend = build_main_backend(&backend_config.kind, main_model.clone(), &params)
+    let (backend, notice) = build_main_backend(&backend_config.kind, main_model.clone(), &params)
         .await
         .map_err(|e| format!("constructing inference backend: {e}"))?;
 
@@ -189,6 +189,16 @@ async fn build_with_strategy(
         concept_count: learner.concepts.len(),
     };
 
+    // What the sidebar shows; differs from the config when the fallback
+    // serves alone (#338). The subsystems above still get the primary's
+    // `main_model` as their identifier even then — a known mislabel (#351).
+    let (backend_name, display_model) = served_identity(
+        &backend_config.kind,
+        &main_model,
+        notice.as_ref(),
+        backend.name(),
+    );
+
     let dm = primer_pedagogy::DialogueManager::new(
         learner,
         Arc::clone(&backend),
@@ -202,8 +212,9 @@ async fn build_with_strategy(
         dialogue_manager: Arc::new(Mutex::new(dm)),
         snapshot: Arc::new(Mutex::new(initial_snapshot)),
         locale: effective_locale,
-        backend_name: backend_config.kind.clone(),
-        main_model,
+        backend_name,
+        main_model: display_model,
+        backend_notice: notice.map(|n| n.to_string()),
         session_store: Arc::clone(&session_store) as _,
         current_turn_abort: Mutex::new(None),
     })

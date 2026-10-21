@@ -6,26 +6,10 @@
 //! `OPENAI_COMPAT_API_KEY` env vars when the corresponding key source is
 //! `Env` — the wiring crate's helpers never touch env vars themselves.
 
-use primer_engine::BackendParams;
+use primer_engine::{BackendNotice, BackendParams};
 
 use crate::config::{ApiKeySource, GuiConfig, SubsystemConfig};
 
-/// Assemble the [`BackendParams`] every `primer-engine` builder consumes.
-///
-/// The cloud `api_key` resolves Env vs Inline here so the wiring
-/// crate doesn't need to touch env vars on every helper call. The
-/// `ANTHROPIC_API_KEY` env var is consulted whenever the cloud backend
-/// is reachable — as the primary OR as the opt-in fallback secondary
-/// (issue #205 follow-up). A local-primary → cloud-fallback setup (the
-/// supported fallback direction) needs the key even though the primary
-/// `kind` is not "cloud"; without this the cloud secondary fails to
-/// build with an Auth error and the fallback silently degrades to
-/// PrimaryAlone. An Inline key is kind-agnostic (it may be entered for
-/// a cloud fallback even when the primary is local).
-///
-/// The resolved openai-compat key lands in
-/// `BackendParams::openai_compat_api_key`; `build_subsystems` reads that
-/// same value back from `params` for the openai-compat embedder.
 /// Read an API-key env var. Unset → `None`; a non-Unicode value is also
 /// unusable but is logged rather than silently treated as unset (#337).
 fn env_key(name: &str) -> Option<String> {
@@ -39,6 +23,22 @@ fn env_key(name: &str) -> Option<String> {
     }
 }
 
+/// Assemble the [`BackendParams`] every `primer-engine` builder consumes.
+///
+/// The cloud `api_key` resolves Env vs Inline here so the wiring
+/// crate doesn't need to touch env vars on every helper call. The
+/// `ANTHROPIC_API_KEY` env var is consulted whenever the cloud backend
+/// is reachable — as the primary OR as the opt-in fallback secondary
+/// (issue #205 follow-up). A local-primary → cloud-fallback setup (the
+/// supported fallback direction) needs the key even though the primary
+/// `kind` is not "cloud"; without this the cloud secondary fails to
+/// build with an Auth error and the fallback degrades to PrimaryAlone
+/// (reported as a `BackendNotice::FallbackDropped`). An Inline key is kind-agnostic (it may be entered for
+/// a cloud fallback even when the primary is local).
+///
+/// The resolved openai-compat key lands in
+/// `BackendParams::openai_compat_api_key`; `build_subsystems` reads that
+/// same value back from `params` for the openai-compat embedder.
 pub(super) fn build_backend_params(config: &GuiConfig) -> BackendParams {
     let backend_config = &config.backend;
 
@@ -193,4 +193,29 @@ fn subsystem_kind(s: &SubsystemConfig) -> Option<String> {
 /// Model-override counterpart of [`subsystem_kind`].
 fn subsystem_model(s: &SubsystemConfig) -> Option<String> {
     if s.match_main { None } else { s.model.clone() }
+}
+
+/// The `(backend kind, model)` the sidebar shows. Normally the configured
+/// primary; but when the primary was unavailable at startup every turn goes
+/// to the fallback, so show that instead (issue #338). `served_name` is the
+/// constructed backend's `name()`, used when the fallback has no model.
+pub(super) fn served_identity(
+    kind: &str,
+    main_model: &str,
+    notice: Option<&BackendNotice>,
+    served_name: &str,
+) -> (String, String) {
+    match notice {
+        Some(BackendNotice::PrimaryUnavailable {
+            fallback,
+            fallback_model,
+            ..
+        }) => (
+            fallback.clone(),
+            fallback_model
+                .clone()
+                .unwrap_or_else(|| served_name.to_string()),
+        ),
+        _ => (kind.to_string(), main_model.to_string()),
+    }
 }
