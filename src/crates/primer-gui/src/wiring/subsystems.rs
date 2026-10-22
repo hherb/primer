@@ -116,7 +116,7 @@ pub(super) fn retrieval_notice(kind: &str, built: bool) -> Option<String> {
     (kind != "none" && !built).then(|| {
         format!(
             "Knowledge search is keyword-only (BM25): the '{kind}' embedder could not \
-             start (e.g. its model download failed offline)."
+             start (model download or embedding server unavailable)."
         )
     })
 }
