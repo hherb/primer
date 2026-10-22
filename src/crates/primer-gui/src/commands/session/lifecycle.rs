@@ -268,6 +268,7 @@ pub(crate) async fn info_from(active: &ActiveSession) -> SessionInfo {
         backend_kind: active.backend_name.clone(),
         main_model: active.main_model.clone(),
         backend_notice: active.backend_notice.clone(),
+        retrieval_notice: active.retrieval_notice.clone(),
         locale: active.locale.pack_id().to_string(),
         voice_mode_available: cfg!(feature = "speech"),
     }

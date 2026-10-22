@@ -211,6 +211,19 @@ async fn stub_embedder_kind_succeeds() {
     );
 }
 
+/// Neither an intentional `none` nor a working embedder raises the
+/// BM25-only notice (#353).
+#[tokio::test]
+async fn working_or_disabled_embedder_has_no_retrieval_notice() {
+    let home = TempDir::new().unwrap();
+    let mut cfg = stub_config();
+    for kind in ["none", "stub"] {
+        cfg.embedder.kind = kind.to_string();
+        let s = build_active_session(home.path(), &cfg).await.unwrap();
+        assert_eq!(s.retrieval_notice, None, "kind {kind}");
+    }
+}
+
 #[tokio::test]
 async fn second_build_after_first_drops_persists_learner_growth() {
     // Models the GUI's start_session → close_session → start_session

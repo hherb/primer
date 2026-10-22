@@ -303,3 +303,24 @@ fn served_identity_shows_fallback_when_primary_unavailable() {
         ("stub".to_string(), "stub".to_string())
     );
 }
+
+// ─── retrieval notice (issue #353) ───────────────────────────────────
+
+/// A configured `none` is intentional BM25-only, and a built embedder means
+/// hybrid retrieval is on: neither gets a notice.
+#[test]
+fn retrieval_notice_absent_when_intentional_or_built() {
+    assert_eq!(retrieval_notice("none", false), None);
+    for kind in ["stub", "fastembed", "ollama", "openai-compat"] {
+        assert_eq!(retrieval_notice(kind, true), None, "kind {kind}");
+    }
+}
+
+/// A real embedder that failed to start (e.g. the BGE-M3 download offline)
+/// silently degrades to BM25-only; the notice names the embedder.
+#[test]
+fn retrieval_notice_reports_failed_embedder() {
+    let notice = retrieval_notice("fastembed", false).expect("failed embedder must be reported");
+    assert!(notice.contains("fastembed"), "notice: {notice}");
+    assert!(notice.contains("BM25"), "notice: {notice}");
+}
