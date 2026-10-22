@@ -265,7 +265,7 @@ A native window with chat bubbles, a session picker on launch, a settings modal 
 cargo run --bin primer-gui
 ```
 
-Settings persist to `~/.primer/gui-config.json` (mode 0600). The first launch ships with the stub backend so you can click through the surface without an API key; pick **Settings** in the launch picker to switch to cloud or ollama and then **Save & start new session**. Sessions persist to the same per-learner SQLite file the CLI uses (`~/.primer/<slugified-name>.db`), so the GUI and the CLI share data — a session started in either can be resumed in the other.
+Settings persist to `~/.primer/gui-config.json` (mode 0600). The first launch ships with the stub backend so you can click through the surface without an API key; pick **Settings** in the launch picker to switch to cloud or ollama and then **Save & start new session**. Sessions persist to the same per-learner SQLite file the CLI uses (`~/.primer/<slugified-name>.db`), so the GUI and the CLI share data — a session started in either can be resumed in the other. The desktop app also writes its diagnostic log to `~/.primer/logs/gui.log` (useful when it was launched from the Dock or Finder, which hides terminal output).
 
 ### Voice mode (experimental POC)
 
