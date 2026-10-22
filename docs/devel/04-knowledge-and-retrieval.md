@@ -119,7 +119,7 @@ Always built, no feature flag. It hashes each input through FNV + xorshift to pr
 
 Behind the `fastembed` feature. Wraps [fastembed-rs](https://github.com/Anush008/fastembed-rs) `5.7.0` to load BGE-M3, a 1024-dimensional multilingual embedding model that covers EN/DE/JA/HI in one binary so the initial test cohort never hits a model swap. The int8-quantised weights weigh in at about 570 MB. See [fastembed_backend.rs](../../src/crates/primer-embedding/src/fastembed_backend.rs).
 
-> **Gotcha:** First-run BGE-M3 download is ~570 MB into `~/.cache/primer/models/` and uses the same `cdn.pyke.io` ONNX-runtime download as the speech feature. Construction failure falls back to BM25-only with a `tracing::warn!` — the conversation still works, which is strictly better than refusing to start. The desktop GUI also shows it as a persistent `#retrieval-notice-banner` (`SessionInfo.retrieval_notice`, issue #353); a configured `none` shows nothing.
+> **Gotcha:** First-run BGE-M3 download is ~570 MB into `~/.cache/primer/models/` and uses the same `cdn.pyke.io` ONNX-runtime download as the speech feature. Construction failure falls back to BM25-only with a `tracing::warn!` — the conversation still works, which is strictly better than refusing to start. The desktop GUI also shows it as a persistent `#retrieval-notice-banner` (`SessionInfo.retrieval_notice`, issue #353); a configured `none` shows nothing. The desktop GUI also tees all `tracing` output into `~/.primer/logs/gui.log` (rotated to `gui.log.1` at startup past 5 MiB, issue #355), because a Dock/Finder launch discards stdout; Android keeps logcat.
 
 ### OllamaEmbedder
 

@@ -14,6 +14,8 @@ pub mod commands;
 pub mod config;
 pub mod csp;
 pub mod diagnostics_toggle_contract;
+#[cfg(not(target_os = "android"))]
+pub mod log_sink;
 pub mod modal_dialog_contract;
 pub mod paths;
 pub mod reasoning_markers;
@@ -152,9 +154,17 @@ fn init_tracing() {
             eprintln!("tracing init failed: {e}");
         }
     }
+    // Desktop: stdout for terminal launches, teed into `~/.primer/logs/
+    // gui.log` because a Dock launch discards stdout (issue #355). A log file
+    // that can't be opened only costs the file; stdout logging still runs.
     #[cfg(not(target_os = "android"))]
     {
-        if let Err(e) = tracing_subscriber::fmt().with_env_filter(filter).try_init() {
+        use tracing_subscriber::util::SubscriberInitExt;
+        let log = log_sink::desktop_log_path(&resolve_home());
+        let file = log_sink::open_log_file(&log, log_sink::GUI_LOG_MAX_BYTES)
+            .inspect_err(|e| eprintln!("cannot open log file {}: {e}", log.display()))
+            .ok();
+        if let Err(e) = log_sink::desktop_subscriber(filter, file).try_init() {
             eprintln!("tracing init failed: {e}");
         }
     }
