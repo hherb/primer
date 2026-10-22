@@ -36,7 +36,7 @@ use crate::state::{ActiveSession, SessionSnapshot};
 
 use backend_params::{build_backend_params, resolve_main_model, served_identity};
 use stores::{open_knowledge_base, open_session_store_and_learner};
-use subsystems::build_subsystems;
+use subsystems::{build_subsystems, retrieval_notice};
 
 // `tests.rs` calls `cloud_backend_in_use` by bare name via `use super::*`;
 // production code in this file doesn't call it, so the import is test-only.
@@ -156,6 +156,7 @@ async fn build_with_strategy(
 
     // ─── Subsystems (classifier, extractor, comprehension, embedder) ─
     let subsystems = build_subsystems(config, &backend, &main_model, &params).await?;
+    let retrieval_notice = retrieval_notice(&config.embedder.kind, subsystems.embedder.is_some());
 
     // ─── Pedagogy settings ───────────────────────────────────────────
     let pedagogy_config = PedagogyConfig {
@@ -215,6 +216,7 @@ async fn build_with_strategy(
         backend_name,
         main_model: display_model,
         backend_notice: notice.map(|n| n.to_string()),
+        retrieval_notice,
         session_store: Arc::clone(&session_store) as _,
         current_turn_abort: Mutex::new(None),
     })

@@ -108,6 +108,19 @@ pub(super) async fn build_subsystems(
     })
 }
 
+/// The UI notice for a configured embedder that failed to start, which
+/// leaves retrieval BM25-only (issue #353). `None` when `kind` is `"none"`
+/// (BM25-only by choice) or the embedder was built. English-only and
+/// operator-facing, like [`primer_engine::BackendNotice`].
+pub(super) fn retrieval_notice(kind: &str, built: bool) -> Option<String> {
+    (kind != "none" && !built).then(|| {
+        format!(
+            "Knowledge search is keyword-only (BM25): the '{kind}' embedder could not \
+             start (model download or embedding server unavailable)."
+        )
+    })
+}
+
 /// Embedder construction, mirroring `primer-cli`'s dispatch matrix.
 ///
 /// `fastembed` / `ollama` / `openai-compat` require their respective cargo

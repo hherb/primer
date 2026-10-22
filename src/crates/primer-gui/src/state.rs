@@ -144,6 +144,11 @@ pub struct ActiveSession {
     /// frontend shows it as a persistent banner. `None` when healthy.
     pub backend_notice: Option<String>,
 
+    /// Notice when the configured embedder failed to start, so retrieval
+    /// silently degraded to BM25-only (issue #353). `None` when hybrid
+    /// retrieval is on or the embedder is `none` by choice.
+    pub retrieval_notice: Option<String>,
+
     /// Snapshot of the DM-owned fields the frontend reads via
     /// `current_session_info`. Refreshed by `send_message` after each
     /// successful turn so readers never have to lock the DM (and queue
@@ -194,6 +199,7 @@ impl std::fmt::Debug for ActiveSession {
             .field("backend_name", &self.backend_name)
             .field("main_model", &self.main_model)
             .field("backend_notice", &self.backend_notice)
+            .field("retrieval_notice", &self.retrieval_notice)
             .finish_non_exhaustive()
     }
 }

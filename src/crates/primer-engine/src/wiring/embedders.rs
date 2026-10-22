@@ -18,7 +18,8 @@ use std::sync::Arc;
 ///   download failed). Caller falls back to BM25-only retrieval; a
 ///   `tracing::warn!` reports it (issue #336: a bare `eprintln!`
 ///   bypasses the subscriber — e.g. Android's logcat writer; a desktop
-///   GUI file sink is #355, an in-app notice #353).
+///   GUI file sink is #355; the GUI banner is `primer-gui`'s
+///   `wiring::subsystems::retrieval_notice`, #353).
 /// - `Err(msg)` — feature not compiled in. The user explicitly asked
 ///   for fastembed; surfacing this as an error lets the binary decide
 ///   whether to exit (CLI) or render it inline (GUI). Earlier

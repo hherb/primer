@@ -25,6 +25,9 @@ pub struct SessionInfo {
     /// Non-fatal startup degradation of the configured fallback / router
     /// (e.g. "Fallback backend 'cloud' is disabled…"), shown as a banner.
     pub backend_notice: Option<String>,
+    /// The configured embedder failed to start, so retrieval is BM25-only
+    /// (issue #353), shown as a banner. `None` when hybrid or `none` by choice.
+    pub retrieval_notice: Option<String>,
     /// Whether this binary was built with the `speech` cargo feature.
     /// The frontend uses this to enable/disable the header voice-mode
     /// toggle. `false` on default builds.

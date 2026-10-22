@@ -23,6 +23,7 @@ const dom = {
   emptyState: document.getElementById("empty-state"),
   errorBanner: document.getElementById("error-banner"),
   backendNoticeBanner: document.getElementById("backend-notice-banner"),
+  retrievalNoticeBanner: document.getElementById("retrieval-notice-banner"),
   composer: document.getElementById("composer"),
   input: document.getElementById("input"),
   send: document.getElementById("send"),
@@ -201,6 +202,7 @@ function resetSessionHeader() {
   dom.sessionInfo.dataset.state = "loading";
   dom.sessionInfo.innerHTML = `<span class="muted">No session</span>`;
   dom.backendNoticeBanner.hidden = true;
+  dom.retrievalNoticeBanner.hidden = true;
 }
 
 function setupSettingsButton() {
@@ -235,6 +237,7 @@ async function handleSessionReady({ info, shouldReplay }) {
   resetChatSurface();
   // A failed info fetch below must not leave the previous session's notice up.
   dom.backendNoticeBanner.hidden = true;
+  dom.retrievalNoticeBanner.hidden = true;
 
   const sessionInfo =
     info ?? (await invoke("current_session_info").catch(() => null));
@@ -334,6 +337,8 @@ function renderSessionInfo(info) {
   // textContent, not innerHTML: the notice embeds a backend error string.
   dom.backendNoticeBanner.textContent = info.backend_notice || "";
   dom.backendNoticeBanner.hidden = !info.backend_notice;
+  dom.retrievalNoticeBanner.textContent = info.retrieval_notice || "";
+  dom.retrievalNoticeBanner.hidden = !info.retrieval_notice;
 }
 
 /// Drive the composer's three-state UI from a single function so the
