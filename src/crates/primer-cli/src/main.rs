@@ -631,6 +631,8 @@ async fn async_main() -> anyhow::Result<()> {
     // Initialise tracing (set RUST_LOG=debug for verbose output, or
     // RUST_LOG=ort=info to see ONNX Runtime session-init logs).
     tracing_subscriber::fmt()
+        // stderr, so log lines never mix into the conversation on stdout.
+        .with_writer(std::io::stderr)
         .with_env_filter(
             tracing_subscriber::EnvFilter::try_from_default_env()
                 .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new(DEFAULT_LOG_FILTER)),

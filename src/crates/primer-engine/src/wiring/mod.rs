@@ -181,6 +181,11 @@ mod build_main_backend_tests;
 mod classifier_construction_tests;
 #[cfg(test)]
 mod comprehension_construction_tests;
+#[cfg(all(
+    test,
+    any(feature = "ollama-embedding", feature = "openai-compat-embedding")
+))]
+mod embedder_fallback_tests;
 #[cfg(test)]
 mod extractor_construction_tests;
 #[cfg(test)]

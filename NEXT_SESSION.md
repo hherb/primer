@@ -1,61 +1,66 @@
 # Primer — Next Session Brief
 
 **Audience:** future Claude Code session continuing work on this repo.
-**Last updated:** 2026-10-21 10:33 UTC. **One PR is open against `main`:**
+**Last updated:** 2026-10-21 22:25 UTC. **One PR is open against `main`:**
 
 | PR | Branch | What | Closes |
 |---|---|---|---|
-| **#350** | `fix/fallback-outcome-347-338` | A degraded fallback/router leg is reported to the user, not just logged. Also carries this brief. | #347, #338 |
+| **#354** | `fix/embedder-fallback-tracing-336` | Embedder BM25 fallback and ignored-model notices go through `tracing`, not `eprintln!`. Also carries this brief. | #336 |
 
-`main` is at `e42628f` (#349). Since the last brief, **all four PRs merged**: #345, #346, #348 and #349. **#330 and #319 are confirmed CLOSED.**
+`main` is at `1583ab4` (#350). Since the last brief, **#350 merged**, and **#347 and #338 are confirmed CLOSED**.
 
 ## What we shipped this session
 
-### #350 (`68098fd`): closes #347 and #338
-**Engine:** `primer_engine::build_main_backend` now returns `Result<(Arc<dyn InferenceBackend>, Option<BackendNotice>)>`. This applies to the fallback path **and** the router path.
-- `BackendNotice::FallbackDropped { fallback, reason }`: plan `PrimaryAlone`, so there is no safety net.
-- `BackendNotice::PrimaryUnavailable { primary, fallback, fallback_model, reason }`: plan `SecondaryAlone`, so the fallback serves every turn.
-- `Display` is the user-facing line.
-- New private helpers in `wiring/backend.rs` (443 lines): `build_secondary_leg` dedups the leg build shared by the fallback and router paths; `degraded_notice` maps a plan to a notice.
+### #354 (`225c751`): closes #336
+**Engine (`primer-engine/src/wiring/embedders.rs`):**
+- Embedder init failure ("… falling back to BM25-only retrieval") now uses `tracing::warn!`, for fastembed, ollama and openai-compat.
+- The ignored non-bge-m3 model note also uses `tracing::warn!`.
+- The "Loading fastembed…" and "Embedder: … at …" lines now use `tracing::info!`.
+- The CLI's default filter (`info,…`) keeps all of these visible. The GUI's subscriber and log sink now receive them.
+- The model note drops its CLI-only `--embedder-model` wording, because the GUI calls the same builder.
 
-**CLI:** prints `Warning: <notice>` on stderr.
+**TDD:** new `wiring/embedder_fallback_tests.rs`.
+- It points real ollama and openai-compat embedders at `http://127.0.0.1:1` (a closed port, so there is no network) and captures the subscriber output.
+- Red on `eprintln!`, green on `tracing`.
+- The module is gated on `cfg(all(test, any(ollama-embedding, openai-compat-embedding)))`, so its helpers are never dead code on a default build.
+- New dev-dep: `tracing-subscriber` (already a workspace dep).
 
-**GUI:**
-- `ActiveSession.backend_notice` and `SessionInfo.backend_notice` (`Option<String>`) feed a new persistent `#backend-notice-banner` in `index.html`.
-- `renderSessionInfo` sets it with `textContent`; `resetSessionHeader` hides it.
-- The pure `wiring/backend_params.rs::served_identity` swaps the sidebar's kind/model to the fallback on `PrimaryUnavailable` (#338). `main_model` stays the subsystem identifier.
+**CI:** new `feature-combos` step: `cargo test -p primer-engine --features ollama-embedding,openai-compat-embedding embedder_fallback`. Before this, no CI job built those features.
 
-**Drive-by:** moved `build_backend_params`'s doc comment back onto it (#348 had left it stacked above `env_key`).
-
-**Docs:** CLAUDE.md (the FallbackBackend bullet), README (§ Inference routing), ROADMAP (line 64).
-
-**TDD:** 5 new engine tests and 4 new GUI tests.
+**Docs:** none needed. CLAUDE.md and `docs/devel/04-knowledge-and-retrieval.md` already said `tracing::warn!`; the code now matches them.
 
 **Gate results:**
-- workspace tests: 1336 passed, 0 failed;
-- clippy `-D warnings`: clean for the workspace, `primer-gui` with `speech` and with `android-native`, and `primer-cli` with `speech`;
-- fmt and default-arm rustdoc `-D warnings`: clean.
+- workspace tests: 1338 passed, 0 failed;
+- clippy `-D warnings`: clean for the workspace, and for `primer-engine` with the two embedding features;
+- fmt and `primer-engine` rustdoc `-D warnings`: clean.
+
+**Filed:** **#353**, the GUI indicator for the effective retrieval mode ("BM25-only (embedder unavailable)"). This was #336's optional half; it mirrors the #347 `backend_notice` pattern.
 
 ### Per-session sweep
 - The oversized list is unchanged.
-- The **inline-test detector is clean for the eighth session running**.
-- Watch-list: `primer-classifier/src/llm.rs` (441), `primer-extractor/src/llm.rs` (454), `primer-engine/src/wiring/backend.rs` (443, grew this session).
+- The **inline-test detector is clean for the ninth session running**.
+- Watch-list: `primer-classifier/src/llm.rs` (441), `primer-extractor/src/llm.rs` (454), `primer-engine/src/wiring/backend.rs` (443).
 
 ## What's next (concrete acceptance criteria)
 
-### 0. Owner review/merge: #350
-- **Acceptance:** CI green and the owner merges.
-- Then confirm #347 and #338 auto-closed.
-- **Optional manual check:** `cargo tauri dev` with primary `ollama` (not running) and fallback `ollama` without a model → the banner shows "Fallback backend 'ollama' is disabled…".
+### 0. Owner review/merge: #354
+- **Acceptance:** CI is green, including the new feature-combos step, and the owner merges.
+- Then confirm #336 auto-closed.
 
 ### 1. Sweep + inline-test detector: re-run EVERY session
 Commands are in the resume block.
 
 ### 2. Remaining review-filed bugs (host-completable; TDD each: failing test, fix, `Closes #N` PR)
-- **#336:** use `tracing::warn!` instead of `eprintln!` for embedder fallback notices. Small; a good next pick.
-- **#341:** CLI-flag wording in engine errors reaches GUI users. This now also covers `BackendNotice.reason`, which is the raw construction error (e.g. "--fallback-model is required…").
+- **#353:** GUI retrieval-mode notice. Good next pick, since it reuses the #347 banner plumbing.
+  - **Acceptance:**
+    - `build_embedder` reports when a configured real embedder failed;
+    - `ActiveSession`/`SessionInfo` carry it;
+    - the GUI renders it;
+    - a configured `none` shows no notice;
+    - a pure stage test pins both cases.
+- **#341:** CLI-flag wording in engine errors reaches GUI users. This also covers `BackendNotice.reason`.
 - **#340:** stage-test gaps.
-- Older ones: #307–#316 (retrieval/storage/streaming), #325/#326 (voice), #331/#332 (storage).
+- Older ones: #307–#316 (retrieval/storage/streaming), #325/#326 (voice), #331/#332 (storage), #351 (subsystem ids under `PrimaryUnavailable`).
 
 ### 3. Production-code splits (owner-approved lane, all feature-gated, so dual-verify)
 - **`primer-inference/src/qnn/genie/real.rs` (566, `qnn`)** is the recommended one. Baselines:
@@ -77,10 +82,12 @@ Commands are in the resume block.
 
 ## Open decisions / risks
 
-- **#350 shows the raw construction error as the notice `reason`.** The GUI already did the same for fatal construction errors ("constructing inference backend: {e}"), so the posture is unchanged. Wording cleanup belongs to #341.
-- **The #350 banner is English-only.** So is the rest of the GUI chrome. `BackendNotice` is typed with locale-neutral fields, so a future i18n render is mechanical.
-- **The CLI's "Using X backend" line still names the configured primary** when the fallback serves alone. The `Warning:` line printed right above it explains this, so I deliberately left the line alone.
-- **Not exercised:** the banner in a live `cargo tauri dev`; a real Dock launch of the bundled `.app` (carried from #348).
+- **CLI tracing now goes to stderr.** The embedder lines print through the CLI's `tracing_subscriber::fmt()`, which the PR #354 review fix pointed at **stderr** (`.with_writer(std::io::stderr)`), so no log line mixes into the conversation on stdout. A user who sets `RUST_LOG=warn` will no longer see the info-level "Loading fastembed…" line; the warnings stay visible. Desktop-GUI tracing still goes to stdout, which a Dock launch discards: tracked in #355.
+- **The fastembed failure path itself is still untested.** It needs a failing BGE-M3 init, which can't be forced without network control. Only the ollama and openai-compat arms are test-pinned; the fastembed arm is the same macro swap.
+- **Carried from #350:**
+  - The notice `reason` is the raw construction error (wording cleanup is #341).
+  - The banner is English-only.
+  - Not exercised: the banner in a live `cargo tauri dev`, and a real Dock launch of the bundled `.app`.
 - **Stale CMake cache after Xcode/SDK upgrades.** Symptom: `'<header>' file not found` from a `*-sys` build. Recipe:
   1. Find the stale caches: `find src/target -name CMakeCache.txt -maxdepth 6 | xargs grep -l 'MacOSX<old>'`.
   2. `cargo clean -p <those sys crates>`.
@@ -99,9 +106,12 @@ Commands are in the resume block.
   4. Hunt for doc drift: `git grep` the behaviour across `*.md`.
   5. Commit with `Closes #N`, push, open the PR.
   6. File any out-of-scope half as a new issue before writing the PR body.
-- **Two issues needing the same plumbing → one PR.** #347 (banner) and #338 (sidebar identity) both needed `build_main_backend` to expose its plan outcome, so one typed return value fixed both.
-- **Changing a widely-called signature:** mechanically rewrite test call sites with `perl -pi` (`let b =` → `let (b, _) =`), so the red phase is pure compile errors pointing at the missing type.
-- **Duplicated GUI+CLI logic → one pure helper in `primer-engine`** that takes the *result* of the I/O call, not the store (`adopt_or_mint_learner_id`).
+- **Testing that something is logged:** install a thread-local `tracing_subscriber::fmt()` with a `MakeWriter` over `Arc<Mutex<Vec<u8>>>`, via `tracing::subscriber::set_default`. `#[tokio::test]` is current-thread, so awaited events are captured. See `primer-engine/src/wiring/embedder_fallback_tests.rs`.
+- **Feature-gated tests:** gate the whole test module on the features, not each test, so the shared helpers aren't dead code on a default build. Then add a CI step, or no job will ever run them.
+- **Unreachable endpoint for network-failure tests:** `http://127.0.0.1:1` refuses fast, with no mock server needed.
+- **Two issues needing the same plumbing → one PR.** One typed return value can fix both (#347 + #338).
+- **Changing a widely-called signature:** mechanically rewrite test call sites with `perl -pi`, so the red phase is pure compile errors.
+- **Duplicated GUI+CLI logic → one pure helper in `primer-engine`** that takes the *result* of the I/O call (`adopt_or_mint_learner_id`).
 - **Split recipe, substantive-line diff, Dependabot triage:** unchanged; see `docs/handoffs/2026-10-16T202752Z.md` § "Patterns to reuse".
 - **Stacked PRs:** after the base squash-merges, retarget or rebase the child **before** merging it (the #344 loss).
 - Read `NEXT_SESSION.md` AFTER `git pull`, and check `git status` first.
@@ -110,7 +120,7 @@ Commands are in the resume block.
 
 ```bash
 cd /Users/hherb/src/primer && git status --short && git checkout main && git pull --ff-only && git log --oneline -6 && gh pr list --state open
-# Open at close: #350. After merge, confirm #347/#338 closed: gh issue view 347 --json state; gh issue view 338 --json state
+# Open at close: #354. After merge, confirm #336 closed: gh issue view 336 --json state
 S=/private/tmp/primer-scratch; mkdir -p "$S"   # or the session's scratchpad dir
 
 # === Oversized-file sweep + inline-test detector (re-verify EVERY session) ===
@@ -119,16 +129,17 @@ find crates -name '*.rs' -not -path '*/vendor/*' -not -name 'tests.rs' | xargs w
 for f in $(find crates -name '*.rs' -not -path '*/vendor/*' -not -name 'tests.rs' | xargs wc -l | awk '$1>500 && $2!="total"{print $2}'); do \
   awk '/#\[cfg\(test\)\]/{ln=NR} ln && NR==ln+1 && /^[[:space:]]*mod .*\{/{print FILENAME" inline mod @"NR}' "$f"; done
 
-# === Next bug (#336): start here ===
-gh issue view 336
-git checkout -b fix/embedder-fallback-tracing-336 origin/main
-~/.cargo/bin/cargo test -p primer-engine -p primer-cli -p primer-gui 2>&1 | grep 'test result'   # baseline
+# === Next bug (#353): start here ===
+gh issue view 353
+git checkout -b fix/gui-retrieval-notice-353 origin/main
+~/.cargo/bin/cargo test -p primer-engine -p primer-gui 2>&1 | grep 'test result'   # baseline
 
 # === Standard workspace gate (one cargo pass at a time) ===
 ~/.cargo/bin/cargo test --workspace 2>&1 | tee $S/ws.log | tail -3
 grep -E 'test result: FAILED|^error' $S/ws.log  # expect empty
 ~/.cargo/bin/cargo clippy --workspace --all-targets -- -D warnings
 ~/.cargo/bin/cargo fmt --all -- --check
+~/.cargo/bin/cargo test -p primer-engine --features ollama-embedding,openai-compat-embedding embedder_fallback   # new in #354
 
 # === Rustdoc gate (CI-enforced); feature arms mirror ci.yml ===
 RUSTDOCFLAGS="-D warnings" ~/.cargo/bin/cargo doc --workspace --no-deps --document-private-items
@@ -140,5 +151,6 @@ for spec in "-p primer-speech --features voice-loop,silero,whisper,piper,cpal,su
 
 ## Reporting back
 
-- **#350:** a configured fallback or router leg that fails to build at startup is now reported, not just logged. The CLI prints a `Warning:` line. The GUI shows a persistent banner, and its sidebar names the backend that is actually answering. Closes #347 and #338, with red-then-green tests; the workspace gate is green (1336 tests).
-- Last session's four PRs (#345, #346, #348, #349) all merged; #330 and #319 are closed.
+- **#354:** embedder BM25-fallback notices now go through `tracing`, so they reach the GUI's log sink and not just an invisible stderr. Closes #336 with red-then-green tests and a new CI step; the workspace gate is green (1338 tests).
+- Filed **#353** for an in-app "BM25-only" indicator.
+- #350 merged; #347 and #338 are closed.
