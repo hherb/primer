@@ -1,64 +1,58 @@
 # Primer — Next Session Brief
 
 **Audience:** future Claude Code session continuing work on this repo.
-**Last updated:** 2026-10-22 11:12 UTC. **One PR is open against `main`:**
+**Last updated:** 2026-10-22 (UTC). **One PR is open against `main`:**
 
 | PR | Branch | What | Closes |
 |---|---|---|---|
-| **#356** | `fix/gui-retrieval-notice-353` | GUI banner when the configured embedder falls back to BM25-only. Also carries this brief. | #353 |
+| **#357** | `fix/gui-tracing-sink-355` | Desktop GUI tees `tracing` into `~/.primer/logs/gui.log`. | #355 |
 
-`main` is at `5df0fcb` (#354). Since the last brief, **#354 merged**, and **#336 is confirmed CLOSED**.
+`main` is at `cfd1da4` (#356). Since the last brief, **#356 merged** and **#353 is confirmed CLOSED**.
 
 ## What we shipped this session
 
-### #356 (`6e762b0`): closes #353
+### #357 (`50774e6`): closes #355
+**Problem:** a Dock/Finder launch sends stdout to `/dev/null`, and the desktop `init_tracing` arm wrote only to stdout. Every GUI `warn!` was lost, including the #336 embedder fallback.
+
 **GUI (`primer-gui`):**
-- New pure `wiring/subsystems.rs::retrieval_notice(kind, built) -> Option<String>`.
-  - Returns `None` when the embedder built, or when `kind == "none"` (BM25-only by choice).
-  - Otherwise returns an English, operator-facing notice that names the embedder.
-- `wiring/mod.rs` computes the notice from `config.embedder.kind` and `subsystems.embedder.is_some()`. **No engine signature changed.**
-- `ActiveSession.retrieval_notice` and `SessionInfo.retrieval_notice` carry it.
-  - All four `SessionInfo` construction sites forward it: `session/lifecycle.rs::info_from`, `voice/start.rs`, `voice_android.rs`, and the `voice/tests.rs` fixture.
-- **UI:** new `#retrieval-notice-banner` in `index.html`, filled via `textContent` in `app.js::renderSessionInfo`.
-  - It is hidden on reset in both places where the backend banner is.
-  - Voice mode re-renders through `window.primerRenderSessionInfo`, so it stays current.
+- New pure, desktop-only module `src/log_sink/` (`mod.rs` plus `tests.rs`):
+  - `desktop_log_path(home)` returns `~/.primer/logs/gui.log`.
+  - `rotate_if_oversized(log, max)` moves the log to `gui.log.1` (one generation) once it reaches `GUI_LOG_MAX_BYTES` (5 MiB).
+  - `open_log_file` creates the directory, rotates, then opens for append.
+  - `desktop_subscriber(filter, Option<File>)` combines a stdout layer with an ANSI-free file layer.
+- `lib.rs::init_tracing` desktop arm uses it. If the file won't open, the app reports that on stderr and keeps logging to stdout.
+- Android's logcat arm is unchanged. **No new dependency** (`tracing-appender` was not added).
 
 **TDD:**
-- Stage tests: `retrieval_notice_absent_when_intentional_or_built` and `retrieval_notice_reports_failed_embedder`.
-- End-to-end: `working_or_disabled_embedder_has_no_retrieval_notice` (`none` and `stub`).
-- Red was compile errors; green is 225 passed in `primer-gui`.
+- Red: compile error against `todo!()` stubs. Green: 7 new tests.
+- Key test: `desktop_subscriber_tees_events_into_the_log_file` (a `warn!` is written, a filtered `debug!` is not, and there are no ANSI escapes).
 
-**Docs:** CLAUDE.md, `docs/devel/04-knowledge-and-retrieval.md`, README (the hybrid-retrieval bullet), and the `primer-engine` `embedders.rs` doc comment. ROADMAP needed nothing.
+**Docs:** CLAUDE.md, `docs/devel/04-knowledge-and-retrieval.md`, README (GUI section), and the `primer-engine` `embedders.rs` doc comment. ROADMAP needed nothing.
 
 **Gate results:**
-- `cargo test -p primer-gui`: 225/0.
-- clippy `-D warnings`: clean for the workspace, for `-p primer-gui --features speech`, and for `-p primer-gui --features android-native`.
+- `cargo test -p primer-gui`: 232/0.
+- clippy `-D warnings`: clean for `primer-gui` default, `speech` and `android-native` (host).
 - fmt: clean.
-- rustdoc `-D warnings`: clean for `primer-gui` (default, speech, android-native) and for `primer-engine`.
-- **Not run:** the full `cargo test --workspace`. Only `primer-gui` code changed; the engine change was a doc comment.
+- rustdoc `-D warnings`: clean for `primer-gui` and `primer-engine`.
+- **Not run:** the full `cargo test --workspace` (only `primer-gui` code changed), the rustdoc `speech`/`android-native` arms after the final link fix (the earlier run failed only on that link), and a real Android target build.
 
 ### Per-session sweep
 - The oversized list is unchanged.
-- The **inline-test detector is clean for the tenth session running**.
+- The **inline-test detector is clean for the eleventh session running**.
 - Watch-list: `primer-classifier/src/llm.rs` (441), `primer-extractor/src/llm.rs` (454), `primer-engine/src/wiring/backend.rs` (443).
 
 ## What's next (concrete acceptance criteria)
 
-### 0. Owner review/merge: #356
+### 0. Owner review/merge: #357
 - **Acceptance:** CI is green and the owner merges.
-- Then confirm #353 auto-closed: `gh issue view 353 --json state`.
+- Then confirm #355 auto-closed: `gh issue view 355 --json state`.
 
 ### 1. Sweep + inline-test detector: re-run EVERY session
 Commands are in the resume block.
 
 ### 2. Remaining review-filed bugs (host-completable; TDD each: failing test, fix, `Closes #N` PR)
-- **#355:** desktop-GUI tracing goes to stdout, which a Dock launch discards.
-  - It pairs naturally with #353: the banner now says *that* the embedder failed, but the *why* is still lost on a Dock launch.
-  - **Acceptance:**
-    - the desktop GUI writes tracing to a file sink under the app's data dir (or stderr plus a file);
-    - a test pins the writer choice;
-    - Android logcat behaviour is unchanged.
 - **#341:** CLI-flag wording in engine errors reaches GUI users. This also covers `BackendNotice.reason`.
+  - **Acceptance:** GUI-facing notice and error text names Settings fields, not `--flags`, while CLI wording is unchanged. A test pins both renderings.
 - **#340:** stage-test gaps.
 - Older ones: #307–#316 (retrieval/storage/streaming), #325/#326 (voice), #331/#332 (storage), #351 (subsystem ids under `PrimaryUnavailable`).
 
@@ -82,14 +76,17 @@ Commands are in the resume block.
 
 ## Open decisions / risks
 
-- **The #353 failed-embedder case is pinned only via the pure helper.**
-  - The end-to-end GUI test covers only `none` and `stub`. A real failure needs network control (fastembed) or a GUI `ollama-embedding` feature arm plus a new CI step.
-  - The wiring line is a one-liner (`subsystems.embedder.is_some()`), so the risk is low.
-- **Banner not seen live.** The new banner hasn't been checked in `cargo tauri dev`. It uses the same `error-banner` class as `#backend-notice-banner`.
-- **Notice text is English-only** and operator-facing, like `BackendNotice`.
-- **CLI tracing goes to stderr** (since #354's review fix). Desktop-GUI tracing still goes to stdout, which a Dock launch discards: #355.
-- **The fastembed failure path is still untested** (it can't be forced without network control).
-- **Carried from #350:** the notice `reason` is the raw construction error (wording cleanup is #341); a real Dock launch of the bundled `.app` is unexercised.
+- **GUI log rotation runs only at startup** (marked `shortcut:` in `log_sink/mod.rs`).
+  - One very long session can grow `gui.log` past 5 MiB.
+  - Upgrade to a size-checking writer only if that shows up in practice.
+- **The log file may hold child text.**
+  - Info-level events can echo session content.
+  - It sits in `~/.primer/` beside the session DBs (same local-only posture), but a parent sharing the log for support is sharing that content.
+- **Not seen live:**
+  - no Dock launch of a bundled `.app` has been run;
+  - the #353 banner hasn't been checked in `cargo tauri dev`.
+- **The #353 failed-embedder case is pinned only via the pure helper.** The end-to-end test covers `none`/`stub`; fastembed failure needs network control.
+- **Notice text is English-only** and operator-facing (`BackendNotice`, `retrieval_notice`). Wording cleanup is #341.
 - **Stale CMake cache after Xcode/SDK upgrades.** Symptom: `'<header>' file not found` from a `*-sys` build. Recipe:
   1. Find the stale caches: `find src/target -name CMakeCache.txt -maxdepth 6 | xargs grep -l 'MacOSX<old>'`.
   2. `cargo clean -p <those sys crates>`.
@@ -101,6 +98,8 @@ Commands are in the resume block.
 
 ## Patterns to reuse, not reinvent
 
+- **A desktop-only GUI module** (`#[cfg(not(target_os = "android"))] pub mod …` in `lib.rs`) is still compiled by the host `android-native` clippy arm, since that arm only enables the feature and does not change the target. Only a real `--target aarch64-linux-android` build drops it.
+- **The rustdoc gate catches public docs that link to a private fn** (`rustdoc::private_intra_doc_links`), even with `--document-private-items`. Describe the private item in prose instead.
 - **Bug-fix recipe:**
   1. Branch off `origin/main`.
   2. Write the failing test, confirm red, fix, confirm green.
@@ -123,7 +122,7 @@ Commands are in the resume block.
 
 ```bash
 cd /Users/hherb/src/primer && git status --short && git checkout main && git pull --ff-only && git log --oneline -6 && gh pr list --state open
-# Open at close: #356. After merge, confirm #353 closed: gh issue view 353 --json state
+# Open at close: #357. After merge, confirm #355 closed: gh issue view 355 --json state
 S=/private/tmp/primer-scratch; mkdir -p "$S"   # or the session's scratchpad dir
 
 # === Oversized-file sweep + inline-test detector (re-verify EVERY session) ===
@@ -132,9 +131,9 @@ find crates -name '*.rs' -not -path '*/vendor/*' -not -name 'tests.rs' | xargs w
 for f in $(find crates -name '*.rs' -not -path '*/vendor/*' -not -name 'tests.rs' | xargs wc -l | awk '$1>500 && $2!="total"{print $2}'); do \
   awk '/#\[cfg\(test\)\]/{ln=NR} ln && NR==ln+1 && /^[[:space:]]*mod .*\{/{print FILENAME" inline mod @"NR}' "$f"; done
 
-# === Next bug (#355): start here ===
-gh issue view 355
-git checkout -b fix/gui-tracing-sink-355 origin/main
+# === Next bug (#341): start here ===
+gh issue view 341
+git checkout -b fix/gui-notice-wording-341 origin/main
 ~/.cargo/bin/cargo test -p primer-engine -p primer-gui 2>&1 | grep 'test result'   # baseline
 
 # === Standard workspace gate (one cargo pass at a time) ===
@@ -154,7 +153,7 @@ for spec in "-p primer-speech --features voice-loop,silero,whisper,piper,cpal,su
 
 ## Reporting back
 
-- **#356:** the desktop app now shows a persistent banner when the configured embedder fails to start and knowledge search drops to keyword-only BM25.
-  - A configured `none` stays silent.
-  - It closes #353 with red-then-green tests; the `primer-gui` gate is green (225 tests) across the default, speech and android-native arms.
-- #354 merged; #336 is closed.
+- **#357:** the desktop app now writes its diagnostic log to `~/.primer/logs/gui.log`, so warnings survive a Dock/Finder launch.
+  - The log is rotated at 5 MiB.
+  - It closes #355 with red-then-green tests; the `primer-gui` gate is green (232 tests).
+- #356 merged; #353 is closed.
