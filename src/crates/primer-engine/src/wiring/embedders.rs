@@ -16,8 +16,9 @@ use std::sync::Arc;
 /// - `Ok(Some(arc))` — feature compiled in AND init succeeded.
 /// - `Ok(None)` — feature compiled in but init failed (e.g. model
 ///   download failed). Caller falls back to BM25-only retrieval; a
-///   `tracing::warn!` reports it (issue #336: stderr is invisible in a
-///   Dock-launched GUI, the subscriber reaches both binaries).
+///   `tracing::warn!` reports it (issue #336: a bare `eprintln!`
+///   bypasses the subscriber — e.g. Android's logcat writer; a desktop
+///   GUI file sink is #355, an in-app notice #353).
 /// - `Err(msg)` — feature not compiled in. The user explicitly asked
 ///   for fastembed; surfacing this as an error lets the binary decide
 ///   whether to exit (CLI) or render it inline (GUI). Earlier

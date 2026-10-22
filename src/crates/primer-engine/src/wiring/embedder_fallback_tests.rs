@@ -1,8 +1,8 @@
 //! Issue #336: an embedder that fails to initialise must report the
-//! BM25-only fallback through `tracing` (which reaches the GUI's
-//! subscriber and log sink), not a bare `eprintln!` (invisible in a
-//! Dock-launched GUI). Each test points a real embedder at a closed
-//! local port so the construction probe fails fast with no network.
+//! BM25-only fallback through `tracing` (which reaches whatever sink
+//! the binary's subscriber installs), not a bare `eprintln!` (which
+//! bypasses it). Each test points a real embedder at a closed local
+//! port so the construction probe fails fast with no network.
 
 use std::io::Write;
 use std::sync::{Arc, Mutex};

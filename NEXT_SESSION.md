@@ -82,7 +82,7 @@ Commands are in the resume block.
 
 ## Open decisions / risks
 
-- **CLI output stream moved.** The embedder lines now print through the CLI's `tracing_subscriber::fmt()`, which writes to **stdout**, not stderr. This is the same place the CLI's other `tracing::info!`/`warn!` lines already go. A user who sets `RUST_LOG=warn` will no longer see the info-level "Loading fastembed…" line; the warnings stay visible.
+- **CLI tracing now goes to stderr.** The embedder lines print through the CLI's `tracing_subscriber::fmt()`, which the PR #354 review fix pointed at **stderr** (`.with_writer(std::io::stderr)`), so no log line mixes into the conversation on stdout. A user who sets `RUST_LOG=warn` will no longer see the info-level "Loading fastembed…" line; the warnings stay visible. Desktop-GUI tracing still goes to stdout, which a Dock launch discards: tracked in #355.
 - **The fastembed failure path itself is still untested.** It needs a failing BGE-M3 init, which can't be forced without network control. Only the ollama and openai-compat arms are test-pinned; the fastembed arm is the same macro swap.
 - **Carried from #350:**
   - The notice `reason` is the raw construction error (wording cleanup is #341).
