@@ -33,6 +33,11 @@ const ROTATED_EXTENSION: &str = "1";
 /// kept, so disk use stays near twice this.
 pub const GUI_LOG_MAX_BYTES: u64 = 5 * 1024 * 1024;
 
+/// Unix permission bits for a newly created log file: owner read/write only,
+/// matching `gui-config.json`.
+#[cfg(unix)]
+const LOG_FILE_MODE: u32 = 0o600;
+
 /// `<home>/.primer/logs/gui.log`. Pure — no filesystem access.
 pub fn desktop_log_path(home: &Path) -> PathBuf {
     home.join(primer_engine::paths::PRIMER_HOME_DIR)
@@ -60,7 +65,10 @@ pub fn rotate_if_oversized(log: &Path, max_bytes: u64) -> io::Result<()> {
 }
 
 /// Create the log's parent directory, rotate an oversized log, and open the
-/// log for appending.
+/// log for appending. A failed rotation is reported on stderr (tracing is not
+/// up yet) and the oversized log is appended to rather than lost. On Unix a
+/// newly created log is owner-only (`0600`): it can carry learner-derived
+/// text, such as unparseable LLM output snippets.
 ///
 /// shortcut: rotation runs only at startup, so one very long-running session
 /// can grow the live log past the cap; switch to a size-checking writer if
@@ -69,8 +77,14 @@ pub fn open_log_file(log: &Path, max_bytes: u64) -> io::Result<File> {
     if let Some(dir) = log.parent() {
         fs::create_dir_all(dir)?;
     }
-    rotate_if_oversized(log, max_bytes)?;
-    OpenOptions::new().create(true).append(true).open(log)
+    if let Err(e) = rotate_if_oversized(log, max_bytes) {
+        eprintln!("cannot rotate log file {}: {e}", log.display());
+    }
+    let mut options = OpenOptions::new();
+    options.create(true).append(true);
+    #[cfg(unix)]
+    std::os::unix::fs::OpenOptionsExt::mode(&mut options, LOG_FILE_MODE);
+    options.open(log)
 }
 
 /// The desktop subscriber: `filter` over a stdout layer plus, when `file` is
