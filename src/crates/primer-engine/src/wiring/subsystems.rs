@@ -64,7 +64,9 @@ pub async fn build_classifier(
         (_, Some(cls_backend_name)) => {
             let model = params.classifier_model.clone().ok_or_else(|| {
                 PrimerError::Inference(
-                    "--classifier-model is required when --classifier-backend is set to a non-stub backend".into(),
+                    "a classifier model is required when the classifier backend is not stub \
+                     (`--classifier-model`, or Settings → Classifier subsystem → Model)"
+                        .into(),
                 )
             })?;
             let cls_backend = build_backend(cls_backend_name, model.clone(), params).await?;
@@ -139,7 +141,9 @@ pub async fn build_extractor(
         (_, Some(ext_backend_name)) => {
             let model = params.extractor_model.clone().ok_or_else(|| {
                 PrimerError::Inference(
-                    "--extractor-model is required when --extractor-backend is set to a non-stub backend".into(),
+                    "an extractor model is required when the extractor backend is not stub \
+                     (`--extractor-model`, or Settings → Extractor subsystem → Model)"
+                        .into(),
                 )
             })?;
             let ext_backend = build_backend(ext_backend_name, model.clone(), params).await?;
@@ -205,7 +209,9 @@ pub async fn build_comprehension(
         (_, Some(comp_backend_name)) => {
             let model = params.comprehension_model.clone().ok_or_else(|| {
                 PrimerError::Inference(
-                    "--comprehension-model is required when --comprehension-backend is set to a non-stub backend".into(),
+                    "a comprehension model is required when the comprehension backend is not stub \
+                     (`--comprehension-model`, or Settings → Comprehension subsystem → Model)"
+                        .into(),
                 )
             })?;
             let comp_backend = build_backend(comp_backend_name, model.clone(), params).await?;

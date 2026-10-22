@@ -187,6 +187,8 @@ mod comprehension_construction_tests;
 ))]
 mod embedder_fallback_tests;
 #[cfg(test)]
+mod error_wording_tests;
+#[cfg(test)]
 mod extractor_construction_tests;
 #[cfg(test)]
 mod main_backend_plan_tests;
