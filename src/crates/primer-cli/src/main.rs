@@ -40,7 +40,7 @@ use primer_core::storage::{LearnerStore, SessionStore};
 use primer_engine::{
     BackendParams, IN_MEMORY, adopt_or_mint_learner_id, build_classifier, build_comprehension,
     build_extractor, build_fastembed_embedder, build_main_backend, build_ollama_embedder,
-    build_openai_compat_embedder, create_learner_with_id, parse_languages,
+    build_openai_compat_embedder, create_learner_with_id, ensure_session_db_dir, parse_languages,
     reconcile_persisted_learner, resolve_session_db_path, should_show_first_run_banner,
     verify_resume_locale_match,
 };
@@ -899,18 +899,15 @@ async fn async_main() -> anyhow::Result<()> {
     // is also gated on !no_persist below.
     let file_existed_before = !cli.no_persist && Path::new(&session_path).exists();
 
-    // Ensure parent directory exists before opening. Not needed for :memory:.
+    // Ensure the parent directory exists (owner-only) before opening. Not
+    // needed for :memory:.
     if !cli.no_persist {
-        if let Some(parent) = session_path.parent() {
-            if !parent.as_os_str().is_empty() {
-                if let Err(e) = std::fs::create_dir_all(parent) {
-                    eprintln!(
-                        "Error: cannot create session-db directory {}: {e}",
-                        parent.display()
-                    );
-                    std::process::exit(1);
-                }
-            }
+        if let Err(e) = ensure_session_db_dir(&session_path, &home) {
+            eprintln!(
+                "Error: cannot create session-db directory for {}: {e}",
+                session_path.display()
+            );
+            std::process::exit(1);
         }
     }
 

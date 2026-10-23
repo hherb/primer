@@ -64,8 +64,8 @@ pub fn rotate_if_oversized(log: &Path, max_bytes: u64) -> io::Result<()> {
     }
 }
 
-/// Create the log's parent directory, rotate an oversized log, and open the
-/// log for appending. A failed rotation is reported on stderr (tracing is not
+/// Create the log's parent directory (owner-only on Unix), rotate an
+/// oversized log, and open the log for appending. A failed rotation is reported on stderr (tracing is not
 /// up yet) and the oversized log is appended to rather than lost. On Unix a
 /// newly created log is owner-only (`0600`): it can carry learner-derived
 /// text, such as unparseable LLM output snippets.
@@ -75,7 +75,7 @@ pub fn rotate_if_oversized(log: &Path, max_bytes: u64) -> io::Result<()> {
 /// that ever shows up in practice.
 pub fn open_log_file(log: &Path, max_bytes: u64) -> io::Result<File> {
     if let Some(dir) = log.parent() {
-        fs::create_dir_all(dir)?;
+        primer_engine::create_private_dir_all(dir)?;
     }
     if let Err(e) = rotate_if_oversized(log, max_bytes) {
         eprintln!("cannot rotate log file {}: {e}", log.display());
