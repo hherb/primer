@@ -40,8 +40,9 @@ use backend_params::{
 use stores::{Stores, open_stores};
 use subsystems::{build_subsystems, retrieval_notice};
 
-// `tests.rs` calls `cloud_backend_in_use` by bare name via `use super::*`;
-// production code in this file doesn't call it, so the import is test-only.
+// Test-only: `tests.rs` / `stage_tests.rs` reach these by bare name via
+// `use super::*`; production goes through `build_backend_params` /
+// `open_stores` instead.
 #[cfg(test)]
 use backend_params::{build_backend_params_with, cloud_backend_in_use};
 #[cfg(test)]
