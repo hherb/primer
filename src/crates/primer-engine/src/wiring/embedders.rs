@@ -54,7 +54,8 @@ pub fn build_fastembed_embedder(
 ) -> std::result::Result<Option<Arc<dyn primer_core::embedder::Embedder>>, String> {
     Err(
         "fastembed embedder requires the `embedding` cargo feature. \
-         Build with `cargo run --features primer-cli/embedding -- ...` (or use embedder = none)."
+         Rebuild with `--features primer-cli/embedding` (CLI) or \
+         `--features primer-gui/embedding` (desktop app), or choose the `none` embedder."
             .to_string(),
     )
 }
@@ -88,7 +89,8 @@ pub async fn build_ollama_embedder(
 ) -> std::result::Result<Option<Arc<dyn primer_core::embedder::Embedder>>, String> {
     Err(
         "ollama embedder requires the `ollama-embedding` cargo feature. \
-         Build with `cargo run --features primer-cli/ollama-embedding -- ...`"
+         Rebuild with `--features primer-cli/ollama-embedding` (CLI) or \
+         `--features primer-gui/ollama-embedding` (desktop app)."
             .to_string(),
     )
 }
@@ -102,7 +104,8 @@ pub async fn build_openai_compat_embedder(
     use primer_embedding::{DEFAULT_OPENAI_COMPAT_URL, OpenAiCompatEmbedder};
     let url = url.unwrap_or(DEFAULT_OPENAI_COMPAT_URL);
     let model = model.ok_or_else(|| {
-        "--embedder-openai-compat-model is required when --embedder-backend is openai-compat"
+        "the openai-compat embedder requires a model \
+         (`--embedder-openai-compat-model`, or Settings → Embedder → Model)"
             .to_string()
     })?;
     match OpenAiCompatEmbedder::new(url, model, api_key).await {
@@ -127,7 +130,8 @@ pub async fn build_openai_compat_embedder(
 ) -> std::result::Result<Option<Arc<dyn primer_core::embedder::Embedder>>, String> {
     Err(
         "openai-compat embedder requires the `openai-compat-embedding` cargo feature. \
-         Build with `cargo run --features primer-cli/openai-compat-embedding -- ...`"
+         Rebuild with `--features primer-cli/openai-compat-embedding` (CLI) or \
+         `--features primer-gui/openai-compat-embedding` (desktop app)."
             .to_string(),
     )
 }

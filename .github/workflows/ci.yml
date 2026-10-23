@@ -244,7 +244,9 @@ jobs:
         # non-default, so their init-failure path (BM25-only fallback
         # reported via tracing, not eprintln) is only exercised here.
         # The tests probe a closed local port — no network, no model.
-        run: cargo test -p primer-engine --features ollama-embedding,openai-compat-embedding embedder_fallback
+        # Unfiltered so the feature-gated `error_wording_tests` arm
+        # (issue #341) runs too; the whole crate suite takes ~seconds.
+        run: cargo test -p primer-engine --features ollama-embedding,openai-compat-embedding
 
       - name: cargo clippy -p primer-cli --features speech
         # Closes the long-flagged gap (raised across ~24 next-session

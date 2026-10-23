@@ -104,7 +104,10 @@ pub fn resolve_fallback_model(
             primer_core::consts::inference::DEFAULT_CLOUD_MODEL.to_string()
         }))),
         "ollama" | "openai-compat" => model.map(Some).ok_or_else(|| {
-            format!("--fallback-model is required when --fallback-backend is {backend}")
+            format!(
+                "a fallback model is required when the fallback backend is {backend} \
+                 (`--fallback-model`, or Settings → Inference backend → Fallback model)"
+            )
         }),
         _ => Ok(model),
     }
@@ -124,7 +127,10 @@ pub async fn build_backend(
         "cloud" => {
             let api_key = params.api_key.clone().ok_or_else(|| {
                 PrimerError::Inference(
-                    "--api-key or ANTHROPIC_API_KEY required for cloud backend".into(),
+                    "the cloud backend requires an Anthropic API key: set ANTHROPIC_API_KEY, \
+                     pass `--api-key`, or enter an inline key in \
+                     Settings → Inference backend → API key"
+                        .into(),
                 )
             })?;
             Ok(Arc::new(primer_inference::cloud::CloudBackend::new(
@@ -218,7 +224,7 @@ pub async fn build_main_backend(
         if fb == primary_name {
             tracing::warn!(
                 backend = primary_name,
-                "--fallback-backend equals --backend; no resilience gain"
+                "fallback backend equals the main backend; no resilience gain"
             );
         }
     }
@@ -295,8 +301,9 @@ async fn build_router_backend(
     let Some(fb_name) = params.fallback_backend.clone() else {
         return Err(PrimerError::Inference(
             format!(
-                "router mode '{}' requires a secondary leg; set --fallback-backend \
-                 (and --fallback-model where required)",
+                "router mode '{}' requires a secondary leg: set a fallback backend \
+                 (`--fallback-backend`, or Settings → Inference backend → Fallback backend) \
+                 and a fallback model where required",
                 params.router_mode
             )
             .into(),
@@ -372,8 +379,8 @@ async fn build_router_backend(
 async fn build_qnn_backend(params: &BackendParams) -> Result<Arc<dyn InferenceBackend>> {
     let bundle_dir = params.qnn_bundle_dir.as_ref().ok_or_else(|| {
         PrimerError::Inference(
-            "--qnn-bundle-dir is required for --backend qnn \
-             (or set PRIMER_QNN_BUNDLE_DIR)"
+            "the qnn backend requires a model bundle directory (`--qnn-bundle-dir` \
+             or PRIMER_QNN_BUNDLE_DIR, or Settings → Inference backend → QNN bundle dir)"
                 .into(),
         )
     })?;
@@ -386,7 +393,8 @@ async fn build_qnn_backend(params: &BackendParams) -> Result<Arc<dyn InferenceBa
 async fn build_qnn_backend(_params: &BackendParams) -> Result<Arc<dyn InferenceBackend>> {
     Err(PrimerError::Inference(
         "qnn backend requires the `qnn` cargo feature. \
-         Build with `cargo build --features primer-cli/qnn` (Android target only)."
+         Rebuild with `--features primer-cli/qnn` (CLI) or \
+         `--features primer-gui/qnn` (desktop app); Android target only."
             .into(),
     ))
 }
@@ -398,7 +406,11 @@ async fn build_qnn_backend(_params: &BackendParams) -> Result<Arc<dyn InferenceB
 async fn build_llamacpp_backend(params: &BackendParams) -> Result<Arc<dyn InferenceBackend>> {
     use primer_inference::llamacpp::params::resolve_gpu_layers;
     let gguf_path = params.gguf_path.as_ref().ok_or_else(|| {
-        PrimerError::Inference("--model <path-to.gguf> is required for --backend llamacpp".into())
+        PrimerError::Inference(
+            "the llamacpp backend requires a GGUF model path (`--model <path-to.gguf>`, \
+             or Settings → Inference backend → GGUF model path)"
+                .into(),
+        )
     })?;
     let n_gpu_layers = resolve_gpu_layers(params.llamacpp_gpu_layers);
     let engine = primer_inference::llamacpp::engine::RealLlamaEngine::new(
@@ -415,7 +427,8 @@ async fn build_llamacpp_backend(params: &BackendParams) -> Result<Arc<dyn Infere
 async fn build_llamacpp_backend(_params: &BackendParams) -> Result<Arc<dyn InferenceBackend>> {
     Err(PrimerError::Inference(
         "llamacpp backend requires the `llamacpp` cargo feature. \
-         Build with `cargo build --features primer-cli/llamacpp` \
+         Rebuild with `--features primer-cli/llamacpp` (CLI) or \
+         `--features primer-gui/llamacpp` (desktop app) \
          (or llamacpp-metal / llamacpp-cuda / llamacpp-vulkan for GPU)."
             .into(),
     ))
