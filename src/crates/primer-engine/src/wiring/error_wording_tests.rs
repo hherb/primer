@@ -69,6 +69,18 @@ fn fallback_model_required_names_flag_and_setting() {
 }
 
 #[tokio::test]
+async fn router_secondary_required_names_flag_and_setting() {
+    let mut p = params(None);
+    p.router_mode = primer_core::router::RouterMode::Hybrid;
+    let msg = err_text(build_main_backend("stub", "m".into(), &p).await);
+    assert_names_both(
+        &msg,
+        "--fallback-backend",
+        "Inference backend → Fallback backend",
+    );
+}
+
+#[tokio::test]
 async fn cloud_key_required_names_flag_env_and_setting() {
     let msg = err_text(build_backend("cloud", "m".into(), &params(None)).await);
     assert_names_both(&msg, "--api-key", "Inference backend → API key");

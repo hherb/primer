@@ -301,8 +301,9 @@ async fn build_router_backend(
     let Some(fb_name) = params.fallback_backend.clone() else {
         return Err(PrimerError::Inference(
             format!(
-                "router mode '{}' requires a secondary leg; set --fallback-backend \
-                 (and --fallback-model where required)",
+                "router mode '{}' requires a secondary leg: set a fallback backend \
+                 (`--fallback-backend`, or Settings → Inference backend → Fallback backend) \
+                 and a fallback model where required",
                 params.router_mode
             )
             .into(),
