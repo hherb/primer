@@ -1,13 +1,13 @@
 //! Translate the GUI's `BackendConfig` into `primer-engine`'s
 //! [`BackendParams`] input struct, plus the small pure resolvers that feed
 //! it (main-model defaults and post-construction rebind, cloud-key gating,
-//! subsystem override kinds, the sidebar's served identity).
+//! subsystem override kinds).
 //!
 //! The only side effect here is reading the `ANTHROPIC_API_KEY` /
 //! `OPENAI_COMPAT_API_KEY` env vars when the corresponding key source is
 //! `Env` — the wiring crate's helpers never touch env vars themselves.
 
-use primer_engine::{BackendNotice, BackendParams};
+use primer_engine::BackendParams;
 
 use crate::config::{ApiKeySource, GuiConfig, SubsystemConfig};
 
@@ -220,29 +220,4 @@ fn subsystem_kind(s: &SubsystemConfig) -> Option<String> {
 /// Model-override counterpart of [`subsystem_kind`].
 fn subsystem_model(s: &SubsystemConfig) -> Option<String> {
     if s.match_main { None } else { s.model.clone() }
-}
-
-/// The `(backend kind, model)` the sidebar shows. Normally the configured
-/// primary; but when the primary was unavailable at startup every turn goes
-/// to the fallback, so show that instead (issue #338). `served_name` is the
-/// constructed backend's `name()`, used when the fallback has no model.
-pub(super) fn served_identity(
-    kind: &str,
-    main_model: &str,
-    notice: Option<&BackendNotice>,
-    served_name: &str,
-) -> (String, String) {
-    match notice {
-        Some(BackendNotice::PrimaryUnavailable {
-            fallback,
-            fallback_model,
-            ..
-        }) => (
-            fallback.clone(),
-            fallback_model
-                .clone()
-                .unwrap_or_else(|| served_name.to_string()),
-        ),
-        _ => (kind.to_string(), main_model.to_string()),
-    }
 }

@@ -10,7 +10,7 @@ use std::time::Duration;
 
 use primer_core::inference::InferenceBackend;
 use primer_core::router::RouterMode;
-use primer_engine::{BackendNotice, BackendParams};
+use primer_engine::BackendParams;
 use tempfile::TempDir;
 
 use super::*;
@@ -380,7 +380,7 @@ async fn subsystems_match_main_stub_and_apply_gui_settings() {
     cfg.vocab.max_per_prompt = Some(CUSTOM_VOCAB_MAX_PER_PROMPT);
     let (backend, params) = stub_backend(&cfg).await;
 
-    let s = build_subsystems(&cfg, &backend, "stub", &params)
+    let s = build_subsystems(&cfg, &backend, &cfg.backend.kind, "stub", &params)
         .await
         .unwrap();
 
@@ -419,7 +419,7 @@ async fn subsystems_inherit_main_backend_via_arc_clone() {
     let params = build_backend_params(&cfg);
     let main: Arc<dyn InferenceBackend> = Arc::new(primer_inference::stub::StubBackend);
 
-    let s = build_subsystems(&cfg, &main, MAIN_MODEL, &params)
+    let s = build_subsystems(&cfg, &main, &cfg.backend.kind, MAIN_MODEL, &params)
         .await
         .unwrap();
 
@@ -438,58 +438,13 @@ async fn subsystems_vocab_cap_defaults_to_const_when_unset() {
     cfg.vocab.max_per_prompt = None;
     let (backend, params) = stub_backend(&cfg).await;
 
-    let s = build_subsystems(&cfg, &backend, "stub", &params)
+    let s = build_subsystems(&cfg, &backend, &cfg.backend.kind, "stub", &params)
         .await
         .unwrap();
 
     assert_eq!(
         s.vocab_settings.max_per_prompt,
         primer_core::consts::vocab::DEFAULT_VOCAB_MAX_PER_PROMPT
-    );
-}
-
-// ─── served identity (issue #338) ────────────────────────────────────
-
-/// With no notice, or a dropped fallback, the primary is what serves turns,
-/// so the sidebar keeps showing the configured kind + model.
-#[test]
-fn served_identity_is_primary_unless_primary_unavailable() {
-    let dropped = BackendNotice::FallbackDropped {
-        fallback: "cloud".into(),
-        reason: "no key".into(),
-    };
-    for notice in [None, Some(&dropped)] {
-        assert_eq!(
-            served_identity("ollama", "llama3.2", notice, "ollama"),
-            ("ollama".to_string(), "llama3.2".to_string())
-        );
-    }
-}
-
-/// Primary down ⇒ the sidebar shows the fallback that actually serves turns.
-#[test]
-fn served_identity_shows_fallback_when_primary_unavailable() {
-    let notice = BackendNotice::PrimaryUnavailable {
-        primary: "ollama".into(),
-        fallback: "cloud".into(),
-        fallback_model: Some("claude-sonnet-4-6".into()),
-        reason: "connection refused".into(),
-    };
-    assert_eq!(
-        served_identity("ollama", "llama3.2", Some(&notice), "claude-sonnet-4-6"),
-        ("cloud".to_string(), "claude-sonnet-4-6".to_string())
-    );
-
-    // A model-less fallback (stub) falls back to the served backend's name.
-    let notice = BackendNotice::PrimaryUnavailable {
-        primary: "ollama".into(),
-        fallback: "stub".into(),
-        fallback_model: None,
-        reason: "x".into(),
-    };
-    assert_eq!(
-        served_identity("ollama", "llama3.2", Some(&notice), "stub"),
-        ("stub".to_string(), "stub".to_string())
     );
 }
 

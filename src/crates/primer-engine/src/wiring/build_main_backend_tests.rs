@@ -257,3 +257,48 @@ async fn primary_unavailable_notice_carries_resolved_fallback_model() {
         }
     }
 }
+
+// ─── served identity (issues #338, #351) ─────────────────────────────
+
+/// With no notice, or a dropped fallback, the primary is what serves turns,
+/// so the sidebar keeps showing the configured kind + model.
+#[test]
+fn served_identity_is_primary_unless_primary_unavailable() {
+    let dropped = BackendNotice::FallbackDropped {
+        fallback: "cloud".into(),
+        reason: "no key".into(),
+    };
+    for notice in [None, Some(&dropped)] {
+        assert_eq!(
+            served_identity("ollama", "llama3.2", notice, "ollama"),
+            ("ollama".to_string(), "llama3.2".to_string())
+        );
+    }
+}
+
+/// Primary down ⇒ the sidebar shows the fallback that actually serves turns.
+#[test]
+fn served_identity_shows_fallback_when_primary_unavailable() {
+    let notice = BackendNotice::PrimaryUnavailable {
+        primary: "ollama".into(),
+        fallback: "cloud".into(),
+        fallback_model: Some("claude-sonnet-4-6".into()),
+        reason: "connection refused".into(),
+    };
+    assert_eq!(
+        served_identity("ollama", "llama3.2", Some(&notice), "claude-sonnet-4-6"),
+        ("cloud".to_string(), "claude-sonnet-4-6".to_string())
+    );
+
+    // A model-less fallback (stub) falls back to the served backend's name.
+    let notice = BackendNotice::PrimaryUnavailable {
+        primary: "ollama".into(),
+        fallback: "stub".into(),
+        fallback_model: None,
+        reason: "x".into(),
+    };
+    assert_eq!(
+        served_identity("ollama", "llama3.2", Some(&notice), "stub"),
+        ("stub".to_string(), "stub".to_string())
+    );
+}

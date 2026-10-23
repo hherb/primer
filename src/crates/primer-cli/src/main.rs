@@ -41,8 +41,8 @@ use primer_engine::{
     BackendParams, IN_MEMORY, adopt_or_mint_learner_id, build_classifier, build_comprehension,
     build_extractor, build_fastembed_embedder, build_main_backend, build_ollama_embedder,
     build_openai_compat_embedder, create_learner_with_id, ensure_session_db_dir, parse_languages,
-    reconcile_persisted_learner, resolve_session_db_path, should_show_first_run_banner,
-    verify_resume_locale_match,
+    reconcile_persisted_learner, resolve_session_db_path, served_identity,
+    should_show_first_run_banner, verify_resume_locale_match,
 };
 use primer_extractor::{ConceptExtractor, ExtractorSettings};
 use primer_knowledge::SqliteKnowledgeBase;
@@ -768,14 +768,14 @@ async fn async_main() -> anyhow::Result<()> {
         primary_ttft_budget_ms: cli.primary_ttft_budget_ms,
     };
 
-    let backend: Arc<dyn InferenceBackend> =
+    let (backend, notice): (Arc<dyn InferenceBackend>, _) =
         match build_main_backend(&cli.backend, main_model.clone(), &backend_params).await {
             Ok((b, notice)) => {
                 // A dropped fallback leg, or a primary replaced by the fallback (#347, #338).
-                if let Some(notice) = notice {
+                if let Some(notice) = &notice {
                     eprintln!("Warning: {notice}");
                 }
-                b
+                (b, notice)
             }
             Err(e) => {
                 eprintln!("Error constructing backend: {e}");
@@ -792,6 +792,11 @@ async fn async_main() -> anyhow::Result<()> {
     } else {
         main_model
     };
+    // Inherited subsystems run on whatever serves turns — the fallback when
+    // the primary is unavailable — so their provenance ids must name it, and
+    // a subsystem model override must build on a kind that constructs (#351).
+    let (served_kind, served_model) =
+        served_identity(&cli.backend, &main_model, notice.as_ref(), backend.name());
 
     match cli.backend.as_str() {
         "stub" => eprintln!("Using stub inference backend (canned Socratic responses)."),
@@ -992,8 +997,8 @@ async fn async_main() -> anyhow::Result<()> {
 
     let classifier: Arc<dyn EngagementClassifier> = match build_classifier(
         Arc::clone(&backend),
-        &cli.backend,
-        &main_model,
+        &served_kind,
+        &served_model,
         &backend_params,
         classifier_settings.clone(),
     )
@@ -1016,8 +1021,8 @@ async fn async_main() -> anyhow::Result<()> {
 
     let extractor: Arc<dyn ConceptExtractor> = match build_extractor(
         Arc::clone(&backend),
-        &cli.backend,
-        &main_model,
+        &served_kind,
+        &served_model,
         &backend_params,
         extractor_settings.clone(),
     )
@@ -1041,8 +1046,8 @@ async fn async_main() -> anyhow::Result<()> {
     let comprehension: Arc<dyn primer_comprehension::ComprehensionClassifier> =
         match build_comprehension(
             Arc::clone(&backend),
-            &cli.backend,
-            &main_model,
+            &served_kind,
+            &served_model,
             &backend_params,
             comprehension_settings.clone(),
         )

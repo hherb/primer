@@ -22,9 +22,14 @@ use primer_extractor::{
 use super::BackendParams;
 use super::backend::build_backend;
 
-/// Construct the engagement classifier according to the dispatch matrix:
+/// Construct the engagement classifier according to the dispatch matrix.
 ///
-/// | main backend | --classifier-backend | --classifier-model | outcome                               |
+/// `main_backend_name` / `main_model` are the kind + model that actually
+/// serve turns (`served_identity`) — the fallback's under
+/// `BackendNotice::PrimaryUnavailable`, never the configured primary's
+/// (#351). The same holds for `build_extractor` and `build_comprehension`.
+///
+/// | served kind  | --classifier-backend | --classifier-model | outcome                               |
 /// |--------------|----------------------|--------------------|---------------------------------------|
 /// | stub         | (unset)              | (any)              | StubEngagementClassifier              |
 /// | *            | "stub"               | (any)              | StubEngagementClassifier              |
@@ -108,7 +113,7 @@ pub async fn build_classifier(
 /// Construct the concept extractor according to the same dispatch matrix
 /// as `build_classifier`:
 ///
-/// | main backend | --extractor-backend | --extractor-model | outcome                                |
+/// | served kind  | --extractor-backend | --extractor-model | outcome                                |
 /// |--------------|---------------------|-------------------|----------------------------------------|
 /// | stub         | (unset)             | (any)             | StubConceptExtractor                   |
 /// | *            | "stub"              | (any)             | StubConceptExtractor                   |
@@ -175,7 +180,7 @@ pub async fn build_extractor(
 /// Construct the comprehension classifier according to the same dispatch matrix
 /// as `build_extractor`:
 ///
-/// | main backend | --comprehension-backend | --comprehension-model | outcome                                    |
+/// | served kind  | --comprehension-backend | --comprehension-model | outcome                                    |
 /// |--------------|-------------------------|-----------------------|--------------------------------------------|
 /// | stub         | (unset)                 | (any)                 | StubComprehensionClassifier                |
 /// | *            | "stub"                  | (any)                 | StubComprehensionClassifier                |
