@@ -258,7 +258,7 @@ async fn primary_unavailable_notice_carries_resolved_fallback_model() {
     }
 }
 
-// ─── served identity (issue #338) ────────────────────────────────────
+// ─── served identity (issues #338, #351) ─────────────────────────────
 
 /// With no notice, or a dropped fallback, the primary is what serves turns,
 /// so the sidebar keeps showing the configured kind + model.

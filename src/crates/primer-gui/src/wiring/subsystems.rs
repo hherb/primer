@@ -32,8 +32,8 @@ use crate::config::{EmbedderConfig, GuiConfig};
 /// (`primer_engine::served_identity`: the fallback's when the primary is
 /// unavailable, #351; the model already rebound from any `*-pending`
 /// placeholder), so inherited subsystems are labelled by what runs them and
-/// overrides build on a kind that actually constructs. The openai-compat embedder reuses the
-/// key the main backend resolved in `params`.
+/// overrides build on a kind that actually constructs. The openai-compat
+/// embedder reuses the key the main backend resolved in `params`.
 pub(super) async fn build_subsystems(
     config: &GuiConfig,
     backend: &Arc<dyn InferenceBackend>,

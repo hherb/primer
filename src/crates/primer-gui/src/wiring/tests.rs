@@ -523,9 +523,15 @@ async fn primary_unavailable_subsystems_name_served_fallback() {
 async fn primary_unavailable_override_subsystem_builds_on_fallback() {
     let home = TempDir::new().unwrap();
     let mut cfg = primary_unavailable_cloud_fallback_config();
-    cfg.classifier.match_main = false;
-    cfg.classifier.kind = None;
-    cfg.classifier.model = Some("override-model".to_string());
+    for sub in [
+        &mut cfg.classifier,
+        &mut cfg.extractor,
+        &mut cfg.comprehension,
+    ] {
+        sub.match_main = false;
+        sub.kind = None;
+        sub.model = Some("override-model".to_string());
+    }
     let s = build_active_session(home.path(), &cfg)
         .await
         .expect("override subsystem must not abort the session");
@@ -533,4 +539,27 @@ async fn primary_unavailable_override_subsystem_builds_on_fallback() {
     assert!(s.backend_notice.is_some());
     let dm = s.dialogue_manager.lock().await;
     assert_eq!(dm.classifier_identifier(), "llm:override-model");
+    // These ids carry the backend name, pinning that the override was built
+    // on the cloud fallback, not merely that construction succeeded.
+    let on_cloud = "llm:cloud-anthropic:override-model";
+    assert_eq!(dm.extractor_identifier(), on_cloud);
+    assert_eq!(dm.comprehension_identifier(), on_cloud);
+}
+
+/// A stub fallback serving alone gets deterministic stub subsystems, exactly
+/// like a stub primary — not `Llm*` wrappers around the stub backend.
+#[tokio::test]
+async fn primary_unavailable_stub_fallback_yields_stub_subsystems() {
+    let home = TempDir::new().unwrap();
+    let mut cfg = stub_config();
+    cfg.backend.kind = "qnn".to_string();
+    cfg.backend.fallback_backend = Some("stub".to_string());
+    cfg.backend.fallback_model = None;
+    let s = build_active_session(home.path(), &cfg).await.unwrap();
+
+    assert!(s.backend_notice.is_some());
+    let dm = s.dialogue_manager.lock().await;
+    assert_eq!(dm.classifier_identifier(), "stub");
+    assert_eq!(dm.extractor_identifier(), "stub");
+    assert_eq!(dm.comprehension_identifier(), "stub");
 }
