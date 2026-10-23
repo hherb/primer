@@ -1,6 +1,7 @@
 //! Translate the GUI's `BackendConfig` into `primer-engine`'s
 //! [`BackendParams`] input struct, plus the small pure resolvers that feed
-//! it (main-model defaults, cloud-key gating, subsystem override kinds).
+//! it (main-model defaults and post-construction rebind, cloud-key gating,
+//! subsystem override kinds, the sidebar's served identity).
 //!
 //! The only side effect here is reading the `ANTHROPIC_API_KEY` /
 //! `OPENAI_COMPAT_API_KEY` env vars when the corresponding key source is
@@ -33,13 +34,24 @@ fn env_key(name: &str) -> Option<String> {
 /// supported fallback direction) needs the key even though the primary
 /// `kind` is not "cloud"; without this the cloud secondary fails to
 /// build with an Auth error and the fallback degrades to PrimaryAlone
-/// (reported as a `BackendNotice::FallbackDropped`). An Inline key is kind-agnostic (it may be entered for
-/// a cloud fallback even when the primary is local).
+/// (reported as a `BackendNotice::FallbackDropped`). An Inline key is
+/// kind-agnostic (it may be entered for a cloud fallback even when the
+/// primary is local).
 ///
 /// The resolved openai-compat key lands in
 /// `BackendParams::openai_compat_api_key`; `build_subsystems` reads that
 /// same value back from `params` for the openai-compat embedder.
 pub(super) fn build_backend_params(config: &GuiConfig) -> BackendParams {
+    build_backend_params_with(config, env_key)
+}
+
+/// [`build_backend_params`] with the env-var lookup injected, so tests can
+/// pin which variables are read (and when) without mutating the process
+/// environment.
+pub(super) fn build_backend_params_with(
+    config: &GuiConfig,
+    env: impl Fn(&str) -> Option<String>,
+) -> BackendParams {
     let backend_config = &config.backend;
 
     let api_key = match &backend_config.api_key_source {
@@ -50,7 +62,7 @@ pub(super) fn build_backend_params(config: &GuiConfig) -> BackendParams {
                 backend_config.fallback_backend.as_deref(),
             ) =>
         {
-            env_key("ANTHROPIC_API_KEY")
+            env("ANTHROPIC_API_KEY")
         }
         ApiKeySource::Env => None,
     };
@@ -62,7 +74,7 @@ pub(super) fn build_backend_params(config: &GuiConfig) -> BackendParams {
     // CLI's reuse of `--openai-compat-api-key` across both.
     let openai_compat_api_key = match &backend_config.openai_compat_api_key_source {
         ApiKeySource::Inline { key } => Some(key.clone()),
-        ApiKeySource::Env => env_key("OPENAI_COMPAT_API_KEY"),
+        ApiKeySource::Env => env("OPENAI_COMPAT_API_KEY"),
     };
 
     BackendParams {
@@ -136,12 +148,27 @@ pub(super) fn cloud_backend_in_use(primary_kind: &str, fallback_backend: Option<
     primary_kind == "cloud" || fallback_backend == Some("cloud")
 }
 
+/// Replace a `*-pending` placeholder with the constructed backend's name.
+///
+/// For qnn the real model id comes from the bundle's `primer-meta.json`, for
+/// llamacpp from the GGUF stem; both are known only after construction, so
+/// `backend.name()` (e.g. "qnn:Qwen3-4B") becomes the model id the subsystem
+/// identifiers carry. Every other kind keeps its configured model. Mirrors
+/// the CLI's post-construction rebind.
+pub(super) fn rebind_main_model(kind: &str, main_model: String, backend_name: &str) -> String {
+    if kind == "qnn" || kind == "llamacpp" {
+        backend_name.to_string()
+    } else {
+        main_model
+    }
+}
+
 /// Resolve the main backend's model id from the GUI's optional override.
 /// Mirrors `primer-cli`: cloud defaults to
 /// [`DEFAULT_CLOUD_MODEL`](primer_core::consts::inference::DEFAULT_CLOUD_MODEL),
 /// ollama and openai-compat require an explicit value, stub falls back to
 /// the literal "stub", and qnn / llamacpp return a `*-pending` placeholder
-/// that `build_with_strategy` rebinds to `backend.name()`.
+/// that [`rebind_main_model`] swaps for `backend.name()` after construction.
 pub(super) fn resolve_main_model(kind: &str, model: Option<&str>) -> Result<String, String> {
     match kind {
         "cloud" => Ok(model
@@ -160,7 +187,7 @@ pub(super) fn resolve_main_model(kind: &str, model: Option<&str>) -> Result<Stri
         "qnn" => {
             // The model id is read from the bundle's `primer-meta.json`
             // at construction time, so the `model` override is ignored.
-            // Return a placeholder that `build_with_strategy` rebinds to
+            // Return a placeholder that `rebind_main_model` swaps for
             // `backend.name()` once the QNN backend constructs (mirrors
             // the CLI's "qnn-pending" placeholder).
             Ok("qnn-pending".to_string())
@@ -169,9 +196,9 @@ pub(super) fn resolve_main_model(kind: &str, model: Option<&str>) -> Result<Stri
             // The real model id comes from the GGUF stem at construction
             // time (`backend.name()` == "llamacpp:<stem>"). The `model`
             // override is ignored — the GGUF path lives in its own config
-            // field. Return a placeholder that `build_with_strategy`
-            // rebinds to `backend.name()` once the backend constructs
-            // (mirrors the CLI's "llamacpp" rebind).
+            // field. Return a placeholder that `rebind_main_model` swaps
+            // for `backend.name()` once the backend constructs (mirrors
+            // the CLI's "llamacpp" rebind).
             Ok("llamacpp-pending".to_string())
         }
         other => Err(format!(

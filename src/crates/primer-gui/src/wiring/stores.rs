@@ -20,6 +20,37 @@ use primer_storage::SqliteSessionStore;
 use super::LocaleStrategy;
 use crate::config::GuiConfig;
 
+/// Everything [`open_stores`] opens, with the session's effective locale.
+pub(super) struct Stores {
+    pub session_store: SqliteSessionStore,
+    /// The locale the session runs under: the persisted learner's on
+    /// resume, else the cfg's. The knowledge base is opened under it.
+    pub locale: Locale,
+    pub learner: LearnerModel,
+    pub knowledge: SqliteKnowledgeBase,
+}
+
+/// Open the session store and learner, then the knowledge base under the
+/// *effective* locale they resolved, never the cfg's. Composed here so the
+/// KB-locale choice is testable on its own: on resume a German learner
+/// under an English cfg must still get the German KB.
+pub(super) async fn open_stores(
+    home: &Path,
+    config: &GuiConfig,
+    cfg_locale: Locale,
+    strategy: LocaleStrategy,
+) -> Result<Stores, String> {
+    let (session_store, locale, learner) =
+        open_session_store_and_learner(home, config, cfg_locale, strategy).await?;
+    let knowledge = open_knowledge_base(config, locale).await?;
+    Ok(Stores {
+        session_store,
+        locale,
+        learner,
+        knowledge,
+    })
+}
+
 /// Open (creating the parent dir if needed) the session DB under
 /// `cfg_locale`, then load-or-mint the learner and resolve the session's
 /// effective locale according to `strategy`.

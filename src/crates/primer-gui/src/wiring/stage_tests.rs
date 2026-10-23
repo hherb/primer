@@ -5,6 +5,7 @@
 //! in isolation so a regression points at the stage that broke rather than
 //! at "building an `ActiveSession` failed somewhere".
 
+use std::cell::RefCell;
 use std::time::Duration;
 
 use primer_core::inference::InferenceBackend;
@@ -94,19 +95,6 @@ fn backend_params_inline_keys_are_used_regardless_of_backend_kind() {
 }
 
 #[test]
-fn backend_params_env_cloud_key_skipped_when_cloud_unreachable() {
-    // Deterministic regardless of the test process's environment: with no
-    // cloud primary and no cloud fallback the env var is never consulted.
-    let mut cfg = stub_config();
-    cfg.backend.api_key_source = ApiKeySource::Env;
-    cfg.backend.fallback_backend = None;
-
-    let p = build_backend_params(&cfg);
-
-    assert_eq!(p.api_key, None);
-}
-
-#[test]
 fn backend_params_parses_reasoning_markers_and_passes_routing_through() {
     let mut cfg = stub_config();
     cfg.backend.reasoning_markers = "<r> </r>\n".to_string();
@@ -127,7 +115,179 @@ fn backend_params_parses_reasoning_markers_and_passes_routing_through() {
     assert_eq!(p.primary_ttft_budget_ms, Some(CUSTOM_TTFT_BUDGET_MS));
 }
 
+/// An env lookup that records every variable name it is asked for and
+/// answers from `vars`. Lets the key-gating tests run without touching the
+/// process environment (`set_var` is unsafe and racy under the parallel
+/// test runner).
+fn recording_env<'a>(
+    vars: &'a [(&'a str, &'a str)],
+    asked: &'a RefCell<Vec<String>>,
+) -> impl Fn(&str) -> Option<String> + 'a {
+    move |name| {
+        asked.borrow_mut().push(name.to_string());
+        vars.iter()
+            .find(|(k, _)| *k == name)
+            .map(|(_, v)| v.to_string())
+    }
+}
+
+/// The cloud key is read when cloud is the primary OR (issue #206) only the
+/// fallback: a local primary with a cloud fallback still needs
+/// `ANTHROPIC_API_KEY`, or the cloud secondary fails with Auth.
+#[test]
+fn backend_params_env_cloud_key_resolved_when_cloud_primary_or_fallback() {
+    for (kind, fallback) in [("cloud", None), ("ollama", Some("cloud"))] {
+        let mut cfg = stub_config();
+        cfg.backend.kind = kind.to_string();
+        cfg.backend.fallback_backend = fallback.map(String::from);
+        cfg.backend.api_key_source = ApiKeySource::Env;
+        let asked = RefCell::new(Vec::new());
+
+        let p = build_backend_params_with(
+            &cfg,
+            recording_env(&[("ANTHROPIC_API_KEY", "sk-env")], &asked),
+        );
+
+        assert_eq!(p.api_key.as_deref(), Some("sk-env"), "kind {kind}");
+        assert!(
+            asked.borrow().iter().any(|k| k == "ANTHROPIC_API_KEY"),
+            "kind {kind}, asked: {:?}",
+            asked.borrow()
+        );
+    }
+}
+
+/// With cloud neither primary nor fallback the cloud key is never read.
+#[test]
+fn backend_params_env_cloud_key_never_read_when_cloud_unreachable() {
+    let mut cfg = stub_config();
+    cfg.backend.api_key_source = ApiKeySource::Env;
+    cfg.backend.fallback_backend = None;
+    let asked = RefCell::new(Vec::new());
+
+    let p = build_backend_params_with(
+        &cfg,
+        recording_env(&[("ANTHROPIC_API_KEY", "sk-env")], &asked),
+    );
+
+    assert_eq!(p.api_key, None);
+    assert!(
+        !asked.borrow().iter().any(|k| k == "ANTHROPIC_API_KEY"),
+        "asked: {:?}",
+        asked.borrow()
+    );
+}
+
+/// The openai-compat `Env` source reads exactly the CLI's variable name.
+#[test]
+fn backend_params_env_openai_compat_key_reads_its_own_var() {
+    let mut cfg = stub_config();
+    cfg.backend.openai_compat_api_key_source = ApiKeySource::Env;
+    let asked = RefCell::new(Vec::new());
+
+    let p = build_backend_params_with(
+        &cfg,
+        recording_env(&[("OPENAI_COMPAT_API_KEY", "oc-env")], &asked),
+    );
+
+    assert_eq!(p.openai_compat_api_key.as_deref(), Some("oc-env"));
+    assert_eq!(*asked.borrow(), ["OPENAI_COMPAT_API_KEY"]);
+}
+
+/// The production wrapper must hand `build_backend_params_with` the real
+/// process env. Always passes when correct; catches a `|_| None` regression
+/// on any machine where `OPENAI_COMPAT_API_KEY` happens to be set (pinning
+/// it unconditionally would need `set_var`, which is racy under the
+/// parallel test runner).
+#[test]
+fn backend_params_wrapper_reads_process_env() {
+    let mut cfg = stub_config();
+    cfg.backend.openai_compat_api_key_source = ApiKeySource::Env;
+
+    let p = build_backend_params(&cfg);
+
+    assert_eq!(
+        p.openai_compat_api_key,
+        std::env::var("OPENAI_COMPAT_API_KEY").ok()
+    );
+}
+
+// ─── main-model rebind ───────────────────────────────────────────────
+
+/// qnn / llamacpp only know their model id after construction; dropping
+/// the rebind would persist `llm:qnn-pending` as the classifier id.
+#[test]
+fn rebind_main_model_takes_backend_name_for_qnn_and_llamacpp() {
+    assert_eq!(
+        rebind_main_model("qnn", "qnn-pending".into(), "qnn:Qwen3-4B"),
+        "qnn:Qwen3-4B"
+    );
+    assert_eq!(
+        rebind_main_model(
+            "llamacpp",
+            "llamacpp-pending".into(),
+            "llamacpp:qwen3-4b-q4"
+        ),
+        "llamacpp:qwen3-4b-q4"
+    );
+}
+
+#[test]
+fn rebind_main_model_passes_other_kinds_through() {
+    for kind in ["stub", "cloud", "ollama", "openai-compat"] {
+        assert_eq!(
+            rebind_main_model(kind, "configured".into(), "backend-name"),
+            "configured",
+            "kind {kind}"
+        );
+    }
+}
+
 // ─── stores ──────────────────────────────────────────────────────────
+
+/// With no explicit `session_db` the DB lands at `<home>/.primer/<slug>.db`
+/// under the injected home, creating the directory.
+#[tokio::test]
+async fn default_session_db_is_created_under_injected_home() {
+    let home = TempDir::new().unwrap();
+    let mut cfg = stub_config();
+    cfg.persistence.no_persist = false;
+    cfg.persistence.session_db = None;
+    cfg.learner.name = "José".to_string();
+
+    open_session_store_and_learner(home.path(), &cfg, Locale::English, LocaleStrategy::UseCfg)
+        .await
+        .unwrap();
+
+    assert!(home.path().join(".primer").join("josé.db").is_file());
+}
+
+/// Resume must open the KB under the persisted learner's locale, not the
+/// cfg's: a German learner resumed under an English cfg gets the German KB.
+#[tokio::test]
+async fn resume_opens_knowledge_base_under_inherited_locale() {
+    let home = TempDir::new().unwrap();
+    let mut cfg = stub_config();
+    cfg.persistence.no_persist = false;
+    cfg.persistence.session_db = Some(home.path().join("learner.db"));
+    let (first, _, _) =
+        open_session_store_and_learner(home.path(), &cfg, Locale::German, LocaleStrategy::UseCfg)
+            .await
+            .unwrap();
+    drop(first);
+
+    let stores = open_stores(
+        home.path(),
+        &cfg,
+        Locale::English,
+        LocaleStrategy::InheritFromPersistedLearner,
+    )
+    .await
+    .unwrap();
+
+    assert_eq!(stores.locale, Locale::German);
+    assert_eq!(stores.knowledge.locale(), Locale::German);
+}
 
 #[tokio::test]
 async fn fresh_store_mints_learner_under_cfg_locale() {
@@ -209,7 +369,8 @@ async fn stub_backend(cfg: &GuiConfig) -> (Arc<dyn InferenceBackend>, BackendPar
 
 /// With a stub main backend `primer-engine` takes its `("stub", None)` arm
 /// and builds a fresh stub per subsystem, so this pins the GUI-settings
-/// plumbing, not `Arc::clone` inheritance (that gap is tracked in #340).
+/// plumbing, not `Arc::clone` inheritance (that is
+/// `subsystems_inherit_main_backend_via_arc_clone`).
 #[tokio::test]
 async fn subsystems_match_main_stub_and_apply_gui_settings() {
     let mut cfg = stub_config();
@@ -241,6 +402,34 @@ async fn subsystems_match_main_stub_and_apply_gui_settings() {
         CUSTOM_VOCAB_MAX_PER_PROMPT as usize
     );
     assert!(s.embedder.is_none(), "embedder kind \"none\" ⇒ BM25-only");
+}
+
+/// A non-stub main kind with no subsystem override reuses the main backend
+/// via `Arc::clone`. The main backend handed in is a `StubBackend` (named
+/// "stub") under an `openai-compat` config, so the "stub" in the extractor /
+/// comprehension ids proves reuse: a freshly built backend would be named
+/// "openai-compat". The classifier id (`llm:<model>`) carries no backend
+/// name, so its assertion pins only the model id, not reuse (#362).
+#[tokio::test]
+async fn subsystems_inherit_main_backend_via_arc_clone() {
+    const MAIN_MODEL: &str = "inherited-model";
+    let mut cfg = stub_config();
+    cfg.backend.kind = "openai-compat".to_string();
+    cfg.backend.model = Some(MAIN_MODEL.to_string());
+    let params = build_backend_params(&cfg);
+    let main: Arc<dyn InferenceBackend> = Arc::new(primer_inference::stub::StubBackend);
+
+    let s = build_subsystems(&cfg, &main, MAIN_MODEL, &params)
+        .await
+        .unwrap();
+
+    // Classifier and extractor/comprehension id formats differ (#316).
+    assert_eq!(s.classifier.identifier(), format!("llm:{MAIN_MODEL}"));
+    assert_eq!(s.extractor.identifier(), format!("llm:stub:{MAIN_MODEL}"));
+    assert_eq!(
+        s.comprehension.identifier(),
+        format!("llm:stub:{MAIN_MODEL}")
+    );
 }
 
 #[tokio::test]

@@ -34,14 +34,19 @@ use tokio::sync::Mutex;
 use crate::config::GuiConfig;
 use crate::state::{ActiveSession, SessionSnapshot};
 
-use backend_params::{build_backend_params, resolve_main_model, served_identity};
-use stores::{open_knowledge_base, open_session_store_and_learner};
+use backend_params::{
+    build_backend_params, rebind_main_model, resolve_main_model, served_identity,
+};
+use stores::{Stores, open_stores};
 use subsystems::{build_subsystems, retrieval_notice};
 
-// `tests.rs` calls `cloud_backend_in_use` by bare name via `use super::*`;
-// production code in this file doesn't call it, so the import is test-only.
+// Test-only: `tests.rs` / `stage_tests.rs` reach these by bare name via
+// `use super::*`; production goes through `build_backend_params` /
+// `open_stores` instead.
 #[cfg(test)]
-use backend_params::cloud_backend_in_use;
+use backend_params::{build_backend_params_with, cloud_backend_in_use};
+#[cfg(test)]
+use stores::{open_knowledge_base, open_session_store_and_learner};
 
 /// How `build_active_session*` should treat a locale mismatch between
 /// `cfg.learner.locale` and a learner already persisted on disk.
@@ -133,26 +138,17 @@ async fn build_with_strategy(
         .await
         .map_err(|e| format!("constructing inference backend: {e}"))?;
 
-    // For QNN the real model id comes from `primer-meta.json` inside the
-    // bundle; for llamacpp it comes from the GGUF stem. In both cases
-    // rebind `main_model` to `backend.name()` (e.g. "qnn:Qwen3-4B" or
-    // "llamacpp:qwen3-4b-q4") so the downstream subsystem identifiers
-    // carry the real model id instead of the "*-pending" placeholder.
-    // Mirrors the CLI's post-construction rebind.
-    let main_model = if backend_config.kind == "qnn" || backend_config.kind == "llamacpp" {
-        backend.name().to_string()
-    } else {
-        main_model
-    };
+    let main_model = rebind_main_model(&backend_config.kind, main_model, backend.name());
 
-    // ─── Session store + learner (open BEFORE KB so the learner's
-    //     locale is probed without a second open) ─────────────────────
-    let (session_store_inner, effective_locale, learner) =
-        open_session_store_and_learner(home, config, cfg_locale, strategy).await?;
-    let session_store = Arc::new(session_store_inner);
-
-    // ─── Knowledge base + auto-seed (under effective_locale) ─────────
-    let knowledge = Arc::new(open_knowledge_base(config, effective_locale).await?);
+    // ─── Session store + learner, then the KB under their locale ─────
+    let Stores {
+        session_store,
+        locale: effective_locale,
+        learner,
+        knowledge,
+    } = open_stores(home, config, cfg_locale, strategy).await?;
+    let session_store = Arc::new(session_store);
+    let knowledge = Arc::new(knowledge);
 
     // ─── Subsystems (classifier, extractor, comprehension, embedder) ─
     let subsystems = build_subsystems(config, &backend, &main_model, &params).await?;
