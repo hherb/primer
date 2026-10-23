@@ -19,7 +19,8 @@ pub use learner::{
     verify_resume_locale_match,
 };
 pub use paths::{
-    IN_MEMORY, PRIMER_HOME_DIR, resolve_session_db_path, should_show_first_run_banner, slug,
+    IN_MEMORY, PRIMER_HOME_DIR, create_private_dir_all, ensure_session_db_dir,
+    resolve_session_db_path, should_show_first_run_banner, slug,
 };
 pub use wiring::{
     BackendNotice, BackendParams, build_backend, build_classifier, build_comprehension,

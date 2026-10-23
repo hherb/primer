@@ -87,6 +87,25 @@ fn open_log_file_creates_an_owner_only_log() {
     assert_eq!(mode, LOG_FILE_MODE, "log can carry learner-derived text");
 }
 
+/// Issue #358: the `~/.primer/logs/` directories it creates are owner-only.
+#[cfg(unix)]
+#[test]
+fn open_log_file_creates_owner_only_directories() {
+    use std::os::unix::fs::PermissionsExt;
+    let home = tempfile::tempdir().unwrap();
+    let log = desktop_log_path(home.path());
+
+    open_log_file(&log, GUI_LOG_MAX_BYTES).unwrap();
+
+    for dir in [
+        log.parent().unwrap(),
+        log.parent().unwrap().parent().unwrap(),
+    ] {
+        let mode = fs::metadata(dir).unwrap().permissions().mode() & 0o777;
+        assert_eq!(mode, 0o700, "{}", dir.display());
+    }
+}
+
 /// A rotation that fails must not cost the session its log file.
 #[cfg(unix)]
 #[test]
