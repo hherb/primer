@@ -28,17 +28,19 @@ use crate::config::{EmbedderConfig, GuiConfig};
 /// `backend` is the (possibly fallback/router-wrapped) main backend;
 /// subsystems with neither a kind nor a model override reuse it via
 /// `Arc::clone`.
-/// `main_model` is the post-construction model id (already rebound from
-/// any `*-pending` placeholder). The openai-compat embedder reuses the
+/// `backend_kind` / `main_model` are the *served* kind and model id
+/// (`primer_engine::served_identity`: the fallback's when the primary is
+/// unavailable, #351; the model already rebound from any `*-pending`
+/// placeholder), so inherited subsystems are labelled by what runs them and
+/// overrides build on a kind that actually constructs. The openai-compat embedder reuses the
 /// key the main backend resolved in `params`.
 pub(super) async fn build_subsystems(
     config: &GuiConfig,
     backend: &Arc<dyn InferenceBackend>,
+    backend_kind: &str,
     main_model: &str,
     params: &BackendParams,
 ) -> Result<DialogueManagerSubsystems, String> {
-    let backend_kind = &config.backend.kind;
-
     let classifier_settings = ClassifierSettings {
         blocking_timeout: Duration::from_millis(config.classifier.timeout_ms),
         ..ClassifierSettings::default()

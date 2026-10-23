@@ -485,3 +485,52 @@ async fn primary_unavailable_session_shows_served_fallback() {
     let notice = s.backend_notice.as_deref().expect("primary-down notice");
     assert!(notice.contains("qnn"), "notice: {notice}");
 }
+
+/// Qnn primary down, cloud fallback serving alone, with an inline key so the
+/// test never depends on the developer's shell.
+fn primary_unavailable_cloud_fallback_config() -> GuiConfig {
+    let mut cfg = stub_config();
+    cfg.backend.kind = "qnn".to_string();
+    cfg.backend.fallback_backend = Some("cloud".to_string());
+    cfg.backend.fallback_model = None;
+    cfg.backend.api_key_source = crate::config::ApiKeySource::Inline {
+        key: "test-key".into(),
+    };
+    cfg
+}
+
+/// Inherited subsystems run on the fallback when the primary is down, so
+/// their identifiers must name the fallback's model, not the primary's
+/// (#351): these ids are the longitudinal provenance record.
+#[tokio::test]
+async fn primary_unavailable_subsystems_name_served_fallback() {
+    let home = TempDir::new().unwrap();
+    let cfg = primary_unavailable_cloud_fallback_config();
+    let s = build_active_session(home.path(), &cfg).await.unwrap();
+
+    let model = primer_core::consts::inference::DEFAULT_CLOUD_MODEL;
+    let dm = s.dialogue_manager.lock().await;
+    assert_eq!(dm.classifier_identifier(), format!("llm:{model}"));
+    // Extractor + comprehension ids also carry the backend's name.
+    let with_backend = format!("llm:cloud-anthropic:{model}");
+    assert_eq!(dm.extractor_identifier(), with_backend);
+    assert_eq!(dm.comprehension_identifier(), with_backend);
+}
+
+/// A subsystem model override used to rebuild the unavailable primary kind
+/// and abort the whole session (#351). It now builds on the serving fallback.
+#[tokio::test]
+async fn primary_unavailable_override_subsystem_builds_on_fallback() {
+    let home = TempDir::new().unwrap();
+    let mut cfg = primary_unavailable_cloud_fallback_config();
+    cfg.classifier.match_main = false;
+    cfg.classifier.kind = None;
+    cfg.classifier.model = Some("override-model".to_string());
+    let s = build_active_session(home.path(), &cfg)
+        .await
+        .expect("override subsystem must not abort the session");
+
+    assert!(s.backend_notice.is_some());
+    let dm = s.dialogue_manager.lock().await;
+    assert_eq!(dm.classifier_identifier(), "llm:override-model");
+}

@@ -28,15 +28,13 @@ use std::sync::Arc;
 use primer_core::config::PedagogyConfig;
 use primer_core::i18n::Locale;
 use primer_core::storage::{LearnerStore, SessionStore};
-use primer_engine::build_main_backend;
+use primer_engine::{build_main_backend, served_identity};
 use tokio::sync::Mutex;
 
 use crate::config::GuiConfig;
 use crate::state::{ActiveSession, SessionSnapshot};
 
-use backend_params::{
-    build_backend_params, rebind_main_model, resolve_main_model, served_identity,
-};
+use backend_params::{build_backend_params, rebind_main_model, resolve_main_model};
 use stores::{Stores, open_stores};
 use subsystems::{build_subsystems, retrieval_notice};
 
@@ -150,8 +148,19 @@ async fn build_with_strategy(
     let session_store = Arc::new(session_store);
     let knowledge = Arc::new(knowledge);
 
+    // What actually serves turns; differs from the config when the fallback
+    // serves alone (#338). The sidebar shows it, and inherited subsystems run
+    // on it, so their provenance ids name it too (#351).
+    let (backend_name, display_model) = served_identity(
+        &backend_config.kind,
+        &main_model,
+        notice.as_ref(),
+        backend.name(),
+    );
+
     // ─── Subsystems (classifier, extractor, comprehension, embedder) ─
-    let subsystems = build_subsystems(config, &backend, &main_model, &params).await?;
+    let subsystems =
+        build_subsystems(config, &backend, &backend_name, &display_model, &params).await?;
     let retrieval_notice = retrieval_notice(&config.embedder.kind, subsystems.embedder.is_some());
 
     // ─── Pedagogy settings ───────────────────────────────────────────
@@ -185,16 +194,6 @@ async fn build_with_strategy(
         learner_age: learner.profile.age,
         concept_count: learner.concepts.len(),
     };
-
-    // What the sidebar shows; differs from the config when the fallback
-    // serves alone (#338). The subsystems above still get the primary's
-    // `main_model` as their identifier even then — a known mislabel (#351).
-    let (backend_name, display_model) = served_identity(
-        &backend_config.kind,
-        &main_model,
-        notice.as_ref(),
-        backend.name(),
-    );
 
     let dm = primer_pedagogy::DialogueManager::new(
         learner,

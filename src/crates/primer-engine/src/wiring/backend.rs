@@ -69,6 +69,33 @@ impl std::fmt::Display for BackendNotice {
     }
 }
 
+/// The `(backend kind, model)` that actually serves turns. Normally the
+/// configured primary; but under [`BackendNotice::PrimaryUnavailable`] every
+/// turn goes to the fallback, so return that instead. Both binaries feed it
+/// to the subsystem builders (whose ids are provenance records, issue #351)
+/// and the GUI sidebar shows it (issue #338). `served_name` is the
+/// constructed backend's `name()`, used when the fallback has no model.
+pub fn served_identity(
+    kind: &str,
+    main_model: &str,
+    notice: Option<&BackendNotice>,
+    served_name: &str,
+) -> (String, String) {
+    match notice {
+        Some(BackendNotice::PrimaryUnavailable {
+            fallback,
+            fallback_model,
+            ..
+        }) => (
+            fallback.clone(),
+            fallback_model
+                .clone()
+                .unwrap_or_else(|| served_name.to_string()),
+        ),
+        _ => (kind.to_string(), main_model.to_string()),
+    }
+}
+
 /// Pure decision: given whether each leg built and whether a fallback was
 /// configured, choose how to assemble the main backend. No I/O.
 pub fn plan_main_backend(

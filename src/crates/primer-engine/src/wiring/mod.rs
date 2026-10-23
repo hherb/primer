@@ -31,7 +31,7 @@ mod subsystems;
 
 pub use backend::{
     BackendNotice, MainBackendPlan, build_backend, build_main_backend, plan_main_backend,
-    resolve_fallback_model,
+    resolve_fallback_model, served_identity,
 };
 pub use embedders::{
     build_fastembed_embedder, build_ollama_embedder, build_openai_compat_embedder,
