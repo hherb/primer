@@ -11,8 +11,8 @@ use primer_core::i18n::Locale;
 use primer_core::learner::LearnerModel;
 use primer_core::storage::{LearnerStore, SessionStore};
 use primer_engine::{
-    IN_MEMORY, adopt_or_mint_learner_id, create_learner_with_id, parse_languages,
-    reconcile_persisted_learner, resolve_session_db_path,
+    IN_MEMORY, adopt_or_mint_learner_id, create_learner_with_id, ensure_session_db_dir,
+    parse_languages, reconcile_persisted_learner, resolve_session_db_path,
 };
 use primer_knowledge::SqliteKnowledgeBase;
 use primer_storage::SqliteSessionStore;
@@ -45,13 +45,12 @@ pub(super) async fn open_session_store_and_learner(
         config.persistence.no_persist,
     );
     if !config.persistence.no_persist {
-        if let Some(parent) = session_path.parent() {
-            if !parent.as_os_str().is_empty() {
-                std::fs::create_dir_all(parent).map_err(|e| {
-                    format!("creating session-db directory {}: {e}", parent.display())
-                })?;
-            }
-        }
+        ensure_session_db_dir(&session_path, home).map_err(|e| {
+            format!(
+                "creating session-db directory for {}: {e}",
+                session_path.display()
+            )
+        })?;
     }
     let mut session_store_inner = SqliteSessionStore::open_for_locale(&session_path, cfg_locale)
         .map_err(|e| format!("opening session-db {}: {e}", session_path.display()))?;

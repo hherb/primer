@@ -68,7 +68,7 @@ pub fn load(home: &Path) -> Result<GuiConfig, ConfigError> {
 
 /// Atomically save the GUI config to disk.
 ///
-/// - Creates `~/.primer/` if missing.
+/// - Creates `~/.primer/` if missing (owner-only `0700` on Unix).
 /// - Writes to `<file>.tmp` then renames over the destination so a
 ///   concurrent reader never sees a partial file.
 /// - On Unix, sets the destination to mode 0600 because it may carry
@@ -77,7 +77,7 @@ pub fn load(home: &Path) -> Result<GuiConfig, ConfigError> {
 pub fn save(home: &Path, config: &GuiConfig) -> Result<(), ConfigError> {
     let path = config_path(home);
     let parent = path.parent().expect("config_path always has a parent");
-    fs::create_dir_all(parent).map_err(|source| ConfigError::Io {
+    primer_engine::create_private_dir_all(parent).map_err(|source| ConfigError::Io {
         path: parent.to_path_buf(),
         source,
     })?;

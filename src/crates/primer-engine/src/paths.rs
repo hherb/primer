@@ -3,7 +3,10 @@
 //! - `slug` — Unicode-aware NFC-normalised slug for a learner name
 //! - `resolve_session_db_path` — explicit / default / in-memory dispatch
 //! - `should_show_first_run_banner` — first-launch banner gate
+//! - `create_private_dir_all` / `ensure_session_db_dir` — owner-only
+//!   (`0700` on Unix) directories for learner data (issue #358)
 
+use std::io;
 use std::path::{Path, PathBuf};
 
 use unicode_normalization::UnicodeNormalization;
@@ -82,6 +85,60 @@ pub fn should_show_first_run_banner(
     file_existed_before: bool,
 ) -> bool {
     !explicit_session_db && !no_persist && !file_existed_before
+}
+
+/// Unix permission bits for directories holding learner data: owner only.
+/// Under the personal-device model other OS logins share the machine, and
+/// the session DBs inside carry a child's full transcript history.
+#[cfg(unix)]
+const PRIVATE_DIR_MODE: u32 = 0o700;
+
+/// Create `dir` and any missing parents. On Unix every directory this call
+/// creates is owner-only (`0700`); components that already exist keep
+/// their permissions, so a user-chosen `--session-db` directory is never
+/// altered.
+pub fn create_private_dir_all(dir: &Path) -> io::Result<()> {
+    let mut builder = std::fs::DirBuilder::new();
+    builder.recursive(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::DirBuilderExt;
+        builder.mode(PRIVATE_DIR_MODE);
+    }
+    builder.create(dir)
+}
+
+/// Prepare the directory a session DB at `session_path` will live in:
+/// create its parent privately, and tighten an existing `<home>/.primer/`
+/// to `0700`. Installs from before #358 have a `0755` `~/.primer/`, and an
+/// owner-only parent protects the `0644` DBs inside without touching each
+/// file. A missing `<home>/.primer/` is not created here (an explicit
+/// `--session-db` elsewhere does not need it); a failed tighten is logged,
+/// not fatal, because it must not stop a child's session. Callers skip this
+/// under `no_persist`.
+pub fn ensure_session_db_dir(session_path: &Path, home: &Path) -> io::Result<()> {
+    if let Some(parent) = session_path.parent() {
+        if !parent.as_os_str().is_empty() {
+            create_private_dir_all(parent)?;
+        }
+    }
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let primer_home = home.join(PRIMER_HOME_DIR);
+        if primer_home.is_dir() {
+            let private = std::fs::Permissions::from_mode(PRIVATE_DIR_MODE);
+            if let Err(e) = std::fs::set_permissions(&primer_home, private) {
+                tracing::warn!(
+                    dir = %primer_home.display(),
+                    "could not make the learner-data directory owner-only: {e}"
+                );
+            }
+        }
+    }
+    #[cfg(not(unix))]
+    let _ = home; // Windows profile-dir ACLs already restrict to the owner.
+    Ok(())
 }
 
 #[cfg(test)]
@@ -201,5 +258,75 @@ mod tests {
         assert!(!should_show_first_run_banner(true, false, false));
         // No-persist → silent (no file is being created at all).
         assert!(!should_show_first_run_banner(false, true, false));
+    }
+
+    #[cfg(unix)]
+    fn mode_of(p: &Path) -> u32 {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::metadata(p).unwrap().permissions().mode() & 0o777
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn create_private_dir_all_makes_every_new_component_owner_only() {
+        let tmp = tempfile::tempdir().unwrap();
+        let dir = tmp.path().join(PRIMER_HOME_DIR).join("logs");
+        create_private_dir_all(&dir).unwrap();
+        assert_eq!(mode_of(&tmp.path().join(PRIMER_HOME_DIR)), 0o700);
+        assert_eq!(mode_of(&dir), 0o700);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn create_private_dir_all_leaves_existing_components_alone() {
+        use std::os::unix::fs::PermissionsExt;
+        // An explicit --session-db under a user-chosen directory must not
+        // have that directory's permissions changed.
+        let tmp = tempfile::tempdir().unwrap();
+        let existing = tmp.path().join("Documents");
+        std::fs::create_dir(&existing).unwrap();
+        std::fs::set_permissions(&existing, std::fs::Permissions::from_mode(0o755)).unwrap();
+        create_private_dir_all(&existing.join("primer")).unwrap();
+        assert_eq!(mode_of(&existing), 0o755);
+        assert_eq!(mode_of(&existing.join("primer")), 0o700);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn ensure_session_db_dir_tightens_a_pre_358_primer_home() {
+        use std::os::unix::fs::PermissionsExt;
+        let home = tempfile::tempdir().unwrap();
+        let primer_home = home.path().join(PRIMER_HOME_DIR);
+        std::fs::create_dir(&primer_home).unwrap();
+        std::fs::set_permissions(&primer_home, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let db = resolve_session_db_path(None, home.path(), "José", false);
+        ensure_session_db_dir(&db, home.path()).unwrap();
+        assert_eq!(mode_of(&primer_home), 0o700);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn ensure_session_db_dir_creates_default_dir_owner_only() {
+        let home = tempfile::tempdir().unwrap();
+        let db = resolve_session_db_path(None, home.path(), "José", false);
+        ensure_session_db_dir(&db, home.path()).unwrap();
+        assert_eq!(mode_of(&home.path().join(PRIMER_HOME_DIR)), 0o700);
+    }
+
+    #[test]
+    fn ensure_session_db_dir_does_not_create_primer_home_for_an_explicit_path() {
+        let home = tempfile::tempdir().unwrap();
+        let elsewhere = tempfile::tempdir().unwrap();
+        let db = elsewhere.path().join("sub").join("x.db");
+        ensure_session_db_dir(&db, home.path()).unwrap();
+        assert!(elsewhere.path().join("sub").is_dir());
+        assert!(!home.path().join(PRIMER_HOME_DIR).exists());
+    }
+
+    #[test]
+    fn ensure_session_db_dir_accepts_a_bare_filename() {
+        // `--session-db x.db` has an empty parent: nothing to create.
+        let home = tempfile::tempdir().unwrap();
+        ensure_session_db_dir(Path::new("x.db"), home.path()).unwrap();
     }
 }
