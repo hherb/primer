@@ -179,7 +179,8 @@ function setupSwitchSessionButton() {
 }
 
 /// Tear down the active session and return to the picker. Used by the
-/// header's "Sessions" button. We close the session server-side first
+/// header's "Sessions" button, and by voice.js after "End voice mode"
+/// (`stop_voice_mode` drops the session). We close the session server-side first
 /// so its background tasks drain cleanly, then wipe the chat surface
 /// before showing the picker — leaving stale bubbles up while the
 /// picker opens would feel like the previous session was still live.
@@ -1301,6 +1302,7 @@ window.primerRefreshSidebar     = refreshSidebar;
 window.primerShowError          = showError;
 window.primerShowToast          = showToast;
 window.primerRenderSessionInfo  = renderSessionInfo;
+window.primerReturnToPicker     = onSwitchSession;
 
 // Boot. Invoked last so every module-level `const` (notably `mobileQuery`,
 // used by `setupSidebarToggle`) is initialised before `main()` runs.

@@ -24,6 +24,7 @@ pub mod state;
 pub mod types;
 pub mod validation;
 pub mod voice;
+pub mod voice_stop_contract;
 pub mod wiring;
 
 use std::path::PathBuf;
