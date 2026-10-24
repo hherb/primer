@@ -333,3 +333,98 @@ fn v7_migration_is_idempotent() {
         "box_level"
     ));
 }
+
+fn fresh_v7_conn() -> Connection {
+    let conn = fresh_v6_conn();
+    apply_v7_migrations(&conn).unwrap();
+    conn
+}
+
+fn index_exists(conn: &Connection, name: &str) -> bool {
+    let count: i64 = conn
+        .query_row(
+            "SELECT COUNT(*) FROM sqlite_master WHERE type='index' AND name=?1",
+            rusqlite::params![name],
+            |r| r.get(0),
+        )
+        .unwrap();
+    count > 0
+}
+
+#[test]
+fn v8_migration_creates_tables_and_index() {
+    let conn = fresh_v7_conn();
+    assert!(!table_exists(&conn, "embedding_models"));
+    assert!(!table_exists(&conn, "embeddings_turns"));
+    apply_v8_migrations(&conn).unwrap();
+    assert!(table_exists(&conn, "embedding_models"));
+    assert!(table_exists(&conn, "embeddings_turns"));
+    assert!(index_exists(&conn, "idx_embeddings_turns_model"));
+}
+
+/// Pins behaviour, not DDL text (issue #332): dropping `ON DELETE CASCADE`
+/// from `embeddings_turns.turn_id` would leave this delete failing on the FK.
+#[test]
+fn v8_session_delete_cascades_to_turn_embeddings() {
+    let conn = fresh_v7_conn();
+    apply_v8_migrations(&conn).unwrap();
+    conn.execute_batch(
+        "INSERT INTO speakers (id, name) VALUES (1, 'Child');
+         INSERT INTO sessions (id, learner_id, started_at)
+             VALUES ('s1', 'l1', '2026-01-01T00:00:00Z');
+         INSERT INTO turns (session_id, turn_index, speaker_id, text, timestamp)
+             VALUES ('s1', 0, 1, 'hello', '2026-01-01T00:00:00Z');
+         INSERT INTO embedding_models (id, name, dim) VALUES (1, 'stub', 2);
+         INSERT INTO embeddings_turns (turn_id, model_id, vec)
+             SELECT id, 1, x'0000000000000000' FROM turns;",
+    )
+    .unwrap();
+
+    conn.execute("DELETE FROM sessions WHERE id = 's1'", [])
+        .unwrap();
+
+    let remaining: i64 = conn
+        .query_row("SELECT COUNT(*) FROM embeddings_turns", [], |r| r.get(0))
+        .unwrap();
+    assert_eq!(
+        remaining, 0,
+        "session delete must sweep its turn embeddings"
+    );
+}
+
+/// `name UNIQUE` backs the "mismatched dim under an existing model is a hard
+/// error" invariant: one registry row per model name.
+#[test]
+fn v8_embedding_models_name_is_unique() {
+    let conn = fresh_v7_conn();
+    apply_v8_migrations(&conn).unwrap();
+    conn.execute(
+        "INSERT INTO embedding_models (name, dim) VALUES ('m', 2)",
+        [],
+    )
+    .unwrap();
+    assert!(
+        conn.execute(
+            "INSERT INTO embedding_models (name, dim) VALUES ('m', 4)",
+            []
+        )
+        .is_err()
+    );
+}
+
+#[test]
+fn v8_migration_is_idempotent() {
+    let conn = fresh_v7_conn();
+    apply_v8_migrations(&conn).unwrap();
+    conn.execute(
+        "INSERT INTO embedding_models (name, dim) VALUES ('m', 2)",
+        [],
+    )
+    .unwrap();
+    apply_v8_migrations(&conn).unwrap(); // re-run must be a no-op
+    let rows: i64 = conn
+        .query_row("SELECT COUNT(*) FROM embedding_models", [], |r| r.get(0))
+        .unwrap();
+    assert_eq!(rows, 1);
+    assert!(index_exists(&conn, "idx_embeddings_turns_model"));
+}
