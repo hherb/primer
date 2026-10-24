@@ -20,45 +20,32 @@ use crate::types::SessionInfo;
 
 /// Start Android voice mode.
 ///
-/// Closes any active text/voice session, builds the active dialogue manager
-/// via the shared wiring (identical to text mode), constructs the Android
-/// voice backends, and spawns the shared voice loop. Returns a
+/// Constructs the Android voice backends (incl. the mic-permission check)
+/// *before* closing any active text/voice session, so a failure there keeps
+/// the user's session (issue #366). Then builds the active dialogue manager
+/// via the shared wiring (identical to text mode) and spawns the shared
+/// voice loop. Returns a
 /// [`SessionInfo`] so the frontend shows the same learner/backend identity
 /// as text mode.
 #[tauri::command]
-pub async fn start_voice_mode_android(
+pub async fn start_voice_mode_android<R: tauri::Runtime>(
     state: tauri::State<'_, AppState>,
-    app: AppHandle,
+    app: AppHandle<R>,
 ) -> Result<SessionInfo, StartVoiceModeError> {
     use primer_core::i18n::Locale;
 
-    // 1. Close any active text session (drains background tasks).
-    super::session::close_session_inner(&state)
-        .await
-        .map_err(StartVoiceModeError::from)?;
-
-    // 2. Close any already-active voice loop. Step 7 flips the sticky toggle
-    //    back to `true` after the new loop is up.
-    super::voice::stop_voice_mode_inner(&state, false)
-        .await
-        .ok();
-
     let cfg = state.config.lock().await.clone();
 
-    // 3. Build the active session via the shared wiring (same as text mode).
-    let active_session = crate::wiring::build_active_session(&state.home, &cfg)
-        .await
-        .map_err(StartVoiceModeError::from)?;
-
-    // 4. Build the Android voice backends (OS mic + speaker via JNI). No
+    // 1. Build the Android voice backends (OS mic + speaker via JNI). No
     //    asset resolution / download — the recognizer + TTS are OS-managed.
     //    Construct the JNI bridge first so the up-front mic-permission check
-    //    runs on the same instance the loop will use.
+    //    runs on the same instance the loop will use. Steps 1-1a run before
+    //    any teardown (issue #366), so a denied mic keeps the text session.
     let locale = Locale::from_pack_id(&cfg.learner.locale).unwrap_or_default();
     let bridge = primer_speech::android::new_jni_bridge()
         .map_err(|e| StartVoiceModeError::from(format!("android bridge init: {e}")))?;
 
-    // 4a. Without RECORD_AUDIO the on-device recognizer only ever emits a
+    // 1a. Without RECORD_AUDIO the on-device recognizer only ever emits a
     //     silent ERROR_INSUFFICIENT_PERMISSIONS. Check up front and surface a
     //     typed error the frontend renders as a "grant the mic" banner with
     //     an Open-settings button — rather than a voice toggle that silently
@@ -86,7 +73,24 @@ pub async fn start_voice_mode_android(
         stop: recognizer_stop,
     } = android;
 
-    // 5. Construct the responder + observer + spawn the loop. No
+    // 2. Close any active text session (drains background tasks), then any
+    //    already-active voice loop. Step 6 flips the sticky toggle back to
+    //    `true` after the new loop is up.
+    super::session::close_session_inner(&state)
+        .await
+        .map_err(StartVoiceModeError::from)?;
+    super::voice::stop_voice_mode_inner(&state, false)
+        .await
+        .ok();
+
+    // 3. Build the active session via the shared wiring (same as text mode).
+    //    It must follow step 2: the old DM's close flushes pending
+    //    learner-model updates, which this build reads back from the DB.
+    let active_session = crate::wiring::build_active_session(&state.home, &cfg)
+        .await
+        .map_err(StartVoiceModeError::from)?;
+
+    // 4. Construct the responder + observer + spawn the loop. No
     //    `on_committed_audio` work (OS plays the TTS), no speaker drain, no
     //    `is_speaking` flag (the cpal-only no-barge-in mechanism does not
     //    apply — the recognizer is the audio source, not a ringbuf).
@@ -120,7 +124,7 @@ pub async fn start_voice_mode_android(
         }
     });
 
-    // 6. Build SessionInfo, then move both the active session and the loop
+    // 5. Build SessionInfo, then move both the active session and the loop
     //    handle into state (same as the desktop path).
     let learner = {
         let snap = active_session.snapshot.lock().await;
@@ -150,7 +154,7 @@ pub async fn start_voice_mode_android(
         info: info.clone(),
     });
 
-    // 7. Flip the sticky toggle on. Persist failure is logged, not fatal.
+    // 6. Flip the sticky toggle on. Persist failure is logged, not fatal.
     {
         let mut c = state.config.lock().await;
         c.speech.voice_mode_enabled = true;

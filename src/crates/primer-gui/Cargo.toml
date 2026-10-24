@@ -83,6 +83,9 @@ tempfile.workspace = true
 # the static_assertions::assert_not_impl_any! call in
 # commands/voice.rs::tests.
 static_assertions = "1"
+# `tauri::test::mock_app` lets a test drive a real `#[tauri::command]`
+# (it needs a `tauri::State` + `AppHandle`) without a window or webview.
+tauri = { workspace = true, features = ["test"] }
 
 [features]
 # Hybrid retrieval is default-on, mirroring primer-cli. A fresh

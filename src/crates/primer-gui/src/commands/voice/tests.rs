@@ -281,3 +281,82 @@ async fn stop_voice_mode_inner_preserves_toggle_when_requested() {
              post-`start_session` `primerRestoreVoiceMode` sees true and auto-restarts"
     );
 }
+
+// ─── Issue #366: a failed start keeps the text session ──────────
+
+/// A mock Tauri app whose `AppState` holds an active stub text session, a
+/// sticky voice toggle that is on (the auto-start path), and an empty home
+/// (so no voice assets are cached). The `TempDir` must outlive the app.
+#[cfg(any(feature = "speech", feature = "android-native"))]
+async fn app_with_text_session() -> (tempfile::TempDir, tauri::App<tauri::test::MockRuntime>) {
+    use crate::config::GuiConfig;
+    use crate::state::AppState;
+    use tauri::Manager;
+
+    let home = tempfile::TempDir::new().unwrap();
+    let mut cfg = GuiConfig::default();
+    cfg.persistence.no_persist = true;
+    cfg.embedder.kind = "none".to_string();
+    cfg.speech.voice_mode_enabled = true;
+    let active = crate::wiring::build_active_session(home.path(), &cfg)
+        .await
+        .unwrap();
+
+    let app = tauri::test::mock_app();
+    app.manage(AppState::new(home.path().to_path_buf(), cfg));
+    *app.state::<AppState>().session.lock().await = Some(active);
+    (home, app)
+}
+
+/// After a failed start, the text session and the sticky toggle must be
+/// exactly as they were.
+#[cfg(any(feature = "speech", feature = "android-native"))]
+async fn assert_text_session_untouched(app: &tauri::App<tauri::test::MockRuntime>) {
+    use tauri::Manager;
+    let state = app.state::<crate::state::AppState>();
+    assert!(
+        state.session.lock().await.is_some(),
+        "a failed start must leave the text session alive"
+    );
+    assert!(
+        state.config.lock().await.speech.voice_mode_enabled,
+        "a failed start must not touch the sticky toggle"
+    );
+}
+
+/// Voice-model consent path: voice assets are not on disk, so
+/// `start_voice_mode` must fail with `AssetMissing` *before* it tears
+/// anything down. The text session then survives the consent-modal
+/// "Cancel".
+#[cfg(feature = "speech")]
+#[tokio::test]
+async fn failed_start_keeps_the_text_session_and_toggle() {
+    use tauri::Manager;
+    let (_home, app) = app_with_text_session().await;
+
+    let err = super::start_voice_mode(app.state(), app.handle().clone())
+        .await
+        .expect_err("assets are missing, so start must fail");
+
+    assert!(
+        matches!(err, StartVoiceModeError::AssetMissing { .. }),
+        "expected AssetMissing, got {err:?}"
+    );
+    assert_text_session_untouched(&app).await;
+}
+
+/// Android path: on a host build the JNI bridge cannot be constructed, which
+/// stands in for any backend-init / mic-permission failure. It must fail
+/// before the teardown, too.
+#[cfg(feature = "android-native")]
+#[tokio::test]
+async fn failed_android_start_keeps_the_text_session_and_toggle() {
+    use tauri::Manager;
+    let (_home, app) = app_with_text_session().await;
+
+    crate::commands::voice_android::start_voice_mode_android(app.state(), app.handle().clone())
+        .await
+        .expect_err("no JNI bridge on a host build, so start must fail");
+
+    assert_text_session_untouched(&app).await;
+}
