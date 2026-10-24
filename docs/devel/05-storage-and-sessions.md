@@ -66,7 +66,7 @@ Locale is a per-learner property, persisted via `LearnerStore`. On first save it
 
 ## Schema-migration pattern
 
-[primer-storage](../../src/crates/primer-storage/src/schema/mod.rs) follows one shape across every migration. The chain lives in [schema/migrations/](../../src/crates/primer-storage/src/schema/migrations/) — one file per version step, `v2.rs` through `v8.rs`, each holding that version's DDL right next to the `apply_vN_migrations` function that runs it. Eight migrations layered additively, each idempotent, each transaction-wrapped, each safe to run on a fresh DB or on any older DB being upgraded. The constant `USER_VERSION` lives in [schema/mod.rs](../../src/crates/primer-storage/src/schema/mod.rs) (currently `8`), next to `SCHEMA_SQL` — the v1 baseline DDL. Open path lives in [store/mod.rs](../../src/crates/primer-storage/src/store/mod.rs) and runs every migration in order on every open.
+[primer-storage](../../src/crates/primer-storage/src/schema/mod.rs) follows one shape across every migration. The chain lives in [schema/migrations/](../../src/crates/primer-storage/src/schema/migrations/) — one file per version step, `v2.rs` through `v9.rs`, each holding that version's DDL right next to the `apply_vN_migrations` function that runs it. Nine migrations layered additively, each idempotent, each transaction-wrapped, each safe to run on a fresh DB or on any older DB being upgraded. The constant `USER_VERSION` lives in [schema/mod.rs](../../src/crates/primer-storage/src/schema/mod.rs) (currently `9`), next to `SCHEMA_SQL` — the v1 baseline DDL. Open path lives in [store/mod.rs](../../src/crates/primer-storage/src/store/mod.rs) and runs every migration in order on every open.
 
 The pattern, distilled from `apply_v8_migrations`:
 
@@ -166,6 +166,7 @@ Single source of truth for what each migration does is [schema/migrations/](../.
 | 6 | `learners.locale` (BCP-47 short pack id, default `'en'`) + `concepts.concept_language_tag` (default `'en'`) |
 | 7 | `learner_concepts.box_level` (Leitner-box scheduler, default `0`) |
 | 8 | `embedding_models` registry + `embeddings_turns` (per-turn f32 BLOB vectors for hybrid long-term memory) |
+| 9 | `turn_classifications` rebuilt so `turn_id` cascades: a session delete no longer fails on the FK (issue #331). The template for changing an existing FK, which SQLite cannot `ALTER`: create / copy / drop / rename in one transaction, guarded by `pragma_foreign_key_list` |
 
 If you find a discrepancy between this table and the `apply_vN_migrations` doc-comments in [schema/migrations/](../../src/crates/primer-storage/src/schema/migrations/), trust the source — that's the code the open path actually runs.
 
@@ -175,23 +176,23 @@ If you find a discrepancy between this table and the `apply_vN_migrations` doc-c
 
 You want to add a hypothetical "vibe" column to `turns` plus a `vibes` lookup table. The end-to-end change is six steps.
 
-**1. Bump `USER_VERSION` in [schema/mod.rs](../../src/crates/primer-storage/src/schema/mod.rs).** From `8` to `9`. While you're there, add a paragraph to the doc-comment on `USER_VERSION` describing what v9 adds — the comment block above the constant is the change-log readers turn to first.
+**1. Bump `USER_VERSION` in [schema/mod.rs](../../src/crates/primer-storage/src/schema/mod.rs).** From `9` to `10`. While you're there, add a paragraph to the doc-comment on `USER_VERSION` describing what v10 adds — the comment block above the constant is the change-log readers turn to first.
 
-**2. Add `schema/migrations/v9.rs` following the `v8.rs` template**, then declare and re-export it from [schema/migrations/mod.rs](../../src/crates/primer-storage/src/schema/migrations/mod.rs) — one `mod v9;` line and one `pub(crate) use v9::apply_v9_migrations;` line. Nothing to add in [schema/mod.rs](../../src/crates/primer-storage/src/schema/mod.rs) — its `pub(crate) use migrations::*;` glob picks the new function up automatically, which is why that re-export is a glob and not a name list. Same shape inside the file: open `conn.unchecked_transaction()`, gate any `ALTER TABLE` on `column_exists` (pulled in with `use super::column_exists;`), use `CREATE TABLE IF NOT EXISTS` for new tables, commit, return.
+**2. Add `schema/migrations/v10.rs` following the `v9.rs` template**, then declare and re-export it from [schema/migrations/mod.rs](../../src/crates/primer-storage/src/schema/migrations/mod.rs) — one `mod v10;` line and one `pub(crate) use v10::apply_v10_migrations;` line. Nothing to add in [schema/mod.rs](../../src/crates/primer-storage/src/schema/mod.rs) — its `pub(crate) use migrations::*;` glob picks the new function up automatically, which is why that re-export is a glob and not a name list. Same shape inside the file: open `conn.unchecked_transaction()`, gate any `ALTER TABLE` on `column_exists` (pulled in with `use super::column_exists;`), use `CREATE TABLE IF NOT EXISTS` for new tables, commit, return.
 
 ```rust
-// src/crates/primer-storage/src/schema/migrations/v9.rs
-pub(crate) fn apply_v9_migrations(conn: &Connection) -> Result<()> {
+// src/crates/primer-storage/src/schema/migrations/v10.rs
+pub(crate) fn apply_v10_migrations(conn: &Connection) -> Result<()> {
     let tx = conn
         .unchecked_transaction()
-        .map_err(|e| PrimerError::Storage(format!("v9 migration: failed to begin tx: {e}")))?;
+        .map_err(|e| PrimerError::Storage(format!("v10 migration: failed to begin tx: {e}")))?;
 
     if !column_exists(&tx, "turns", "vibe")? {
         tx.execute_batch(
             "ALTER TABLE turns ADD COLUMN vibe INTEGER NOT NULL DEFAULT 0;",
         )
         .map_err(|e| {
-            PrimerError::Storage(format!("v9 migration: ALTER turns ADD vibe: {e}"))
+            PrimerError::Storage(format!("v10 migration: ALTER turns ADD vibe: {e}"))
         })?;
     }
 
@@ -201,20 +202,20 @@ pub(crate) fn apply_v9_migrations(conn: &Connection) -> Result<()> {
             name TEXT NOT NULL UNIQUE
         );",
     )
-    .map_err(|e| PrimerError::Storage(format!("v9 migration: create vibes: {e}")))?;
+    .map_err(|e| PrimerError::Storage(format!("v10 migration: create vibes: {e}")))?;
 
     tx.commit()
-        .map_err(|e| PrimerError::Storage(format!("v9 migration: commit: {e}")))?;
+        .map_err(|e| PrimerError::Storage(format!("v10 migration: commit: {e}")))?;
     Ok(())
 }
 ```
 
-**3. Wire it into the open path.** In [store/mod.rs](../../src/crates/primer-storage/src/store/mod.rs), call `apply_v9_migrations(&conn)?` after the `apply_v8_migrations` line and before the `validate_and_seed_lookup` block. Order matters — validate-and-seed should see the post-migration schema.
+**3. Wire it into the open path.** In [store/mod.rs](../../src/crates/primer-storage/src/store/mod.rs), call `apply_v10_migrations(&conn)?` after the `apply_v9_migrations` line and before the `validate_and_seed_lookup` block. Order matters — validate-and-seed should see the post-migration schema.
 
-**4. Add a migration round-trip test.** Following the pattern in the `v4_tests` sibling module ([schema/v4_tests.rs](../../src/crates/primer-storage/src/schema/v4_tests.rs), declared with `#[cfg(test)] mod v4_tests;` from [schema/mod.rs](../../src/crates/primer-storage/src/schema/mod.rs)), add a test that builds a fresh v8 connection, asserts the new schema isn't there yet, runs `apply_v9_migrations`, and asserts the new column / table is present. Add an idempotency test (run the migration twice, assert no error and no duplicate rows). If you want full coverage, also add a fault-injection rollback test in the style of `apply_v4_migrations_rolls_back_on_failure`.
+**4. Add a migration round-trip test.** Following the pattern in the `v4_tests` sibling module ([schema/v4_tests.rs](../../src/crates/primer-storage/src/schema/v4_tests.rs), declared with `#[cfg(test)] mod v4_tests;` from [schema/mod.rs](../../src/crates/primer-storage/src/schema/mod.rs)), add a test that builds a fresh v9 connection, asserts the new schema isn't there yet, runs `apply_v10_migrations`, and asserts the new column / table is present. Add an idempotency test (run the migration twice, assert no error and no duplicate rows). If you want full coverage, also add a fault-injection rollback test in the style of `apply_v4_migrations_rolls_back_on_failure`.
 
 **5. If the migration touches an enum-backed lookup table**, extend [catalog.rs](../../src/crates/primer-storage/src/catalog.rs) with the new `expected_<table>()` function, add a `validate_and_seed_lookup` call in [store/mod.rs](../../src/crates/primer-storage/src/store/mod.rs) right after the existing four, and write a `expected_<table>_covers_all_variants` test that pins the projection against the Rust enum (the existing `expected_engagement_states_covers_all_variants` and `expected_understanding_depths_covers_all_variants` tests are the pattern). The "vibes" example above is open-vocabulary so this step doesn't apply, but if `Vibe` were a closed Rust enum it would.
 
-**6. Update [CLAUDE.md](../../CLAUDE.md).** There's a "Schema is at version 8." sentence in the `primer-storage` paragraph; bump it to 9 and add the new migration to the v2..v8 chain summary. The same paragraph notes that "the existing v2..v8 chain is the template" — extend that to v2..v9 (or whatever the current top is).
+**6. Update [CLAUDE.md](../../CLAUDE.md).** There's a "Schema is at version 9." sentence in the `primer-storage` paragraph; bump it to 10 and add the new migration to the v2..v9 chain summary. The same paragraph notes that "the existing v2..v9 chain is the template" — extend that to v2..v10 (or whatever the current top is).
 
 After all six steps, `cargo test -p primer-storage` should pass on a fresh DB and on every fixture from earlier versions. If any test breaks because it hardcoded an older `USER_VERSION` constant, that's the test telling you the version bump landed correctly — fix the hardcode to use `USER_VERSION` directly.

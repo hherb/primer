@@ -20,6 +20,7 @@ mod v5;
 mod v6;
 mod v7;
 mod v8;
+mod v9;
 
 pub use v2::apply_v2_migrations;
 pub(crate) use v3::apply_v3_migrations;
@@ -28,6 +29,7 @@ pub(crate) use v5::apply_v5_migrations;
 pub(crate) use v6::apply_v6_migrations;
 pub(crate) use v7::apply_v7_migrations;
 pub(crate) use v8::apply_v8_migrations;
+pub(crate) use v9::apply_v9_migrations;
 
 fn column_exists(conn: &Connection, table: &str, column: &str) -> Result<bool> {
     let sql = format!("SELECT COUNT(*) FROM pragma_table_info('{table}') WHERE name = ?1");
