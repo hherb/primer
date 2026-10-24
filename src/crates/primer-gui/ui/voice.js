@@ -11,6 +11,7 @@
 //   window.primerShowError(msg)
 //   window.primerShowToast(msg)
 //   window.primerRenderSessionInfo(info)
+//   window.primerReturnToPicker()
 
 (() => {
   const { invoke } = window.__TAURI__.core;
@@ -89,8 +90,19 @@
   async function onToggleClick() {
     if (!state.available) return;
     if (state.active) {
-      await invoke(vcmd("stop_voice_mode")).catch((e) => showError(`stop voice: ${e}`));
+      let stopErr = null;
+      await invoke(vcmd("stop_voice_mode")).catch((e) => { stopErr = e; });
       setActive(false);
+      // stop_voice_mode drops the session server-side when a loop was running
+      // (even on Err), so the header/banners/composer would describe a dead
+      // session (#352 item 3). The picker path's close_session covers the rest.
+      if (window.primerReturnToPicker) await window.primerReturnToPicker();
+      // Report after the picker reset: it clears the chat error banner, and
+      // only the toast stacks above the picker overlay.
+      if (stopErr) {
+        console.warn("stop_voice_mode failed:", stopErr);
+        if (window.primerShowToast) window.primerShowToast(`stop voice: ${stopErr}`);
+      }
       return;
     }
     try {

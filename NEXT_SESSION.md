@@ -1,78 +1,93 @@
 # Primer — Next Session Brief
 
 **Audience:** future Claude Code session continuing work on this repo.
-**Last updated:** 2026-10-23 (UTC).
+**Last updated:** 2026-10-24 (UTC).
 
-**One PR is open against `main`:**
+**Two PRs are open against `main`:**
 
 | PR | Branch | What | Closes |
 |---|---|---|---|
-| **#363** | `fix/subsystem-ids-degraded-351` | Subsystems follow the served backend under `PrimaryUnavailable` (this brief rides on it) | #351 |
+| **#367** | `fix/voice-stop-header-352` | Return to the session picker after "End voice mode" (this brief rides on it) | #352 item 3 (refs only; the issue stays open) |
+| **#368** | `test/v8-migration-shape-332` | v8 migration shape + cascade tests | #332 |
 
-`main` is at `0570967` (#361).
+`main` is at `85009d8` (#363).
 
 **Since the last brief:**
-- **#360 and #361 merged.**
-- **#358 and #340 are confirmed CLOSED.**
+- **#363 merged.**
+- **#351 is confirmed CLOSED.**
 
 ## What we shipped this session
 
-### #363 (`0dd2ef0`): closes #351
+### #367 (`e2e9d27` + this brief's docs commit): #352 item 3
 
-**Problem:** under `BackendNotice::PrimaryUnavailable`, the fallback serves every turn, but the classifier, extractor and comprehension builders still got the **primary's** kind and model. That caused two bugs:
-1. **Wrong provenance ids.** Inherited subsystems ran on the fallback but were labelled after the primary:
-   - `llm:<primary model>`;
-   - `llm:cloud-anthropic` for a qnn or llamacpp primary.
-2. **Aborted startup.** A model-only override rebuilt the unavailable primary kind and aborted startup:
-   - CLI: it exited;
-   - GUI: it failed with "constructing engagement classifier".
+**Problem:** `stop_voice_mode` drops the active session server-side, even when it returns `Err`. `ui/voice.js` only switched the composer back to text. The header pills, `#backend-notice-banner` and an enabled text composer then described a dead session, and typing failed with "no active session — call start_session first".
 
-**Fix:**
-- `served_identity` moved from `primer-gui/src/wiring/backend_params.rs` to `primer-engine/src/wiring/backend.rs` and is re-exported as `primer_engine::served_identity`.
-- Both binaries pass its `(kind, model)` to the subsystem builders.
-- GUI `build_subsystems` takes `backend_kind` explicitly.
-- An explicit `--*-backend` override is unchanged: it still builds exactly the kind asked for.
+**Fix (owner-chosen: "back to picker"):**
+- After an explicit stop, `onToggleClick` calls `window.primerReturnToPicker`.
+- That is app.js `onSwitchSession`, the Sessions-button path: an idempotent `close_session`, a reset of the chat, header and banners, then `showPicker()`.
+- The session that just ended can be resumed from the picker.
+- The owner rejected "reset header only" and "continue in text".
 
-**Tests:**
-- New GUI tests in `primer-gui/src/wiring/tests.rs`, both mutation-checked red against the old call site:
-  - `primary_unavailable_subsystems_name_served_fallback`
-  - `primary_unavailable_override_subsystem_builds_on_fallback`
-- The `served_identity` unit tests moved to `primer-engine/src/wiring/build_main_backend_tests.rs`.
-- The CLI was smoke-run on the issue's override scenario. It now prints `Engagement classifier: llm:override-x`; before the fix it exited.
+**Tests:** new `primer-gui/src/voice_stop_contract.rs`, an `include_str!` contract test, 3 tests. They are mutation-checked: 2 fail against the old JS.
 
-**Docs:** the CLAUDE.md `FallbackBackend` paragraph is updated. The "Sharper edge" text and the "#351 known mislabel" note are replaced.
+**Docs:** CLAUDE.md voice paragraph and README voice bullet.
 
 **Gate:**
-- `cargo test --workspace`: 1375/0.
-- clippy `-D warnings`: clean for the workspace, `primer-gui` (`speech`, `android-native`) and `primer-cli` `speech`.
+- `cargo test --workspace`: 1379/0.
+- clippy `-D warnings`: `primer-gui` default and `speech`.
 - fmt: clean.
-- rustdoc for engine, gui and cli: clean.
+- rustdoc: `primer-gui` default and `speech`.
 
-**Filed rather than fixed:** the issue's "ollama variant" was added to **#352 as item 4**. An overridden subsystem pointing at a dead server soft-fails every turn, and that is only logged. It is a runtime signal, not a construction problem.
+**Filed:** **#366**. A *failed* `start_voice_mode` closes the text session at step 1, before the steps that can fail:
+- step 3, session build;
+- step 4, the assets: consent cancel, `auto_download_disabled`;
+- step 5, backend init / permission.
+
+The symptom is the same dead-composer, on a different path. The fix is in Rust (reorder the steps). The issue includes a test recipe.
+
+### #368 (`f49eda6`): closes #332
+
+Four new v8 tests in `primer-storage/src/schema/v4_tests.rs`:
+1. Tables and index exist after v8.
+2. A session delete cascades to `embeddings_turns`.
+3. `embedding_models.name` is `UNIQUE`.
+4. A re-run is idempotent.
+
+They are mutation-checked: dropping `ON DELETE CASCADE` or `UNIQUE` turns tests 2 and 3 red. The 3 `store/embeddings.rs` fixture tests now call `apply_v8_migrations` instead of a hand-rolled `CREATE TABLE`.
+
+**Gate:** `primer-storage` 158/0; clippy, fmt and rustdoc clean.
+
+> SHAs are the branch-tip commits as pushed; squash-merge will give new ones on `main`.
 
 ### Per-session sweep
-- **Inline-test detector:** clean for the fourteenth session running.
-- **Oversized list:** unchanged, except that `primer-gui/src/wiring/stage_tests.rs` went to 515 after the #360/#361 merge and is back to 462 on #363, because the `served_identity` tests moved out.
+- **Inline-test detector:** clean for the fifteenth session running.
+- **Oversized list:** unchanged.
 
 ## What's next (concrete acceptance criteria)
 
-### 0. Owner review/merge: #363
-- **Acceptance:** CI is green and it merges.
-- Then check the issue is closed: `gh issue view 351 --json state`.
+### 0. Owner review/merge: #367, #368
+- **Acceptance:** CI is green and both merge.
+- Then check: `gh issue view 332 --json state` should be CLOSED. **#352 stays open**: #367 only says "Refs".
 
 ### 1. Sweep + inline-test detector: re-run EVERY session
 Commands are in the resume block.
 
-### 2. Remaining review-filed bugs (host-completable; TDD each: failing test, fix, `Closes #N` PR)
-- **#352** (recommended next): it now has four items. Take them in order of size:
-  - **Item 3** (smallest): the GUI header and `#backend-notice-banner` stay up after `stop_voice_mode`.
-    - **Acceptance:** after a voice stop, `resetSessionHeader` (or an equivalent refresh) clears both.
-    - This is JS-only, in `ui/voice.js`.
-  - **Item 2:** report a same-kind fallback (`--fallback-backend == --backend`) as a third `BackendNotice` variant, on both the fallback path and the router path.
-    - **Acceptance:** `build_main_backend` returns the new notice in both modes. Extend `build_main_backend_tests.rs`.
-  - **Items 1 and 4:** per-turn "served by" and subsystem soft-fail signals. These are larger and need a design note first.
-- **#331 / #332** (storage): cascade delete for `turn_classifications`; shape assertions for the v8 migration. Small and well-scoped.
-- **Older ones:** #307–#316 (retrieval/storage/streaming), #325/#326 (voice).
+### 2. Bugs (host-completable; TDD each)
+- **#366** (recommended next, Rust, small):
+  - Reorder `primer-gui/src/commands/voice/start.rs` so the asset resolve (needs only `cfg`), the session build and the backend init all run **before** `close_session_inner` / `stop_voice_mode_inner`.
+  - **Acceptance:** a `commands/voice/tests.rs` test with an active session plus missing voice assets. `start_voice_mode`'s failure must leave `state.session` as `Some` and the sticky toggle unchanged.
+  - Check whether `voice_android.rs` start has the same ordering.
+  - **Watch:** the step-3 `build_active_session` opens the same per-child session DB while the old session is still open. SQLite allows two connections, but check that the old session's close/drain doesn't race the new one. You may need to build the session last, after assets and backends.
+- **#331** (storage, medium): v9 migration that rebuilds `turn_classifications` with `session_id … ON DELETE CASCADE`.
+  - Use the create / copy / drop / rename steps in one tx.
+  - Keep `UNIQUE(turn_id, classifier_id)`.
+  - Backfill `session_id` from `turns`.
+  - **Acceptance:** with classifications present, `DELETE FROM sessions` succeeds and the rows are gone; an idempotent re-run; `USER_VERSION` = 9. Update `user_version_constant_is_eight` and the CLAUDE.md "Schema is at version 8" text.
+  - Use #368's cascade test as the template.
+- **#352 remaining:**
+  - **Item 2 needs an owner decision first** (see Open decisions).
+  - Items 1 and 4 (per-turn "served by" signal; subsystem soft-fail signal) need a design note.
+- **Older:** #307–#316 (retrieval/storage/streaming), #325/#326 (voice).
 
 ### 3. Production-code splits (owner-approved lane, all feature-gated, so dual-verify)
 - **`primer-inference/src/qnn/genie/real.rs`** (566 lines, `qnn`) is the recommended one. Baselines:
@@ -81,7 +96,7 @@ Commands are in the resume block.
   - the rustdoc `qnn` arm.
 - **`primer-speech/src/macos/{tts.rs 668, stt.rs 504}`** (`macos-native`).
 - **Low value:** `state_machine/inner.rs` (506).
-- **Hardest:** `primer-cli/src/main.rs` (~1350).
+- **Hardest:** `primer-cli/src/main.rs` (1353).
 
 ### Carried / owner-or-hardware-gated
 - **#260:** Android-voice on-device acceptance.
@@ -94,63 +109,63 @@ Commands are in the resume block.
 
 ## Open decisions / risks
 
-### #363
-- **Under `PrimaryUnavailable`, a model-only subsystem override now runs on the fallback kind** (for example, a cloud fallback with `--classifier-model override-x` sends `override-x` to Anthropic).
-  - This is the issue's suggested fix, and `--fallback-backend` is the consent to use that kind.
-  - However, the override model name was originally chosen for the *primary* kind. If it isn't valid on the fallback, the subsystem soft-fails per turn, which is only logged (#352 item 4).
-- **The CLI's "Using X backend" banner still names the configured primary.** The `Warning:` line just above it explains the switch to the fallback.
-- **Existing rows written under the mislabel are not rewritten.** Rows in `turn_classifications` / `comprehension_classifiers` from earlier degraded sessions keep the wrong id. No migration is planned, because there's no way to tell which rows were affected.
+### #352 item 2: what counts as a pointless fallback? (owner decision)
+The issue proposes a third `BackendNotice` whenever `--fallback-backend == --backend`, on both the fallback and the router paths. But a same **kind** with a different **model** is a legitimate setup:
+- ollama small model as primary, ollama big model as fallback (resilience against model-not-found);
+- small/large hybrid routing on one server.
+
+A kind-only notice would show a warning banner for a valid config.
+
+**Options:**
+- (a) notice only when kind **and** model match;
+- (b) kind-only, but worded as "no protection if the server goes down";
+- (c) drop the item and keep the `tracing::warn!`.
+
+**Recommendation:** (a). Also downgrade or drop today's kind-only warn on the router path.
+
+### #367
+- **Ending voice mode now sends the user to the picker.** The voice transcript is cleared from view, but it is saved and can be resumed from the picker.
+- **Not checked in a live `cargo tauri dev` session.** The only verification is the contract test, plus `node --check` syntax checks on both JS files.
+- **An exit the user did not ask for keeps the session.** `primer://voice/exit` (loop error, keyword "goodbye") does NOT return to the picker. In that case `stop_voice_mode_inner` isn't called, so the session is still alive. Correct today; revisit if exit handling changes.
 
 ### Carried from earlier sessions
+- **Mislabelled rows from before #363:** rows in `turn_classifications` / `comprehension_classifiers` from earlier degraded sessions keep the wrong id. Under `PrimaryUnavailable`, a model-only override runs on the fallback kind; an invalid model there soft-fails per turn and is only logged (#352 item 4).
 - **#360 permissions:**
   - Existing `0644` DB files are protected only by the `0700` parent directory.
   - The tighten step runs only when a session opens.
   - Windows and Android are untouched.
 - **GUI logging:** log rotation runs only at startup (`shortcut:` in `log_sink/mod.rs`), and the log file may hold child text.
-- **Not seen live:** no Dock launch of a bundled `.app`; the #353 banner hasn't been checked in `cargo tauri dev`.
-- **Notice text is English-only** and operator-facing. #359's Settings paths are hand-written strings, so they can drift silently if a GUI label is renamed.
+- **Notice text is English-only** and operator-facing. The Settings paths are hand-written strings.
 - **Stale CMake cache after Xcode/SDK upgrades:**
   1. `find src/target -name CMakeCache.txt -maxdepth 6 | xargs grep -l 'MacOSX<old>'`
   2. `cargo clean -p <those sys crates>`
 - **The `github` MCP server fails to connect** (bad Authorization header). The `gh` CLI works.
 - **zsh gotchas:**
   - `$var` is not word-split; use `${=spec}`.
-  - Quote `echo ===X`.
-  - Use `git grep … -- '*.rs'`, not `--include` globs.
+  - **Quote `echo ===X`**; an unquoted `===` errors with "== not found".
+  - Use `git grep … -- '*.rs'`.
 
 ## Patterns to reuse, not reinvent
 
-- **"What serves turns" is one function.** Use `primer_engine::served_identity(kind, model, notice, backend.name())` anywhere that needs the effective backend: sidebar, subsystem ids, logs. Never re-derive it from `config.backend.kind`.
-- **End-to-end degraded-primary tests in the GUI:**
-  - Use `kind = "qnn"`; it always fails on a host build.
-  - Pair it with a `cloud` fallback and an **Inline** key, so the test never depends on the shell.
-  - See `primary_unavailable_cloud_fallback_config()` in `primer-gui/src/wiring/tests.rs`.
-- **Id formats differ per subsystem:**
-  - the classifier is `llm:<model>`;
-  - the extractor and comprehension are `llm:<backend.name()>:<model>`.
-
-  Check the format before writing the assertion.
-- **Testing env-var-dependent code:**
-  - Inject the lookup as `impl Fn(&str) -> Option<String>`.
-  - In tests, pass a recording closure.
-  - Never use `set_var`.
-  - See `recording_env` in `stage_tests.rs`.
-- **Proving `Arc` reuse:** hand in a backend whose `name()` differs from what a fresh build would produce.
+- **JS behaviour without a JS runner:** use an `include_str!` contract test in `primer-gui/src/*_contract.rs`. Slice the function body by a unique anchor string and assert the call is there. See `voice_stop_contract.rs` and `diagnostics_toggle_contract.rs`. Mutation-check by stashing the `ui/` changes and re-running.
+- **Cross-file JS hooks:** app.js exports `window.primer*` functions at the bottom; voice.js lists the ones it uses in its header comment. Add new hooks in both places.
+- **Migration tests:** pin *behaviour* (cascade fires, UNIQUE rejects), not DDL text. Build `fresh_vN_conn()` by chaining the earlier helpers. Fixtures should call the real `apply_vN_migrations`; never hand-roll the DDL.
+- **Effective backend:** use `primer_engine::served_identity(...)` everywhere. Never re-derive it from `config.backend.kind`.
+- **End-to-end degraded-primary GUI tests:** pair a `qnn` primary with a `cloud` fallback and an Inline key (`primary_unavailable_cloud_fallback_config()`).
+- **Env-var-dependent code:** inject `impl Fn(&str) -> Option<String>`; never use `set_var`.
 - **Mutation-check new tests:**
   1. Back up the file to the scratchpad.
   2. Apply the mutation with `perl -0pi`.
   3. Run the filtered tests.
   4. Restore the file.
-- **Python `sub()` edits:** a helper that asserts the match stops before the write. Chain the next git step with `&&`.
-- **Owner-only dirs on Unix:** use `primer_engine::create_private_dir_all`.
+- **Python `sub()` edits:** a helper that asserts the match count stops before the write.
 - **Bug-fix recipe:**
   1. Branch off `origin/main`.
   2. Failing test, then fix, then green.
-  3. Test + clippy each touched crate, plus its feature arms. Then fmt.
+  3. Test + clippy each touched crate, plus its feature arms. Then fmt and rustdoc.
   4. `git grep` the docs for drift.
   5. Commit with `Closes #N`, push, open the PR.
-  6. File any out-of-scope half as an issue. Add it to an existing issue if one covers the same family.
-- **CLI/GUI-shared messages:** name both forms in one string, pinned by `assert_names_both`.
+  6. File any out-of-scope half as an issue.
 - **Split recipe, substantive-line diff, Dependabot triage:** see `docs/handoffs/2026-10-16T202752Z.md`.
 - **Session start:** check `git status` first, and read `NEXT_SESSION.md` AFTER `git pull`.
 
@@ -158,7 +173,7 @@ Commands are in the resume block.
 
 ```bash
 cd /Users/hherb/src/primer && git status --short && git checkout main && git pull --ff-only && git log --oneline -6 && gh pr list --state open
-# Open at close: #363. After merge: gh issue view 351 --json state
+# Open at close: #367, #368. After merge: gh issue view 332 --json state   (352 stays open)
 S=/private/tmp/primer-scratch; mkdir -p "$S"   # or the session's scratchpad dir
 
 # === Oversized-file sweep + inline-test detector (re-verify EVERY session) ===
@@ -167,17 +182,18 @@ find crates -name '*.rs' -not -path '*/vendor/*' -not -name 'tests.rs' | xargs w
 for f in $(find crates -name '*.rs' -not -path '*/vendor/*' -not -name 'tests.rs' | xargs wc -l | awk '$1>500 && $2!="total"{print $2}'); do \
   awk '/#\[cfg\(test\)\]/{ln=NR} ln && NR==ln+1 && /^[[:space:]]*mod .*\{/{print FILENAME" inline mod @"NR}' "$f"; done
 
-# === Next bug (#352, item 3 first): start here ===
-gh issue view 352 --comments
-git checkout -b fix/voice-stop-header-352 origin/main
-grep -n "setActive\|resetSessionHeader" crates/primer-gui/ui/*.js
+# === Next bug (#366): start here ===
+gh issue view 366
+git checkout -b fix/voice-start-keeps-session-366 origin/main
+sed -n 30,80p crates/primer-gui/src/commands/voice/start.rs
+grep -n "fn \|state.session" crates/primer-gui/src/commands/voice/tests.rs | head -40
 
 # === Standard workspace gate (one cargo pass at a time) ===
 ~/.cargo/bin/cargo test --workspace 2>&1 | tee $S/ws.log | tail -3
 grep -E 'test result: FAILED|^error' $S/ws.log  # expect empty
 ~/.cargo/bin/cargo clippy --workspace --all-targets -- -D warnings
+~/.cargo/bin/cargo clippy -p primer-gui --features speech --all-targets -- -D warnings
 ~/.cargo/bin/cargo fmt --all -- --check
-~/.cargo/bin/cargo test -p primer-engine --features ollama-embedding,openai-compat-embedding
 
 # === Rustdoc gate (CI-enforced); feature arms mirror ci.yml ===
 RUSTDOCFLAGS="-D warnings" ~/.cargo/bin/cargo doc --workspace --no-deps --document-private-items
@@ -189,6 +205,6 @@ for spec in "-p primer-speech --features voice-loop,silero,whisper,piper,cpal,su
 
 ## Reporting back
 
-- **#363:** when the main backend is down at startup and the fallback takes over, the background classifiers now run on the fallback and are labelled after it. A per-classifier model setting no longer crashes startup. Closes #351.
-- The silent-runtime half of the issue is now item 4 on #352.
-- Workspace gate: 1375/0.
+- **#367:** clicking "End voice mode" now takes you back to the session picker, where you can resume the conversation, instead of leaving a text box that no longer works.
+- **#366 (filed):** a voice-mode start that fails (for example, cancelling the model download) still ends your text session. This is next.
+- **#368:** the embeddings database migration now has tests proving that deleting a session also deletes its stored vectors. Closes #332.
