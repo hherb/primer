@@ -93,8 +93,9 @@
       let stopErr = null;
       await invoke(vcmd("stop_voice_mode")).catch((e) => { stopErr = e; });
       setActive(false);
-      // stop_voice_mode drops the session server-side (even on Err), so the
-      // header/banners/composer would describe a dead session (#352 item 3).
+      // stop_voice_mode drops the session server-side when a loop was running
+      // (even on Err), so the header/banners/composer would describe a dead
+      // session (#352 item 3). The picker path's close_session covers the rest.
       if (window.primerReturnToPicker) await window.primerReturnToPicker();
       // Report after the picker reset: it clears the chat error banner, and
       // only the toast stacks above the picker overlay.
