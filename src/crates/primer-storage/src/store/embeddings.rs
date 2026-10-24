@@ -168,9 +168,8 @@ mod tests {
     #[test]
     fn validate_storage_embedder_accepts_registered() {
         let conn = Connection::open_in_memory().unwrap();
-        conn.execute_batch(
-            "CREATE TABLE embedding_models(id INTEGER PRIMARY KEY, name TEXT NOT NULL UNIQUE, dim INTEGER NOT NULL);",
-        ).unwrap();
+        // The real migration, not a hand-rolled copy that could drift (#332).
+        crate::schema::apply_v8_migrations(&conn).unwrap();
         upsert_storage_embedding_model(&conn, "stub", 8).unwrap();
         assert!(validate_storage_embedder(&conn, "stub", 8).is_ok());
     }
@@ -178,9 +177,8 @@ mod tests {
     #[test]
     fn validate_storage_embedder_rejects_dim_mismatch() {
         let conn = Connection::open_in_memory().unwrap();
-        conn.execute_batch(
-            "CREATE TABLE embedding_models(id INTEGER PRIMARY KEY, name TEXT NOT NULL UNIQUE, dim INTEGER NOT NULL);",
-        ).unwrap();
+        // The real migration, not a hand-rolled copy that could drift (#332).
+        crate::schema::apply_v8_migrations(&conn).unwrap();
         upsert_storage_embedding_model(&conn, "stub", 8).unwrap();
         let err = validate_storage_embedder(&conn, "stub", 16)
             .unwrap_err()
@@ -191,9 +189,8 @@ mod tests {
     #[test]
     fn upsert_is_idempotent_on_same_dim() {
         let conn = Connection::open_in_memory().unwrap();
-        conn.execute_batch(
-            "CREATE TABLE embedding_models(id INTEGER PRIMARY KEY, name TEXT NOT NULL UNIQUE, dim INTEGER NOT NULL);",
-        ).unwrap();
+        // The real migration, not a hand-rolled copy that could drift (#332).
+        crate::schema::apply_v8_migrations(&conn).unwrap();
         let id1 = upsert_storage_embedding_model(&conn, "stub", 8).unwrap();
         let id2 = upsert_storage_embedding_model(&conn, "stub", 8).unwrap();
         assert_eq!(id1, id2);
