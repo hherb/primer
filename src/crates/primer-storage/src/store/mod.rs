@@ -126,7 +126,7 @@ impl SqliteSessionStore {
 
         // Read existing user_version. A fresh DB returns 0; v1 DBs from
         // before the rolling-summary work return 1; current builds stamp
-        // `USER_VERSION` (8 today) once the migration chain below has run.
+        // `USER_VERSION` (9 today) once the migration chain below has run.
         let existing_version: i64 = conn
             .query_row("PRAGMA user_version", [], |row| row.get(0))
             .map_err(|e| PrimerError::Storage(format!("read user_version failed: {e}")))?;
@@ -173,6 +173,11 @@ impl SqliteSessionStore {
         // embedding_models + embeddings_turns for hybrid long-term-
         // memory retrieval (Phase 0.2.5).
         crate::schema::apply_v8_migrations(&conn)?;
+
+        // v9 migrations: idempotent on every open. Rebuilds
+        // turn_classifications so its turn_id cascades and a session
+        // delete no longer fails on the FK (issue #331).
+        crate::schema::apply_v9_migrations(&conn)?;
 
         if existing_version != crate::schema::USER_VERSION {
             conn.execute_batch(&format!(

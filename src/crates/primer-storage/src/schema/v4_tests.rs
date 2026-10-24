@@ -75,8 +75,8 @@ fn understanding_depths_is_seeded_after_v4_with_validate_and_seed() {
 }
 
 #[test]
-fn user_version_constant_is_eight() {
-    assert_eq!(USER_VERSION, 8);
+fn user_version_constant_is_nine() {
+    assert_eq!(USER_VERSION, 9);
 }
 
 #[test]
@@ -427,4 +427,79 @@ fn v8_migration_is_idempotent() {
         .unwrap();
     assert_eq!(rows, 1);
     assert!(index_exists(&conn, "idx_embeddings_turns_model"));
+}
+
+fn fresh_v8_conn() -> Connection {
+    let conn = fresh_v7_conn();
+    apply_v8_migrations(&conn).unwrap();
+    conn
+}
+
+/// A session with one classified turn, built on whatever schema `conn` has.
+fn insert_classified_session(conn: &Connection) {
+    conn.execute_batch(
+        "INSERT INTO speakers (id, name) VALUES (1, 'Child');
+         INSERT INTO engagement_states (id, name) VALUES (1, 'Engaged');
+         INSERT INTO classifiers (id, identifier) VALUES (1, 'stub');
+         INSERT INTO sessions (id, learner_id, started_at)
+             VALUES ('s1', 'l1', '2026-01-01T00:00:00Z');
+         INSERT INTO turns (session_id, turn_index, speaker_id, text, timestamp)
+             VALUES ('s1', 0, 1, 'hello', '2026-01-01T00:00:00Z');
+         INSERT INTO turn_classifications
+             (turn_id, engagement_state_id, classifier_id, confidence, classified_at)
+             SELECT id, 1, 1, 0.9, '2026-01-01T00:00:00Z' FROM turns;",
+    )
+    .unwrap();
+}
+
+fn classification_count(conn: &Connection) -> i64 {
+    conn.query_row("SELECT COUNT(*) FROM turn_classifications", [], |r| {
+        r.get(0)
+    })
+    .unwrap()
+}
+
+/// Issue #331: before v9 this delete failed with "FOREIGN KEY constraint
+/// failed" because `turn_classifications.turn_id` did not cascade.
+#[test]
+fn v9_session_delete_cascades_to_turn_classifications() {
+    let conn = fresh_v8_conn();
+    apply_v9_migrations(&conn).unwrap();
+    insert_classified_session(&conn);
+
+    conn.execute("DELETE FROM sessions WHERE id = 's1'", [])
+        .unwrap();
+
+    assert_eq!(
+        classification_count(&conn),
+        0,
+        "session delete must sweep its turn classifications"
+    );
+}
+
+/// Upgrading a v8 DB that already holds classifications keeps every row and
+/// the `UNIQUE(turn_id, classifier_id)` constraint, and a re-run is a no-op.
+#[test]
+fn v9_migration_preserves_rows_and_unique_and_is_idempotent() {
+    let conn = fresh_v8_conn();
+    insert_classified_session(&conn);
+
+    apply_v9_migrations(&conn).unwrap();
+    apply_v9_migrations(&conn).unwrap(); // re-run must be a no-op
+
+    assert_eq!(classification_count(&conn), 1, "rows survive the rebuild");
+    assert!(index_exists(&conn, "idx_turn_classifications_turn_id"));
+    assert!(
+        conn.execute(
+            "INSERT INTO turn_classifications
+                 (turn_id, engagement_state_id, classifier_id, confidence, classified_at)
+                 SELECT id, 1, 1, 0.5, '2026-01-02T00:00:00Z' FROM turns",
+            []
+        )
+        .is_err(),
+        "UNIQUE(turn_id, classifier_id) must survive the rebuild"
+    );
+    conn.execute("DELETE FROM sessions WHERE id = 's1'", [])
+        .unwrap();
+    assert_eq!(classification_count(&conn), 0);
 }

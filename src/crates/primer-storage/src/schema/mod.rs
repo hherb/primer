@@ -60,7 +60,11 @@ pub(crate) use migrations::*;
 /// `embedding_models` mirrors the registry in `primer-knowledge`, so a
 /// DB re-opened under a different embedder is a detectable hard error
 /// rather than a silent retrieval-quality regression.
-pub const USER_VERSION: i64 = 8;
+///
+/// Bumped to 9 when we rebuilt `turn_classifications` so its `turn_id`
+/// FK cascades: before that, deleting a session whose turns had been
+/// classified failed with `FOREIGN KEY constraint failed` (issue #331).
+pub const USER_VERSION: i64 = 9;
 
 /// Idempotent CREATE statements for the base (v1) schema. Run on every
 /// `open()`. v2-specific objects are added by `apply_v2_migrations`.
