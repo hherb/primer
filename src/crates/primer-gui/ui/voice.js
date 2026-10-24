@@ -11,6 +11,7 @@
 //   window.primerShowError(msg)
 //   window.primerShowToast(msg)
 //   window.primerRenderSessionInfo(info)
+//   window.primerReturnToPicker()
 
 (() => {
   const { invoke } = window.__TAURI__.core;
@@ -91,6 +92,9 @@
     if (state.active) {
       await invoke(vcmd("stop_voice_mode")).catch((e) => showError(`stop voice: ${e}`));
       setActive(false);
+      // stop_voice_mode drops the session server-side (even on Err), so the
+      // header/banners/composer would describe a dead session (#352 item 3).
+      if (window.primerReturnToPicker) await window.primerReturnToPicker();
       return;
     }
     try {
