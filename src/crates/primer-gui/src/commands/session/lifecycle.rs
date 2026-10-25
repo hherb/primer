@@ -243,7 +243,8 @@ pub(crate) async fn close_session_inner(state: &AppState) -> Result<(), String> 
 /// re-toggle it. (Without this, every session switch silently flipped
 /// voice mode off and required a manual re-enable.)
 pub(crate) async fn prepare_for_session_change(state: &AppState) -> Result<(), String> {
-    #[cfg(feature = "speech")]
+    // android-native builds have no `speech` feature but run the same loop.
+    #[cfg(any(feature = "speech", feature = "android-native"))]
     crate::commands::voice::stop_voice_mode_inner(state, true)
         .await
         .ok();

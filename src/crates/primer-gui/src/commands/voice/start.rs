@@ -11,17 +11,19 @@ use super::StartVoiceModeError;
 use super::{missing_to_error, stop_voice_mode_inner};
 
 #[cfg(feature = "speech")]
-use std::sync::Arc;
+use std::sync::{Arc, atomic::Ordering};
 
 /// Start voice mode.
 ///
-/// Resolves the locale's voice assets (returning `Err(AssetMissing { … })`
-/// if any are absent so the frontend can render the consent dialog) and
-/// builds the local backends (mic + speaker + VAD + STT + TTS) *before*
-/// touching the active text session or voice loop, so a failure there
-/// leaves the user's session and the sticky toggle as they were (issue
-/// #366). Only then does it close both, build the new session and spawn
-/// the shared voice loop. The active session is moved into `state.session`
+/// Stops any already-running voice loop first (so two mic pipelines never
+/// overlap; it touches nothing when no loop runs). Then resolves the
+/// locale's voice assets (returning `Err(AssetMissing { … })` if any are
+/// absent so the frontend can render the consent dialog) and builds the
+/// local backends (mic + speaker + VAD + STT + TTS) *before* closing the
+/// active text session, so a failure there leaves the user's session and
+/// the sticky toggle as they were (issue #366). Only then does it close
+/// the text session, build the new session and spawn the shared voice
+/// loop. The active session is moved into `state.session`
 /// (so sidebar / learner-state commands keep working) and the loop
 /// handle is moved into `state.voice`.
 ///
@@ -38,12 +40,20 @@ pub async fn start_voice_mode<R: tauri::Runtime>(
 ) -> Result<SessionInfo, StartVoiceModeError> {
     use primer_core::i18n::Locale;
 
+    // 0. Stop any already-active voice loop, so its mic pipeline is gone
+    //    before step 2 starts a new one. A no-op without a running loop,
+    //    so a text session and the sticky toggle are untouched; with one,
+    //    the toggle flip-down is undone by step 7 after the new loop is up.
+    if let Err(e) = stop_voice_mode_inner(&state, false).await {
+        tracing::warn!("stopping the previous voice loop before restart: {e}");
+    }
+
     let cfg = state.config.lock().await.clone();
 
     // 1. Resolve voice assets for the active locale, gated on the
-    //    decoupled (stt, tts) choice. Steps 1-2 run before any teardown
-    //    (issue #366): a consent-modal "Cancel" or a backend-init error
-    //    must not cost the user their text session.
+    //    decoupled (stt, tts) choice. Steps 1-2 run before the text
+    //    session is closed (issue #366): a consent-modal "Cancel" or a
+    //    backend-init error must not cost the user their text session.
     let locale = Locale::from_pack_id(&cfg.learner.locale).unwrap_or_default();
     let (stt, tts) = cfg.speech.resolve_backends();
     let assets =
@@ -80,22 +90,24 @@ pub async fn start_voice_mode<R: tauri::Runtime>(
         .take()
         .expect("build_local_backends always returns drain_hook");
     let is_speaking = Arc::clone(&local.is_speaking);
+    // The mic is live from here, but the loop starts only after steps 3-4
+    // (which can take seconds). Reuse the anti-feedback gate to discard
+    // mic audio until then, so speech from before voice mode is visibly on
+    // can't become the first voice turn. Released just before `run_loop`.
+    is_speaking.store(true, Ordering::SeqCst);
 
-    // 3. Close any active text session (drains background tasks), then
-    //    any already-active voice loop. The toggle flip-down inside
-    //    stop_voice_mode_inner is harmless here because step 7 below
-    //    flips it back to `true` after the new loop is up.
+    // 3. Close any active text session (drains background tasks).
     crate::commands::session::close_session_inner(&state)
         .await
         .map_err(StartVoiceModeError::from)?;
-    stop_voice_mode_inner(&state, false).await.ok();
 
     // 4. Build the active session via the shared wiring so DM
     //    construction is identical to text mode. It must follow step 3:
     //    the old DM's close flushes pending learner-model updates, which
     //    this build reads back from the session DB.
     //    shortcut: a failure here still loses the closed text session;
-    //    it needs a config change between the two builds, so it is rare.
+    //    usually a config change between the two builds (e.g. the locale
+    //    guard), so it is rare.
     let active_session = crate::wiring::build_active_session(&state.home, &cfg)
         .await
         .map_err(StartVoiceModeError::from)?;
@@ -106,6 +118,7 @@ pub async fn start_voice_mode<R: tauri::Runtime>(
     let responder: Box<dyn primer_speech::voice_loop::Responder + 'static> =
         Box::new(crate::voice::responder::ArcDmResponder::new(dm_arc));
 
+    is_speaking.store(false, Ordering::SeqCst);
     let (handle, join) = primer_speech::voice_loop::run_loop(
         backends,
         event_rx,

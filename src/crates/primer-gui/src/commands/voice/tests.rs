@@ -308,15 +308,36 @@ async fn app_with_text_session() -> (tempfile::TempDir, tauri::App<tauri::test::
     (home, app)
 }
 
-/// After a failed start, the text session and the sticky toggle must be
-/// exactly as they were.
 #[cfg(any(feature = "speech", feature = "android-native"))]
-async fn assert_text_session_untouched(app: &tauri::App<tauri::test::MockRuntime>) {
+type SharedDm = std::sync::Arc<tokio::sync::Mutex<primer_pedagogy::DialogueManager>>;
+
+/// The dialogue manager of the app's current text session, to check after a
+/// failed start that the *same* session survived (not a rebuilt one).
+#[cfg(any(feature = "speech", feature = "android-native"))]
+async fn current_dm(app: &tauri::App<tauri::test::MockRuntime>) -> SharedDm {
     use tauri::Manager;
     let state = app.state::<crate::state::AppState>();
+    let guard = state.session.lock().await;
+    std::sync::Arc::clone(&guard.as_ref().expect("a text session").dialogue_manager)
+}
+
+/// After a failed start, the same text session must still be active and the
+/// sticky toggle untouched. (No voice loop runs in these tests, so the
+/// toggle half guards against a new unconditional flip, not the reorder.)
+#[cfg(any(feature = "speech", feature = "android-native"))]
+async fn assert_text_session_untouched(
+    app: &tauri::App<tauri::test::MockRuntime>,
+    dm_before: &SharedDm,
+) {
+    use tauri::Manager;
+    let state = app.state::<crate::state::AppState>();
+    let session = state.session.lock().await;
+    let active = session
+        .as_ref()
+        .expect("a failed start must leave the text session alive");
     assert!(
-        state.session.lock().await.is_some(),
-        "a failed start must leave the text session alive"
+        std::sync::Arc::ptr_eq(&active.dialogue_manager, dm_before),
+        "a failed start must keep the original text session, not rebuild it"
     );
     assert!(
         state.config.lock().await.speech.voice_mode_enabled,
@@ -333,6 +354,7 @@ async fn assert_text_session_untouched(app: &tauri::App<tauri::test::MockRuntime
 async fn failed_start_keeps_the_text_session_and_toggle() {
     use tauri::Manager;
     let (_home, app) = app_with_text_session().await;
+    let dm_before = current_dm(&app).await;
 
     let err = super::start_voice_mode(app.state(), app.handle().clone())
         .await
@@ -342,21 +364,69 @@ async fn failed_start_keeps_the_text_session_and_toggle() {
         matches!(err, StartVoiceModeError::AssetMissing { .. }),
         "expected AssetMissing, got {err:?}"
     );
-    assert_text_session_untouched(&app).await;
+    assert_text_session_untouched(&app, &dm_before).await;
+}
+
+/// Backend-init path: the asset files exist but are garbage, so asset
+/// resolution passes and `build_loop_backends` fails. That is the last
+/// fallible step before the teardown, so this pins the teardown below it.
+#[cfg(feature = "speech")]
+#[tokio::test]
+async fn failed_backend_init_keeps_the_text_session_and_toggle() {
+    use primer_core::i18n::Locale;
+    use tauri::Manager;
+    let (home, app) = app_with_text_session().await;
+    let dm_before = current_dm(&app).await;
+
+    let cfg = app
+        .state::<crate::state::AppState>()
+        .config
+        .lock()
+        .await
+        .clone();
+    let (stt, tts) = cfg.speech.resolve_backends();
+    let missing = crate::voice::assets::resolve_voice_assets(
+        home.path(),
+        &cfg.speech,
+        &Locale::from_pack_id(&cfg.learner.locale).unwrap_or_default(),
+        stt,
+        tts,
+    )
+    .expect_err("a fresh home has no voice assets");
+    for entry in &missing.entries {
+        std::fs::create_dir_all(entry.path.parent().unwrap()).unwrap();
+        std::fs::write(&entry.path, b"not a model").unwrap();
+    }
+
+    let err = super::start_voice_mode(app.state(), app.handle().clone())
+        .await
+        .expect_err("garbage model files, so the backend build must fail");
+
+    assert!(
+        matches!(&err, StartVoiceModeError::Other { message } if message.starts_with("backend init")),
+        "expected a backend-init error, got {err:?}"
+    );
+    assert_text_session_untouched(&app, &dm_before).await;
 }
 
 /// Android path: on a host build the JNI bridge cannot be constructed, which
-/// stands in for any backend-init / mic-permission failure. It must fail
-/// before the teardown, too.
+/// stands in for any bridge-init failure. It must fail before the teardown,
+/// too. (The permission check right after it shares the same position.)
 #[cfg(feature = "android-native")]
 #[tokio::test]
 async fn failed_android_start_keeps_the_text_session_and_toggle() {
     use tauri::Manager;
     let (_home, app) = app_with_text_session().await;
+    let dm_before = current_dm(&app).await;
 
-    crate::commands::voice_android::start_voice_mode_android(app.state(), app.handle().clone())
-        .await
-        .expect_err("no JNI bridge on a host build, so start must fail");
+    let err =
+        crate::commands::voice_android::start_voice_mode_android(app.state(), app.handle().clone())
+            .await
+            .expect_err("no JNI bridge on a host build, so start must fail");
 
-    assert_text_session_untouched(&app).await;
+    assert!(
+        matches!(&err, StartVoiceModeError::Other { message } if message.starts_with("android bridge init")),
+        "expected the bridge-init error, got {err:?}"
+    );
+    assert_text_session_untouched(&app, &dm_before).await;
 }

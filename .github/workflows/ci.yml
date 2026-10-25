@@ -277,6 +277,26 @@ jobs:
         # steps above and stays warm via the rust-cache layer.
         run: cargo clippy -p primer-cli --features speech --all-targets -- -D warnings
 
+      - name: cargo test -p primer-gui --features speech (voice commands)
+        # Issue #366. The voice-start tests (`commands/voice/tests.rs`) drive
+        # the real `start_voice_mode` through `tauri::test::mock_app` and pin
+        # that a failed start keeps the text session. They are gated on the
+        # `speech` feature, which no other test step builds for primer-gui,
+        # so without this a reorder of the teardown would pass CI. No audio
+        # device or model needed: each test fails before cpal opens.
+        run: cargo test -p primer-gui --features speech --lib commands::voice
+
+      - name: cargo test android-native (host)
+        # Same #366 guard for `start_voice_mode_android`, plus the shared
+        # `stop_voice_mode_inner` tests. Runs on the host: the JNI bridge
+        # can't be built off-device, which is the failure the test drives.
+        # The primer-speech half runs the host-testable Android voice logic
+        # (derived VAD, re-arm/watchdog, and the recognizer loop exiting on
+        # a dropped stop sender), which no other test step builds.
+        run: |
+          cargo test -p primer-gui --no-default-features --features android-native --lib commands::voice
+          cargo test -p primer-speech --features voice-loop,android-native --lib android
+
       - name: cargo doc (non-default feature arms, rustdoc -D warnings)
         # Broken intra-doc links drift-guard for cfg-gated code the default
         # `cargo doc` step never sees (closes #330, #319). Most deps are

@@ -29,10 +29,10 @@
     // session switches firing `primerRestoreVoiceMode` before the first
     // call's `start_voice_mode` has resolved and set `state.active = true`).
     // Without this, a second call would race past the `state.active` check
-    // and invoke `start_voice_mode` a second time, whose step-2 teardown
-    // briefly flips the sticky toggle to `false` on disk before step-8
-    // restores it — a tiny window where a crash leaves the persisted
-    // toggle stale.
+    // and invoke `start_voice_mode` a second time, whose step-0 teardown of
+    // the first call's loop briefly flips the sticky toggle to `false` on
+    // disk before step 7 restores it — a tiny window where a crash leaves
+    // the persisted toggle stale.
     starting: false,
   };
 
