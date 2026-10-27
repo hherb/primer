@@ -118,7 +118,8 @@ pub fn should_rearm(event: &SpeechEvent) -> bool {
 }
 
 /// Poll the bridge for recognizer events, driving the derived VAD and
-/// forwarding edges + transcripts, until `stop` fires or the bridge errors.
+/// forwarding edges + transcripts, until `stop` fires (or its sender is
+/// dropped) or the bridge errors.
 /// Re-arms `start_listening` after each terminal event ([`should_rearm`] —
 /// the recognizer is one-shot per `startListening`), including after a
 /// recoverable no-match/timeout so the loop keeps listening.
@@ -140,7 +141,13 @@ pub async fn run_recognizer_loop(
     // terminal error and then emit nothing, wedging the armed loop.
     let mut last_event_at = Instant::now();
     loop {
-        if stop.try_recv().is_ok() {
+        // A dropped sender (`Closed`) is a stop too: the GUI drops it when
+        // start fails after building the backends, and a loop that ignored
+        // it would keep the singleton recognizer armed forever.
+        if !matches!(
+            stop.try_recv(),
+            Err(tokio::sync::oneshot::error::TryRecvError::Empty)
+        ) {
             let _ = bridge.stop_listening();
             return Ok(());
         }
@@ -232,6 +239,30 @@ pub async fn run_recognizer_loop(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn recognizer_loop_exits_when_stop_sender_is_dropped() {
+        let bridge = Arc::new(crate::android::bridge::tests::MockBridge::with_events(
+            vec![],
+        ));
+        let (event_tx, _event_rx) = std::sync::mpsc::channel::<VadEvent>();
+        let (txt_tx, _txt_rx) = std::sync::mpsc::channel::<String>();
+        let (stop_tx, stop_rx) = tokio::sync::oneshot::channel::<()>();
+        drop(stop_tx);
+
+        let run = run_recognizer_loop(
+            bridge,
+            "en-US".into(),
+            event_tx,
+            txt_tx,
+            stop_rx,
+            Arc::new(AtomicBool::new(false)),
+        );
+        tokio::time::timeout(std::time::Duration::from_secs(5), run)
+            .await
+            .expect("a dropped stop sender must end the loop")
+            .unwrap();
+    }
 
     #[test]
     fn process_event_emits_start_then_transcript_then_end() {
