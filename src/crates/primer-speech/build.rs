@@ -1,7 +1,7 @@
 //! Build script for `primer-speech`.
 //!
-//! Only does anything when the `macos-native-26` feature is on. In that
-//! case it:
+//! With `whisper`, links the C++ runtime on macOS and OpenMP on
+//! Linux/glibc (see the two helpers). With `macos-native-26` it:
 //!   1. Invokes `swift-bridge-build` to generate the C header + Swift
 //!      glue from src/macos26/bridge.rs.
 //!   2. Invokes `swiftc` to compile the Swift sidecar + generated glue
@@ -23,6 +23,9 @@ fn main() {
 
     #[cfg(feature = "whisper")]
     link_cxx_runtime_on_macos();
+
+    #[cfg(feature = "whisper")]
+    link_openmp_on_linux_gnu();
 
     #[cfg(feature = "macos-native-26")]
     macos_native_26::build();
@@ -51,6 +54,28 @@ fn link_cxx_runtime_on_macos() {
     // whisper-cpp-plus-sys's own build script branches on `target_os`).
     if std::env::var("CARGO_CFG_TARGET_OS").as_deref() == Ok("macos") {
         println!("cargo:rustc-link-lib=c++");
+    }
+}
+
+/// Link GNU OpenMP (`libgomp`) when the `whisper` feature targets
+/// Linux/glibc.
+///
+/// whisper.cpp's CMake build turns ggml's OpenMP threading on whenever it
+/// finds OpenMP, which gcc on Linux always provides, but
+/// `whisper-cpp-plus-sys` never emits a `-lgomp`. Every Linux link of a
+/// whisper build (the portable `--features speech` CLI, primer-gui's speech
+/// tests) then fails with `undefined reference to GOMP_parallel` /
+/// `omp_get_thread_num`. rustc places upstream dylib directives after all
+/// rlibs, so this resolves the symbols inside the sys crate's bundled ggml.
+/// shortcut: assumes gcc's OpenMP; a clang/libomp toolchain would need
+/// `omp` instead. Drop once the sys crate links OpenMP itself.
+#[cfg(feature = "whisper")]
+fn link_openmp_on_linux_gnu() {
+    // Target, not host, for the same reason as `link_cxx_runtime_on_macos`.
+    let target_os = std::env::var("CARGO_CFG_TARGET_OS");
+    let target_env = std::env::var("CARGO_CFG_TARGET_ENV");
+    if target_os.as_deref() == Ok("linux") && target_env.as_deref() == Ok("gnu") {
+        println!("cargo:rustc-link-lib=gomp");
     }
 }
 
