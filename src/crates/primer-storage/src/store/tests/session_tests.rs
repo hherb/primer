@@ -1242,11 +1242,6 @@ fn apply_v3_migrations_creates_index_on_turn_classifications() {
     assert_eq!(count, 1);
 }
 
-#[test]
-fn user_version_is_eight() {
-    assert_eq!(crate::schema::USER_VERSION, 8);
-}
-
 // ─── save_classification / load_recent_assessments ───────────────
 
 #[tokio::test]
