@@ -21,6 +21,7 @@ pub mod conversation;
 pub mod embedder;
 pub mod error;
 pub mod extractor;
+pub mod fts_util;
 pub mod i18n;
 pub mod inference;
 pub mod knowledge;

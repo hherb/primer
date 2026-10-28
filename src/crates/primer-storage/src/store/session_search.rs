@@ -12,7 +12,7 @@ use uuid::Uuid;
 use super::SqliteSessionStore;
 use super::conv::parse_rfc3339;
 use super::embeddings::{blob_to_vec, dot_product, validate_storage_embedder};
-use super::fts::sanitize_fts_phrase;
+use primer_core::fts_util::sanitize_fts_phrase;
 
 impl SqliteSessionStore {
     pub(super) async fn retrieve_session_turns_inner(

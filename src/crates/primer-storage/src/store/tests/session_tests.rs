@@ -1148,8 +1148,7 @@ async fn retrieve_session_turns_handles_quotes_and_special_chars() {
     // FTS5-special characters and reserved keywords in the input
     // must not be interpreted as operators. Hostile chars get
     // stripped, every surviving token (keywords included) is quoted
-    // and OR-joined — meaningful
-    // words still match the indexed turn.
+    // and OR-joined — meaningful words still match the indexed turn.
     use primer_core::conversation::Speaker;
     let store = open_memory();
     let mut session = Session::new(Uuid::new_v4());

@@ -1,9 +1,6 @@
-//! FTS5 query sanitisation.
-//!
-//! Child input is fed through `sanitize_fts_phrase` before being passed
-//! to `MATCH` so that user text can never break out of the FTS5 query
-//! grammar. BM25 ranking + the caller's `LIMIT k` keep the OR-join from
-//! producing noise.
+//! FTS5 query sanitisation, shared by `primer-knowledge` (KB retrieval)
+//! and `primer-storage` (long-term-memory retrieval) so child input is
+//! sanitised identically on both paths (issue #378).
 
 /// Sanitize an arbitrary user query into an FTS5 expression that is
 /// safe to pass to `MATCH`. Tokenizes on whitespace, strips every
@@ -11,15 +8,15 @@
 /// `)`, slashes, etc.), wraps each surviving token in double quotes (so
 /// any special character the tokenizer would otherwise see is inert, and
 /// `AND` / `OR` / `NOT` / `NEAR` are plain terms rather than operators —
-/// #309), and joins the tokens with explicit `OR`. An empty result means "no
-/// useful tokens"; the caller should skip the query rather than issue
+/// #309), and joins the tokens with explicit `OR`. An empty result means
+/// "no useful tokens"; the caller should skip the query rather than issue
 /// `MATCH ''` which FTS5 rejects.
 ///
 /// `OR` is chosen over implicit-AND so that "noise" tokens introduced
 /// by sanitization (e.g. fragments from stripped punctuation) do not
 /// torpedo the entire query. BM25 ranking + the caller's `LIMIT k` keep
 /// the result list focused on the most relevant matches.
-pub(super) fn sanitize_fts_phrase(query: &str) -> String {
+pub fn sanitize_fts_phrase(query: &str) -> String {
     let tokens: Vec<String> = query
         .split_whitespace()
         .map(|tok| {
