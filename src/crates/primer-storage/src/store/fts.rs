@@ -8,10 +8,10 @@
 /// Sanitize an arbitrary user query into an FTS5 expression that is
 /// safe to pass to `MATCH`. Tokenizes on whitespace, strips every
 /// non-alphanumeric character per token (kills `*`, `^`, `:`, `"`, `(`,
-/// `)`, slashes, etc.), drops the FTS5 reserved keywords (`AND`, `OR`,
-/// `NOT`, `NEAR`), wraps each surviving token in double quotes (so any
-/// special character the tokenizer would otherwise see is inert), and
-/// joins the tokens with explicit `OR`. An empty result means "no
+/// `)`, slashes, etc.), wraps each surviving token in double quotes (so
+/// any special character the tokenizer would otherwise see is inert, and
+/// `AND` / `OR` / `NOT` / `NEAR` are plain terms rather than operators —
+/// #309), and joins the tokens with explicit `OR`. An empty result means "no
 /// useful tokens"; the caller should skip the query rather than issue
 /// `MATCH ''` which FTS5 rejects.
 ///
@@ -20,7 +20,6 @@
 /// torpedo the entire query. BM25 ranking + the caller's `LIMIT k` keep
 /// the result list focused on the most relevant matches.
 pub(super) fn sanitize_fts_phrase(query: &str) -> String {
-    const RESERVED: &[&str] = &["AND", "OR", "NOT", "NEAR"];
     let tokens: Vec<String> = query
         .split_whitespace()
         .map(|tok| {
@@ -29,7 +28,6 @@ pub(super) fn sanitize_fts_phrase(query: &str) -> String {
                 .collect::<String>()
         })
         .filter(|tok| !tok.is_empty())
-        .filter(|tok| !RESERVED.iter().any(|r| r.eq_ignore_ascii_case(tok)))
         .collect();
     if tokens.is_empty() {
         return String::new();
@@ -65,14 +63,16 @@ mod tests {
     }
 
     #[test]
-    fn reserved_keywords_are_dropped() {
-        // AND / OR / NOT / NEAR (case-insensitive) are stripped.
-        assert_eq!(sanitize_fts_phrase("dogs AND cats"), "\"dogs\" OR \"cats\"");
+    fn reserved_keywords_are_kept_as_quoted_terms() {
+        // Quoted, AND / OR / NOT / NEAR are plain terms to FTS5 (#309).
         assert_eq!(
-            sanitize_fts_phrase("apple or pear"),
-            "\"apple\" OR \"pear\""
+            sanitize_fts_phrase("dogs AND cats"),
+            "\"dogs\" OR \"AND\" OR \"cats\""
         );
-        assert_eq!(sanitize_fts_phrase("near the not"), "\"the\"");
+        assert_eq!(
+            sanitize_fts_phrase("near the not"),
+            "\"near\" OR \"the\" OR \"not\""
+        );
     }
 
     #[test]

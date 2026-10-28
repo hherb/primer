@@ -1,9 +1,10 @@
 //! FTS5 query sanitization.
 
 /// Coerce free-form input into an FTS5-safe phrase. Strips non-alphanumerics
-/// (so any FTS5-special character is inert), drops reserved keywords
-/// (`AND`, `OR`, `NOT`, `NEAR`), quotes each surviving token, and joins
-/// them with explicit `OR`. An empty result means "no useful tokens";
+/// (so any FTS5-special character is inert), quotes each surviving token,
+/// and joins them with explicit `OR`. `AND` / `OR` / `NOT` / `NEAR` are
+/// kept: FTS5 reads them as operators only unquoted, and children say
+/// "not" and "near" as content words (#309). An empty result means "no useful tokens";
 /// the caller short-circuits to empty results rather than issuing
 /// `MATCH ''` which FTS5 rejects.
 ///
@@ -15,7 +16,6 @@
 /// Mirrors the same-named function in `primer-storage`. A future cleanup
 /// should hoist both into `primer-core::fts_util`.
 pub(crate) fn sanitize_fts_phrase(query: &str) -> String {
-    const RESERVED: &[&str] = &["AND", "OR", "NOT", "NEAR"];
     let tokens: Vec<String> = query
         .split_whitespace()
         .map(|tok| {
@@ -24,7 +24,6 @@ pub(crate) fn sanitize_fts_phrase(query: &str) -> String {
                 .collect::<String>()
         })
         .filter(|tok| !tok.is_empty())
-        .filter(|tok| !RESERVED.iter().any(|r| r.eq_ignore_ascii_case(tok)))
         .collect();
     if tokens.is_empty() {
         return String::new();
