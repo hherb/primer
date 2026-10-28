@@ -8,7 +8,7 @@
 //! invisibly degrade retrieval, exactly the bug class this guards against.
 
 use primer_core::error::{PrimerError, Result};
-use rusqlite::Connection;
+use rusqlite::{Connection, OptionalExtension};
 
 /// Read-side embedder validation. Symmetric to `upsert_embedding_model`
 /// but read-only:
@@ -32,7 +32,9 @@ pub(crate) fn validate_embedder_against_db(
             rusqlite::params![name],
             |r| r.get(0),
         )
-        .ok();
+        .optional()
+        // Only "no row" means unregistered; any other error must surface (#310).
+        .map_err(|e| PrimerError::Knowledge(format!("read embedding_models: {e}")))?;
     if let Some(existing_dim) = existing {
         if existing_dim as usize != dim {
             return Err(PrimerError::Knowledge(format!(
@@ -69,7 +71,9 @@ pub(crate) fn upsert_embedding_model(conn: &Connection, name: &str, dim: usize) 
             rusqlite::params![name],
             |r| Ok((r.get(0)?, r.get(1)?)),
         )
-        .ok();
+        .optional()
+        // Only "no row" means unregistered; any other error must surface (#310).
+        .map_err(|e| PrimerError::Knowledge(format!("read embedding_models: {e}")))?;
     if let Some((id, existing_dim)) = existing {
         if existing_dim as usize != dim {
             return Err(PrimerError::Knowledge(format!(
@@ -85,4 +89,45 @@ pub(crate) fn upsert_embedding_model(conn: &Connection, name: &str, dim: usize) 
     )
     .map_err(|e| PrimerError::Knowledge(format!("insert embedding_model: {e}")))?;
     Ok(conn.last_insert_rowid())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A DB with the real schema and one registered model whose `dim` cell
+    /// holds text — the "corrupt row" that must not read as "unregistered".
+    fn conn_with_corrupt_dim() -> Connection {
+        let conn = Connection::open_in_memory().unwrap();
+        crate::schema::migrate_or_create(&conn, "en").unwrap();
+        upsert_embedding_model(&conn, "stub", 8).unwrap();
+        conn.execute("UPDATE embedding_models SET dim = 'not-a-number'", [])
+            .unwrap();
+        conn
+    }
+
+    #[test]
+    fn validate_propagates_select_errors_instead_of_reading_unregistered() {
+        let err = validate_embedder_against_db(&conn_with_corrupt_dim(), "stub", 16)
+            .expect_err("a corrupt registry row must not pass validation (#310)");
+        assert!(matches!(err, PrimerError::Knowledge(_)), "{err}");
+    }
+
+    #[test]
+    fn validate_errors_when_the_registry_table_is_missing() {
+        let conn = Connection::open_in_memory().unwrap();
+        assert!(validate_embedder_against_db(&conn, "stub", 8).is_err());
+    }
+
+    #[test]
+    fn upsert_propagates_select_errors() {
+        assert!(upsert_embedding_model(&conn_with_corrupt_dim(), "stub", 8).is_err());
+    }
+
+    #[test]
+    fn validate_accepts_an_unregistered_model_on_a_fresh_db() {
+        let conn = Connection::open_in_memory().unwrap();
+        crate::schema::migrate_or_create(&conn, "en").unwrap();
+        assert!(validate_embedder_against_db(&conn, "stub", 8).is_ok());
+    }
 }
