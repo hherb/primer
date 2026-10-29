@@ -803,6 +803,49 @@ async fn fts_keywords_in_a_query_are_searchable_terms() {
         .unwrap();
 }
 
+/// A batch is one transaction (#308): a failing row rolls back the rows
+/// before it, so a half-loaded seed file can't block `auto_seed_if_empty`'s
+/// retry.
+#[tokio::test]
+async fn insert_passages_rolls_back_the_whole_batch_on_a_failing_row() {
+    let db = tmp_db();
+    let kb = SqliteKnowledgeBase::open_for_locale(db.path(), Locale::English).unwrap();
+    Connection::open(db.path())
+        .unwrap()
+        .execute_batch(
+            "CREATE TRIGGER reject_bad BEFORE INSERT ON passages_en_content
+             WHEN NEW.id = 'bad' BEGIN SELECT RAISE(ABORT, 'rejected'); END;",
+        )
+        .unwrap();
+
+    let result = kb.insert_passages(&[("good", "src", "fine"), ("bad", "src", "boom")]);
+
+    assert!(
+        matches!(result, Err(PrimerError::Knowledge(_))),
+        "{result:?}"
+    );
+    assert_eq!(
+        kb.passage_count().unwrap(),
+        0,
+        "the good row must roll back"
+    );
+}
+
+/// The content row and its FTS row commit together (#308): a failed FTS
+/// insert must not leave a content row that BM25 can never find.
+#[tokio::test]
+async fn insert_passage_rolls_back_the_content_row_when_the_fts_insert_fails() {
+    let db = tmp_db();
+    let kb = SqliteKnowledgeBase::open_for_locale(db.path(), Locale::English).unwrap();
+    Connection::open(db.path())
+        .unwrap()
+        .execute_batch("DROP TABLE passages_en;")
+        .unwrap();
+
+    assert!(kb.insert_passage("p1", "src", "text").is_err());
+    assert_eq!(kb.passage_count().unwrap(), 0);
+}
+
 /// `--reembed --force` reset (#377): clearing a locale's vectors also
 /// unregisters every model no locale still uses, so the same model name can
 /// come back at a new dim. A model another locale still uses stays pinned.

@@ -3689,6 +3689,7 @@ dependencies = [
  "primer-core",
  "primer-embedding",
  "primer-knowledge",
+ "rusqlite",
  "serde",
  "serde_json",
  "tempfile",

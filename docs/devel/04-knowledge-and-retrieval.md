@@ -156,6 +156,8 @@ Both load on a fresh English KB, giving 91 passages out of the box. The German l
 
 The loader half — `load_jsonl(kb, path)` — is idempotent. It treats `id` as the deduplication key: a row already in `passages_<pack>_content` with the same `id` is skipped, not overwritten, mirroring the append-only behaviour of `SessionStore::save_session`. Re-running on the same JSONL is a no-op; running it on a JSONL with new entries adds only the new ones. The `sources` table uses upsert semantics so attribution stays current. A JSONL line may carry an optional nested `parent_source` object (the umbrella-attribution case from schema v4); when present, the loader registers the umbrella source row first (de-duped across every passage that shares it, since the `parent_source_id` FK is enforced) and links the passage's own source to it.
 
+Loading is also all-or-nothing. `auto_seed_if_empty` (via `load_seed_files`) parses every seed file before writing any, then writes the whole corpus — source rows and passages — in one `SqliteKnowledgeBase::insert_seed` transaction. So a malformed line or a failed write in any file leaves the KB as it was, and the next startup retries the seed instead of being stuck half-seeded. Parse errors name the file and line. A passage `id` repeated within one file is rejected (nothing enforces uniqueness in SQL); one repeated across seed files is skipped like an id already in the KB.
+
 > **Note:** `auto_seed_if_empty` runs unconditionally on every CLI startup, but the empty-KB check makes the actual load conditional. After the first run the KB is non-empty and the function is a `passage_count` query plus an early return.
 
 ## Wikipedia-shaped ingestion pipeline
