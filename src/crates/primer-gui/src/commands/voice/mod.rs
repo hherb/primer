@@ -13,7 +13,7 @@
 //!   `MissingAsset`, and the pure `missing_to_error` gate.
 //! - `start` — `start_voice_mode`.
 //! - `stop` — `stop_voice_mode`, `cancel_voice_response`, and the shared
-//!   `stop_voice_mode_inner` teardown helper.
+//!   `stop_voice_mode_by_user` / `stop_voice_mode_inner` teardown helpers.
 //! - `asset_download` — `download_voice_assets`.
 //! - `state_copy` — `VoiceStateCopy` + `get_voice_state_copy`.
 //! - `capabilities` — the compile-time `*_available` flags.
