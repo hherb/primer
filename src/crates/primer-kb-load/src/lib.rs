@@ -38,10 +38,10 @@
 
 use primer_core::error::{PrimerError, Result};
 use primer_core::i18n::Locale;
-use primer_core::knowledge::{KnowledgeBase, SourceMeta};
+use primer_core::knowledge::SourceMeta;
 use primer_knowledge::SqliteKnowledgeBase;
 use serde::{Deserialize, Serialize};
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::io::{BufRead, BufReader};
 use std::path::{Path, PathBuf};
 
@@ -99,8 +99,9 @@ pub struct LoadStats {
     pub sources_seen: usize,
 }
 
-/// A parsed seed file, not yet written: its passages plus every source row
-/// they reference (umbrella rows included, de-duped by id).
+/// A parsed seed corpus, not yet written: its passages plus every source
+/// row they reference (umbrella rows included, de-duped by id).
+#[derive(Default)]
 struct ParsedSeed {
     passages: Vec<SeedPassage>,
     sources: HashMap<String, SourceMeta>,
@@ -109,42 +110,40 @@ struct ParsedSeed {
 /// Load a JSONL file into `kb`. Sources are upserted; passages are
 /// inserted if their `id` is new, skipped otherwise.
 ///
-/// The whole file is parsed before anything is written, and its passages
-/// land in one transaction, so a failed load writes no passages (#308).
+/// The whole file is parsed before anything is written, and its sources
+/// and passages land in one transaction, so a failed load writes nothing
+/// (#308).
 ///
 /// Errors:
 /// - I/O errors reading the file → `PrimerError::Knowledge` with context.
-/// - Malformed JSON → the line number and parse error are returned in
-///   `PrimerError::Knowledge`; nothing from the file is written.
+/// - Malformed JSON, or an `id` repeated within the file → the file path,
+///   line number and cause are returned in `PrimerError::Knowledge`;
+///   nothing from the file is written.
 pub async fn load_jsonl(kb: &SqliteKnowledgeBase, path: &Path) -> Result<LoadStats> {
     write_seed(kb, parse_jsonl(path)?).await
 }
 
-/// Load several seed files, parsing them all before writing any, so a bad
-/// line in a later file can't leave the earlier ones loaded — which would
-/// make the KB non-empty and stop `auto_seed_if_empty` from ever retrying
-/// (#308). Returns the stats aggregated across files.
+/// Load several seed files as one corpus: every file is parsed, then all
+/// of them are written in a single transaction. A bad line or a failed
+/// write in any file therefore leaves the KB as it was — a half-loaded KB
+/// would be non-empty and stop `auto_seed_if_empty` from ever retrying
+/// (#308). An `id` that also appears in an earlier file is skipped, like
+/// one already in the KB.
 pub async fn load_seed_files(kb: &SqliteKnowledgeBase, paths: &[PathBuf]) -> Result<LoadStats> {
-    let parsed = paths
-        .iter()
-        .map(|p| parse_jsonl(p))
-        .collect::<Result<Vec<_>>>()?;
-    let mut total = LoadStats::default();
-    // shortcut: a write failure (e.g. disk full) in a later file still
-    // leaves the earlier files committed; one cross-file transaction would
-    // close that if it ever shows up.
-    for (path, seed) in paths.iter().zip(parsed) {
+    let mut corpus = ParsedSeed::default();
+    for path in paths {
         tracing::info!(
             target = "primer-kb-load",
             path = %path.display(),
-            "loading seed corpus"
+            "parsing seed corpus"
         );
-        let stats = write_seed(kb, seed).await?;
-        total.inserted += stats.inserted;
-        total.skipped_existing += stats.skipped_existing;
-        total.sources_seen += stats.sources_seen;
+        let seed = parse_jsonl(path)?;
+        corpus.passages.extend(seed.passages);
+        for (id, src) in seed.sources {
+            corpus.sources.entry(id).or_insert(src);
+        }
     }
-    Ok(total)
+    write_seed(kb, corpus).await
 }
 
 /// Read and parse a JSONL seed file without touching the KB.
@@ -153,19 +152,38 @@ fn parse_jsonl(path: &Path) -> Result<ParsedSeed> {
         .map_err(|e| PrimerError::Knowledge(format!("open {}: {e}", path.display())))?;
     let reader = BufReader::new(file);
     let mut passages = Vec::new();
+    let mut ids = HashSet::new();
     let mut sources: HashMap<String, SourceMeta> = HashMap::new();
     let now = chrono::Utc::now().timestamp();
 
     for (line_no, line) in reader.lines().enumerate() {
-        let line =
-            line.map_err(|e| PrimerError::Knowledge(format!("read line {}: {e}", line_no + 1)))?;
+        let line = line.map_err(|e| {
+            PrimerError::Knowledge(format!(
+                "{}: read line {}: {e}",
+                path.display(),
+                line_no + 1
+            ))
+        })?;
         let line = line.trim();
         if line.is_empty() || line.starts_with('#') {
             continue;
         }
         let passage: SeedPassage = serde_json::from_str(line).map_err(|e| {
-            PrimerError::Knowledge(format!("parse JSONL line {}: {e}", line_no + 1))
+            PrimerError::Knowledge(format!(
+                "{}: parse JSONL line {}: {e}",
+                path.display(),
+                line_no + 1
+            ))
         })?;
+        // No UNIQUE constraint backs `id`, so a repeat would land twice (#383).
+        if !ids.insert(passage.id.clone()) {
+            return Err(PrimerError::Knowledge(format!(
+                "{}: line {}: duplicate passage id {}",
+                path.display(),
+                line_no + 1,
+                passage.id
+            )));
+        }
 
         // Register the source the first time we see it in this file, linking
         // it to its umbrella parent when the passage declares one (#40).
@@ -199,28 +217,19 @@ fn parse_jsonl(path: &Path) -> Result<ParsedSeed> {
     Ok(ParsedSeed { passages, sources })
 }
 
-/// Write a parsed seed file: sources first (so every passage that lands has
-/// its attribution row), then the new passages in one transaction.
+/// Write a parsed seed corpus — its sources and every passage whose `id`
+/// is not already in the KB (or earlier in the corpus) — in one
+/// transaction.
 async fn write_seed(kb: &SqliteKnowledgeBase, seed: ParsedSeed) -> Result<LoadStats> {
     let ParsedSeed { passages, sources } = seed;
-    // Upsert umbrella (parent-less) rows before child rows: the
-    // `sources.parent_source_id` FK references `sources(id)`, so a child
-    // written before its umbrella exists would fail the constraint. The
-    // HashMap iteration order is arbitrary, so we must order explicitly.
-    for src in sources.values().filter(|s| s.parent_source_id.is_none()) {
-        kb.upsert_source(src).await?;
-    }
-    for src in sources.values().filter(|s| s.parent_source_id.is_some()) {
-        kb.upsert_source(src).await?;
-    }
-
-    let existing_ids = existing_passage_ids(kb)?;
+    let mut seen = existing_passage_ids(kb)?;
     let new: Vec<(&str, &str, &str)> = passages
         .iter()
-        .filter(|p| !existing_ids.contains(&p.id))
+        .filter(|p| seen.insert(p.id.clone()))
         .map(|p| (p.id.as_str(), p.source.as_str(), p.text.as_str()))
         .collect();
-    kb.insert_passages(&new)?;
+    let sources: Vec<SourceMeta> = sources.into_values().collect();
+    kb.insert_seed(&sources, &new)?;
     let stats = LoadStats {
         inserted: new.len(),
         skipped_existing: passages.len() - new.len(),
@@ -239,7 +248,7 @@ async fn write_seed(kb: &SqliteKnowledgeBase, seed: ParsedSeed) -> Result<LoadSt
 
 /// Collect the set of passage ids already in the KB, so we can dedup in
 /// O(N+M) instead of one SELECT per row.
-fn existing_passage_ids(kb: &SqliteKnowledgeBase) -> Result<std::collections::HashSet<String>> {
+fn existing_passage_ids(kb: &SqliteKnowledgeBase) -> Result<HashSet<String>> {
     kb.list_passage_ids()
 }
 

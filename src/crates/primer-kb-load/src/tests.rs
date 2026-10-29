@@ -1,6 +1,6 @@
 use super::*;
 use primer_core::i18n::Locale;
-use primer_core::knowledge::RetrievalParams;
+use primer_core::knowledge::{KnowledgeBase, RetrievalParams};
 use std::io::Write;
 
 fn write_jsonl(lines: &[&str]) -> tempfile::NamedTempFile {
@@ -344,6 +344,8 @@ async fn malformed_json_reports_line_number() {
     let err = load_jsonl(&kb, jsonl.path()).await.unwrap_err();
     let msg = format!("{err}");
     assert!(msg.contains("line 2"), "expected line number, got: {msg}");
+    let name = jsonl.path().file_name().unwrap().to_str().unwrap();
+    assert!(msg.contains(name), "expected the file name, got: {msg}");
 }
 
 /// A malformed line anywhere in a file loads nothing from it — no passages,
@@ -382,4 +384,118 @@ async fn a_malformed_seed_file_loads_nothing_from_any_file() {
 
     let stats = load_seed_files(&kb, &files[..1]).await.unwrap();
     assert_eq!(stats.inserted, 1, "the retry loads cleanly");
+}
+
+/// No UNIQUE constraint backs a passage `id`, so a repeat within one file
+/// is rejected up front rather than landing twice (#383).
+#[tokio::test]
+async fn a_duplicate_id_within_a_file_loads_nothing() {
+    let db = tempfile::NamedTempFile::new().unwrap();
+    let kb = SqliteKnowledgeBase::open_for_locale(db.path(), Locale::English).unwrap();
+    let jsonl = write_jsonl(&[
+        r#"{"id":"p1","source":"seed","license":"CC0-1.0","attribution":"x","text":"one"}"#,
+        r#"{"id":"p1","source":"seed","license":"CC0-1.0","attribution":"x","text":"two"}"#,
+    ]);
+
+    let msg = format!("{}", load_jsonl(&kb, jsonl.path()).await.unwrap_err());
+    assert!(msg.contains("duplicate passage id p1"), "{msg}");
+    assert!(msg.contains("line 2"), "{msg}");
+    assert_eq!(kb.passage_count().unwrap(), 0);
+}
+
+/// An id that also appears in an earlier seed file is skipped, like one
+/// already in the KB, so it lands exactly once.
+#[tokio::test]
+async fn an_id_repeated_across_seed_files_lands_once() {
+    let db = tempfile::NamedTempFile::new().unwrap();
+    let kb = SqliteKnowledgeBase::open_for_locale(db.path(), Locale::English).unwrap();
+    let first = write_jsonl(&[
+        r#"{"id":"p1","source":"seed","license":"CC0-1.0","attribution":"x","text":"one"}"#,
+    ]);
+    let second = write_jsonl(&[
+        r#"{"id":"p1","source":"seed","license":"CC0-1.0","attribution":"x","text":"one"}"#,
+        r#"{"id":"p2","source":"seed","license":"CC0-1.0","attribution":"x","text":"two"}"#,
+    ]);
+    let files = [first.path().to_path_buf(), second.path().to_path_buf()];
+
+    let stats = load_seed_files(&kb, &files).await.unwrap();
+
+    assert_eq!(stats.inserted, 2);
+    assert_eq!(stats.skipped_existing, 1);
+    assert_eq!(kb.passage_count().unwrap(), 2);
+}
+
+/// A write failure in a later file rolls back every file's passages AND
+/// source rows, umbrella rows included — the whole corpus is one
+/// transaction (#308). Once the cause is gone the reload links children to
+/// their umbrella as usual.
+#[tokio::test]
+async fn a_write_failure_in_a_later_file_loads_nothing_from_any_file() {
+    let db = tempfile::NamedTempFile::new().unwrap();
+    let kb = SqliteKnowledgeBase::open_for_locale(db.path(), Locale::English).unwrap();
+    let good = write_jsonl(&[
+        r#"{"id":"p1","source":"seed","license":"CC0-1.0","attribution":"x","text":"ok"}"#,
+    ]);
+    let wiki = write_jsonl(&[
+        r#"{"id":"bad","source":"wiki-simple:en:bad","license":"CC-BY-SA-3.0","attribution":"a","text":"boom","parent_source":{"id":"wiki-simple:en","license":"CC-BY-SA-3.0","attribution":"Simple English Wikipedia"}}"#,
+    ]);
+    let files = [good.path().to_path_buf(), wiki.path().to_path_buf()];
+    let side = rusqlite::Connection::open(db.path()).unwrap();
+    side.execute_batch(
+        "CREATE TRIGGER reject_bad BEFORE INSERT ON passages_en_content
+         WHEN NEW.id = 'bad' BEGIN SELECT RAISE(ABORT, 'rejected'); END;",
+    )
+    .unwrap();
+
+    let msg = format!("{}", load_seed_files(&kb, &files).await.unwrap_err());
+    assert!(msg.contains("insert passage bad"), "{msg}");
+    assert_eq!(kb.passage_count().unwrap(), 0);
+    assert!(kb.list_sources().await.unwrap().is_empty());
+
+    side.execute_batch("DROP TRIGGER reject_bad;").unwrap();
+    let stats = load_seed_files(&kb, &files).await.unwrap();
+    assert_eq!(stats.inserted, 2);
+    let sources = kb.list_sources().await.unwrap();
+    let child = sources
+        .iter()
+        .find(|s| s.id == "wiki-simple:en:bad")
+        .unwrap();
+    assert_eq!(child.parent_source_id.as_deref(), Some("wiki-simple:en"));
+}
+
+/// The #308 contract end to end: a startup whose seed dir holds a bad file
+/// fails and leaves the KB empty, so the next startup's
+/// `auto_seed_if_empty` retries and loads everything.
+// The std Mutex is held across .await; see auto_seed_loads_all_matching_jsonl_files_in_dir.
+#[allow(clippy::await_holding_lock)]
+#[tokio::test]
+async fn auto_seed_retries_after_a_failed_startup() {
+    let seed_dir = tempfile::tempdir().unwrap();
+    let good = r#"{"id":"hand-1","source":"seed:en:hand-1","license":"CC0-1.0","attribution":"hand","text":"hand-drafted passage"}"#;
+    std::fs::write(seed_dir.path().join("seed_passages.en.jsonl"), good).unwrap();
+    let wiki = seed_dir.path().join("wiki_passages.en.jsonl");
+    std::fs::write(&wiki, "{not valid json").unwrap();
+    let db = tempfile::NamedTempFile::new().unwrap();
+    let kb = SqliteKnowledgeBase::open_for_locale(db.path(), Locale::English).unwrap();
+
+    let _guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    unsafe {
+        std::env::set_var("PRIMER_SEED_DIR", seed_dir.path());
+    }
+    let failed = auto_seed_if_empty(&kb, Locale::English).await;
+    let empty_after_failure = kb.passage_count().unwrap();
+    std::fs::write(
+        &wiki,
+        r#"{"id":"wiki-1","source":"wiki-simple:en:wiki-1","license":"CC-BY-SA-3.0","attribution":"wiki","text":"wikipedia passage"}"#,
+    )
+    .unwrap();
+    let retried = auto_seed_if_empty(&kb, Locale::English).await;
+    unsafe {
+        std::env::remove_var("PRIMER_SEED_DIR");
+    }
+
+    assert!(failed.is_err());
+    assert_eq!(empty_after_failure, 0);
+    let stats = retried.unwrap().expect("the retry should seed");
+    assert_eq!(stats.inserted, 2);
 }

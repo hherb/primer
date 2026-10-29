@@ -210,26 +210,7 @@ impl SqliteKnowledgeBase {
 impl KnowledgeBase for SqliteKnowledgeBase {
     async fn upsert_source(&self, source: &SourceMeta) -> Result<()> {
         let conn = self.conn.lock().unwrap();
-        conn.execute(
-            "INSERT INTO sources(id, license, attribution, source_url, retrieved_at, parent_source_id)
-                 VALUES (?1, ?2, ?3, ?4, ?5, ?6)
-                 ON CONFLICT(id) DO UPDATE SET
-                    license          = excluded.license,
-                    attribution      = excluded.attribution,
-                    source_url       = excluded.source_url,
-                    retrieved_at     = excluded.retrieved_at,
-                    parent_source_id = excluded.parent_source_id",
-            rusqlite::params![
-                source.id,
-                source.license,
-                source.attribution,
-                source.source_url,
-                source.retrieved_at,
-                source.parent_source_id,
-            ],
-        )
-        .map_err(|e| PrimerError::Knowledge(format!("upsert source: {e}")))?;
-        Ok(())
+        ingest::upsert_source_row(&conn, source)
     }
 
     async fn list_sources(&self) -> Result<Vec<SourceMeta>> {

@@ -1,7 +1,7 @@
-//! Passage ingest (write path): plain inserts, embedded inserts, and the
-//! `--reembed` backfill upsert. All go through the cached-statement
-//! `insert_passage_inner` core so the bootstrap-ingest loop stays cheap
-//! per row.
+//! Passage ingest (write path): plain and seed inserts (with their source
+//! rows), embedded inserts, and the `--reembed` backfill upsert. All go
+//! through the cached-statement `insert_passage_inner` core so the
+//! bootstrap-ingest loop stays cheap per row.
 
 use crate::SqliteKnowledgeBase;
 use crate::embedding_model::upsert_embedding_model;
@@ -9,7 +9,34 @@ use crate::locale_sql::LocaleSql;
 use crate::vector::vec_to_blob;
 use primer_core::embedder::Embedder;
 use primer_core::error::{PrimerError, Result};
+use primer_core::knowledge::SourceMeta;
 use rusqlite::Connection;
+
+/// Upsert one `sources` row, refreshing its metadata on conflict. Takes a
+/// `Connection` so it runs both standalone (`KnowledgeBase::upsert_source`)
+/// and inside `insert_seed`'s transaction.
+pub(crate) fn upsert_source_row(conn: &Connection, source: &SourceMeta) -> Result<()> {
+    conn.execute(
+        "INSERT INTO sources(id, license, attribution, source_url, retrieved_at, parent_source_id)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6)
+             ON CONFLICT(id) DO UPDATE SET
+                license          = excluded.license,
+                attribution      = excluded.attribution,
+                source_url       = excluded.source_url,
+                retrieved_at     = excluded.retrieved_at,
+                parent_source_id = excluded.parent_source_id",
+        rusqlite::params![
+            source.id,
+            source.license,
+            source.attribution,
+            source.source_url,
+            source.retrieved_at,
+            source.parent_source_id,
+        ],
+    )
+    .map_err(|e| PrimerError::Knowledge(format!("upsert source {}: {e}", source.id)))?;
+    Ok(())
+}
 
 impl SqliteKnowledgeBase {
     /// Insert a passage into the knowledge base. Its content row and FTS
@@ -19,13 +46,33 @@ impl SqliteKnowledgeBase {
     }
 
     /// Insert `(id, source, text)` passages in one transaction: either all
-    /// land or none do. The seed loader writes each file through this, so a
-    /// failed load leaves no half-seeded KB behind (#308).
+    /// land or none do.
     pub fn insert_passages(&self, passages: &[(&str, &str, &str)]) -> Result<()> {
+        self.insert_seed(&[], passages)
+    }
+
+    /// Upsert `sources` and insert `(id, source, text)` passages in one
+    /// transaction: either everything lands or nothing does. The seed
+    /// loader writes a whole seed corpus through this, so a failed load
+    /// leaves neither passages nor stray source rows behind (#308).
+    ///
+    /// Umbrella (parent-less) sources are written before their children:
+    /// `sources.parent_source_id` is an enforced FK, so a child written
+    /// first would fail the constraint.
+    pub fn insert_seed(
+        &self,
+        sources: &[SourceMeta],
+        passages: &[(&str, &str, &str)],
+    ) -> Result<()> {
         let conn = self.conn.lock().unwrap();
         let tx = conn
             .unchecked_transaction()
             .map_err(|e| PrimerError::Knowledge(format!("begin insert tx: {e}")))?;
+        let (umbrellas, children): (Vec<_>, Vec<_>) =
+            sources.iter().partition(|s| s.parent_source_id.is_none());
+        for src in umbrellas.into_iter().chain(children) {
+            upsert_source_row(&tx, src)?;
+        }
         for (id, source, text) in passages {
             Self::insert_passage_inner(&tx, &self.sql, id, source, text)?;
         }
@@ -47,13 +94,13 @@ impl SqliteKnowledgeBase {
     ) -> Result<i64> {
         conn.prepare_cached(&sql.insert_content)
             .and_then(|mut s| s.execute(rusqlite::params![id, source, text]))
-            .map_err(|e| PrimerError::Knowledge(format!("Insert failed: {e}")))?;
+            .map_err(|e| PrimerError::Knowledge(format!("insert passage {id}: {e}")))?;
 
         let rowid = conn.last_insert_rowid();
 
         conn.prepare_cached(&sql.insert_fts)
             .and_then(|mut s| s.execute(rusqlite::params![id, source, text, rowid]))
-            .map_err(|e| PrimerError::Knowledge(format!("FTS insert failed: {e}")))?;
+            .map_err(|e| PrimerError::Knowledge(format!("FTS insert passage {id}: {e}")))?;
 
         Ok(rowid)
     }
