@@ -332,6 +332,16 @@ pub async fn reembed_kb(
     for chunk in candidates.chunks(batch_size.max(1)) {
         let texts: Vec<&str> = chunk.iter().map(|(_, t)| t.as_str()).collect();
         let vecs = embedder.embed(&texts).await?;
+        // `zip` below would silently leave the tail unembedded (#311);
+        // checked before any upsert so a bad chunk writes nothing.
+        if vecs.len() != chunk.len() {
+            return Err(PrimerError::Knowledge(format!(
+                "embedder {} returned {} vector(s) for {} input(s); refusing to under-embed",
+                embedder.model_id(),
+                vecs.len(),
+                chunk.len()
+            )));
+        }
         for ((id, _), v) in chunk.iter().zip(vecs.into_iter()) {
             kb.upsert_embedding(id, embedder.model_id(), embedder.dim(), &v)?;
             done += 1;

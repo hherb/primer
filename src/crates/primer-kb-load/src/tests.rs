@@ -191,6 +191,48 @@ async fn reembed_backfills_passages_missing_embeddings() {
     assert_eq!(n2, 0);
 }
 
+/// An embedder whose batch endpoint drops the last item — the misbehaving
+/// openai-compat server of #311. Wraps `StubEmbedder` for the real vectors.
+struct DropsLastEmbedder(primer_embedding::StubEmbedder);
+
+impl primer_core::speech::Named for DropsLastEmbedder {
+    fn name(&self) -> &str {
+        "drops-last"
+    }
+}
+
+#[async_trait::async_trait]
+impl primer_core::embedder::Embedder for DropsLastEmbedder {
+    async fn embed(&self, texts: &[&str]) -> Result<Vec<Vec<f32>>> {
+        let mut v = self.0.embed(texts).await?;
+        v.pop();
+        Ok(v)
+    }
+    fn dim(&self) -> usize {
+        self.0.dim()
+    }
+    fn model_id(&self) -> &str {
+        self.0.model_id()
+    }
+}
+
+#[tokio::test]
+async fn reembed_errors_when_embedder_returns_fewer_vectors_than_inputs() {
+    let db = tempfile::NamedTempFile::new().unwrap();
+    let kb = SqliteKnowledgeBase::open_for_locale(db.path(), Locale::English).unwrap();
+    kb.insert_passage("p1", "src", "first text").unwrap();
+    kb.insert_passage("p2", "src", "second text").unwrap();
+
+    let short = DropsLastEmbedder(primer_embedding::StubEmbedder::with_dim(16));
+    let err = reembed_kb(&kb, &short, false, 8)
+        .await
+        .expect_err("a short batch must not be reported as success (#311)")
+        .to_string();
+    assert!(err.contains("returned 1 vector(s) for 2 input(s)"), "{err}");
+    // The bad chunk wrote nothing.
+    assert_eq!(kb.embedding_count().unwrap(), 0);
+}
+
 /// Serialise the three tests that mutate `PRIMER_SEED_DIR`. Cargo's
 /// default test harness runs `#[test]` functions in parallel; without
 /// this guard, two tests racing on the same env var would produce
