@@ -99,23 +99,62 @@ pub struct LoadStats {
     pub sources_seen: usize,
 }
 
+/// A parsed seed file, not yet written: its passages plus every source row
+/// they reference (umbrella rows included, de-duped by id).
+struct ParsedSeed {
+    passages: Vec<SeedPassage>,
+    sources: HashMap<String, SourceMeta>,
+}
+
 /// Load a JSONL file into `kb`. Sources are upserted; passages are
 /// inserted if their `id` is new, skipped otherwise.
+///
+/// The whole file is parsed before anything is written, and its passages
+/// land in one transaction, so a failed load writes no passages (#308).
 ///
 /// Errors:
 /// - I/O errors reading the file → `PrimerError::Knowledge` with context.
 /// - Malformed JSON → the line number and parse error are returned in
-///   `PrimerError::Knowledge`; loading aborts (no partial commit beyond
-///   the rows already inserted — each pair is its own transaction).
+///   `PrimerError::Knowledge`; nothing from the file is written.
 pub async fn load_jsonl(kb: &SqliteKnowledgeBase, path: &Path) -> Result<LoadStats> {
+    write_seed(kb, parse_jsonl(path)?).await
+}
+
+/// Load several seed files, parsing them all before writing any, so a bad
+/// line in a later file can't leave the earlier ones loaded — which would
+/// make the KB non-empty and stop `auto_seed_if_empty` from ever retrying
+/// (#308). Returns the stats aggregated across files.
+pub async fn load_seed_files(kb: &SqliteKnowledgeBase, paths: &[PathBuf]) -> Result<LoadStats> {
+    let parsed = paths
+        .iter()
+        .map(|p| parse_jsonl(p))
+        .collect::<Result<Vec<_>>>()?;
+    let mut total = LoadStats::default();
+    // shortcut: a write failure (e.g. disk full) in a later file still
+    // leaves the earlier files committed; one cross-file transaction would
+    // close that if it ever shows up.
+    for (path, seed) in paths.iter().zip(parsed) {
+        tracing::info!(
+            target = "primer-kb-load",
+            path = %path.display(),
+            "loading seed corpus"
+        );
+        let stats = write_seed(kb, seed).await?;
+        total.inserted += stats.inserted;
+        total.skipped_existing += stats.skipped_existing;
+        total.sources_seen += stats.sources_seen;
+    }
+    Ok(total)
+}
+
+/// Read and parse a JSONL seed file without touching the KB.
+fn parse_jsonl(path: &Path) -> Result<ParsedSeed> {
     let file = std::fs::File::open(path)
         .map_err(|e| PrimerError::Knowledge(format!("open {}: {e}", path.display())))?;
     let reader = BufReader::new(file);
-    let mut stats = LoadStats::default();
+    let mut passages = Vec::new();
     let mut sources: HashMap<String, SourceMeta> = HashMap::new();
     let now = chrono::Utc::now().timestamp();
-
-    let existing_ids: std::collections::HashSet<String> = existing_passage_ids(kb)?;
 
     for (line_no, line) in reader.lines().enumerate() {
         let line =
@@ -155,15 +194,15 @@ pub async fn load_jsonl(kb: &SqliteKnowledgeBase, path: &Path) -> Result<LoadSta
                     parent_source_id: None,
                 });
         }
-
-        if existing_ids.contains(&passage.id) {
-            stats.skipped_existing += 1;
-            continue;
-        }
-        kb.insert_passage(&passage.id, &passage.source, &passage.text)?;
-        stats.inserted += 1;
+        passages.push(passage);
     }
+    Ok(ParsedSeed { passages, sources })
+}
 
+/// Write a parsed seed file: sources first (so every passage that lands has
+/// its attribution row), then the new passages in one transaction.
+async fn write_seed(kb: &SqliteKnowledgeBase, seed: ParsedSeed) -> Result<LoadStats> {
+    let ParsedSeed { passages, sources } = seed;
     // Upsert umbrella (parent-less) rows before child rows: the
     // `sources.parent_source_id` FK references `sources(id)`, so a child
     // written before its umbrella exists would fail the constraint. The
@@ -174,7 +213,19 @@ pub async fn load_jsonl(kb: &SqliteKnowledgeBase, path: &Path) -> Result<LoadSta
     for src in sources.values().filter(|s| s.parent_source_id.is_some()) {
         kb.upsert_source(src).await?;
     }
-    stats.sources_seen = sources.len();
+
+    let existing_ids = existing_passage_ids(kb)?;
+    let new: Vec<(&str, &str, &str)> = passages
+        .iter()
+        .filter(|p| !existing_ids.contains(&p.id))
+        .map(|p| (p.id.as_str(), p.source.as_str(), p.text.as_str()))
+        .collect();
+    kb.insert_passages(&new)?;
+    let stats = LoadStats {
+        inserted: new.len(),
+        skipped_existing: passages.len() - new.len(),
+        sources_seen: sources.len(),
+    };
 
     tracing::info!(
         target = "primer-kb-load",
@@ -379,20 +430,13 @@ pub async fn auto_seed_if_empty(
         );
         return Ok(None);
     }
-    let mut total = LoadStats::default();
-    for path in &files {
-        tracing::info!(
-            target = "primer-kb-load",
-            locale = locale.pack_id(),
-            path = %path.display(),
-            "loading seed corpus into empty knowledge base"
-        );
-        let stats = load_jsonl(kb, path).await?;
-        total.inserted += stats.inserted;
-        total.skipped_existing += stats.skipped_existing;
-        total.sources_seen += stats.sources_seen;
-    }
-    Ok(Some(total))
+    tracing::info!(
+        target = "primer-kb-load",
+        locale = locale.pack_id(),
+        files = files.len(),
+        "loading seed corpus into empty knowledge base"
+    );
+    Ok(Some(load_seed_files(kb, &files).await?))
 }
 
 #[cfg(test)]

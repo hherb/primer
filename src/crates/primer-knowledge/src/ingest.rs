@@ -12,11 +12,25 @@ use primer_core::error::{PrimerError, Result};
 use rusqlite::Connection;
 
 impl SqliteKnowledgeBase {
-    /// Insert a passage into the knowledge base.
+    /// Insert a passage into the knowledge base. Its content row and FTS
+    /// row commit together, so BM25 can always see a stored passage (#308).
     pub fn insert_passage(&self, id: &str, source: &str, text: &str) -> Result<()> {
+        self.insert_passages(&[(id, source, text)])
+    }
+
+    /// Insert `(id, source, text)` passages in one transaction: either all
+    /// land or none do. The seed loader writes each file through this, so a
+    /// failed load leaves no half-seeded KB behind (#308).
+    pub fn insert_passages(&self, passages: &[(&str, &str, &str)]) -> Result<()> {
         let conn = self.conn.lock().unwrap();
-        Self::insert_passage_inner(&conn, &self.sql, id, source, text)?;
-        Ok(())
+        let tx = conn
+            .unchecked_transaction()
+            .map_err(|e| PrimerError::Knowledge(format!("begin insert tx: {e}")))?;
+        for (id, source, text) in passages {
+            Self::insert_passage_inner(&tx, &self.sql, id, source, text)?;
+        }
+        tx.commit()
+            .map_err(|e| PrimerError::Knowledge(format!("commit insert: {e}")))
     }
 
     /// Core two-statement insert (content row + FTS index row), shared by

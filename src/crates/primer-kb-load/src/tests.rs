@@ -345,3 +345,41 @@ async fn malformed_json_reports_line_number() {
     let msg = format!("{err}");
     assert!(msg.contains("line 2"), "expected line number, got: {msg}");
 }
+
+/// A malformed line anywhere in a file loads nothing from it — no passages,
+/// no sources — so the KB stays empty and the next startup's
+/// `auto_seed_if_empty` retries (#308).
+#[tokio::test]
+async fn malformed_line_loads_nothing_from_the_file() {
+    let db = tempfile::NamedTempFile::new().unwrap();
+    let kb = SqliteKnowledgeBase::open_for_locale(db.path(), Locale::English).unwrap();
+    let jsonl = write_jsonl(&[
+        r#"{"id":"p1","source":"seed","license":"CC0-1.0","attribution":"x","text":"ok"}"#,
+        r#"{not valid json"#,
+        r#"{"id":"p3","source":"seed","license":"CC0-1.0","attribution":"x","text":"ok"}"#,
+    ]);
+
+    assert!(load_jsonl(&kb, jsonl.path()).await.is_err());
+
+    assert_eq!(kb.passage_count().unwrap(), 0);
+    assert!(kb.list_sources().await.unwrap().is_empty());
+}
+
+/// Every seed file is parsed before any is written, so a bad later file
+/// leaves the earlier ones unloaded too, and the KB stays retryable (#308).
+#[tokio::test]
+async fn a_malformed_seed_file_loads_nothing_from_any_file() {
+    let db = tempfile::NamedTempFile::new().unwrap();
+    let kb = SqliteKnowledgeBase::open_for_locale(db.path(), Locale::English).unwrap();
+    let good = write_jsonl(&[
+        r#"{"id":"p1","source":"seed","license":"CC0-1.0","attribution":"x","text":"ok"}"#,
+    ]);
+    let bad = write_jsonl(&[r#"{not valid json"#]);
+    let files = [good.path().to_path_buf(), bad.path().to_path_buf()];
+
+    assert!(load_seed_files(&kb, &files).await.is_err());
+    assert_eq!(kb.passage_count().unwrap(), 0);
+
+    let stats = load_seed_files(&kb, &files[..1]).await.unwrap();
+    assert_eq!(stats.inserted, 1, "the retry loads cleanly");
+}
