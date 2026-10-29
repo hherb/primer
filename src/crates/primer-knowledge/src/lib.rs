@@ -14,7 +14,8 @@
 //!   (and the public [`USER_VERSION`] constant).
 //! - [`ingest`] — the passage write path (plain / embedded / `--reembed`).
 //! - [`retrieval`] — the hybrid (BM25 + vector cosine) read path.
-//! - [`vector`] / [`embedding_model`] / [`fts`] — pure leaf helpers.
+//! - [`vector`] / [`embedding_model`] — pure leaf helpers (FTS5 query
+//!   sanitisation is shared via [`primer_core::fts_util`]).
 //!
 //! The BM25-only [`KnowledgeBase`] trait impl and the struct's lifecycle +
 //! diagnostic accessors live here in the crate root.
@@ -49,7 +50,6 @@
 #![allow(rustdoc::private_intra_doc_links)]
 
 mod embedding_model;
-mod fts;
 mod ingest;
 mod locale_sql;
 mod retrieval;
@@ -260,14 +260,12 @@ impl KnowledgeBase for SqliteKnowledgeBase {
     }
 
     async fn retrieve(&self, query: &str, params: &RetrievalParams) -> Result<Vec<Passage>> {
-        // Sanitize the input into FTS5-friendly form: strip reserved
-        // keywords and non-alphanumerics, OR-join the surviving tokens.
+        // Sanitize the input into FTS5-friendly form: strip
+        // non-alphanumerics, quote and OR-join the surviving tokens.
         // Without this, a natural-language query like "how does the sun
         // shine" would AND every token together (FTS5's default) and
-        // miss any passage that uses different filler words. Mirrors the
-        // sanitizer in `primer-storage`; consolidating both into
-        // `primer-core::fts_util` is a separate cleanup.
-        let phrase = fts::sanitize_fts_phrase(query);
+        // miss any passage that uses different filler words.
+        let phrase = primer_core::fts_util::sanitize_fts_phrase(query);
         if phrase.is_empty() {
             return Ok(vec![]);
         }

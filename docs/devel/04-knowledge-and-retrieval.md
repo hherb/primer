@@ -70,7 +70,7 @@ The shorter `SqliteKnowledgeBase::open(path)` exists for back-compat but is `#[d
 
 SQLite FTS5 ranks results with BM25, which is the lexical-overlap baseline that has powered most search engines since the 1990s. One quirk worth knowing: FTS5 returns BM25 scores as **negative** numbers (more negative = more relevant), because internally the ranker is sorted ascending. The `KnowledgeBase` public API negates this when it builds a `Passage`, so callers always see "higher = more relevant" — the `score` field is monotonic in the natural sense. If you ever read raw `bm25(...)` values in a debugging session, remember the sign flip when comparing them to what the trait returns.
 
-Child input is sanitised before it touches FTS5. Tokens are stripped of non-alphanumeric characters, FTS5 reserved keywords (`AND`, `OR`, `NOT`, `NEAR`) are dropped, surviving tokens are quoted and OR-joined. An empty result short-circuits the query. This is what allows the long-term-memory layer in `primer-storage` to take raw child input safely; BM25 + `LIMIT k` keeps the OR-join from producing noise.
+Child input is sanitised before it touches FTS5. Tokens are stripped of non-alphanumeric characters, then every surviving token is quoted and OR-joined. The FTS5 keywords `AND` / `OR` / `NOT` / `NEAR` are kept: quoted, they are plain terms, not operators (issue #309). An empty result short-circuits the query. This is what allows the long-term-memory layer in `primer-storage` to take raw child input safely; BM25 + `LIMIT k` keeps the OR-join from producing noise.
 
 ## Hybrid retrieval
 

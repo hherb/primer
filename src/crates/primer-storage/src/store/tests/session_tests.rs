@@ -1147,9 +1147,8 @@ async fn retrieve_session_turns_returns_empty_when_no_match() {
 async fn retrieve_session_turns_handles_quotes_and_special_chars() {
     // FTS5-special characters and reserved keywords in the input
     // must not be interpreted as operators. Hostile chars get
-    // stripped, reserved tokens (`OR`, `NEAR`, ...) are dropped,
-    // surviving content tokens are quoted and ANDed — meaningful
-    // words still match the indexed turn.
+    // stripped, every surviving token (keywords included) is quoted
+    // and OR-joined — meaningful words still match the indexed turn.
     use primer_core::conversation::Speaker;
     let store = open_memory();
     let mut session = Session::new(Uuid::new_v4());
@@ -1167,18 +1166,27 @@ async fn retrieve_session_turns_handles_quotes_and_special_chars() {
 }
 
 #[tokio::test]
-async fn retrieve_session_turns_drops_only_reserved_tokens() {
-    // A query that is *nothing but* FTS5 keywords + special chars
-    // must not produce a query that matches everything; it must
-    // produce an empty result via the empty-phrase short-circuit.
+async fn retrieve_session_turns_treats_fts_keywords_as_terms() {
+    // A query of *nothing but* FTS5 keywords + special chars must
+    // neither error nor match everything: quoted, the keywords are
+    // ordinary terms (#309), so only a turn containing one matches.
+    use primer_core::conversation::Speaker;
     let store = open_memory();
-    let session = Session::new(Uuid::new_v4());
+    let mut session = Session::new(Uuid::new_v4());
+    session.add_turn(make_turn(Speaker::Child, "what is plasma", None, vec![]));
+    session.add_turn(make_turn(
+        Speaker::Child,
+        "the moon is not near",
+        None,
+        vec![],
+    ));
     store.save_session(&session).await.unwrap();
     let hits = store
         .retrieve_session_turns(session.id, "AND OR NOT NEAR \" * ^", 10, 1000)
         .await
         .unwrap();
-    assert!(hits.is_empty());
+    assert_eq!(hits.len(), 1, "{hits:?}");
+    assert_eq!(hits[0].text, "the moon is not near");
 }
 
 #[tokio::test]

@@ -1,102 +1,78 @@
 # Primer — Next Session Brief
 
 **Audience:** future Claude Code session continuing work on this repo.
-**Last updated:** 2026-10-24 (UTC).
+**Last updated:** 2026-10-28 (UTC).
 
-**Two PRs are open against `main`:**
+**Three PRs are open against `main`** (no file overlap between them, so any merge order works):
 
 | PR | Branch | What | Closes |
 |---|---|---|---|
-| **#369** | `fix/voice-start-keeps-session-366` | A failed voice-mode start keeps the text session (this brief rides on it) | #366 |
-| **#370** | `fix/turn-classifications-cascade-331` | Schema v9: session delete cascades through `turn_classifications` | #331 |
+| **#374** | `fix/embedder-validation-optional-310` | Embedder-model validation propagates SELECT errors | #310 |
+| **#375** | `fix/reembed-vec-count-311` | `reembed_kb` errors on a short embedder batch (+ README `--force` wording) | #311 |
+| **#376** | `fix/fts-keep-keyword-terms-309` | FTS sanitizer keeps `AND`/`OR`/`NOT`/`NEAR` as terms (this brief rides on it) | #309 |
 
-`main` is at `221ee0c` (#368).
+`main` is at `5dcbe5f` (#370).
 
 **Since the last brief:**
-- **#367 and #368 merged.**
-- **#332 is confirmed CLOSED.**
+- **#369 and #370 merged**; #366 and #331 are CLOSED.
+- The #369 review produced two new issues: **#371** (`stop_voice_mode_inner`'s 5 s timeout detaches instead of aborting) and **#372** (consent-modal Cancel never persists `voice_mode_enabled=false`).
 - **#352 stays open**, as planned.
 
 ## What we shipped this session
 
-### #369 (`eb98d9f` + this brief's docs commit): closes #366
+### #374 (`10d93ef`): closes #310
+- **Problem:** all four `embedding_models` lookups (KB + session DB, validate + upsert) used `query_row(..).ok()`. A missing table, corrupt page or type error read as "unregistered", so the dim-mismatch hard error never fired.
+- **Fix:** `.optional()` + `map_err` → only "no row" means unregistered; anything else propagates as `Knowledge` / `Storage`.
+- **Tests:** per crate — corrupt-`dim` row and missing-table validate errors, upsert-on-corrupt-row errors, fresh-DB-unregistered Ok. Mutation-checked (reverting to `.ok()` turns both validate tests red). Knowledge's `embedding_model.rs` got its first test module.
 
-**Problem:** `start_voice_mode` closed the text session and the voice loop before the steps that can fail (assets, backend init). A consent "Cancel", `auto_download_disabled` or a backend error then left a dead-session composer.
+### #375 (`cb57dc6` + `eac468e`): closes #311
+- **Problem:** `reembed_kb` zipped inputs with vectors, so a short batch left tail passages unembedded and still returned `Ok`.
+- **Fix:** `vecs.len() != chunk.len()` → `PrimerError::Knowledge`, checked **before** any upsert so a bad chunk writes nothing.
+- **Tests:** a `DropsLastEmbedder` mock (StubEmbedder minus the last vector); red before the fix. Adds `async-trait` as a `primer-kb-load` dev-dep.
+- **README:** the `reembed_kb` paragraph no longer claims `force` re-embeds everything. Filed the real gap as **#377**.
 
-**Fix:**
-- **Desktop order:** assets → backends → close text session and voice loop → build session → spawn.
-- **Why the session build stays after the close:** the close flushes learner-model updates, and the build reads them back. Building earlier would load a stale learner, which later overwrites the fresh one.
-- **Residual:** a `shortcut:` comment covers a session-build failure after the close. It needs a config change between the two builds.
-- **Android:** `start_voice_mode_android` gets the same reorder. The JNI bridge, the `RECORD_AUDIO` check and the backends now run before the teardown.
-- **No JS change:** the consent "Cancel" path calls `stop_voice_mode`, which is a no-op when no loop is running.
+### #376 (`b37f8dc` + this brief's docs commit): closes #309
+- **Problem:** both `sanitize_fts_phrase` copies dropped `AND`/`OR`/`NOT`/`NEAR`. Every token is already quoted, and quoted they are plain FTS5 terms, so the filter was pure recall loss.
+- **Fix:** filter removed in `primer-knowledge/src/fts.rs` and `primer-storage/src/store/fts.rs`.
+- **Tests:** knowledge end-to-end ("NEAR" retrieves the "near" passage; keyword-only hostile input raises no FTS5 error; red before the fix); storage unit + session-retrieval tests flipped from "dropped" to "kept as terms".
+- **Retrieval check:** EN/DE BM25 retrieval-quality benchmarks green; ignored `bm25_floor_tripwire` unchanged (min 0.95, median 4.25, worst top-1 2.06). The `--features fastembed` hybrid benchmarks were **not** run.
+- **Docs:** CLAUDE.md FTS bullet, `docs/devel/04` + `05`.
 
-**Test seam:**
-- Both commands are now generic over `R: tauri::Runtime`; `generate_handler!` infers `Wry`.
-- `primer-gui` dev-deps enable `tauri`'s `test` feature.
-- `commands/voice/tests.rs` drives the **real** commands via `tauri::test::mock_app`, with shared helpers `app_with_text_session` and `assert_text_session_untouched`.
-- Two tests, `speech` and `android-native` arms. Both are mutation-checked: moving the teardown back in front turns them red.
+### Gate
+- `cargo test --workspace` on the #375 branch: 1385/0.
+- Per touched crate (each branch): test, clippy `--all-targets -D warnings`, fmt, rustdoc `--document-private-items` clean.
+- **Not run this session:** the full rustdoc feature-arm loop and the `primer-gui` speech / android-native clippy arms — no touched crate is feature-gated.
 
-**Gate:**
-- `cargo test --workspace`: 1383/0.
-- `primer-gui` speech: 296/0; android-native: 252/0.
-- clippy `-D warnings`: workspace, gui speech, gui android-native.
-- fmt: clean.
-- rustdoc: gui default, speech and android-native.
-
-**Docs:** CLAUDE.md voice paragraph.
-
-### #370 (`e5ae2b2`): closes #331
-
-**Fix:** `schema/migrations/v9.rs` rebuilds `turn_classifications` with `turn_id … ON DELETE CASCADE`.
-- Create / copy / drop / rename in one transaction, guarded by `pragma_foreign_key_list`, so it runs once.
-- **No `session_id` column:** `turns.session_id` already cascades, so this needs no backfill and no insert-path change.
-- Carried over: rows, ids, UNIQUE and the index.
-- `USER_VERSION` = 9.
-- The duplicate `user_version_is_eight` test (`session_tests.rs`) is dropped.
-
-**Tests:** 2 new in `v4_tests.rs`. Mutation-checked: a no-op v9 reproduces the exact FK error.
-
-**Gate:** workspace 1384/0; clippy, fmt and rustdoc (`primer-storage`) clean.
-
-**Docs:**
-- CLAUDE.md, now "version 9", with v9 named as the FK-rebuild template.
-- `docs/devel/05-storage-and-sessions.md`: new table row, and the recipe shifted to a hypothetical v10.
-- The v5 comment.
-
-> SHAs are the branch-tip commits as pushed; squash-merge will give new ones on `main`.
+> SHAs are branch-tip commits as pushed; squash-merge gives new ones on `main`.
 
 ### Per-session sweep
-- **Inline-test detector:** clean for the sixteenth session running.
+- **Inline-test detector:** clean for the seventeenth session running.
 - **Oversized list:** unchanged.
 
 ## What's next (concrete acceptance criteria)
 
-### 0. Owner review/merge: #369, #370
-- **Acceptance:** CI is green and both merge.
-- Then check: `gh issue view 366 --json state` and `gh issue view 331 --json state` should both be CLOSED.
-- **Merge-order note:** both PRs edit CLAUDE.md, on different lines. If the second squash conflicts, rebase it.
+### 0. Owner review/merge: #374, #375, #376
+- **Acceptance:** CI green, all three merge; then `gh issue view 309|310|311 --json state` are all CLOSED.
 
 ### 1. Sweep + inline-test detector: re-run EVERY session
 Commands are in the resume block.
 
 ### 2. Bugs (host-completable; TDD each)
-- **#352 remaining:**
-  - **Item 2 needs an owner decision first** (see Open decisions).
-  - Items 1 and 4 (per-turn "served by" signal; subsystem soft-fail signal) need a design note before code.
-- **Older:** #307–#316 (retrieval/storage/streaming), #325/#326 (voice). Pick the smallest host-testable one. Run `gh issue list --state open` and read each issue before choosing.
-- **Session-delete follow-on (only if the owner wants it):** now that every turn-child table cascades, a `SessionStore::delete_session` + GUI "delete this session" feature is unblocked. This is new feature work, so brainstorm it with the owner first.
+- **Smallest next picks:**
+  - **#377** `reembed_kb --force` should re-embed everything. Acceptance: embed with a dim-8 stub, `force`-reembed with a dim-16 stub → every passage carries the dim-16 model's vector; decide (and test) what happens to the old `embedding_models` row.
+  - **#372** consent-modal Cancel persists `voice_mode_enabled=false`. Acceptance: a contract test (`*_contract.rs` pattern) or command test proves Cancel writes the sticky toggle off, so the modal does not re-appear next launch.
+  - **#308** kb-load seed loading not atomic. Acceptance: a malformed JSONL line leaves the KB with zero passages from that file (one transaction), test with a 3-line file whose line 2 is bad.
+- **#371** (voice-loop abort on stop timeout) is bigger: needs a `JoinHandle::abort` design note first.
+- **#352 remaining:** item 2 needs the owner decision below; items 1 and 4 need a design note before code.
+- **Older:** #307, #312–#316, #325/#326, #362, #364, #365. Read each before choosing.
 
 ### 3. Production-code splits (owner-approved lane, all feature-gated, so dual-verify)
-- **`primer-inference/src/qnn/genie/real.rs`** (566 lines, `qnn`) is the recommended one. Baselines:
-  - `cargo test -p primer-inference`;
-  - `cargo clippy -p primer-inference --features qnn --all-targets -- -D warnings`;
-  - the rustdoc `qnn` arm.
+- **`primer-inference/src/qnn/genie/real.rs`** (566 lines, `qnn`) is the recommended one. Baselines: `cargo test -p primer-inference`; `cargo clippy -p primer-inference --features qnn --all-targets -- -D warnings`; the rustdoc `qnn` arm.
 - **`primer-speech/src/macos/{tts.rs 668, stt.rs 504}`** (`macos-native`).
-- **Low value:** `state_machine/inner.rs` (506).
-- **Hardest:** `primer-cli/src/main.rs` (1353).
+- **Low value:** `state_machine/inner.rs` (506). **Hardest:** `primer-cli/src/main.rs` (1353).
 
 ### Carried / owner-or-hardware-gated
-- **#260:** Android-voice on-device acceptance. Also re-check, on device, that a denied mic now keeps the text session (#369).
+- **#260:** Android-voice on-device acceptance; also re-check on device that a denied mic keeps the text session (#369).
 - **#192:** manual macOS-native STT + injected TTS smoke.
 - **#170 Stages B, E and F:** the OpenRAIL-M disclosure must ship before any default flip.
 - **#166 item #1:** owner-run WhisperStream reuse smoke.
@@ -107,24 +83,19 @@ Commands are in the resume block.
 ## Open decisions / risks
 
 ### #352 item 2: what counts as a pointless fallback? (owner decision, unchanged)
-`--fallback-backend == --backend` with a different **model** is a legitimate setup: small/big ollama models, or hybrid routing on one server.
-
-**Options:**
+`--fallback-backend == --backend` with a different **model** is legitimate (small/big ollama models, or hybrid routing on one server).
 - (a) notice only when kind **and** model match;
-- (b) kind-only, but worded as "no protection if the server goes down";
+- (b) kind-only, worded as "no protection if the server goes down";
 - (c) drop the item and keep the `tracing::warn!`.
 
-**Recommendation:** (a). Also downgrade or drop today's kind-only warn on the router path.
+**Recommendation:** (a), and downgrade or drop today's kind-only warn on the router path.
 
-### #369
-- **A session-build failure after the close still loses the text session.** Marked with a `shortcut:` comment in `start.rs`. It is rare (it needs a config change between the two builds), but it is not zero.
-- **Backends are now built while a voice loop could still be running.** The frontend guards with `state.active` / `state.starting`, so this is only the defensive step-2 path. If it ever happens, a second cpal mic would open briefly. On hosts that refuse a second stream, the start now fails and leaves the old loop running, which is safer than before.
-- **Not checked in a live `cargo tauri dev` session** or on an Android device.
-- **New dev-only dependency surface:** `tauri`'s `test` feature (`MockRuntime`).
-
-### #370
-- **v9 rebuilds the table on first open.** That is a full copy, but `turn_classifications` holds one row per turn, so it is small.
-- **The drop / rename runs with `foreign_keys = ON`.** This is safe because no table references `turn_classifications`. **If a future table ever FKs to it, revisit this.**
+### This session
+- **#376 changes BM25 query terms.** Common words "and"/"or"/"not" now take part in scoring. BM25 benchmarks and the floor tripwire are unchanged, but the **fastembed hybrid benchmarks were not run**. Run them before trusting the hybrid recall numbers: `~/.cargo/bin/cargo test -p primer-kb-load --features fastembed --test retrieval_quality_hybrid --test retrieval_quality_hybrid_de` (downloads ~570 MB BGE-M3 on first run).
+- **#374 turns a previously-silent DB problem into a hard error** on hybrid retrieval. That is the point, but a user with a genuinely corrupt `embedding_models` row now sees a retrieval error instead of BM25-only results.
+- **#375:** earlier chunks stay embedded when a later chunk fails. Safe, because reruns are idempotent, but the run reports an error, not a partial count.
+- **#369 residuals (unchanged):** a session-build failure after the close still loses the text session (`shortcut:` in `start.rs`); not checked in a live `cargo tauri dev` session or on device.
+- **#370:** v9 drop/rename runs with `foreign_keys = ON`; revisit if a future table ever FKs to `turn_classifications`.
 
 ### Carried from earlier sessions
 - **Mislabelled rows from before #363:** rows in `turn_classifications` / `comprehension_classifiers` from earlier degraded sessions keep the wrong id. Under `PrimaryUnavailable`, a model-only override runs on the fallback kind; an invalid model there soft-fails per turn and is only logged (#352 item 4).
@@ -150,6 +121,8 @@ Commands are in the resume block.
 - **Migration tests:** pin *behaviour* (cascade fires, UNIQUE rejects), not DDL text. Build `fresh_vN_conn()` by chaining the earlier helpers. Fixtures should call the real `apply_vN_migrations`; never hand-roll the DDL.
 - **Effective backend:** use `primer_engine::served_identity(...)` everywhere. Never re-derive it from `config.backend.kind`.
 - **End-to-end degraded-primary GUI tests:** pair a `qnn` primary with a `cloud` fallback and an Inline key (`primary_unavailable_cloud_fallback_config()`).
+- **Misbehaving-embedder tests:** wrap `StubEmbedder` and alter its output (`DropsLastEmbedder` in `primer-kb-load/src/tests.rs`). `Named` lives at `primer_core::speech::Named`.
+- **Corrupt-row DB tests:** register a row, then `UPDATE … SET <int col> = 'not-a-number'` to force a read-side type error (`conn_with_corrupt_dim`).
 - **Env-var-dependent code:** inject `impl Fn(&str) -> Option<String>`; never use `set_var`.
 - **Mutation-check new tests:**
   1. Back up the file to the scratchpad.
@@ -173,7 +146,7 @@ Commands are in the resume block.
 
 ```bash
 cd /Users/hherb/src/primer && git status --short && git checkout main && git pull --ff-only && git log --oneline -6 && gh pr list --state open
-# Open at close: #369, #370. After merge: gh issue view 366 --json state; gh issue view 331 --json state   (352 stays open)
+# Open at close: #374, #375, #376. After merge: for i in 309 310 311; do gh issue view $i --json state; done
 S=/private/tmp/primer-scratch; mkdir -p "$S"   # or the session's scratchpad dir
 
 # === Oversized-file sweep + inline-test detector (re-verify EVERY session) ===
@@ -203,5 +176,6 @@ for spec in "-p primer-speech --features voice-loop,silero,whisper,piper,cpal,su
 
 ## Reporting back
 
-- **#369:** if starting voice mode fails (for example, you cancel the voice-model download, or the microphone isn't allowed), your text conversation now keeps working instead of silently ending. Closes #366.
-- **#370:** the session database can now delete a whole conversation cleanly. Before, the stored engagement labels blocked it. This unblocks a future "delete my history" feature. Closes #331.
+- **#374:** if the embedding registry in a database is damaged, the Primer now says so instead of silently searching with the wrong model. Closes #310.
+- **#375:** re-embedding the knowledge base now stops with an error if the embedding server drops items, instead of quietly leaving some passages unsearchable. Closes #311.
+- **#376:** questions containing "not", "near", "or" or "and" now use those words when searching ("why is the moon so near" keeps "near"). Closes #309.
