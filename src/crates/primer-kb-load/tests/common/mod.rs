@@ -10,6 +10,8 @@
 //!   (kept at the top level for back-compat with existing tests).
 //! - German: `common::de::QUERIES_DE`, `KNOWN_FAILING_QUERIES_DE`,
 //!   `KNOWN_FAILING_QUERIES_DE_HYBRID` — see `tests/common/de.rs`.
+//! - Off-topic small talk (EN + DE) for the #307 query gate:
+//!   `common::off_topic` — see `tests/common/off_topic.rs`.
 
 #![allow(dead_code)] // not every BenchQuery field is read by every consumer
 

@@ -969,3 +969,30 @@ async fn retrieve_hybrid_query_gate_ignored_when_vector_leg_is_empty() {
         .unwrap();
     assert_eq!(hits.len(), 1);
 }
+
+#[tokio::test]
+async fn retrieve_hybrid_query_gate_judges_best_hit_not_first_inserted() {
+    // The gate reads the vector leg's first hit, so this pins that the
+    // leg is best-first: the matching passage is inserted SECOND, behind
+    // an unrelated one, and the query must still clear the gate.
+    use primer_embedding::StubEmbedder;
+    let db = tmp_db();
+    let kb = SqliteKnowledgeBase::open_for_locale(db.path(), Locale::English).unwrap();
+    let stub = StubEmbedder::with_dim(64);
+    kb.insert_passage_with_embedding("p0", "src", "volcanoes erupt when magma rises", &stub)
+        .await
+        .unwrap();
+    kb.insert_passage_with_embedding("p1", "src", GATE_PASSAGE, &stub)
+        .await
+        .unwrap();
+
+    let hits = kb
+        .retrieve_hybrid(
+            GATE_PASSAGE,
+            &stub,
+            &gated_params(Some(QUERY_GATE_TEST_COSINE)),
+        )
+        .await
+        .unwrap();
+    assert_eq!(hits.first().map(|p| p.id.as_str()), Some("p1"), "{hits:?}");
+}

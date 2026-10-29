@@ -50,6 +50,10 @@ pub const OFF_TOPIC_DE: &[&str] = &[
 /// 0.45 gate, so they still retrieve passages. The gate leaves a recall
 /// margin below the lowest on-topic benchmark query (0.473) rather than
 /// catch these; see `KB_QUERY_GATE_MIN_COSINE_BGE_M3`.
+///
+/// Keyed by text alone, not locale: an utterance in both lists (e.g.
+/// "okay") must leak in both locales or neither, or the both-ways check
+/// can't be satisfied — reword one copy if they ever diverge.
 pub const KNOWN_LEAKING_OFF_TOPIC: &[&str] = &[
     "good morning",
     "hello",

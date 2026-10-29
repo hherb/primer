@@ -110,8 +110,9 @@ pub struct HybridParams {
     /// ("can we", "what is your"). An empty vector leg (no stored
     /// vectors) is never gated. Cosine scales are model-specific, so
     /// pick the value with [`kb_query_gate_min_cosine`] rather than
-    /// hard-coding one. Only the knowledge-base path applies it;
-    /// long-term-memory turn retrieval ignores it.
+    /// hard-coding one. Only `SqliteKnowledgeBase`'s hybrid path applies
+    /// it; the trait's BM25-only default impl and long-term-memory turn
+    /// retrieval ignore it.
     pub min_top_cosine: Option<f64>,
     /// Restrict to specific sources (empty = search all).
     pub source_filter: Vec<String>,
@@ -135,7 +136,10 @@ impl Default for HybridParams {
 /// the embedder `model_id`, or `None` for a model nobody has calibrated —
 /// raw cosine scales differ per model, and a gate tuned for one would
 /// silently empty every result under another (the stub embedder's
-/// cosines are near zero, for instance).
+/// cosines are near zero, for instance). The match is the exact id
+/// string, so `bge-m3:latest` gets no gate, while an ollama/openai-compat
+/// embedder whose model is literally named `bge-m3` inherits the
+/// fastembed calibration.
 pub fn kb_query_gate_min_cosine(model_id: &str) -> Option<f64> {
     use crate::consts::retrieval as r;
     (model_id == r::BGE_M3_MODEL_ID).then_some(r::KB_QUERY_GATE_MIN_COSINE_BGE_M3)
@@ -266,5 +270,10 @@ mod retrieval_params_tests {
         );
         assert_eq!(kb_query_gate_min_cosine("stub-fxhash-v1"), None);
         assert_eq!(kb_query_gate_min_cosine("nomic-embed-text"), None);
+        assert_eq!(
+            kb_query_gate_min_cosine("bge-m3:latest"),
+            None,
+            "exact match only"
+        );
     }
 }

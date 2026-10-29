@@ -83,6 +83,13 @@ impl SqliteKnowledgeBase {
         if let (Some(floor), Some(best)) = (params.min_top_cosine, vec_hits.first())
             && best.score < floor
         {
+            tracing::debug!(
+                target: "primer::retrieval",
+                best_cosine = best.score,
+                floor,
+                bm25_dropped = bm25.len(),
+                "off-topic gate: hybrid KB retrieval emptied"
+            );
             return Ok(vec![]);
         }
 
@@ -156,6 +163,12 @@ impl SqliteKnowledgeBase {
                 continue;
             }
             let sim = cosine(query, &v) as f64;
+            if !sim.is_finite() {
+                // A NaN breaks the sort's ordering, so `first()` would no
+                // longer be the best hit the off-topic gate judges.
+                tracing::warn!(target: "primer::retrieval", passage = %id, "non-finite cosine; skipping");
+                continue;
+            }
             scored.push((
                 sim,
                 Passage {
