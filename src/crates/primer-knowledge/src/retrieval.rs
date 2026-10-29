@@ -33,7 +33,9 @@ impl SqliteKnowledgeBase {
     /// but with stored vectors under a different model logs a warning
     /// and returns an empty vec leg (effective BM25-only fallback) —
     /// silent degradation would invisibly hurt retrieval. A `min_score`
-    /// floor and a `source_filter` allow-list apply post-fusion.
+    /// floor and a `source_filter` allow-list apply post-fusion; the
+    /// `min_top_cosine` off-topic gate applies before fusion and empties
+    /// the whole result.
     pub(crate) async fn retrieve_hybrid_inner(
         &self,
         query: &str,
@@ -74,6 +76,15 @@ impl SqliteKnowledgeBase {
             )));
         }
         let vec_hits = self.knn_scan(&q_vec, embedder.model_id(), params.vector_top_k)?;
+
+        // Off-topic gate (issue #307): `knn_scan` sorts by cosine, so the
+        // first hit is the best match. An empty vector leg has nothing to
+        // judge, so it falls through to BM25 as before.
+        if let (Some(floor), Some(best)) = (params.min_top_cosine, vec_hits.first())
+            && best.score < floor
+        {
+            return Ok(vec![]);
+        }
 
         // 3. RRF fusion. We fuse over passage `id`s (string-stable across
         //    legs) since BM25 and the vector path both produce `Passage`s.

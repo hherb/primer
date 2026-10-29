@@ -2431,6 +2431,7 @@ async fn retrieve_session_turns_hybrid_includes_bm25_hit() {
                 final_top_k: 3,
                 rrf_k: 60.0,
                 min_score: f64::NEG_INFINITY,
+                min_top_cosine: None,
                 source_filter: vec![],
             },
             1000,

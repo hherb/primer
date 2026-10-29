@@ -569,6 +569,7 @@ async fn retrieve_hybrid_returns_relevant_passage() {
                 final_top_k: 3,
                 rrf_k: 60.0,
                 min_score: f64::NEG_INFINITY,
+                min_top_cosine: None,
                 source_filter: vec![],
             },
         )
@@ -870,4 +871,101 @@ async fn clear_embeddings_resets_this_locale_and_prunes_unused_models() {
         matches!(still_pinned, Err(PrimerError::Knowledge(_))),
         "model-b is still used by de, so its dim stays 4, got {still_pinned:?}"
     );
+}
+
+/// Hybrid params for the query-gate tests: wide legs, no fused floor, and
+/// the given gate. A stub cosine between two different strings is near
+/// zero, and exactly 1.0 for identical strings, so `QUERY_GATE_TEST_COSINE`
+/// sits safely between the two.
+fn gated_params(gate: Option<f64>) -> HybridParams {
+    HybridParams {
+        bm25_top_k: 5,
+        vector_top_k: 5,
+        final_top_k: 3,
+        rrf_k: 60.0,
+        min_score: f64::NEG_INFINITY,
+        min_top_cosine: gate,
+        source_filter: vec![],
+    }
+}
+
+const QUERY_GATE_TEST_COSINE: f64 = 0.9;
+const GATE_PASSAGE: &str = "the sky is blue because of rayleigh scattering";
+
+#[tokio::test]
+async fn retrieve_hybrid_query_gate_drops_off_topic_query_from_both_legs() {
+    // Issue #307: "rayleigh" matches p1 on the BM25 leg, but the vector
+    // leg's best cosine is below the gate, so the query counts as off-topic
+    // and NOTHING comes back — the BM25 hit included.
+    use primer_embedding::StubEmbedder;
+    let db = tmp_db();
+    let kb = SqliteKnowledgeBase::open_for_locale(db.path(), Locale::English).unwrap();
+    let stub = StubEmbedder::with_dim(64);
+    kb.insert_passage_with_embedding("p1", "src", GATE_PASSAGE, &stub)
+        .await
+        .unwrap();
+
+    let ungated = kb
+        .retrieve_hybrid("rayleigh", &stub, &gated_params(None))
+        .await
+        .unwrap();
+    assert_eq!(ungated.len(), 1, "without a gate the BM25 hit comes back");
+
+    let gated = kb
+        .retrieve_hybrid(
+            "rayleigh",
+            &stub,
+            &gated_params(Some(QUERY_GATE_TEST_COSINE)),
+        )
+        .await
+        .unwrap();
+    assert!(
+        gated.is_empty(),
+        "gated query must return nothing: {gated:?}"
+    );
+}
+
+#[tokio::test]
+async fn retrieve_hybrid_query_gate_keeps_on_topic_query() {
+    use primer_embedding::StubEmbedder;
+    let db = tmp_db();
+    let kb = SqliteKnowledgeBase::open_for_locale(db.path(), Locale::English).unwrap();
+    let stub = StubEmbedder::with_dim(64);
+    kb.insert_passage_with_embedding("p1", "src", GATE_PASSAGE, &stub)
+        .await
+        .unwrap();
+
+    // Identical text ⇒ cosine 1.0, above the gate.
+    let hits = kb
+        .retrieve_hybrid(
+            GATE_PASSAGE,
+            &stub,
+            &gated_params(Some(QUERY_GATE_TEST_COSINE)),
+        )
+        .await
+        .unwrap();
+    assert_eq!(hits.len(), 1);
+    assert_eq!(hits[0].id, "p1");
+}
+
+#[tokio::test]
+async fn retrieve_hybrid_query_gate_ignored_when_vector_leg_is_empty() {
+    // No stored vectors ⇒ empty vector leg ⇒ hybrid is effectively
+    // BM25-only. The gate has no cosine to judge, so it must not wipe
+    // out the BM25 fallback.
+    use primer_embedding::StubEmbedder;
+    let db = tmp_db();
+    let kb = SqliteKnowledgeBase::open_for_locale(db.path(), Locale::English).unwrap();
+    let stub = StubEmbedder::with_dim(64);
+    kb.insert_passage("p1", "src", GATE_PASSAGE).unwrap();
+
+    let hits = kb
+        .retrieve_hybrid(
+            "rayleigh",
+            &stub,
+            &gated_params(Some(QUERY_GATE_TEST_COSINE)),
+        )
+        .await
+        .unwrap();
+    assert_eq!(hits.len(), 1);
 }
