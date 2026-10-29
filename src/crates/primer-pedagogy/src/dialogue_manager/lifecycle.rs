@@ -125,6 +125,13 @@ impl DialogueManager {
     /// a learner persistence layer lands. The session's `learner_id`
     /// is preserved as loaded.
     pub async fn resume_session(&mut self, loaded: Session) -> Result<()> {
+        // Drain tasks spawned by the outgoing session before swapping it out:
+        // their turn indices point into that session, so applying them later
+        // would write its concepts onto the resumed one's turns (issue #314).
+        // The learner is the same child, so its updates still belong.
+        self.await_pending_background().await;
+        self.last_extraction = None;
+        self.last_comprehension = None;
         self.session = loaded;
         self.session.ended_at = None;
         self.last_break_suggested_at = None;

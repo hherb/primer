@@ -486,3 +486,43 @@ async fn resume_session_clears_last_break_suggested_at() {
         "resume_session should clear last_break_suggested_at"
     );
 }
+
+/// Issue #314: a post-response task spawned in the previous session must
+/// not be applied to a session swapped in by `resume_session` — its turn
+/// indices point into the old session, and they are in bounds for any
+/// resumed session with ≥2 turns.
+#[tokio::test]
+async fn resume_session_does_not_apply_previous_sessions_pending_extraction() {
+    let backend = std::sync::Arc::new(ScriptedBackend::new(vec![Ok(chunk("Hi!", true))]));
+    let extractor = Arc::new(primer_extractor::StubConceptExtractor::with_response(
+        ConceptExtraction {
+            child_concepts: vec!["gravity".into()],
+            primer_concepts: vec!["physics".into()],
+        },
+    ));
+    let mut dm = DialogueManager::new(
+        test_learner(),
+        backend,
+        std::sync::Arc::new(EmptyKnowledge),
+        DialogueManagerStores::default(),
+        subsystems_with_extractor(extractor as Arc<dyn ConceptExtractor>),
+        PedagogyConfig::default(),
+    );
+    dm.respond_to("tell me about gravity").await.unwrap();
+
+    let learner_id = dm.learner.profile.id;
+    dm.resume_session(make_test_session_with_turns(4, learner_id))
+        .await
+        .unwrap();
+    // Whatever is still pending would be applied at the next turn's start.
+    dm.await_pending_background().await;
+
+    for turn in &dm.session.turns {
+        assert!(
+            turn.concepts.is_empty(),
+            "old exchange's concepts leaked into resumed turn {turn:?}"
+        );
+    }
+    assert!(dm.last_extraction().is_none());
+    assert!(dm.last_comprehension().is_none());
+}
