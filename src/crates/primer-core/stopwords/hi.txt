@@ -1,0 +1,5 @@
+# Hindi stopwords for KB BM25 retrieval (issue #386).
+#
+# Empty for now: Hindi is a preview locale with no shipped KB corpus, and
+# a list needs a native speaker's review (docs/localisation/hi/README.md).
+# An empty list makes the filter a no-op for Hindi.

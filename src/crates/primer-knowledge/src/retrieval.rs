@@ -1,8 +1,9 @@
 //! Hybrid (BM25 + vector cosine) retrieval read path.
 //!
-//! `retrieve_hybrid_inner` fuses the FTS5 BM25 leg (via the
-//! `KnowledgeBase::retrieve` trait method) with an in-Rust cosine k-NN leg
-//! (`knn_scan`) through Reciprocal Rank Fusion. The BM25-only trait impl and
+//! `retrieve_hybrid_inner` fuses the FTS5 BM25 leg (`bm25_search`, the
+//! query shared with the BM25-only `KnowledgeBase::retrieve`, here with
+//! stopwords kept — #386) with an in-Rust cosine k-NN leg (`knn_scan`)
+//! through Reciprocal Rank Fusion. The BM25-only trait impl and
 //! the `KnowledgeBase::retrieve_hybrid` override that forwards here live with
 //! the struct in `lib.rs`; this module is the hybrid extension on top of it.
 //! The `_inner` name (mirroring `primer-storage`'s
@@ -49,17 +50,16 @@ impl SqliteKnowledgeBase {
             embedder.dim(),
         )?;
 
-        // 1. BM25 leg via the existing path.
-        let bm25 = self
-            .retrieve(
-                query,
-                &RetrievalParams {
-                    top_k: params.bm25_top_k,
-                    min_score: f64::NEG_INFINITY,
-                    source_filter: vec![],
-                },
-            )
-            .await?;
+        // 1. BM25 leg, stopwords kept (see `bm25_search`).
+        let bm25 = self.bm25_search(
+            query,
+            &RetrievalParams {
+                top_k: params.bm25_top_k,
+                min_score: f64::NEG_INFINITY,
+                source_filter: vec![],
+            },
+            false,
+        )?;
 
         // 2. Vector leg.
         let q_vec = embedder
@@ -182,5 +182,65 @@ impl SqliteKnowledgeBase {
         scored.sort_by(|a, b| b.0.partial_cmp(&a.0).unwrap_or(std::cmp::Ordering::Equal));
         scored.truncate(top_k);
         Ok(scored.into_iter().map(|(_, p)| p).collect())
+    }
+}
+
+impl SqliteKnowledgeBase {
+    /// The FTS5 BM25 query behind both retrieval paths.
+    /// `drop_stopwords` is `true` for BM25-only [`KnowledgeBase::retrieve`]
+    /// and `false` for the hybrid BM25 leg, whose off-topic defence is the
+    /// cosine gate and whose 100% benchmark recall was measured with
+    /// stopwords kept (dropping them cost "what is inside a tiny bug" its
+    /// `seed:en:insects` hit).
+    pub(crate) fn bm25_search(
+        &self,
+        query: &str,
+        params: &RetrievalParams,
+        drop_stopwords: bool,
+    ) -> Result<Vec<Passage>> {
+        // Sanitize the input into FTS5-friendly form: strip
+        // non-alphanumerics, quote and OR-join the surviving tokens.
+        // Without this, a natural-language query like "how does the sun
+        // shine" would AND every token together (FTS5's default) and
+        // miss any passage that uses different filler words.
+        let phrase = primer_core::fts_util::sanitize_fts_phrase_excluding(query, |t| {
+            drop_stopwords && primer_core::stopwords::is_stopword(self.locale, t)
+        });
+        if phrase.is_empty() {
+            return Ok(vec![]);
+        }
+
+        let conn = self.conn.lock().unwrap();
+
+        // FTS5 match query with BM25 ranking. The statement string is
+        // precomputed in `LocaleSql` (table name comes from
+        // `Locale::pack_id()`, a closed-enum projection, never user
+        // input); parameters are bound positionally — the sanitized
+        // phrase and limit go through `?1` and `?2`.
+        let mut stmt = conn
+            .prepare_cached(&self.sql.retrieve)
+            .map_err(|e| PrimerError::Knowledge(format!("Query prepare failed: {e}")))?;
+
+        let passages = stmt
+            .query_map(rusqlite::params![phrase, params.top_k as i64], |row| {
+                Ok(Passage {
+                    id: row.get(0)?,
+                    source: row.get(1)?,
+                    text: row.get(2)?,
+                    // FTS5 rank is negative (more negative = more relevant).
+                    // We negate it so higher = more relevant.
+                    score: -row.get::<_, f64>(3)?,
+                })
+            })
+            .map_err(|e| PrimerError::Knowledge(format!("Query failed: {e}")))?
+            .filter_map(|r| r.ok())
+            .filter(|p| p.score >= params.min_score)
+            .filter(|p| {
+                params.source_filter.is_empty()
+                    || params.source_filter.iter().any(|s| p.source.starts_with(s))
+            })
+            .collect();
+
+        Ok(passages)
     }
 }

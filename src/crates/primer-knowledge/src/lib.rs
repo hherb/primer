@@ -240,49 +240,11 @@ impl KnowledgeBase for SqliteKnowledgeBase {
         Ok(out)
     }
 
+    /// BM25-only retrieval drops the locale's stopwords (#386): with no
+    /// cosine gate on this path, small talk ("can we stop now") would
+    /// otherwise match passages through its filler words.
     async fn retrieve(&self, query: &str, params: &RetrievalParams) -> Result<Vec<Passage>> {
-        // Sanitize the input into FTS5-friendly form: strip
-        // non-alphanumerics, quote and OR-join the surviving tokens.
-        // Without this, a natural-language query like "how does the sun
-        // shine" would AND every token together (FTS5's default) and
-        // miss any passage that uses different filler words.
-        let phrase = primer_core::fts_util::sanitize_fts_phrase(query);
-        if phrase.is_empty() {
-            return Ok(vec![]);
-        }
-
-        let conn = self.conn.lock().unwrap();
-
-        // FTS5 match query with BM25 ranking. The statement string is
-        // precomputed in `LocaleSql` (table name comes from
-        // `Locale::pack_id()`, a closed-enum projection, never user
-        // input); parameters are bound positionally — the sanitized
-        // phrase and limit go through `?1` and `?2`.
-        let mut stmt = conn
-            .prepare_cached(&self.sql.retrieve)
-            .map_err(|e| PrimerError::Knowledge(format!("Query prepare failed: {e}")))?;
-
-        let passages = stmt
-            .query_map(rusqlite::params![phrase, params.top_k as i64], |row| {
-                Ok(Passage {
-                    id: row.get(0)?,
-                    source: row.get(1)?,
-                    text: row.get(2)?,
-                    // FTS5 rank is negative (more negative = more relevant).
-                    // We negate it so higher = more relevant.
-                    score: -row.get::<_, f64>(3)?,
-                })
-            })
-            .map_err(|e| PrimerError::Knowledge(format!("Query failed: {e}")))?
-            .filter_map(|r| r.ok())
-            .filter(|p| p.score >= params.min_score)
-            .filter(|p| {
-                params.source_filter.is_empty()
-                    || params.source_filter.iter().any(|s| p.source.starts_with(s))
-            })
-            .collect();
-
-        Ok(passages)
+        self.bm25_search(query, params, true)
     }
 
     /// Trait-object dispatch for the hybrid path. Without this override,

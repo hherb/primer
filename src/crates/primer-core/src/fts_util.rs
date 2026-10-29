@@ -17,6 +17,16 @@
 /// torpedo the entire query. BM25 ranking + the caller's `LIMIT k` keep
 /// the result list focused on the most relevant matches.
 pub fn sanitize_fts_phrase(query: &str) -> String {
+    sanitize_fts_phrase_excluding(query, |_| false)
+}
+
+/// [`sanitize_fts_phrase`], additionally dropping every stripped token
+/// for which `exclude` returns `true` — the KB passes
+/// [`crate::stopwords::is_stopword`] so filler words don't match passages
+/// (#386). `exclude` sees the punctuation-stripped token ("don't" arrives
+/// as "dont"). Excluding every token yields an empty string, same as an
+/// empty query.
+pub fn sanitize_fts_phrase_excluding(query: &str, exclude: impl Fn(&str) -> bool) -> String {
     let tokens: Vec<String> = query
         .split_whitespace()
         .map(|tok| {
@@ -24,7 +34,7 @@ pub fn sanitize_fts_phrase(query: &str) -> String {
                 .filter(|c| c.is_alphanumeric())
                 .collect::<String>()
         })
-        .filter(|tok| !tok.is_empty())
+        .filter(|tok| !tok.is_empty() && !exclude(tok))
         .collect();
     if tokens.is_empty() {
         return String::new();
@@ -85,6 +95,30 @@ mod tests {
     fn alphanumeric_unicode_is_preserved() {
         // is_alphanumeric is Unicode-aware.
         assert_eq!(sanitize_fts_phrase("café résumé"), "\"café\" OR \"résumé\"");
+    }
+
+    #[test]
+    fn excluding_drops_tokens_the_predicate_rejects() {
+        assert_eq!(
+            sanitize_fts_phrase_excluding("why is the sky blue", |t| {
+                ["why", "is", "the"].contains(&t)
+            }),
+            "\"sky\" OR \"blue\""
+        );
+    }
+
+    #[test]
+    fn excluding_sees_punctuation_stripped_tokens() {
+        // The predicate is applied after stripping, so "don't" arrives as "dont".
+        assert_eq!(
+            sanitize_fts_phrase_excluding("I don't know!", |t| t == "dont"),
+            "\"I\" OR \"know\""
+        );
+    }
+
+    #[test]
+    fn excluding_every_token_yields_empty() {
+        assert_eq!(sanitize_fts_phrase_excluding("can we stop", |_| true), "");
     }
 
     #[test]
