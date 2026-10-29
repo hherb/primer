@@ -157,7 +157,7 @@ pub struct DialogueManager {
     /// the system prompt; never mutated after construction.
     vocab_settings: crate::vocab::VocabSettings,
     /// Most recent comprehension result applied to the learner. Cleared
-    /// on session lifecycle events. Used by `--verbose`.
+    /// on `new` and `resume_session`. Used by `--verbose`.
     last_comprehension: Option<primer_core::comprehension::ComprehensionResult>,
     /// In-memory timestamp of the last `SuggestBreak` fire. Reset on
     /// `new` and `resume_session`. Not persisted across `--resume`
@@ -170,7 +170,7 @@ pub struct DialogueManager {
     /// Pedagogical configuration.
     config: PedagogyConfig,
     /// Most recent extractor output applied to the learner. Cleared on
-    /// session lifecycle events. Used by `--verbose`.
+    /// `new` and `resume_session`. Used by `--verbose`.
     last_extraction: Option<primer_core::extractor::ConceptExtraction>,
     /// Tracks whether `learner` has fields-that-map-to-the-`learners`-table
     /// changes that haven't been flushed yet. The per-turn save site is
