@@ -31,6 +31,14 @@ impl OpenAiSseBuffer {
         self.buf.extend_from_slice(bytes);
     }
 
+    /// Call once at EOF: terminate a final line the server flushed
+    /// without `\n`, so `pop_data` can still yield it (issue #313).
+    fn finish(&mut self) {
+        if !self.buf.is_empty() {
+            self.buf.push(b'\n');
+        }
+    }
+
     /// Pop the next `data:` payload, if a complete line is available.
     /// Returns `None` if no complete line ending in `\n` is buffered.
     fn pop_data(&mut self) -> Option<String> {
@@ -328,58 +336,10 @@ impl InferenceBackend for OpenAiCompatBackend {
             let mut filter = ReasoningFilter::new(markers);
             let mut had_visible = false;
             'outer: loop {
-                match bytes_stream.next().await {
+                let eof = match bytes_stream.next().await {
                     Some(Ok(bytes)) => {
                         buf.extend(&bytes);
-                        while let Some(data) = buf.pop_data() {
-                            // A mid-stream `{"error": ...}` payload is a real
-                            // generation failure, not line noise: surface it so
-                            // the partial turn drops at the dialogue-manager
-                            // layer instead of the reply finishing as a clean
-                            // truncated turn. Probed on EVERY payload — not
-                            // only on chunk-parse failure — because some
-                            // servers (OpenRouter, proxies) attach the error
-                            // object to an otherwise well-formed chunk that
-                            // still deserializes cleanly (e.g. with an empty
-                            // `choices` array or `finish_reason: "error"`).
-                            if let Some(msg) =
-                                crate::stream_error::parse_stream_error_payload(&data)
-                            {
-                                let _ = tx
-                                    .send(Err(PrimerError::Inference(
-                                        format!("OpenAI-compat mid-stream error: {msg}").into(),
-                                    )))
-                                    .await;
-                                break 'outer;
-                            }
-                            let chunk = match parse_openai_compat_chunk(&data) {
-                                Ok(Some(c)) => c,
-                                Ok(None) => continue,
-                                Err(e) => {
-                                    tracing::warn!(
-                                        "Skipping unparseable OpenAI-compat SSE line: {e}"
-                                    );
-                                    continue;
-                                }
-                            };
-                            match crate::reasoning_stream::process_filtered_chunk(
-                                &mut filter,
-                                chunk,
-                                &mut had_visible,
-                                "openai-compat",
-                            ) {
-                                crate::reasoning_stream::FilterAction::Nothing => {}
-                                crate::reasoning_stream::FilterAction::Forward(r) => {
-                                    if tx.send(r).await.is_err() {
-                                        break 'outer;
-                                    }
-                                }
-                                crate::reasoning_stream::FilterAction::Final(r) => {
-                                    let _ = tx.send(r).await;
-                                    break 'outer;
-                                }
-                            }
-                        }
+                        false
                     }
                     Some(Err(e)) => {
                         // Mid-stream transport error: surface it and stop. We do
@@ -394,32 +354,83 @@ impl InferenceBackend for OpenAiCompatBackend {
                             .await;
                         break 'outer;
                     }
+                    // Upstream closed. Terminate a final event flushed without its
+                    // trailing newline (issue #313) so the drain below still parses it.
                     None => {
-                        // Upstream closed without a `[DONE]` / finish_reason
-                        // marker (abrupt EOF). A normal stream emits a done chunk,
-                        // hits the `Final` arm, and breaks before reaching here —
-                        // so reaching `None` means we must still flush. Feed a
-                        // synthetic done chunk through the shared helper so a
-                        // held-back visible tail still reaches the child and a
-                        // stream that ended mid-reasoning surfaces
-                        // `ReasoningWithoutAnswer` instead of silently producing
-                        // nothing.
-                        if let crate::reasoning_stream::FilterAction::Final(r) =
-                            crate::reasoning_stream::process_filtered_chunk(
-                                &mut filter,
-                                TokenChunk {
-                                    text: String::new(),
-                                    done: true,
-                                    ..Default::default()
-                                },
-                                &mut had_visible,
-                                "openai-compat",
-                            )
-                        {
-                            let _ = tx.send(r).await;
-                        }
+                        buf.finish();
+                        true
+                    }
+                };
+                while let Some(data) = buf.pop_data() {
+                    // A mid-stream `{"error": ...}` payload is a real
+                    // generation failure, not line noise: surface it so
+                    // the partial turn drops at the dialogue-manager
+                    // layer instead of the reply finishing as a clean
+                    // truncated turn. Probed on EVERY payload — not
+                    // only on chunk-parse failure — because some
+                    // servers (OpenRouter, proxies) attach the error
+                    // object to an otherwise well-formed chunk that
+                    // still deserializes cleanly (e.g. with an empty
+                    // `choices` array or `finish_reason: "error"`).
+                    if let Some(msg) = crate::stream_error::parse_stream_error_payload(&data) {
+                        let _ = tx
+                            .send(Err(PrimerError::Inference(
+                                format!("OpenAI-compat mid-stream error: {msg}").into(),
+                            )))
+                            .await;
                         break 'outer;
                     }
+                    let chunk = match parse_openai_compat_chunk(&data) {
+                        Ok(Some(c)) => c,
+                        Ok(None) => continue,
+                        Err(e) => {
+                            tracing::warn!("Skipping unparseable OpenAI-compat SSE line: {e}");
+                            continue;
+                        }
+                    };
+                    match crate::reasoning_stream::process_filtered_chunk(
+                        &mut filter,
+                        chunk,
+                        &mut had_visible,
+                        "openai-compat",
+                    ) {
+                        crate::reasoning_stream::FilterAction::Nothing => {}
+                        crate::reasoning_stream::FilterAction::Forward(r) => {
+                            if tx.send(r).await.is_err() {
+                                break 'outer;
+                            }
+                        }
+                        crate::reasoning_stream::FilterAction::Final(r) => {
+                            let _ = tx.send(r).await;
+                            break 'outer;
+                        }
+                    }
+                }
+                if eof {
+                    // Upstream closed without a `[DONE]` / finish_reason
+                    // marker (abrupt EOF). A normal stream emits a done chunk,
+                    // hits the `Final` arm, and breaks before reaching here —
+                    // so reaching `None` means we must still flush. Feed a
+                    // synthetic done chunk through the shared helper so a
+                    // held-back visible tail still reaches the child and a
+                    // stream that ended mid-reasoning surfaces
+                    // `ReasoningWithoutAnswer` instead of silently producing
+                    // nothing.
+                    if let crate::reasoning_stream::FilterAction::Final(r) =
+                        crate::reasoning_stream::process_filtered_chunk(
+                            &mut filter,
+                            TokenChunk {
+                                text: String::new(),
+                                done: true,
+                                ..Default::default()
+                            },
+                            &mut had_visible,
+                            "openai-compat",
+                        )
+                    {
+                        let _ = tx.send(r).await;
+                    }
+                    break 'outer;
                 }
             }
         });
