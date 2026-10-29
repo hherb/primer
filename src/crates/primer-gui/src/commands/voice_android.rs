@@ -176,13 +176,13 @@ pub async fn start_voice_mode_android<R: tauri::Runtime>(
 }
 
 /// Stop the active Android voice loop, if any. Delegates to the shared
-/// `super::voice::stop_voice_mode_inner` (which fires the loop's `stop_tx`,
-/// joins with a timeout, flips the sticky toggle off, and drops the active
-/// session). The wrapped join from `start_voice_mode_android` stops the
+/// `super::voice::stop_voice_mode_by_user` (which fires the loop's `stop_tx`,
+/// joins with a timeout, drops the active session, and flips the sticky
+/// toggle off — even when no loop was running, #372). The wrapped join from `start_voice_mode_android` stops the
 /// recognizer consumer once the loop exits.
 #[tauri::command]
 pub async fn stop_voice_mode_android(state: tauri::State<'_, AppState>) -> Result<(), String> {
-    super::voice::stop_voice_mode_inner(&state, false).await
+    super::voice::stop_voice_mode_by_user(&state).await
 }
 
 /// Cancel the in-flight LLM call + TTS synthesis for the current Android

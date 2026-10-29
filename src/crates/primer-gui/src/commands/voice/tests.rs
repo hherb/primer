@@ -430,3 +430,39 @@ async fn failed_android_start_keeps_the_text_session_and_toggle() {
     );
     assert_text_session_untouched(&app, &dm_before).await;
 }
+
+// ─── Issue #372: consent-modal Cancel persists the toggle off ───
+
+/// The consent modal's "Cancel" calls `stop_voice_mode` after an
+/// `AssetMissing` start, when no voice loop ever ran. The off-state must
+/// still be persisted to `gui-config.json`, or the modal re-appears on every
+/// launch. With no loop to stop, the text session is left alone (#352 item 3
+/// only drops it after a real voice stop).
+#[cfg(feature = "speech")]
+#[tokio::test]
+async fn stop_without_a_loop_persists_the_toggle_off() {
+    use tauri::Manager;
+    let (home, app) = app_with_text_session().await;
+    let dm_before = current_dm(&app).await;
+
+    super::stop_voice_mode(app.state()).await.unwrap();
+
+    let state = app.state::<crate::state::AppState>();
+    assert!(!state.config.lock().await.speech.voice_mode_enabled);
+    let on_disk = crate::config::load(home.path()).unwrap();
+    assert!(
+        !on_disk.speech.voice_mode_enabled,
+        "the off-state must survive a relaunch"
+    );
+    let session = state.session.lock().await;
+    assert!(
+        std::sync::Arc::ptr_eq(
+            &session
+                .as_ref()
+                .expect("text session kept")
+                .dialogue_manager,
+            &dm_before
+        ),
+        "no loop ran, so the text session must survive"
+    );
+}
