@@ -12,7 +12,7 @@
 //! under the legacy name `cosine` and should be unified at the same time.
 
 use primer_core::error::{PrimerError, Result};
-use rusqlite::Connection;
+use rusqlite::{Connection, OptionalExtension};
 
 /// Read-side counterpart to `upsert_storage_embedding_model`. Same
 /// invariant on dim mismatch (hard error), and surfaces a tracing
@@ -26,7 +26,9 @@ pub(super) fn validate_storage_embedder(conn: &Connection, name: &str, dim: usiz
             rusqlite::params![name],
             |r| r.get(0),
         )
-        .ok();
+        .optional()
+        // Only "no row" means unregistered; any other error must surface (#310).
+        .map_err(|e| PrimerError::Storage(format!("read embedding_models: {e}")))?;
     if let Some(existing_dim) = existing {
         if existing_dim as usize != dim {
             return Err(PrimerError::Storage(format!(
@@ -64,7 +66,9 @@ pub(super) fn upsert_storage_embedding_model(
             rusqlite::params![name],
             |r| Ok((r.get(0)?, r.get(1)?)),
         )
-        .ok();
+        .optional()
+        // Only "no row" means unregistered; any other error must surface (#310).
+        .map_err(|e| PrimerError::Storage(format!("read embedding_models: {e}")))?;
     if let Some((id, existing_dim)) = existing {
         if existing_dim as usize != dim {
             return Err(PrimerError::Storage(format!(
@@ -184,6 +188,42 @@ mod tests {
             .unwrap_err()
             .to_string();
         assert!(err.contains("dim 8") && err.contains("dim 16"), "{err}");
+    }
+
+    /// A DB with one registered model whose `dim` cell holds text — the
+    /// "corrupt row" that must not read as "unregistered" (#310).
+    fn conn_with_corrupt_dim() -> Connection {
+        let conn = Connection::open_in_memory().unwrap();
+        crate::schema::apply_v8_migrations(&conn).unwrap();
+        upsert_storage_embedding_model(&conn, "stub", 8).unwrap();
+        conn.execute("UPDATE embedding_models SET dim = 'not-a-number'", [])
+            .unwrap();
+        conn
+    }
+
+    #[test]
+    fn validate_storage_embedder_propagates_select_errors() {
+        let err = validate_storage_embedder(&conn_with_corrupt_dim(), "stub", 16)
+            .expect_err("a corrupt registry row must not pass validation (#310)");
+        assert!(matches!(err, PrimerError::Storage(_)), "{err}");
+    }
+
+    #[test]
+    fn validate_storage_embedder_errors_when_the_registry_table_is_missing() {
+        let conn = Connection::open_in_memory().unwrap();
+        assert!(validate_storage_embedder(&conn, "stub", 8).is_err());
+    }
+
+    #[test]
+    fn upsert_storage_embedding_model_propagates_select_errors() {
+        assert!(upsert_storage_embedding_model(&conn_with_corrupt_dim(), "stub", 8).is_err());
+    }
+
+    #[test]
+    fn validate_storage_embedder_accepts_unregistered_on_fresh_db() {
+        let conn = Connection::open_in_memory().unwrap();
+        crate::schema::apply_v8_migrations(&conn).unwrap();
+        assert!(validate_storage_embedder(&conn, "stub", 8).is_ok());
     }
 
     #[test]
