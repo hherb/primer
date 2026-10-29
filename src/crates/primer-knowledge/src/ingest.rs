@@ -1,5 +1,5 @@
 //! Passage ingest (write path): plain inserts, embedded inserts, and the
-//! `--reembed` backfill upsert. All go through the cached-statement
+//! `--reembed` backfill upsert and its `--force` reset. All go through the cached-statement
 //! `insert_passage_inner` core so the bootstrap-ingest loop stays cheap
 //! per row.
 
@@ -108,6 +108,36 @@ impl SqliteKnowledgeBase {
         tx.commit()
             .map_err(|e| PrimerError::Knowledge(format!("commit insert: {e}")))?;
         Ok(())
+    }
+
+    /// The `--reembed --force` reset (#377): delete every vector in this
+    /// locale, then unregister each `embedding_models` row that no locale's
+    /// vectors still use, so a model may come back under the same name at a
+    /// new dim. One transaction. Returns the number of vectors deleted.
+    pub fn clear_embeddings(&self) -> Result<usize> {
+        let err = |e: rusqlite::Error| PrimerError::Knowledge(format!("clear embeddings: {e}"));
+        let conn = self.conn.lock().unwrap();
+        let tx = conn.unchecked_transaction().map_err(err)?;
+        let deleted = tx
+            .execute(&format!("DELETE FROM {}", self.embeddings_table), [])
+            .map_err(err)?;
+        // Every locale's vectors, not just ours: another locale may still use a model.
+        let tables: Vec<String> = tx
+            .prepare(r"SELECT name FROM sqlite_master WHERE type = 'table' AND name LIKE 'embeddings\_%' ESCAPE '\'")
+            .and_then(|mut s| s.query_map([], |r| r.get(0))?.collect())
+            .map_err(err)?;
+        let in_use = tables
+            .iter()
+            .map(|t| format!("SELECT model_id FROM {t}"))
+            .collect::<Vec<_>>()
+            .join(" UNION ");
+        tx.execute(
+            &format!("DELETE FROM embedding_models WHERE id NOT IN ({in_use})"),
+            [],
+        )
+        .map_err(err)?;
+        tx.commit().map_err(err)?;
+        Ok(deleted)
     }
 
     /// Backfill an embedding for an already-inserted passage. Used by
