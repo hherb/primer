@@ -103,6 +103,17 @@ pub struct HybridParams {
     pub rrf_k: f64,
     /// Post-fusion score floor; passages below this are dropped.
     pub min_score: f64,
+    /// Query-level off-topic gate (issue #307). When `Some(floor)` and the
+    /// vector leg's best cosine is below `floor`, the query is judged
+    /// off-topic and hybrid retrieval returns nothing — BM25 hits
+    /// included, because on small talk those are stopword matches
+    /// ("can we", "what is your"). An empty vector leg (no stored
+    /// vectors) is never gated. Cosine scales are model-specific, so
+    /// pick the value with [`kb_query_gate_min_cosine`] rather than
+    /// hard-coding one. Only `SqliteKnowledgeBase`'s hybrid path applies
+    /// it; the trait's BM25-only default impl and long-term-memory turn
+    /// retrieval ignore it.
+    pub min_top_cosine: Option<f64>,
     /// Restrict to specific sources (empty = search all).
     pub source_filter: Vec<String>,
 }
@@ -115,9 +126,23 @@ impl Default for HybridParams {
             final_top_k: crate::consts::retrieval::KB_FINAL_TOP_K,
             rrf_k: crate::consts::retrieval::RRF_K,
             min_score: crate::consts::retrieval::KB_MIN_SCORE,
+            min_top_cosine: None,
             source_filter: vec![],
         }
     }
+}
+
+/// The off-topic gate ([`HybridParams::min_top_cosine`]) calibrated for
+/// the embedder `model_id`, or `None` for a model nobody has calibrated —
+/// raw cosine scales differ per model, and a gate tuned for one would
+/// silently empty every result under another (the stub embedder's
+/// cosines are near zero, for instance). The match is the exact id
+/// string, so `bge-m3:latest` gets no gate, while an ollama/openai-compat
+/// embedder whose model is literally named `bge-m3` inherits the
+/// fastembed calibration.
+pub fn kb_query_gate_min_cosine(model_id: &str) -> Option<f64> {
+    use crate::consts::retrieval as r;
+    (model_id == r::BGE_M3_MODEL_ID).then_some(r::KB_QUERY_GATE_MIN_COSINE_BGE_M3)
 }
 
 /// The knowledge base backend.
@@ -226,9 +251,29 @@ mod retrieval_params_tests {
             crate::consts::retrieval::KB_MIN_SCORE,
             "HybridParams::default().min_score must equal KB_MIN_SCORE"
         );
+        assert_eq!(
+            d.min_top_cosine, None,
+            "HybridParams::default() must not gate: the gate is model-specific"
+        );
         assert!(
             d.source_filter.is_empty(),
             "default source_filter must be empty (no source restriction)"
+        );
+    }
+
+    #[test]
+    fn query_gate_is_calibrated_for_bge_m3_only() {
+        use crate::consts::retrieval as r;
+        assert_eq!(
+            kb_query_gate_min_cosine(r::BGE_M3_MODEL_ID),
+            Some(r::KB_QUERY_GATE_MIN_COSINE_BGE_M3)
+        );
+        assert_eq!(kb_query_gate_min_cosine("stub-fxhash-v1"), None);
+        assert_eq!(kb_query_gate_min_cosine("nomic-embed-text"), None);
+        assert_eq!(
+            kb_query_gate_min_cosine("bge-m3:latest"),
+            None,
+            "exact match only"
         );
     }
 }

@@ -8,17 +8,21 @@
 
 use primer_core::consts::retrieval as r;
 use primer_core::conversation::Turn;
-use primer_core::knowledge::{HybridParams, Passage, RetrievalParams};
+use primer_core::knowledge::{HybridParams, Passage, RetrievalParams, kb_query_gate_min_cosine};
 
 use super::DialogueManager;
 
-fn kb_hybrid_params(final_top_k: usize) -> HybridParams {
+/// KB hybrid params; `embedder_model_id` picks the calibrated off-topic
+/// gate (issue #307), so small talk retrieves nothing instead of the
+/// nearest-but-irrelevant passages.
+fn kb_hybrid_params(final_top_k: usize, embedder_model_id: &str) -> HybridParams {
     HybridParams {
         bm25_top_k: r::KB_BM25_TOP_K,
         vector_top_k: r::KB_VECTOR_TOP_K,
         final_top_k,
         rrf_k: r::RRF_K,
         min_score: r::KB_MIN_SCORE,
+        min_top_cosine: kb_query_gate_min_cosine(embedder_model_id),
         source_filter: vec![],
     }
 }
@@ -34,6 +38,7 @@ fn ltm_hybrid_params() -> HybridParams {
         // ground-truth passages, and we'd rather see something old
         // than nothing.
         min_score: f64::NEG_INFINITY,
+        min_top_cosine: None,
         source_filter: vec![],
     }
 }
@@ -52,7 +57,7 @@ impl DialogueManager {
         // (step 1.2.5). Non-qnn backends keep the global KB_FINAL_TOP_K.
         let kb_top_k = self.config.effective_kb_top_k(self.inference.name());
         if let Some(ref embedder) = self.embedder {
-            let params = kb_hybrid_params(kb_top_k);
+            let params = kb_hybrid_params(kb_top_k, embedder.model_id());
             match self
                 .knowledge
                 .retrieve_hybrid(query, embedder.as_ref(), &params)

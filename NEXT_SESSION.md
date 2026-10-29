@@ -1,82 +1,75 @@
 # Primer — Next Session Brief
 
 **Audience:** future Claude Code session continuing work on this repo.
-**Last updated:** 2026-10-29 09:05 (UTC).
+**Last updated:** 2026-10-29 14:09 (UTC).
 
-**Two PRs are open against `main`** from this session:
+**One PR is open against `main`** from this session:
 
 | PR | Branch | What | Closes |
 |---|---|---|---|
-| **#384** | `fix/stream-eof-flush-313` | Stream buffers parse a final line/event left unterminated at EOF | #313 |
-| **#385** | `fix/resume-drains-background-314` | `resume_session` drains the outgoing session's background tasks (this brief rides on it) | #314 |
+| **#387** | `fix/hybrid-query-gate-307` | Off-topic query gate for hybrid KB retrieval (this brief rides on it) | #307 |
 
-- **Merge order:** independent. #384 touches only `primer-inference`; #385 touches `primer-pedagogy`. Both edit one bullet each in `CLAUDE.md`, on different lines, so there's no conflict.
-- **`main` is at `9de7977`** (#382).
+- **`main` is at `a12f1ea`** (#385).
 
-**Since the last brief:**
-- **#379, #380, #381 and #382 all merged**; #308, #372 and #377 are CLOSED.
+**Since the last brief:** #384 and #385 both merged; #313 and #314 are CLOSED.
 
 ## What we shipped this session
 
-### #384 (`7171946`): closes #313
-- **Problem:** `SseBuffer`, `NdjsonBuffer` and `OpenAiSseBuffer` only yield `\n`-terminated units, and no spawn loop drained leftovers at EOF. A terminal payload flushed without a newline right before close was dropped:
-  - **ollama / openai-compat:** the synthetic EOF chunk said `Stop`, masking a real `Length`.
-  - **cloud:** the stream ended with no terminal chunk at all.
+### #387 (`1e80138` + this brief's docs commit): closes #307
+- **Measured first:** best-passage BGE-M3 cosine on the shipped EN + DE corpora.
+  - 122 on-topic benchmark queries: 0.473–0.772 (median 0.652).
+  - 33 off-topic utterances (greetings, meta-talk, feelings): 0.365–0.473 (median 0.426).
+  - **The ranges touch.** BM25 alone leaks 19/33 off-topic utterances through stopwords, so the per-passage `knn_scan` floor the issue suggested could not meet "≤1 passage each".
+  - Reported to the owner, who chose **option A: a query-level gate at 0.45**.
 - **Fix:**
-  - Each buffer has a `finish()` that terminates any residual line/event.
-  - Each loop computes `let eof = match …`, drains as before, and on EOF drains once more before the existing synthetic-done / break.
-  - The loop bodies are moved, not changed (`git diff -w` shows only the new lines).
-- **Tests:** one per backend, driving the real `generate_stream` against a new `#[cfg(test)]` one-shot HTTP server, `primer-inference/src/test_http.rs` (`serve_once` + `collect`). All three were red before the fix. Mutation-checked.
-- **Size:** `cloud.rs` is held at exactly 500 lines.
-- **Docs:** CLAUDE.md streaming bullet, `docs/devel/03`.
-
-### #385 (`e8edcac` + this brief's docs commit): closes #314
-- **Problem:** `resume_session` didn't drain the task slots. The next turn then applied the old exchange's concepts onto the resumed session's turns.
-- **Fix:** `await_pending_background()` *before* the session swap, then clear `last_extraction` / `last_comprehension`. Their field docs now name `new` + `resume_session`.
-- **Test:** `resume_session_does_not_apply_previous_sessions_pending_extraction` (`lifecycle_tests.rs`). Red before the fix. Each half (drain, clear) mutation-checked separately.
-- **Docs:** CLAUDE.md `dialogue_manager` bullet.
+  - `HybridParams.min_top_cosine: Option<f64>`. If the vector leg's best cosine is below it, `retrieve_hybrid_inner` returns nothing, BM25 hits included. An empty vector leg is never gated.
+  - `primer_core::knowledge::kb_query_gate_min_cosine(model_id)` gives `Some(KB_QUERY_GATE_MIN_COSINE_BGE_M3 = 0.45)` for `bge-m3`, `None` for any other model; `HybridParams::default()` is `None`.
+  - The DM's `kb_hybrid_params` sets it from `embedder.model_id()`. LTM is untouched.
+  - `BGE_M3_MODEL_ID` now lives in `primer_core::consts::retrieval`; `primer_embedding` re-uses it.
+- **Result at 0.45:** 0/122 on-topic lost; 26/33 off-topic now return nothing. The 7 leakers are pinned in `tests/common/off_topic.rs::KNOWN_LEAKING_OFF_TOPIC`.
+- **Tests:**
+  - 3 StubEmbedder tests in `primer-knowledge/src/tests.rs` (`retrieve_hybrid_query_gate_*`), mutation-checked.
+  - `primer-kb-load/tests/off_topic_gate.rs` (fastembed): gated-vs-leaking pinned both ways, plus the `#[ignore]`'d `off_topic_gate_probe` for recalibration.
+  - `retrieval_quality_hybrid{,_de}` now run with the gate on: 100% loose/strict preserved. The hybrid sweep harness runs gated too.
+- **Docs:** CLAUDE.md hybrid-retrieval bullet.
+- **Filed:** #386 (BM25 stopword matching; also covers the router-counting follow-up).
 
 ### Gate
-- **Workspace:** `cargo test --workspace`: 1408/0 (both changes together, before splitting the branches).
-- **#384:** `primer-inference` clippy `--all-targets -D warnings` + rustdoc `--document-private-items` on default / `qnn` / `llamacpp`.
-- **#385:** `primer-pedagogy` clippy + rustdoc.
-- **Both:** fmt clean.
+- `cargo test --workspace`: 1426/0.
+- Workspace clippy `--all-targets -D warnings`; `primer-kb-load` + `primer-embedding` fastembed clippy; fmt.
+- Rustdoc: workspace, plus the `primer-embedding`/`primer-kb-load` fastembed arm.
+- fastembed: `off_topic_gate`, `retrieval_quality_hybrid`, `retrieval_quality_hybrid_de` all green (this also discharges the benchmarks owed from #376).
 - **Not run:**
-  - the full rustdoc feature-arm loop (no other feature-gated crate was touched);
-  - the fastembed hybrid benchmarks (still owed from #376).
+  - the full 54-cell hybrid sweeps (EN + DE); only the production cell is verified, via the recall tests;
+  - the other rustdoc feature arms (no feature-gated code in speech/inference/gui was touched).
 
 > SHAs are branch-tip commits as pushed; squash-merge gives new ones on `main`.
 
 ### Per-session sweep
-- **Inline-test detector:** clean for the nineteenth session running.
-- **Oversized list:** unchanged. `cloud.rs` is at 500 lines, so it stays off the list.
+- **Inline-test detector:** clean for the twentieth session running.
+- **Oversized list:** unchanged.
 
 ## What's next (concrete acceptance criteria)
 
-### 0. Owner review/merge: #384, #385
-- **Acceptance:** CI green, both merged; then `gh issue view 313|314 --json state` are both CLOSED.
+### 0. Owner review/merge: #387
+- **Acceptance:** CI green, merged; then `gh issue view 307 --json state` is CLOSED.
 
 ### 1. Sweep + inline-test detector: re-run EVERY session
 Commands are in the resume block.
 
-### 2. #307: a similarity floor for the hybrid vector leg (the lead pick; needs real embeddings)
-- **What's wrong:**
-  - `knn_scan` (`primer-knowledge/src/retrieval.rs`) has no cosine floor.
-  - The DM passes `min_score = 0.0` on the hybrid path.
-  - So hybrid **never returns empty**: "good morning" injects 5 irrelevant passages.
-  - That also adds +0.45 to the router score, which tips small talk to the cloud under `--router-mode hybrid`.
+### 2. #386: BM25 stopword matching (the natural follow-up; host-completable)
+- **What's wrong:** `sanitize_fts_phrase` OR-joins every token, so "can we stop now" gets 30 BM25 hits (top 4.01). This hits the BM25-only path (`--embedder-backend none`, Android, and the hybrid-error fallback) and the 7 gate leakers.
 - **Plan:**
-  1. Add an off-topic query set (greetings, "can we stop now", emotional utterances; EN + DE) to `tests/common/`.
-  2. Run it through `retrieval_quality_hybrid*` under `--features fastembed`, logging the top cosine per query for on-topic vs off-topic.
-  3. Pick the floor from that gap and add it as a `primer_core::consts::retrieval` const (plus `HybridParams`).
-  4. Apply it in `knn_scan`.
-  5. Re-run the hybrid sweep.
+  1. Add per-locale stopword lists in the prompt pack, so a new locale stays data-only.
+  2. Drop stopwords in the KB query sanitizer only. Keep #309's operator handling, and leave LTM alone unless measured.
+  3. Measure with `tests/common/off_topic.rs` on the BM25-only path.
 - **Acceptance:**
-  - 100% loose/strict recall preserved on the 91 EN queries and on the DE set (excluding `KNOWN_FAILING_QUERIES_DE_HYBRID`);
-  - the off-topic set returns ≤1 passage each;
-  - a structural `StubEmbedder` test pins "below the floor ⇒ dropped" on the default `cargo test`.
-- **Cost:** ~570 MB BGE-M3 download on first fastembed run. Host-completable; no owner call needed unless the on/off-topic distributions overlap. If they do, report the numbers and ask.
-- **Router follow-up:** decide whether `RoutingSignals.retrieved_passages` should count vector-only hits. That's a separate small issue if the floor alone doesn't fix the router inflation.
+  - BM25-only 91-query EN + DE recall unchanged (`retrieval_quality{,_de}`; `KNOWN_FAILING_*` not grown);
+  - hybrid fastembed recall still 100%;
+  - off-topic BM25-only hits drop materially (report the before/after counts);
+  - `KNOWN_LEAKING_OFF_TOPIC` shrinks, or stays with a note.
+- **Risk:** child questions are stopword-heavy ("why is the sky blue"). If recall drops, report and ask.
+- **Router:** decide in the same issue whether `RoutingSignals.retrieved_passages` needs changing once stopwords are gone.
 
 ### 3. Other bugs (host-completable; TDD each)
 - **#371** (voice-loop abort on stop timeout) needs a `JoinHandle::abort` design note first.
@@ -107,14 +100,15 @@ Commands are in the resume block.
 
 **Recommendation:** (a), and downgrade or drop today's kind-only warn on the router path.
 
-### This session
-- **#385: a resume right after a turn can now block** for up to the background budget (default 10 s worst case) while the old tasks drain. Real hosts (CLI, GUI) resume on a fresh manager with nothing pending, so it's a no-op there. Aborting instead would lose the old exchange's learner updates.
-- **#384: `finish()` only ever adds a terminator.** A truncated *partial* payload (connection cut mid-JSON) still fails to parse and is skipped with the existing `warn!`, the same as before. Only a complete-but-unterminated final unit is recovered.
-- **#384:** the `serve_once` tests bind `127.0.0.1:0`. A CI sandbox that forbids loopback sockets would fail them (GitHub runners allow it; `primer-gui`'s download tests already do the same).
-- **Still owed from #376:** the fastembed hybrid benchmarks (fold into the #307 work above):
-  `~/.cargo/bin/cargo test -p primer-kb-load --features fastembed --test retrieval_quality_hybrid --test retrieval_quality_hybrid_de`.
+### This session (#387)
+- **Recall margin is thin:** 0.023 below the lowest benchmark query ("was ist schall", 0.473). A real child's on-topic question just under 0.45 now gets **no** grounding at all, not 5 weak passages. The 33-utterance off-topic set is small. Re-measure with `off_topic_gate_probe` when the corpus grows.
+- **Only `bge-m3` is gated.** ollama, openai-compat and the other fastembed variants keep the old never-empty behaviour until someone calibrates them (add an arm to `kb_query_gate_min_cosine`).
+- **The gate depends on the model id string.** Renaming `BGE_M3_MODEL_ID` silently ungates; the `query_gate_is_calibrated_for_bge_m3_only` test pins the lookup.
+- **`HybridParams` is shared with LTM** (`retrieve_session_turns_hybrid`), which ignores `min_top_cosine`. That is documented on the field.
 
 ### Carried from earlier sessions
+- **#385:** a resume right after a turn can block for up to the background budget (10 s worst case) while old tasks drain. It is a no-op on the real hosts.
+- **#384:** `finish()` only recovers a complete-but-unterminated final unit. A truncated partial payload is still skipped with `warn!`. The `serve_once` tests bind loopback.
 - **#381:** a `force` reembed clears the locale's vectors up front. A part-way embedder failure degrades hybrid towards BM25 until a rerun. A model still used by another locale stays pinned at its old dim.
 - **#382:** a *write* failure in a later seed file still leaves earlier files committed (`shortcut:` in `load_seed_files`). `bulk_insert_bench` not re-run after per-row transactions.
 - **#374** turns a corrupt `embedding_models` row into a hard retrieval error, not BM25-only results. That is intended.
@@ -139,6 +133,8 @@ Commands are in the resume block.
 
 ## Patterns to reuse, not reinvent
 
+- **Calibrating a retrieval threshold (new):** measure the distribution *before* designing the fix. A throwaway `tests/zz_probe.rs` that embeds every seed passage (read the JSONL, skip `#` comment lines) and prints per-query best cosine + BM25 hit counts answered #307 in one run. The committed version is `off_topic_gate.rs::off_topic_gate_probe`. When the distributions overlap, report the numbers and let the owner pick the trade-off.
+- **Struct-literal field additions across the workspace (new):** `git grep -n "HybridParams {"` to list them. A regex keyed on `min_score: …,\n source_filter` also hits `RetrievalParams` literals, so check each match.
 - **Driving a real streaming backend end to end (new):** `crate::test_http::serve_once(body)` in `primer-inference` answers one request with `200` + `body` and then closes, with no `Content-Length`. Point `OllamaBackend::new` / `OpenAiCompatBackend::new` / `CloudBackend::new` at the returned URL, then `crate::test_http::collect(stream)`. Use it for any spawn-loop behaviour (EOF, mid-stream error payloads) that buffer-level tests can't reach.
 - **Restructuring a big match arm without retyping it (new):** a Python regex that captures the existing blocks and reassembles them, then `cargo fmt`, then verify with `git diff -w` that only the intended lines changed. Assert exactly one match before writing.
 - **JS behaviour without a JS runner:** use an `include_str!` contract test in `primer-gui/src/*_contract.rs`. Slice the function body by a unique anchor string and assert the call is there. See `voice_stop_contract.rs` and `diagnostics_toggle_contract.rs`. Mutation-check by stashing the `ui/` changes and re-running.
@@ -174,7 +170,7 @@ Commands are in the resume block.
 
 ```bash
 cd /Users/hherb/src/primer && git status --short && git checkout main && git pull --ff-only && git log --oneline -6 && gh pr list --state open
-# Open at close: #384, #385. After merge: for i in 313 314; do gh issue view $i --json state; done
+# Open at close: #387. After merge: gh issue view 307 --json state
 S=/private/tmp/primer-scratch; mkdir -p "$S"   # or the session's scratchpad dir
 
 # === Oversized-file sweep + inline-test detector (re-verify EVERY session) ===
@@ -183,9 +179,11 @@ find crates -name '*.rs' -not -path '*/vendor/*' -not -name 'tests.rs' | xargs w
 for f in $(find crates -name '*.rs' -not -path '*/vendor/*' -not -name 'tests.rs' | xargs wc -l | awk '$1>500 && $2!="total"{print $2}'); do \
   awk '/#\[cfg\(test\)\]/{ln=NR} ln && NR==ln+1 && /^[[:space:]]*mod .*\{/{print FILENAME" inline mod @"NR}' "$f"; done
 
-# === #307 starting point (downloads ~570 MB BGE-M3 on first run) ===
-gh issue view 307
-~/.cargo/bin/cargo test -p primer-kb-load --features fastembed --test retrieval_quality_hybrid --test retrieval_quality_hybrid_de -- --nocapture
+# === #386 starting point (BM25-only path needs no model; fastembed re-check downloads ~570 MB BGE-M3 if not cached) ===
+gh issue view 386
+~/.cargo/bin/cargo test -p primer-kb-load --test retrieval_quality --test retrieval_quality_de
+~/.cargo/bin/cargo test -p primer-kb-load --features fastembed --test off_topic_gate --test retrieval_quality_hybrid --test retrieval_quality_hybrid_de
+~/.cargo/bin/cargo test -p primer-kb-load --features fastembed --test off_topic_gate -- --ignored off_topic_gate_probe --nocapture
 
 # === Pick the next bug ===
 gh issue list --state open --limit 40
@@ -208,5 +206,4 @@ for spec in "-p primer-speech --features voice-loop,silero,whisper,piper,cpal,su
 
 ## Reporting back
 
-- **#384:** when a local or cloud model server sends its very last message without a trailing newline and then hangs up, the Primer still notices that the reply was cut short. It can then recover instead of treating the truncated answer as complete. Closes #313.
-- **#385:** resuming a different conversation on the same Primer instance can no longer mix the previous conversation's extracted concepts into it. Closes #314.
+- **#387:** when a child just says "good morning" or "can we stop now", the Primer no longer stuffs five unrelated encyclopedia passages into its prompt. That also stops simple small talk from being routed to the cloud model under hybrid routing. Real questions keep full retrieval, measured at 100% on the English and German benchmarks. Closes #307; the remaining stopword cases are filed as #386.

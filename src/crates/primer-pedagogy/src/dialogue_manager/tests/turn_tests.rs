@@ -1176,3 +1176,89 @@ async fn build_turn_prompt_no_knowledge_tier_omits_kb_section() {
         &prompt_nokb.system[..prompt_nokb.system.len().min(300)]
     );
 }
+
+/// KB spy for the off-topic gate wiring: records the gate the DM passed
+/// to `retrieve_hybrid` and answers it with nothing (as a gated query
+/// would), while BM25-only `retrieve` WOULD return a stopword hit.
+struct GateRecordingKnowledge {
+    last_gate: Mutex<Option<Option<f64>>>,
+}
+
+#[async_trait]
+impl primer_core::knowledge::KnowledgeBase for GateRecordingKnowledge {
+    async fn retrieve(
+        &self,
+        _query: &str,
+        _params: &primer_core::knowledge::RetrievalParams,
+    ) -> Result<Vec<primer_core::knowledge::Passage>> {
+        Ok(vec![primer_core::knowledge::Passage {
+            id: "kb:stopword-hit".into(),
+            source: "src".into(),
+            text: "can we".into(),
+            score: 4.0,
+        }])
+    }
+
+    async fn retrieve_hybrid(
+        &self,
+        _query: &str,
+        _embedder: &dyn primer_core::embedder::Embedder,
+        params: &primer_core::knowledge::HybridParams,
+    ) -> Result<Vec<primer_core::knowledge::Passage>> {
+        *self.last_gate.lock().unwrap() = Some(params.min_top_cosine);
+        Ok(vec![])
+    }
+}
+
+/// Embedder that only reports a model id; the spy KB never embeds.
+struct ModelIdEmbedder(&'static str);
+
+impl primer_core::speech::Named for ModelIdEmbedder {
+    fn name(&self) -> &str {
+        self.0
+    }
+}
+
+#[async_trait]
+impl primer_core::embedder::Embedder for ModelIdEmbedder {
+    async fn embed(&self, _texts: &[&str]) -> Result<Vec<Vec<f32>>> {
+        unreachable!("the spy KB never embeds")
+    }
+    fn dim(&self) -> usize {
+        1
+    }
+    fn model_id(&self) -> &str {
+        self.0
+    }
+}
+
+#[tokio::test]
+async fn kb_retrieval_passes_model_gate_and_keeps_gated_result_empty() {
+    // Issue #307: the embedder's model id must reach the gate, and an
+    // empty (gated) hybrid result must NOT be refilled from BM25 — that
+    // would bring the stopword hits straight back.
+    use primer_core::consts::retrieval::{BGE_M3_MODEL_ID, KB_QUERY_GATE_MIN_COSINE_BGE_M3};
+    let backend = Arc::new(ScriptedBackend::new(vec![]));
+    let knowledge = Arc::new(GateRecordingKnowledge {
+        last_gate: Mutex::new(None),
+    });
+    let mut subsystems = default_subsystems();
+    subsystems.embedder = Some(Arc::new(ModelIdEmbedder(BGE_M3_MODEL_ID)));
+    let dm = DialogueManager::new(
+        test_learner(),
+        backend,
+        knowledge.clone(),
+        DialogueManagerStores::default(),
+        subsystems,
+        PedagogyConfig::default(),
+    );
+    let passages = dm.retrieve_knowledge("can we stop now").await;
+    assert!(
+        passages.is_empty(),
+        "gated result was refilled: {passages:?}"
+    );
+    assert_eq!(
+        *knowledge.last_gate.lock().unwrap(),
+        Some(Some(KB_QUERY_GATE_MIN_COSINE_BGE_M3))
+    );
+}

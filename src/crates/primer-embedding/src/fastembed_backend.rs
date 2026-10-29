@@ -41,7 +41,7 @@ use std::sync::{Arc, Mutex};
 
 /// Project default real-model id. The corresponding fastembed enum
 /// variant is [`EmbeddingModel::BGEM3`]; vector dim is 1024.
-pub const BGE_M3_MODEL_ID: &str = "bge-m3";
+pub const BGE_M3_MODEL_ID: &str = primer_core::consts::retrieval::BGE_M3_MODEL_ID;
 const BGE_M3_DIM: usize = 1024;
 
 /// Name + dim for every fastembed variant we explicitly support.

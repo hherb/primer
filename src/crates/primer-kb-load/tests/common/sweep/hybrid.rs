@@ -11,7 +11,7 @@ use std::sync::Arc;
 use crate::common::BenchQuery;
 use primer_core::embedder::Embedder;
 use primer_core::i18n::Locale;
-use primer_core::knowledge::{HybridParams, KnowledgeBase};
+use primer_core::knowledge::{HybridParams, KnowledgeBase, kb_query_gate_min_cosine};
 use primer_embedding::FastEmbedBackend;
 use primer_kb_load::{auto_seed_if_empty, reembed_kb};
 use primer_knowledge::SqliteKnowledgeBase;
@@ -110,6 +110,9 @@ async fn evaluate_hybrid_cell(
             final_top_k,
             rrf_k,
             min_score,
+            // Sweep under the production off-topic gate (issue #307) so a
+            // gate that cost recall would show up here.
+            min_top_cosine: kb_query_gate_min_cosine(embedder.model_id()),
             source_filter: vec![],
         };
         let hits = kb

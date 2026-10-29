@@ -60,6 +60,26 @@ pub const KB_FINAL_TOP_K_SMALL_CONTEXT: usize = 3;
 /// appeared in either leg.
 pub const KB_MIN_SCORE: f64 = 0.0;
 
+/// Embedder model id of the project's default real model (BGE-M3, via
+/// fastembed). Lives here so the retrieval calibration below can key on
+/// it; `primer_embedding::BGE_M3_MODEL_ID` re-uses this value.
+pub const BGE_M3_MODEL_ID: &str = "bge-m3";
+
+/// Off-topic query gate for the KB hybrid path under BGE-M3
+/// ([`crate::knowledge::HybridParams::min_top_cosine`], issue #307): a
+/// query whose best passage cosine is below this retrieves nothing.
+/// Measured on the shipped EN + DE corpora: the 122 benchmark queries
+/// have a best cosine of 0.473–0.772 (median 0.652); 33 off-topic
+/// utterances (greetings, "can we stop now", "mir ist langweilig")
+/// score 0.365–0.473 (median 0.426). The two ranges touch, so this
+/// value trades precision for a recall margin: 0.45 loses no benchmark
+/// query (0.023 below the lowest) and empties 26 of the 33 off-topic
+/// ones; 0.47 would empty 32 but leave almost no margin for a real
+/// child's on-topic question. Re-measure with the `#[ignore]`'d
+/// `off_topic_gate_probe` in `primer-kb-load/tests/` when the corpus or
+/// the model changes.
+pub const KB_QUERY_GATE_MIN_COSINE_BGE_M3: f64 = 0.45;
+
 /// BM25 leg top-K for long-term-memory (session-turn) retrieval.
 /// Smaller than the KB path because the session corpus is usually
 /// orders of magnitude smaller and the fused candidate set

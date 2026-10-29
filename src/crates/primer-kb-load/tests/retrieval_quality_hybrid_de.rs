@@ -81,6 +81,7 @@ async fn hybrid_de_retrieval_structural_with_stub() {
 #[tokio::test]
 async fn hybrid_de_retrieval_recall_with_fastembed() {
     use common::de::KNOWN_FAILING_QUERIES_DE_HYBRID;
+    use primer_core::embedder::Embedder;
     use primer_embedding::FastEmbedBackend;
 
     let db = tempfile::NamedTempFile::new().unwrap();
@@ -95,7 +96,12 @@ async fn hybrid_de_retrieval_recall_with_fastembed() {
         .await
         .expect("BGE-M3 re-embed must succeed");
 
-    let params = HybridParams::default();
+    // Production gates off-topic queries (issue #307); recall must hold
+    // with the gate on.
+    let params = HybridParams {
+        min_top_cosine: primer_core::knowledge::kb_query_gate_min_cosine(embedder.model_id()),
+        ..HybridParams::default()
+    };
 
     let mut loose_failures = Vec::new();
     let mut strict_failures = Vec::new();
