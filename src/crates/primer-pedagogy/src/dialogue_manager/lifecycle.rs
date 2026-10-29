@@ -228,7 +228,7 @@ impl DialogueManager {
     }
 
     /// Most recent comprehension result applied to the learner (used by `--verbose`).
-    /// Cleared on session lifecycle events. Returns `None` until the first
+    /// Cleared on `new` and `resume_session`. Returns `None` until the first
     /// completed exchange whose comprehension has been awaited.
     pub fn last_comprehension(&self) -> Option<&primer_core::comprehension::ComprehensionResult> {
         self.last_comprehension.as_ref()
@@ -247,8 +247,9 @@ impl DialogueManager {
         self.embedder.as_deref().map(|e| e.name())
     }
 
-    /// End the session gracefully. Drains any in-flight classifier task so
-    /// the final turn's assessment lands on disk, records `ended_at`, and
+    /// End the session gracefully. Drains the in-flight classifier and
+    /// post-response tasks so the final turn's assessment and concepts land
+    /// on disk, records `ended_at`, and
     /// (if storage is configured) fires a final save so the timestamp
     /// lands on disk. Save failures are logged via `tracing::warn!` rather
     /// than propagated — matching `respond_to_streaming`'s save-failure

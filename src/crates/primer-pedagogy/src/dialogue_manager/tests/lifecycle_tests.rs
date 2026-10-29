@@ -525,4 +525,12 @@ async fn resume_session_does_not_apply_previous_sessions_pending_extraction() {
     }
     assert!(dm.last_extraction().is_none());
     assert!(dm.last_comprehension().is_none());
+    // Drained, not aborted: the same child still learned the concept.
+    assert!(
+        dm.learner
+            .concepts
+            .iter()
+            .any(|c| c.concept_id == "gravity"),
+        "outgoing exchange's concepts should still reach the learner"
+    );
 }
