@@ -1,8 +1,8 @@
 //! Hybrid (BM25 + vector cosine) retrieval read path.
 //!
 //! `retrieve_hybrid_inner` fuses the FTS5 BM25 leg (`bm25_search`, the
-//! query shared with the BM25-only `KnowledgeBase::retrieve`, here with
-//! stopwords kept — #386) with an in-Rust cosine k-NN leg (`knn_scan`)
+//! query shared with the BM25-only `KnowledgeBase::retrieve`; stopwords
+//! are kept unless the vector leg is empty — #386) with an in-Rust cosine k-NN leg (`knn_scan`)
 //! through Reciprocal Rank Fusion. The BM25-only trait impl and
 //! the `KnowledgeBase::retrieve_hybrid` override that forwards here live with
 //! the struct in `lib.rs`; this module is the hybrid extension on top of it.
@@ -50,18 +50,7 @@ impl SqliteKnowledgeBase {
             embedder.dim(),
         )?;
 
-        // 1. BM25 leg, stopwords kept (see `bm25_search`).
-        let bm25 = self.bm25_search(
-            query,
-            &RetrievalParams {
-                top_k: params.bm25_top_k,
-                min_score: f64::NEG_INFINITY,
-                source_filter: vec![],
-            },
-            false,
-        )?;
-
-        // 2. Vector leg.
+        // 1. Vector leg.
         let q_vec = embedder
             .embed(&[query])
             .await?
@@ -87,11 +76,23 @@ impl SqliteKnowledgeBase {
                 target: "primer::retrieval",
                 best_cosine = best.score,
                 floor,
-                bm25_dropped = bm25.len(),
                 "off-topic gate: hybrid KB retrieval emptied"
             );
             return Ok(vec![]);
         }
+
+        // 2. BM25 leg. Stopwords are kept while the vector leg has hits
+        //    (see `bm25_search`); with no stored vectors the result is
+        //    BM25 alone, so it drops them like BM25-only `retrieve` (#386).
+        let bm25 = self.bm25_search(
+            query,
+            &RetrievalParams {
+                top_k: params.bm25_top_k,
+                min_score: f64::NEG_INFINITY,
+                source_filter: vec![],
+            },
+            vec_hits.is_empty(),
+        )?;
 
         // 3. RRF fusion. We fuse over passage `id`s (string-stable across
         //    legs) since BM25 and the vector path both produce `Passage`s.
@@ -188,9 +189,11 @@ impl SqliteKnowledgeBase {
 impl SqliteKnowledgeBase {
     /// The FTS5 BM25 query behind both retrieval paths.
     /// `drop_stopwords` is `true` for BM25-only [`KnowledgeBase::retrieve`]
-    /// and `false` for the hybrid BM25 leg, whose off-topic defence is the
-    /// cosine gate and whose 100% benchmark recall was measured with
-    /// stopwords kept (dropping them cost "what is inside a tiny bug" its
+    /// and for a hybrid query whose vector leg is empty (no stored vectors:
+    /// the result is BM25 alone). It is `false` for the hybrid BM25 leg
+    /// beside a non-empty vector leg, whose off-topic defence is the cosine
+    /// gate and whose 100% benchmark recall was measured with stopwords
+    /// kept (dropping them cost "what is inside a tiny bug" its
     /// `seed:en:insects` hit).
     pub(crate) fn bm25_search(
         &self,

@@ -1036,19 +1036,43 @@ async fn retrieve_uses_the_kb_locale_stopword_list() {
 }
 
 #[tokio::test]
-async fn hybrid_bm25_leg_keeps_stopwords() {
-    // The hybrid leg's recall was measured with stopwords kept (#386).
-    // No stored vectors, so the vector leg is empty and the hybrid result
-    // is exactly the BM25 leg.
+async fn hybrid_drops_stopwords_when_the_vector_leg_is_empty() {
+    // No stored vectors (the default `:memory:` KB, #388): the hybrid
+    // result is BM25 alone, so it filters like BM25-only `retrieve` (#386).
     let db = tmp_db();
     let kb = SqliteKnowledgeBase::open_for_locale(db.path(), Locale::English).unwrap();
     kb.insert_passage("p1", "s", "Now we can see the stars at night.")
         .unwrap();
     let stub = primer_embedding::StubEmbedder::with_dim(16);
+    let params = HybridParams::default();
+    let got = kb
+        .retrieve_hybrid("can we do it now", &stub, &params)
+        .await
+        .unwrap();
+    assert!(got.is_empty(), "{got:?}");
+    let got = kb
+        .retrieve_hybrid("see the stars", &stub, &params)
+        .await
+        .unwrap();
+    assert_eq!(got.len(), 1, "content words must still match");
+}
+
+#[tokio::test]
+async fn hybrid_bm25_leg_keeps_stopwords_beside_a_vector_leg() {
+    // The hybrid leg's recall was measured with stopwords kept (#386).
+    // Only "vec" has a vector; "lex" can reach the result only through a
+    // BM25 match on the stopwords "now" / "we".
+    let db = tmp_db();
+    let kb = SqliteKnowledgeBase::open_for_locale(db.path(), Locale::English).unwrap();
+    let stub = primer_embedding::StubEmbedder::with_dim(16);
+    kb.insert_passage_with_embedding("vec", "s", "Volcanoes erupt lava.", &stub)
+        .await
+        .unwrap();
+    kb.insert_passage("lex", "s", "Now we can see the stars at night.")
+        .unwrap();
     let got = kb
         .retrieve_hybrid("can we do it now", &stub, &HybridParams::default())
         .await
         .unwrap();
-    assert_eq!(got.len(), 1, "{got:?}");
-    assert!(retrieve_all(&kb, "can we do it now").await.is_empty());
+    assert!(got.iter().any(|p| p.id == "lex"), "{got:?}");
 }
