@@ -191,6 +191,35 @@ async fn reembed_backfills_passages_missing_embeddings() {
     assert_eq!(n2, 0);
 }
 
+/// `force` re-embeds every passage, even one that already has a vector, and
+/// lets the same model id come back at a new dim — the stub's id is
+/// constant across dims, so this is the "model swap" the dim-mismatch
+/// errors tell users to fix with `--reembed --force` (#377).
+#[tokio::test]
+async fn reembed_force_replaces_every_vector_under_a_new_dim() {
+    use primer_core::knowledge::{HybridParams, KnowledgeBase};
+    use primer_embedding::StubEmbedder;
+    let db = tempfile::NamedTempFile::new().unwrap();
+    let kb = SqliteKnowledgeBase::open_for_locale(db.path(), Locale::English).unwrap();
+    kb.insert_passage("p1", "src", "first text").unwrap();
+    kb.insert_passage("p2", "src", "second text").unwrap();
+    let old = StubEmbedder::with_dim(8);
+    let new = StubEmbedder::with_dim(16);
+    assert_eq!(reembed_kb(&kb, &old, false, 8).await.unwrap(), 2);
+
+    assert_eq!(reembed_kb(&kb, &new, true, 8).await.unwrap(), 2);
+
+    assert_eq!(kb.embedding_count().unwrap(), 2);
+    let params = HybridParams::default();
+    kb.retrieve_hybrid("first", &new, &params)
+        .await
+        .expect("the registry now carries dim 16");
+    assert!(
+        kb.retrieve_hybrid("first", &old, &params).await.is_err(),
+        "the old dim must no longer validate"
+    );
+}
+
 /// An embedder whose batch endpoint drops the last item — the misbehaving
 /// openai-compat server of #311. Wraps `StubEmbedder` for the real vectors.
 struct DropsLastEmbedder(primer_embedding::StubEmbedder);

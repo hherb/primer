@@ -845,3 +845,29 @@ async fn insert_passage_rolls_back_the_content_row_when_the_fts_insert_fails() {
     assert!(kb.insert_passage("p1", "src", "text").is_err());
     assert_eq!(kb.passage_count().unwrap(), 0);
 }
+
+/// `--reembed --force` reset (#377): clearing a locale's vectors also
+/// unregisters every model no locale still uses, so the same model name can
+/// come back at a new dim. A model another locale still uses stays pinned.
+#[tokio::test]
+async fn clear_embeddings_resets_this_locale_and_prunes_unused_models() {
+    let db = tmp_db();
+    let en = SqliteKnowledgeBase::open_for_locale(db.path(), Locale::English).unwrap();
+    let de = SqliteKnowledgeBase::open_for_locale(db.path(), Locale::German).unwrap();
+    en.insert_passage("p1", "src", "first").unwrap();
+    de.insert_passage("d1", "src", "erste").unwrap();
+    en.upsert_embedding("p1", "model-a", 4, &[1.0; 4]).unwrap();
+    de.upsert_embedding("d1", "model-b", 4, &[1.0; 4]).unwrap();
+
+    assert_eq!(en.clear_embeddings().unwrap(), 1);
+    assert_eq!(en.embedding_count().unwrap(), 0);
+    assert_eq!(de.embedding_count().unwrap(), 1, "other locales untouched");
+
+    en.upsert_embedding("p1", "model-a", 8, &[1.0; 8])
+        .expect("model-a was unused, so it may re-register at a new dim");
+    let still_pinned = en.upsert_embedding("p1", "model-b", 8, &[1.0; 8]);
+    assert!(
+        matches!(still_pinned, Err(PrimerError::Knowledge(_))),
+        "model-b is still used by de, so its dim stays 4, got {still_pinned:?}"
+    );
+}

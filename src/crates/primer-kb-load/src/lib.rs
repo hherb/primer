@@ -345,29 +345,28 @@ fn xdg_data_home() -> Option<PathBuf> {
 }
 
 /// Backfill embeddings for every passage in `kb` that doesn't already
-/// have one (or for every passage when `force = true`). Calls `embedder`
-/// in batches to amortise the per-call cost.
+/// have one. With `force = true`, first clears every vector in the locale
+/// (and unregisters models no locale still uses), so every passage is
+/// re-embedded and a model may come back at a new dim — the model-swap
+/// path (#377). Calls `embedder` in batches to amortise the per-call cost.
 ///
 /// Returns the number of passages embedded. Errors fail the whole call —
 /// embedding is not best-effort here, because a partial fill is exactly
-/// the problem this is designed to fix.
+/// the problem this is designed to fix. A `force` run that fails part-way
+/// leaves the remaining passages unembedded; rerunning (with or without
+/// `force`) completes it.
 pub async fn reembed_kb(
     kb: &SqliteKnowledgeBase,
     embedder: &dyn primer_core::embedder::Embedder,
     force: bool,
     batch_size: usize,
 ) -> Result<usize> {
-    // Today the missing-list is the only public per-passage iteration
-    // path on `SqliteKnowledgeBase`. `--force` semantics — re-embed
-    // everything regardless — would need a `list_passages_with_text()`
-    // accessor; tracked as a follow-up.
     if force {
-        tracing::warn!(
+        let cleared = kb.clear_embeddings()?;
+        tracing::info!(
             target = "primer-kb-load",
-            "reembed --force is not yet a complete operation: it currently \
-             re-embeds only passages WITHOUT an embedding row. Re-embedding \
-             of already-embedded passages requires a `list_passages_with_text()` \
-             accessor on SqliteKnowledgeBase."
+            cleared,
+            "reembed --force: cleared existing vectors"
         );
     }
     let candidates: Vec<(String, String)> = kb.passages_missing_embedding()?;
