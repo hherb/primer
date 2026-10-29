@@ -1,75 +1,79 @@
 # Primer — Next Session Brief
 
 **Audience:** future Claude Code session continuing work on this repo.
-**Last updated:** 2026-10-29 14:09 (UTC).
+**Last updated:** 2026-10-29 21:57 (UTC).
 
 **One PR is open against `main`** from this session:
 
 | PR | Branch | What | Closes |
 |---|---|---|---|
-| **#387** | `fix/hybrid-query-gate-307` | Off-topic query gate for hybrid KB retrieval (this brief rides on it) | #307 |
+| **#390** | `fix/bm25-stopwords-386` | BM25 KB retrieval drops per-locale stopwords (this brief rides on it) | #386 |
 
-- **`main` is at `a12f1ea`** (#385).
+- **`main` is at `fe86ee2`** (#387).
 
-**Since the last brief:** #384 and #385 both merged; #313 and #314 are CLOSED.
+**Since the last brief:** #387 merged, #307 is CLOSED. #388 and #389 were filed from the #387 review (both are about the KB never being embedded by default).
 
 ## What we shipped this session
 
-### #387 (`1e80138` + this brief's docs commit): closes #307
-- **Measured first:** best-passage BGE-M3 cosine on the shipped EN + DE corpora.
-  - 122 on-topic benchmark queries: 0.473–0.772 (median 0.652).
-  - 33 off-topic utterances (greetings, meta-talk, feelings): 0.365–0.473 (median 0.426).
-  - **The ranges touch.** BM25 alone leaks 19/33 off-topic utterances through stopwords, so the per-passage `knn_scan` floor the issue suggested could not meet "≤1 passage each".
-  - Reported to the owner, who chose **option A: a query-level gate at 0.45**.
+### #390 (`04e0645` + `38a25a1` + this brief's docs commit): closes #386
+- **Measured first** (BM25-only, production `top_k=5` / `min_score=0.5`): 19/33 off-topic utterances retrieved, 81 passages in total. The per-token probe showed the very common words ("is", "the", "can") were already under the floor. The leaks came from mid-frequency function words ("we", "now", "your", "wir", "mehr", "keine", "ich") and content words ("good", "stop", "talk", "name", "Lust").
 - **Fix:**
-  - `HybridParams.min_top_cosine: Option<f64>`. If the vector leg's best cosine is below it, `retrieve_hybrid_inner` returns nothing, BM25 hits included. An empty vector leg is never gated.
-  - `primer_core::knowledge::kb_query_gate_min_cosine(model_id)` gives `Some(KB_QUERY_GATE_MIN_COSINE_BGE_M3 = 0.45)` for `bge-m3`, `None` for any other model; `HybridParams::default()` is `None`.
-  - The DM's `kb_hybrid_params` sets it from `embedder.model_id()`. LTM is untouched.
-  - `BGE_M3_MODEL_ID` now lives in `primer_core::consts::retrieval`; `primer_embedding` re-uses it.
-- **Result at 0.45:** 0/122 on-topic lost; 26/33 off-topic now return nothing. The 7 leakers are pinned in `tests/common/off_topic.rs::KNOWN_LEAKING_OFF_TOPIC`.
-- **Tests:**
-  - 3 StubEmbedder tests in `primer-knowledge/src/tests.rs` (`retrieve_hybrid_query_gate_*`), mutation-checked.
-  - `primer-kb-load/tests/off_topic_gate.rs` (fastembed): gated-vs-leaking pinned both ways, plus the `#[ignore]`'d `off_topic_gate_probe` for recalibration.
-  - `retrieval_quality_hybrid{,_de}` now run with the gate on: 100% loose/strict preserved. The hybrid sweep harness runs gated too.
-- **Docs:** CLAUDE.md hybrid-retrieval bullet.
-- **Filed:** #386 (BM25 stopword matching; also covers the router-counting follow-up).
+  - `primer_core::fts_util::sanitize_fts_phrase_excluding(query, exclude)`.
+  - `primer_core::stopwords::is_stopword(locale, token)`. The lists are data files at `primer-core/stopwords/<pack_id>.txt` (en, de; hi empty = no-op), embedded with `include_str!`.
+  - **Deviation from the brief:** the lists are NOT in the prompt pack, because `primer-knowledge` can't depend on `primer-pedagogy`. Adding a locale is still a data file plus one arm each in `list_source` and `set`.
+  - `SqliteKnowledgeBase::bm25_search(.., drop_stopwords)` in `retrieval.rs`:
+    - `retrieve` (BM25-only) drops stopwords;
+    - the hybrid BM25 leg drops them **only when the vector leg is empty** (the default `:memory:` KB, #388); beside a non-empty vector leg it keeps them, because dropping them cost hybrid recall ("what is inside a tiny bug" lost `seed:en:insects`);
+    - the vector leg now runs before the BM25 leg, so a gated query skips the BM25 work.
+  - LTM retrieval is untouched.
+  - Kept as terms: `not` / `nicht` / `near` (#309), and `how` (dropping it cost "how does my dog see in the dark" its eye passage).
+- **Result:**
+  - off-topic on the BM25-only path: 19/33 → **10/33**. The 10 match through content words and are pinned both ways in `tests/off_topic_bm25.rs` (`KNOWN_LEAKING_OFF_TOPIC_BM25`).
+  - EN BM25 strict recall 21/24 → **22/24**: "why does the brain need oxygen from the lungs" now passes and has left `KNOWN_FAILING_QUERIES`. DE is unchanged.
+  - hybrid fastembed EN + DE: still 100%. `KNOWN_LEAKING_OFF_TOPIC` (hybrid) is unchanged, because the vector leg alone fills those top 5s.
+- **Router decision (from #386):** no change to `RoutingSignals.retrieved_passages`. The remaining hits are content-word matches the router can't tell from real relevance.
+- **Tests:** stopword behaviour and list-hygiene tests, sanitizer predicate tests, three KB tests (BM25-only, locale-specific, plus the two hybrid directions). The KB tests are mutation-checked against the filter and both directions of the hybrid flag. `off_topic_bm25` is mutation-checked too: reverting the filter gives 9 drift lines.
+- **Docs:** CLAUDE.md (FTS5 bullet, gate bullet, #45 paraphrase sentence, tripwire numbers, primer-knowledge layout); README (knowledge-base section). ROADMAP: no change (bug fix, no roadmap item).
 
 ### Gate
-- `cargo test --workspace`: 1426/0.
-- Workspace clippy `--all-targets -D warnings`; `primer-kb-load` + `primer-embedding` fastembed clippy; fmt.
-- Rustdoc: workspace, plus the `primer-embedding`/`primer-kb-load` fastembed arm.
-- fastembed: `off_topic_gate`, `retrieval_quality_hybrid`, `retrieval_quality_hybrid_de` all green (this also discharges the benchmarks owed from #376).
+- `cargo test --workspace`: 1459/0.
+- Workspace clippy `--all-targets -D warnings`; fastembed clippy for `primer-kb-load` + `primer-knowledge`; fmt; workspace rustdoc.
+- fastembed: `off_topic_gate`, `retrieval_quality_hybrid{,_de}` green.
+- BM25 sweeps (EN + DE) and `bm25_floor_tripwire` re-run.
 - **Not run:**
-  - the full 54-cell hybrid sweeps (EN + DE); only the production cell is verified, via the recall tests;
-  - the other rustdoc feature arms (no feature-gated code in speech/inference/gui was touched).
+  - the 54-cell hybrid sweeps (the hybrid leg with stored vectors is unchanged);
+  - the rustdoc feature arms (no feature-gated code touched).
 
 > SHAs are branch-tip commits as pushed; squash-merge gives new ones on `main`.
 
 ### Per-session sweep
-- **Inline-test detector:** clean for the twentieth session running.
+- **Inline-test detector:** clean for the twenty-first session running.
 - **Oversized list:** unchanged.
 
 ## What's next (concrete acceptance criteria)
 
-### 0. Owner review/merge: #387
-- **Acceptance:** CI green, merged; then `gh issue view 307 --json state` is CLOSED.
+### 0. Owner review/merge: #390
+- **Acceptance:** CI green, merged; then `gh issue view 386 --json state` is CLOSED.
 
 ### 1. Sweep + inline-test detector: re-run EVERY session
 Commands are in the resume block.
 
-### 2. #386: BM25 stopword matching (the natural follow-up; host-completable)
-- **What's wrong:** `sanitize_fts_phrase` OR-joins every token, so "can we stop now" gets 30 BM25 hits (top 4.01). This hits the BM25-only path (`--embedder-backend none`, Android, and the hybrid-error fallback) and the 7 gate leakers.
-- **Plan:**
-  1. Add per-locale stopword lists in the prompt pack, so a new locale stays data-only.
-  2. Drop stopwords in the KB query sanitizer only. Keep #309's operator handling, and leave LTM alone unless measured.
-  3. Measure with `tests/common/off_topic.rs` on the BM25-only path.
+### 2. #388 + #389 together: the default KB is never embedded (recommended next; host-completable)
+- **What's wrong:**
+  - The default `:memory:` KB is seeded without vectors, so the default run's hybrid KB retrieval is BM25-only.
+  - On that path `min_score = KB_MIN_SCORE = 0.0`, not the 0.5 BM25-only floor.
+  - The #307 cosine gate never fires there.
+  - #389: on a *partly* embedded KB the gate can drop on-topic BM25 hits.
+- **Decide first (owner, or recommend):**
+  - (a) embed after `auto_seed_if_empty` when an embedder is wired (BGE-M3 over ~91 passages each startup), and maybe default `--knowledge-db` to a persistent per-locale cache;
+  - (b) only apply `KB_BM25_ONLY_MIN_SCORE` + a one-time `warn!` when the vector leg is empty.
+  - Either way, #389 needs a coverage flag (`passages_missing_embedding()` exists).
 - **Acceptance:**
-  - BM25-only 91-query EN + DE recall unchanged (`retrieval_quality{,_de}`; `KNOWN_FAILING_*` not grown);
-  - hybrid fastembed recall still 100%;
-  - off-topic BM25-only hits drop materially (report the before/after counts);
-  - `KNOWN_LEAKING_OFF_TOPIC` shrinks, or stays with a note.
-- **Risk:** child questions are stopword-heavy ("why is the sky blue"). If recall drops, report and ask.
-- **Router:** decide in the same issue whether `RoutingSignals.retrieved_passages` needs changing once stopwords are gone.
+  - a test that drives the *shipped* wiring (CLI/GUI store open + seed), not a hand `reembed_kb`;
+  - the gate fires on a default run (if (a));
+  - #389's partly embedded KB keeps BM25 hits for un-embedded passages;
+  - recall benchmarks unchanged.
+- **Note:** #390 already drops stopwords on the empty-vector-leg path, so small talk mostly stops leaking there today.
 
 ### 3. Other bugs (host-completable; TDD each)
 - **#371** (voice-loop abort on stop timeout) needs a `JoinHandle::abort` design note first.
@@ -100,13 +104,22 @@ Commands are in the resume block.
 
 **Recommendation:** (a), and downgrade or drop today's kind-only warn on the router path.
 
-### This session (#387)
-- **Recall margin is thin:** 0.023 below the lowest benchmark query ("was ist schall", 0.473). A real child's on-topic question just under 0.45 now gets **no** grounding at all, not 5 weak passages. The 33-utterance off-topic set is small. Re-measure with `off_topic_gate_probe` when the corpus grows.
-- **Only `bge-m3` is gated.** ollama, openai-compat and the other fastembed variants keep the old never-empty behaviour until someone calibrates them (add an arm to `kb_query_gate_min_cosine`).
-- **The gate depends on the model id string.** Renaming `BGE_M3_MODEL_ID` silently ungates; the `query_gate_is_calibrated_for_bge_m3_only` test pins the lookup.
-- **`HybridParams` is shared with LTM** (`retrieve_session_turns_hybrid`), which ignores `min_top_cosine`. That is documented on the field.
+### #388 approach (new owner decision, see What's next §2)
+**Recommendation:** (a) with a persistent per-locale KB cache under `~/.primer/`. Embedding ~91 passages on every `:memory:` startup is affordable on a desktop, but not on Android. Android stays `--embedder-backend none` anyway (#157).
+
+### This session (#390)
+- **The stopword lists are hand-built** (function words + contraction forms + fillers), validated only against the 33-utterance off-topic set and the 91 + 31 query benchmarks. Grow them with care: every added word must not appear in a real child question. Re-run `retrieval_quality{,_de}` + `off_topic_bm25` + `bm25_floor_tripwire`.
+- **BM25 margin narrowed:** min top-K score 0.95 → 0.80 and worst top-1 2.06 → 1.12, against the 0.5 floor. The tripwire still passes (median 3.85 > 1.00), but there is less headroom for corpus growth.
+- **Hindi has no list** (preview locale, no corpus); the filter is a no-op there.
+- **The hybrid leg's stopword behaviour depends on the vector leg being empty.** On a *partly* embedded KB (#389) it keeps stopwords. That is consistent with the gate, but it means the un-embedded passages are matched with the noisier query.
+- **The gate's debug line lost its `bm25_dropped` count** (the BM25 leg now runs after the gate).
 
 ### Carried from earlier sessions
+- **#387 (off-topic gate):**
+  - **Recall margin is thin:** 0.023 below the lowest benchmark query ("was ist schall", 0.473). A real child's on-topic question just under 0.45 now gets **no** grounding at all, not 5 weak passages. The 33-utterance off-topic set is small. Re-measure with `off_topic_gate_probe` when the corpus grows.
+  - **Only `bge-m3` is gated.** ollama, openai-compat and the other fastembed variants keep the old never-empty behaviour until someone calibrates them (add an arm to `kb_query_gate_min_cosine`).
+  - **The gate depends on the model id string.** Renaming `BGE_M3_MODEL_ID` silently ungates; the `query_gate_is_calibrated_for_bge_m3_only` test pins the lookup.
+  - **`HybridParams` is shared with LTM** (`retrieve_session_turns_hybrid`), which ignores `min_top_cosine`. That is documented on the field.
 - **#385:** a resume right after a turn can block for up to the background budget (10 s worst case) while old tasks drain. It is a no-op on the real hosts.
 - **#384:** `finish()` only recovers a complete-but-unterminated final unit. A truncated partial payload is still skipped with `warn!`. The `serve_once` tests bind loopback.
 - **#381:** a `force` reembed clears the locale's vectors up front. A part-way embedder failure degrades hybrid towards BM25 until a rerun. A model still used by another locale stays pinned at its old dim.
@@ -133,6 +146,9 @@ Commands are in the resume block.
 
 ## Patterns to reuse, not reinvent
 
+- **Old-behaviour baseline for the stopword filter (new):** open a KB under `Locale::Hindi` (empty list) and `load_jsonl` the EN seed files into it. That gives the pre-#386 ranking side by side with the filtered one in a single probe run.
+- **Before/after sweep numbers (new):** `git stash -u` → run the `#[ignore]`'d sweep → `git stash pop`. To see which `KNOWN_FAILING_*` entries now pass, empty the list temporarily (perl), run `retrieval_quality`, then restore from a scratchpad backup.
+- **Per-token blame for a leaky query (new):** run each token alone through `kb.retrieve` at the production params. #386's probe showed the very common words ("is", "the", "can") were already under the 0.5 floor, and the leaks came from mid-frequency function words plus content words.
 - **Calibrating a retrieval threshold (new):** measure the distribution *before* designing the fix. A throwaway `tests/zz_probe.rs` that embeds every seed passage (read the JSONL, skip `#` comment lines) and prints per-query best cosine + BM25 hit counts answered #307 in one run. The committed version is `off_topic_gate.rs::off_topic_gate_probe`. When the distributions overlap, report the numbers and let the owner pick the trade-off.
 - **Struct-literal field additions across the workspace (new):** `git grep -n "HybridParams {"` to list them. A regex keyed on `min_score: …,\n source_filter` also hits `RetrievalParams` literals, so check each match.
 - **Driving a real streaming backend end to end (new):** `crate::test_http::serve_once(body)` in `primer-inference` answers one request with `200` + `body` and then closes, with no `Content-Length`. Point `OllamaBackend::new` / `OpenAiCompatBackend::new` / `CloudBackend::new` at the returned URL, then `crate::test_http::collect(stream)`. Use it for any spawn-loop behaviour (EOF, mid-stream error payloads) that buffer-level tests can't reach.
@@ -170,7 +186,7 @@ Commands are in the resume block.
 
 ```bash
 cd /Users/hherb/src/primer && git status --short && git checkout main && git pull --ff-only && git log --oneline -6 && gh pr list --state open
-# Open at close: #387. After merge: gh issue view 307 --json state
+# Open at close: #390. After merge: gh issue view 386 --json state
 S=/private/tmp/primer-scratch; mkdir -p "$S"   # or the session's scratchpad dir
 
 # === Oversized-file sweep + inline-test detector (re-verify EVERY session) ===
@@ -179,11 +195,12 @@ find crates -name '*.rs' -not -path '*/vendor/*' -not -name 'tests.rs' | xargs w
 for f in $(find crates -name '*.rs' -not -path '*/vendor/*' -not -name 'tests.rs' | xargs wc -l | awk '$1>500 && $2!="total"{print $2}'); do \
   awk '/#\[cfg\(test\)\]/{ln=NR} ln && NR==ln+1 && /^[[:space:]]*mod .*\{/{print FILENAME" inline mod @"NR}' "$f"; done
 
-# === #386 starting point (BM25-only path needs no model; fastembed re-check downloads ~570 MB BGE-M3 if not cached) ===
-gh issue view 386
-~/.cargo/bin/cargo test -p primer-kb-load --test retrieval_quality --test retrieval_quality_de
+# === #388 / #389 starting point ===
+gh issue view 388; gh issue view 389
+git grep -n "auto_seed_if_empty" -- '*.rs' | grep -v tests
+~/.cargo/bin/cargo test -p primer-kb-load --test off_topic_bm25 --test retrieval_quality --test retrieval_quality_de
 ~/.cargo/bin/cargo test -p primer-kb-load --features fastembed --test off_topic_gate --test retrieval_quality_hybrid --test retrieval_quality_hybrid_de
-~/.cargo/bin/cargo test -p primer-kb-load --features fastembed --test off_topic_gate -- --ignored off_topic_gate_probe --nocapture
+~/.cargo/bin/cargo test -p primer-kb-load --test bm25_floor_tripwire -- --ignored --nocapture
 
 # === Pick the next bug ===
 gh issue list --state open --limit 40
@@ -206,4 +223,4 @@ for spec in "-p primer-speech --features voice-loop,silero,whisper,piper,cpal,su
 
 ## Reporting back
 
-- **#387:** when a child just says "good morning" or "can we stop now", the Primer no longer stuffs five unrelated encyclopedia passages into its prompt. That also stops simple small talk from being routed to the cloud model under hybrid routing. Real questions keep full retrieval, measured at 100% on the English and German benchmarks. Closes #307; the remaining stopword cases are filed as #386.
+- **#390:** when the Primer runs without the semantic search model (the Android setup, or whenever that model fails to load), "can we stop now" or "thank you" no longer pulls encyclopedia passages into its prompt. Common filler words are now ignored when matching the knowledge base, in English and German. That cut the small talk that retrieves anything from 19 of 33 phrases to 10. The 10 left use real words like "stop", "talk" or "name", which genuine questions use too. Real questions retrieve as well as before, and one English question that used to miss its passage now finds it. Closes #386.
