@@ -172,6 +172,17 @@ impl SseBuffer {
         }
     }
 
+    /// Call once at EOF: terminate a trailing line/event flushed without
+    /// `\n` / blank line, so `next_event` still yields it (issue #313).
+    fn finish(&mut self) {
+        if !self.bytes.is_empty() {
+            self.extend(b"\n");
+        }
+        if !self.lines.is_empty() {
+            self.lines.push_back(String::new());
+        }
+    }
+
     fn next_event(&mut self) -> Option<SseEvent> {
         // Walk pending lines, building an event until a blank-line terminator
         // is found. Lines starting with `:` are SSE comments (heartbeats).
@@ -435,27 +446,10 @@ impl InferenceBackend for CloudBackend {
             let mut buf = SseBuffer::new();
             let mut translator = AnthropicEventTranslator::new();
             'outer: loop {
-                match bytes_stream.next().await {
+                let eof = match bytes_stream.next().await {
                     Some(Ok(bytes)) => {
                         buf.extend(&bytes);
-                        while let Some(ev) = buf.next_event() {
-                            match translator.step(&ev) {
-                                Ok(Some(chunk)) => {
-                                    let done = chunk.done;
-                                    if tx.send(Ok(chunk)).await.is_err() {
-                                        break 'outer;
-                                    }
-                                    if done {
-                                        break 'outer;
-                                    }
-                                }
-                                Ok(None) => {} // ignorable event
-                                Err(e) => {
-                                    let _ = tx.send(Err(e)).await;
-                                    break 'outer;
-                                }
-                            }
-                        }
+                        false
                     }
                     Some(Err(e)) => {
                         let _ = tx
@@ -465,7 +459,33 @@ impl InferenceBackend for CloudBackend {
                             .await;
                         break 'outer;
                     }
-                    None => break 'outer,
+                    // Upstream closed: terminate an unterminated final event
+                    // (issue #313) so the drain below still parses it.
+                    None => {
+                        buf.finish();
+                        true
+                    }
+                };
+                while let Some(ev) = buf.next_event() {
+                    match translator.step(&ev) {
+                        Ok(Some(chunk)) => {
+                            let done = chunk.done;
+                            if tx.send(Ok(chunk)).await.is_err() {
+                                break 'outer;
+                            }
+                            if done {
+                                break 'outer;
+                            }
+                        }
+                        Ok(None) => {} // ignorable event
+                        Err(e) => {
+                            let _ = tx.send(Err(e)).await;
+                            break 'outer;
+                        }
+                    }
+                }
+                if eof {
+                    break 'outer;
                 }
             }
         });

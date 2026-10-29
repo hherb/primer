@@ -27,6 +27,8 @@ mod reasoning_stream;
 pub mod router;
 mod stream_error;
 pub mod stub;
+#[cfg(test)]
+mod test_http;
 
 #[cfg(feature = "qnn")]
 pub mod qnn;

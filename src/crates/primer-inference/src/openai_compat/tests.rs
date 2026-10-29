@@ -414,3 +414,30 @@ mod reasoning_wiring {
         assert!(!err);
     }
 }
+
+/// Issue #313: a terminal `finish_reason: "length"` event flushed without
+/// a trailing `\n` right before the server closes must still be parsed,
+/// or the synthetic EOF chunk (`Stop`) masks the truncation.
+#[tokio::test]
+async fn stream_parses_unterminated_final_event_at_eof() {
+    let url = crate::test_http::serve_once(concat!(
+        "data: {\"choices\":[{\"delta\":{\"content\":\"Hi\"},\"finish_reason\":null}]}\n\n",
+        "data: {\"choices\":[{\"delta\":{},\"finish_reason\":\"length\"}]}",
+    ))
+    .await;
+    let backend = OpenAiCompatBackend::new(url, "m".into(), None);
+    let prompt = Prompt {
+        system: String::new(),
+        messages: vec![],
+    };
+    let stream = backend
+        .generate_stream(&prompt, &GenerationParams::default())
+        .await
+        .unwrap();
+    let chunks = crate::test_http::collect(stream).await;
+    let text: String = chunks.iter().map(|c| c.text.as_str()).collect();
+    assert_eq!(text, "Hi");
+    let terminal = chunks.last().expect("a terminal chunk");
+    assert!(terminal.done);
+    assert_eq!(terminal.finish_reason, FinishReason::Length);
+}
