@@ -306,3 +306,32 @@ fn parse_anthropic_event_authentication_error_is_typed_auth() {
         other => panic!("expected typed Auth, got {other:?}"),
     }
 }
+
+/// Issue #313: a terminal `message_stop` event flushed without its
+/// trailing blank line right before the server closes must still be
+/// parsed, or the stream ends with no terminal chunk and the
+/// `max_tokens` (`Length`) signal is lost.
+#[tokio::test]
+async fn stream_parses_unterminated_final_event_at_eof() {
+    let url = crate::test_http::serve_once(concat!(
+        "event: content_block_delta\ndata: {\"type\":\"content_block_delta\",\"index\":0,\"delta\":{\"type\":\"text_delta\",\"text\":\"Hi\"}}\n\n",
+        "event: message_delta\ndata: {\"type\":\"message_delta\",\"delta\":{\"stop_reason\":\"max_tokens\"}}\n\n",
+        "event: message_stop\ndata: {}",
+    ))
+    .await;
+    let backend = CloudBackend::new(url, "k".into(), "m".into());
+    let prompt = Prompt {
+        system: String::new(),
+        messages: vec![],
+    };
+    let stream = backend
+        .generate_stream(&prompt, &GenerationParams::default())
+        .await
+        .unwrap();
+    let chunks = crate::test_http::collect(stream).await;
+    let text: String = chunks.iter().map(|c| c.text.as_str()).collect();
+    assert_eq!(text, "Hi");
+    let terminal = chunks.last().expect("a terminal chunk");
+    assert!(terminal.done);
+    assert_eq!(terminal.finish_reason, FinishReason::Length);
+}

@@ -253,3 +253,30 @@ mod reasoning_wiring {
         assert!(!text.trim().is_empty(), "no visible answer produced");
     }
 }
+
+/// Issue #313: a terminal `done_reason: "length"` line flushed without a
+/// trailing `\n` right before the server closes must still be parsed, or
+/// the synthetic EOF chunk (`Stop`) masks the truncation.
+#[tokio::test]
+async fn stream_parses_unterminated_final_line_at_eof() {
+    let url = crate::test_http::serve_once(concat!(
+        "{\"message\":{\"role\":\"assistant\",\"content\":\"Hi\"},\"done\":false}\n",
+        "{\"message\":{\"role\":\"assistant\",\"content\":\"\"},\"done\":true,\"done_reason\":\"length\"}",
+    ))
+    .await;
+    let backend = OllamaBackend::new(url, "m".into());
+    let prompt = Prompt {
+        system: String::new(),
+        messages: vec![],
+    };
+    let stream = backend
+        .generate_stream(&prompt, &GenerationParams::default())
+        .await
+        .unwrap();
+    let chunks = crate::test_http::collect(stream).await;
+    let text: String = chunks.iter().map(|c| c.text.as_str()).collect();
+    assert_eq!(text, "Hi");
+    let terminal = chunks.last().expect("a terminal chunk");
+    assert!(terminal.done);
+    assert_eq!(terminal.finish_reason, FinishReason::Length);
+}

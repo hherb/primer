@@ -140,6 +140,14 @@ impl NdjsonBuffer {
         self.buf.extend_from_slice(bytes);
     }
 
+    /// Call once at EOF: terminate a final line the server flushed
+    /// without `\n`, so `pop_line` can still yield it (issue #313).
+    fn finish(&mut self) {
+        if !self.buf.is_empty() {
+            self.buf.push(b'\n');
+        }
+    }
+
     fn pop_line(&mut self) -> Option<String> {
         let nl = self.buf.iter().position(|b| *b == b'\n')?;
         let line: Vec<u8> = self.buf.drain(..=nl).take(nl).collect();
@@ -250,56 +258,10 @@ impl InferenceBackend for OllamaBackend {
             let mut filter = ReasoningFilter::new(markers);
             let mut had_visible = false;
             'outer: loop {
-                match bytes_stream.next().await {
+                let eof = match bytes_stream.next().await {
                     Some(Ok(bytes)) => {
                         buf.extend(&bytes);
-                        while let Some(line) = buf.pop_line() {
-                            if line.trim().is_empty() {
-                                continue;
-                            }
-                            // A mid-stream `{"error":"..."}` payload is a real
-                            // generation failure (runner crash, OOM, model
-                            // unloaded), not line noise: surface it so the
-                            // partial turn drops at the dialogue-manager layer
-                            // instead of the reply finishing as a clean
-                            // truncated turn. Probed on every line — not only
-                            // on parse failure — so an error attached to an
-                            // otherwise chunk-shaped payload is caught too.
-                            if let Some(msg) =
-                                crate::stream_error::parse_stream_error_payload(&line)
-                            {
-                                let _ = tx
-                                    .send(Err(PrimerError::Inference(
-                                        format!("Ollama mid-stream error: {msg}").into(),
-                                    )))
-                                    .await;
-                                break 'outer;
-                            }
-                            let chunk = match parse_ollama_line(&line) {
-                                Ok(c) => c,
-                                Err(e) => {
-                                    tracing::warn!("Skipping unparseable Ollama line: {e}");
-                                    continue;
-                                }
-                            };
-                            match crate::reasoning_stream::process_filtered_chunk(
-                                &mut filter,
-                                chunk,
-                                &mut had_visible,
-                                "ollama",
-                            ) {
-                                crate::reasoning_stream::FilterAction::Nothing => {}
-                                crate::reasoning_stream::FilterAction::Forward(r) => {
-                                    if tx.send(r).await.is_err() {
-                                        break 'outer;
-                                    }
-                                }
-                                crate::reasoning_stream::FilterAction::Final(r) => {
-                                    let _ = tx.send(r).await;
-                                    break 'outer;
-                                }
-                            }
-                        }
+                        false
                     }
                     Some(Err(e)) => {
                         // Mid-stream transport error: surface it and stop. We do
@@ -314,31 +276,82 @@ impl InferenceBackend for OllamaBackend {
                             .await;
                         break 'outer;
                     }
+                    // Upstream closed. Terminate a final line flushed without its
+                    // trailing newline (issue #313) so the drain below still parses it.
                     None => {
-                        // Upstream closed without a `done` marker (abrupt EOF). A
-                        // normal stream sends a done chunk, hits the `Final` arm,
-                        // and breaks before reaching here — so reaching `None`
-                        // means we must still flush. Feed a synthetic done chunk
-                        // through the shared helper so a held-back visible tail
-                        // still reaches the child and a stream that ended
-                        // mid-reasoning surfaces `ReasoningWithoutAnswer` instead
-                        // of silently producing nothing.
-                        if let crate::reasoning_stream::FilterAction::Final(r) =
-                            crate::reasoning_stream::process_filtered_chunk(
-                                &mut filter,
-                                TokenChunk {
-                                    text: String::new(),
-                                    done: true,
-                                    ..Default::default()
-                                },
-                                &mut had_visible,
-                                "ollama",
-                            )
-                        {
-                            let _ = tx.send(r).await;
-                        }
+                        buf.finish();
+                        true
+                    }
+                };
+                while let Some(line) = buf.pop_line() {
+                    if line.trim().is_empty() {
+                        continue;
+                    }
+                    // A mid-stream `{"error":"..."}` payload is a real
+                    // generation failure (runner crash, OOM, model
+                    // unloaded), not line noise: surface it so the
+                    // partial turn drops at the dialogue-manager layer
+                    // instead of the reply finishing as a clean
+                    // truncated turn. Probed on every line — not only
+                    // on parse failure — so an error attached to an
+                    // otherwise chunk-shaped payload is caught too.
+                    if let Some(msg) = crate::stream_error::parse_stream_error_payload(&line) {
+                        let _ = tx
+                            .send(Err(PrimerError::Inference(
+                                format!("Ollama mid-stream error: {msg}").into(),
+                            )))
+                            .await;
                         break 'outer;
                     }
+                    let chunk = match parse_ollama_line(&line) {
+                        Ok(c) => c,
+                        Err(e) => {
+                            tracing::warn!("Skipping unparseable Ollama line: {e}");
+                            continue;
+                        }
+                    };
+                    match crate::reasoning_stream::process_filtered_chunk(
+                        &mut filter,
+                        chunk,
+                        &mut had_visible,
+                        "ollama",
+                    ) {
+                        crate::reasoning_stream::FilterAction::Nothing => {}
+                        crate::reasoning_stream::FilterAction::Forward(r) => {
+                            if tx.send(r).await.is_err() {
+                                break 'outer;
+                            }
+                        }
+                        crate::reasoning_stream::FilterAction::Final(r) => {
+                            let _ = tx.send(r).await;
+                            break 'outer;
+                        }
+                    }
+                }
+                if eof {
+                    // Upstream closed without a `done` marker (abrupt EOF). A
+                    // normal stream sends a done chunk, hits the `Final` arm,
+                    // and breaks before reaching here — so reaching `None`
+                    // means we must still flush. Feed a synthetic done chunk
+                    // through the shared helper so a held-back visible tail
+                    // still reaches the child and a stream that ended
+                    // mid-reasoning surfaces `ReasoningWithoutAnswer` instead
+                    // of silently producing nothing.
+                    if let crate::reasoning_stream::FilterAction::Final(r) =
+                        crate::reasoning_stream::process_filtered_chunk(
+                            &mut filter,
+                            TokenChunk {
+                                text: String::new(),
+                                done: true,
+                                ..Default::default()
+                            },
+                            &mut had_visible,
+                            "ollama",
+                        )
+                    {
+                        let _ = tx.send(r).await;
+                    }
+                    break 'outer;
                 }
             }
         });
