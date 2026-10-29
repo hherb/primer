@@ -129,11 +129,11 @@ If you find yourself wanting to move concept persistence back into `save_session
 
 ## FTS5 query sanitisation
 
-`retrieve_session_turns` takes raw child input as its `query`. To pass that to FTS5's `MATCH` operator without letting punctuation, quotes, or reserved keywords crash the query parser, the storage layer runs everything through [sanitize_fts_phrase](../../src/crates/primer-storage/src/store/fts.rs) first.
+`retrieve_session_turns` takes raw child input as its `query`. To pass that to FTS5's `MATCH` operator without letting punctuation, quotes, or reserved keywords crash the query parser, the storage layer runs everything through [sanitize_fts_phrase](../../src/crates/primer-core/src/fts_util.rs) first.
 
-The transformation is simple: split on whitespace, strip every non-alphanumeric character per token (kills `*`, `^`, `:`, `"`, `(`, `)`, slashes, etc.), drop the FTS5 reserved keywords `AND` / `OR` / `NOT` / `NEAR` (case-insensitive), wrap each surviving token in double quotes (so any character the tokenizer would otherwise see as special is inert), and OR-join the lot. An empty result short-circuits the query — FTS5 rejects `MATCH ''`, so the caller skips the search and returns an empty result.
+The transformation is simple: split on whitespace, strip every non-alphanumeric character per token (kills `*`, `^`, `:`, `"`, `(`, `)`, slashes, etc.), wrap each surviving token in double quotes (so any character the tokenizer would otherwise see as special is inert, and `AND` / `OR` / `NOT` / `NEAR` are plain terms rather than operators — issue #309), and OR-join the lot. An empty result short-circuits the query — FTS5 rejects `MATCH ''`, so the caller skips the search and returns an empty result.
 
-OR-joining (rather than implicit-AND) is a deliberate choice. If sanitization introduces noise tokens — say, a stripped contraction leaving a stray fragment — implicit-AND would torpedo the entire query. With OR, BM25 ranking + the caller's `LIMIT k` keep the result list focused on the most relevant matches and the noise tokens just don't contribute. The unit tests at the bottom of [fts.rs](../../src/crates/primer-storage/src/store/fts.rs) pin the behaviour for empty input, single token, multiple tokens, reserved keywords, FTS5-active punctuation, Unicode alphanumerics, and punctuation-only input.
+OR-joining (rather than implicit-AND) is a deliberate choice. If sanitization introduces noise tokens — say, a stripped contraction leaving a stray fragment — implicit-AND would torpedo the entire query. With OR, BM25 ranking + the caller's `LIMIT k` keep the result list focused on the most relevant matches and the noise tokens just don't contribute. The unit tests at the bottom of [fts_util.rs](../../src/crates/primer-core/src/fts_util.rs) pin the behaviour for empty input, single token, multiple tokens, reserved keywords, FTS5-active punctuation, Unicode alphanumerics, and punctuation-only input.
 
 ## Long-term memory
 

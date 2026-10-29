@@ -4,11 +4,11 @@
 //! See the crate-level docs in `lib.rs` for the locking and error
 //! conventions. Sub-modules under `store::*` split the impl by axis
 //! (`session_save`, `session_load`, `session_search`, `learner`) plus
-//! pure helpers (`conv`, `fts`, `embeddings`).
+//! pure helpers (`conv`, `embeddings`); FTS5 sanitisation lives in
+//! `primer_core::fts_util`.
 
 mod conv;
 mod embeddings;
-mod fts;
 mod learner;
 mod session;
 mod session_load;

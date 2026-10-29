@@ -778,3 +778,27 @@ fn locale_sql_fts_insert_binds_rowid_as_param_four() {
             .contains("passages_en(rowid, id, source, text)")
     );
 }
+
+#[tokio::test]
+async fn fts_keywords_in_a_query_are_searchable_terms() {
+    // "near" / "not" are content words in child speech; quoted, FTS5
+    // treats them as terms, not operators (#309).
+    let db = tmp_db();
+    let kb = SqliteKnowledgeBase::open_for_locale(db.path(), Locale::English).unwrap();
+    kb.insert_passage("near", "test:source", "the moon is near the earth")
+        .unwrap();
+    kb.insert_passage("far", "test:source", "pluto orbits far away")
+        .unwrap();
+    let params = RetrievalParams {
+        top_k: 5,
+        min_score: f64::NEG_INFINITY,
+        source_filter: vec![],
+    };
+    let got = kb.retrieve("NEAR", &params).await.unwrap();
+    assert_eq!(got.len(), 1, "{got:?}");
+    assert_eq!(got[0].id, "near");
+    // Keyword-only hostile input is inert: no FTS5 syntax error.
+    kb.retrieve("AND OR NOT NEAR \" * ^", &params)
+        .await
+        .unwrap();
+}
