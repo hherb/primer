@@ -1,19 +1,20 @@
 //! Stopping and cancelling voice mode: the `stop_voice_mode` and
 //! `cancel_voice_response` commands (plus their non-`speech` stubs) and
-//! the `stop_voice_mode_inner` teardown helper shared with the Android
-//! stop path and `session::prepare_for_session_change`.
+//! the teardown helpers: `stop_voice_mode_by_user` (shared with the Android
+//! stop command) and `stop_voice_mode_inner` (also used by the start paths
+//! and `session::prepare_for_session_change`).
 
 use crate::state::AppState;
 
-/// Stop the active voice loop, if any.
+/// Stop the active voice loop, if any, and turn the sticky toggle off.
 ///
 /// Sends the stop signal then joins the loop task with a 5-second timeout.
 /// On timeout, the join handle is dropped, which aborts the task.
-/// Idempotent — returns `Ok(())` when no voice loop is active.
+/// Idempotent — with no voice loop active it only persists the toggle off.
 #[cfg(feature = "speech")]
 #[tauri::command]
 pub async fn stop_voice_mode(state: tauri::State<'_, AppState>) -> Result<(), String> {
-    stop_voice_mode_inner(&state, false).await
+    stop_voice_mode_by_user(&state).await
 }
 
 /// Stub for builds without the speech feature.
@@ -21,6 +22,32 @@ pub async fn stop_voice_mode(state: tauri::State<'_, AppState>) -> Result<(), St
 #[tauri::command]
 pub async fn stop_voice_mode(_state: tauri::State<'_, AppState>) -> Result<(), String> {
     Ok(())
+}
+
+/// An explicit user stop (the Stop button, or the consent modal's "Cancel"),
+/// shared by the desktop and Android stop commands: tear down any running
+/// loop, then durably turn the sticky toggle off. The flip runs even when no
+/// loop was running — after an `AssetMissing` start nothing ever ran, and
+/// "not now" must survive a relaunch (#372). `start_voice_mode`'s own
+/// teardown does NOT come through here, because a failed start must leave
+/// the toggle as it was.
+#[cfg(any(feature = "speech", feature = "android-native"))]
+pub(crate) async fn stop_voice_mode_by_user(state: &AppState) -> Result<(), String> {
+    let result = stop_voice_mode_inner(state, true).await;
+    persist_toggle_off(state).await;
+    result
+}
+
+/// Set `speech.voice_mode_enabled = false` and save it. A persist failure is
+/// logged, not propagated: the in-memory state is already correct and the
+/// next settings save picks it up.
+#[cfg(any(feature = "speech", feature = "android-native"))]
+async fn persist_toggle_off(state: &AppState) {
+    let mut c = state.config.lock().await;
+    c.speech.voice_mode_enabled = false;
+    if let Err(e) = crate::config::save(&state.home, &c) {
+        tracing::warn!("persist speech.voice_mode_enabled=false failed: {e}");
+    }
 }
 
 /// Internal helper so `start_voice_mode` can close any active loop
@@ -59,16 +86,10 @@ pub(crate) async fn stop_voice_mode_inner(
     let timeout = std::time::Duration::from_secs(5);
     let join_result = tokio::time::timeout(timeout, active.join).await;
 
-    // Flip the sticky toggle off — voice mode just stopped. Persist
-    // failure is logged but doesn't propagate; the in-memory state is
-    // already correct and the next save_settings will pick it up.
-    // Skipped on a transient teardown (`preserve_toggle == true`).
+    // Flip the sticky toggle off — voice mode just stopped. Skipped on a
+    // transient teardown (`preserve_toggle == true`).
     if !preserve_toggle {
-        let mut c = state.config.lock().await;
-        c.speech.voice_mode_enabled = false;
-        if let Err(e) = crate::config::save(&state.home, &c) {
-            tracing::warn!("persist speech.voice_mode_enabled=false failed: {e}");
-        }
+        persist_toggle_off(state).await;
     }
 
     // Also drop the underlying active session (the DM that the voice
