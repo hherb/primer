@@ -21,6 +21,9 @@ fn stub_config_with_persistence(home: &std::path::Path) -> GuiConfig {
     // resume_session path is exercised against actual storage.
     let mut cfg = GuiConfig::default();
     cfg.persistence.session_db = Some(home.join("test_session.db"));
+    // No embedder: the default fastembed one would load BGE-M3 and embed
+    // the whole corpus in every test (#388).
+    cfg.embedder.kind = "none".to_string();
     cfg
 }
 
@@ -980,6 +983,7 @@ async fn session_switch_rebuilds_under_new_locale() {
     // a separate bug class from the voice-loop teardown gap).
     let mut cfg_de = GuiConfig::default();
     cfg_de.persistence.no_persist = true;
+    cfg_de.embedder.kind = "none".to_string();
     cfg_de.learner.locale = "de".to_string();
     cfg_de.learner.name = "Hans".to_string();
     let active_de = build_active_session(home.path(), &cfg_de).await.unwrap();

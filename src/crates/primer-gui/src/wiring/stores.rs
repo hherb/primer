@@ -1,18 +1,20 @@
 //! Open the per-learner session store, resolve the learner model (and the
-//! session's effective locale), and open + auto-seed the knowledge base.
+//! session's effective locale), and open + seed (+ embed) the knowledge base.
 //!
 //! The session store is opened BEFORE the knowledge base so the persisted
 //! learner's locale can be probed without a second open; the knowledge
 //! base is then opened under the resolved effective locale.
 
-use std::path::{Path, PathBuf};
+use std::path::Path;
 
+use primer_core::embedder::Embedder;
 use primer_core::i18n::Locale;
 use primer_core::learner::LearnerModel;
 use primer_core::storage::{LearnerStore, SessionStore};
 use primer_engine::{
-    IN_MEMORY, adopt_or_mint_learner_id, create_learner_with_id, ensure_session_db_dir,
-    parse_languages, reconcile_persisted_learner, resolve_session_db_path,
+    KnowledgeDb, adopt_or_mint_learner_id, create_learner_with_id, create_private_dir_all,
+    ensure_session_db_dir, parse_languages, reconcile_persisted_learner, resolve_knowledge_db,
+    resolve_session_db_path,
 };
 use primer_knowledge::SqliteKnowledgeBase;
 use primer_storage::SqliteSessionStore;
@@ -28,6 +30,8 @@ pub(super) struct Stores {
     pub locale: Locale,
     pub learner: LearnerModel,
     pub knowledge: SqliteKnowledgeBase,
+    /// Why embedding the knowledge base failed, if it did (#388).
+    pub embed_error: Option<String>,
 }
 
 /// Open the session store and learner, then the knowledge base under the
@@ -39,15 +43,17 @@ pub(super) async fn open_stores(
     config: &GuiConfig,
     cfg_locale: Locale,
     strategy: LocaleStrategy,
+    embedder: Option<&dyn Embedder>,
 ) -> Result<Stores, String> {
     let (session_store, locale, learner) =
         open_session_store_and_learner(home, config, cfg_locale, strategy).await?;
-    let knowledge = open_knowledge_base(config, locale).await?;
+    let (knowledge, embed_error) = open_knowledge_base(home, config, locale, embedder).await?;
     Ok(Stores {
         session_store,
         locale,
         learner,
         knowledge,
+        embed_error,
     })
 }
 
@@ -181,31 +187,54 @@ pub(super) async fn open_session_store_and_learner(
     Ok((session_store_inner, effective_locale, learner))
 }
 
-/// Open the knowledge base under `locale` (`:memory:` unless Settings
-/// names an explicit path) and auto-seed it from the bundled JSONL corpus
-/// when empty.
+/// Open the knowledge base under `locale` and get it ready (#388). An
+/// explicit Settings path is seeded only when empty and never embedded
+/// here. Otherwise, with an embedder wired, the KB is the per-model cache
+/// under `<home>/.primer/kb/`: the bundled corpus is topped up and every
+/// passage without a vector is embedded, so the cost is paid once, not on
+/// every session build. With no embedder (or `no_persist`) it is a
+/// `:memory:` KB seeded per open. Also returns why embedding failed, if
+/// it did: that is soft, the session runs on BM25.
 pub(super) async fn open_knowledge_base(
+    home: &Path,
     config: &GuiConfig,
     locale: Locale,
-) -> Result<SqliteKnowledgeBase, String> {
-    let knowledge_path = config
-        .persistence
-        .knowledge_db
-        .clone()
-        .unwrap_or_else(|| PathBuf::from(IN_MEMORY));
+    embedder: Option<&dyn Embedder>,
+) -> Result<(SqliteKnowledgeBase, Option<String>), String> {
+    let knowledge_db = resolve_knowledge_db(
+        config.persistence.knowledge_db.clone(),
+        Some(home),
+        embedder.map(|e| e.model_id()),
+        config.persistence.no_persist,
+    );
+    let knowledge_path = knowledge_db.path();
+    if let KnowledgeDb::Cache(_) = knowledge_db
+        && let Some(dir) = knowledge_path.parent()
+    {
+        create_private_dir_all(dir)
+            .map_err(|e| format!("creating knowledge-base cache dir {}: {e}", dir.display()))?;
+    }
     let knowledge = SqliteKnowledgeBase::open_for_locale(&knowledge_path, locale)
         .map_err(|e| format!("opening knowledge base {}: {e}", knowledge_path.display()))?;
-    if let Some(stats) = primer_kb_load::auto_seed_if_empty(&knowledge, locale)
-        .await
-        .map_err(|e| format!("auto-seeding knowledge base: {e}"))?
-    {
-        tracing::info!(
-            target: "primer-gui::startup",
-            inserted = stats.inserted,
-            sources = stats.sources_seen,
-            "auto-seeded knowledge base for locale {}",
-            locale.pack_id()
-        );
-    }
-    Ok(knowledge)
+    let embed_with = match knowledge_db {
+        KnowledgeDb::Explicit(_) => None,
+        _ => embedder,
+    };
+    let prepared = primer_kb_load::prepare_kb(
+        &knowledge,
+        &primer_kb_load::discover_seed_files(locale),
+        matches!(knowledge_db, KnowledgeDb::Cache(_)),
+        embed_with,
+    )
+    .await
+    .map_err(|e| format!("seeding knowledge base: {e}"))?;
+    tracing::info!(
+        target: "primer-gui::startup",
+        path = %knowledge_path.display(),
+        seeded = prepared.seeded.map_or(0, |s| s.inserted),
+        embedded = prepared.embedded,
+        "knowledge base ready for locale {}",
+        locale.pack_id()
+    );
+    Ok((knowledge, prepared.embed_error))
 }

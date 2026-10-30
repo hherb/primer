@@ -3,6 +3,8 @@
 //! - `slug` — Unicode-aware NFC-normalised slug for a learner name
 //! - `resolve_session_db_path` — explicit / default / in-memory dispatch
 //! - `should_show_first_run_banner` — first-launch banner gate
+//! - `resolve_knowledge_db` — in-memory / explicit / embedded-cache
+//!   dispatch for the knowledge base (issue #388)
 //! - `create_private_dir_all` / `ensure_session_db_dir` — owner-only
 //!   (`0700` on Unix) directories for learner data (issue #358)
 
@@ -71,6 +73,65 @@ pub fn resolve_session_db_path(
         home.join(PRIMER_HOME_DIR)
             .join(format!("{}.db", slug(learner_name)))
     })
+}
+
+/// Subdirectory of `~/.primer/` holding the embedded knowledge-base
+/// caches, one SQLite file per embedder model (issue #388).
+pub const KB_CACHE_DIR: &str = "kb";
+
+/// Where the knowledge base lives, which also decides how startup
+/// prepares it (see `primer_kb_load::prepare_kb`).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum KnowledgeDb {
+    /// `:memory:`, seeded on every open (and embedded on every open when
+    /// an embedder is wired).
+    InMemory,
+    /// A user-chosen file. Seeded only when empty and never embedded at
+    /// startup: the user manages it with `primer-kb-load --reembed`.
+    Explicit(PathBuf),
+    /// The default cache for one embedder model. The seed corpus is topped
+    /// up and missing vectors are embedded on every open, so the embedding
+    /// cost is paid once, not per startup.
+    Cache(PathBuf),
+}
+
+impl KnowledgeDb {
+    /// The SQLite path to open.
+    pub fn path(&self) -> PathBuf {
+        match self {
+            Self::InMemory => PathBuf::from(IN_MEMORY),
+            Self::Explicit(p) | Self::Cache(p) => p.clone(),
+        }
+    }
+}
+
+/// Resolve where the knowledge base lives. An explicit path always wins.
+/// Otherwise, with an embedder wired (its `model_id` given), a home
+/// directory, and persistence on, the KB is the per-model cache
+/// `<home>/.primer/kb/<slug(model_id)>.db`. Keying the file by model
+/// keeps one model's vectors from ever meeting another's dim. Without an
+/// embedder there are no vectors worth caching, so it stays `:memory:`.
+/// An empty `home` (HOME unset) counts as no home, never as the cwd.
+pub fn resolve_knowledge_db(
+    explicit: Option<PathBuf>,
+    home: Option<&Path>,
+    embedder_model_id: Option<&str>,
+    no_persist: bool,
+) -> KnowledgeDb {
+    if let Some(p) = explicit {
+        return KnowledgeDb::Explicit(p);
+    }
+    match (
+        home.filter(|h| !h.as_os_str().is_empty()),
+        embedder_model_id,
+    ) {
+        (Some(home), Some(model)) if !no_persist => KnowledgeDb::Cache(
+            home.join(PRIMER_HOME_DIR)
+                .join(KB_CACHE_DIR)
+                .join(format!("{}.db", slug(model))),
+        ),
+        _ => KnowledgeDb::InMemory,
+    }
 }
 
 /// Should we print the "we just started persisting your sessions"
@@ -197,6 +258,42 @@ mod tests {
     fn slug_empty_input_falls_back_to_default() {
         assert_eq!(slug(""), "default");
         assert_eq!(slug("!!!"), "default");
+    }
+
+    #[test]
+    fn resolve_knowledge_db_explicit_wins_even_under_no_persist() {
+        let p = PathBuf::from("/tmp/kb.db");
+        let home = Path::new("/h");
+        for no_persist in [false, true] {
+            assert_eq!(
+                resolve_knowledge_db(Some(p.clone()), Some(home), Some("bge-m3"), no_persist),
+                KnowledgeDb::Explicit(p.clone())
+            );
+        }
+    }
+
+    #[test]
+    fn resolve_knowledge_db_caches_per_model_under_home() {
+        let db = resolve_knowledge_db(None, Some(Path::new("/h")), Some("BAAI/bge-m3"), false);
+        assert_eq!(
+            db,
+            KnowledgeDb::Cache(PathBuf::from("/h/.primer/kb/baai-bge-m3.db"))
+        );
+        assert_eq!(db.path(), PathBuf::from("/h/.primer/kb/baai-bge-m3.db"));
+    }
+
+    #[test]
+    fn resolve_knowledge_db_stays_in_memory_without_embedder_home_or_persistence() {
+        let home = Path::new("/h");
+        for db in [
+            resolve_knowledge_db(None, Some(home), None, false),
+            resolve_knowledge_db(None, None, Some("bge-m3"), false),
+            resolve_knowledge_db(None, Some(Path::new("")), Some("bge-m3"), false),
+            resolve_knowledge_db(None, Some(home), Some("bge-m3"), true),
+        ] {
+            assert_eq!(db, KnowledgeDb::InMemory);
+            assert_eq!(db.path(), PathBuf::from(IN_MEMORY));
+        }
     }
 
     #[test]

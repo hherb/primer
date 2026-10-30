@@ -168,7 +168,7 @@ Concrete `Embedder` backends. `StubEmbedder` (deterministic FNV+xorshift hash �
 
 ### primer-kb-load
 
-JSONL ingestion + auto-seed-on-empty + `--reembed` backfill for the knowledge base. `load_jsonl(kb, path)` ingests passages (idempotent: skips already-present ids). `auto_seed_if_empty(kb, locale)` discovers `seed_passages.<pack_id>.jsonl` via `$PRIMER_SEED_DIR` → `$XDG_DATA_HOME/primer/seed/` → walking up from `CARGO_MANIFEST_DIR` and loads it on a freshly-empty KB. `reembed_kb(kb, embedder, force, batch_size)` backfills embeddings for passages missing one, and errors (rather than under-embedding) if the embedder returns a short batch. `force` first clears the locale's vectors (and unregisters models no locale still uses), so every passage is re-embedded and a model can come back at a new dim — the path for swapping embedder models on an existing KB. A standalone binary `primer-kb-load --reembed --knowledge-db <path> --locale <pack>` is feature-gated on `fastembed`. A retrieval-quality integration test asserts that canonical child queries surface passages with the expected key terms — corpus edits that regress retrieval get caught in CI.
+JSONL ingestion + auto-seed-on-empty + `--reembed` backfill for the knowledge base. `load_jsonl(kb, path)` ingests passages (idempotent: skips already-present ids). `auto_seed_if_empty(kb, locale)` discovers `seed_passages.<pack_id>.jsonl` via `$PRIMER_SEED_DIR` → `$XDG_DATA_HOME/primer/seed/` → walking up from `CARGO_MANIFEST_DIR` and loads it on a freshly-empty KB. At startup both binaries call `prepare_kb`, which seeds the KB and, when an embedder is wired, embeds every passage that lacks a vector. By default that KB is a per-model cache under `~/.primer/kb/`, so the corpus is embedded once rather than on every start, and the off-topic gate works out of the box. `reembed_kb(kb, embedder, force, batch_size)` backfills embeddings for passages missing one, and errors (rather than under-embedding) if the embedder returns a short batch. `force` first clears the locale's vectors (and unregisters models no locale still uses), so every passage is re-embedded and a model can come back at a new dim — the path for swapping embedder models on an existing KB. A standalone binary `primer-kb-load --reembed --knowledge-db <path> --locale <pack>` is feature-gated on `fastembed`. A retrieval-quality integration test asserts that canonical child queries surface passages with the expected key terms — corpus edits that regress retrieval get caught in CI.
 
 ### primer-storage
 
@@ -329,7 +329,10 @@ Project-local `.env` wins over the home file. Both are gitignored. See `.env.exa
                                 servers; required for remote providers.
 --name <name>                   Child's name for the learner profile (default: Explorer)
 --age <age>                     Child's age in years (default: 8)
---knowledge-db <path>           Path to SQLite knowledge base (default: in-memory)
+--knowledge-db <path>           Path to SQLite knowledge base (default: with an embedder,
+                                an embedded per-model cache under ~/.primer/kb/ — the
+                                first run embeds the corpus, which can take a few
+                                minutes; without one, in-memory)
 --session-db <path>             Path to SQLite session store
                                 (default: ~/.primer/<slugified-name>.db, created if missing)
 --resume <uuid>                 Resume a past session by UUID. Reads from --session-db; errors if

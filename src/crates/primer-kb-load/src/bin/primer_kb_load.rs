@@ -55,7 +55,7 @@ struct Args {
     embedder_backend: String,
 
     /// Batch size passed to the embedder per call.
-    #[arg(long, default_value_t = 16)]
+    #[arg(long, default_value_t = primer_kb_load::DEFAULT_EMBED_BATCH_SIZE)]
     embed_batch_size: usize,
 }
 

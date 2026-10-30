@@ -138,16 +138,6 @@ async fn build_with_strategy(
 
     let main_model = rebind_main_model(&backend_config.kind, main_model, backend.name());
 
-    // ─── Session store + learner, then the KB under their locale ─────
-    let Stores {
-        session_store,
-        locale: effective_locale,
-        learner,
-        knowledge,
-    } = open_stores(home, config, cfg_locale, strategy).await?;
-    let session_store = Arc::new(session_store);
-    let knowledge = Arc::new(knowledge);
-
     // What actually serves turns; differs from the config when the fallback
     // serves alone (#338). The sidebar shows it, and inherited subsystems run
     // on it, so their provenance ids name it too (#351).
@@ -159,9 +149,33 @@ async fn build_with_strategy(
     );
 
     // ─── Subsystems (classifier, extractor, comprehension, embedder) ─
+    // Built before the stores: the embedder picks the KB cache file and
+    // fills its vectors (#388).
     let subsystems =
         build_subsystems(config, &backend, &backend_name, &display_model, &params).await?;
-    let retrieval_notice = retrieval_notice(&config.embedder.kind, subsystems.embedder.is_some());
+
+    // ─── Session store + learner, then the KB under their locale ─────
+    let Stores {
+        session_store,
+        locale: effective_locale,
+        learner,
+        knowledge,
+        embed_error,
+    } = open_stores(
+        home,
+        config,
+        cfg_locale,
+        strategy,
+        subsystems.embedder.as_deref(),
+    )
+    .await?;
+    let session_store = Arc::new(session_store);
+    let knowledge = Arc::new(knowledge);
+    let retrieval_notice = retrieval_notice(
+        &config.embedder.kind,
+        subsystems.embedder.is_some(),
+        embed_error.as_deref(),
+    );
 
     // ─── Pedagogy settings ───────────────────────────────────────────
     let pedagogy_config = PedagogyConfig {

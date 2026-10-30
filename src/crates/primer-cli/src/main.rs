@@ -29,6 +29,7 @@ use std::io::{self, BufRead, Write};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
+use anyhow::Context;
 use clap::Parser;
 use primer_classifier::{ClassifierSettings, EngagementClassifier};
 use primer_core::config::PedagogyConfig;
@@ -38,11 +39,12 @@ use primer_core::inference::InferenceBackend;
 use primer_core::knowledge::KnowledgeBase;
 use primer_core::storage::{LearnerStore, SessionStore};
 use primer_engine::{
-    BackendParams, IN_MEMORY, adopt_or_mint_learner_id, build_classifier, build_comprehension,
+    BackendParams, KnowledgeDb, adopt_or_mint_learner_id, build_classifier, build_comprehension,
     build_extractor, build_fastembed_embedder, build_main_backend, build_ollama_embedder,
-    build_openai_compat_embedder, create_learner_with_id, ensure_session_db_dir, parse_languages,
-    reconcile_persisted_learner, resolve_session_db_path, served_identity,
-    should_show_first_run_banner, verify_resume_locale_match,
+    build_openai_compat_embedder, create_learner_with_id, create_private_dir_all,
+    ensure_session_db_dir, parse_languages, reconcile_persisted_learner, resolve_knowledge_db,
+    resolve_session_db_path, served_identity, should_show_first_run_banner,
+    verify_resume_locale_match,
 };
 use primer_extractor::{ConceptExtractor, ExtractorSettings};
 use primer_knowledge::SqliteKnowledgeBase;
@@ -180,8 +182,10 @@ struct Cli {
     #[arg(long, value_name = "CSV")]
     languages: Option<String>,
 
-    /// Path to knowledge base SQLite file.
-    /// If omitted, uses an in-memory database.
+    /// Path to knowledge base SQLite file (seeded when empty; never
+    /// embedded at startup — use `primer-kb-load --reembed`). If omitted:
+    /// with an embedder, an embedded per-model cache under `~/.primer/kb/`;
+    /// without one (or with `--no-persist`), an in-memory database.
     #[arg(long)]
     knowledge_db: Option<PathBuf>,
 
@@ -203,8 +207,10 @@ struct Cli {
     /// Run the session in-memory only — nothing is written to disk
     /// and the conversation evaporates on exit. Useful for quick
     /// experiments and tests; the per-learner default-path persistence
-    /// stays out of the way. Mutually exclusive with `--resume` and
-    /// `--session-db`.
+    /// stays out of the way. With an embedder the in-memory knowledge
+    /// base is re-embedded on every start (minutes with BGE-M3; add
+    /// `--embedder-backend none` to skip it). Mutually exclusive with
+    /// `--resume` and `--session-db`.
     #[arg(long, conflicts_with_all = ["session_db", "resume"])]
     no_persist: bool,
 
@@ -848,25 +854,6 @@ async fn async_main() -> anyhow::Result<()> {
         }
     };
 
-    // Knowledge base — in-memory by default (empty, but functional).
-    // Locale-scoped: passages are indexed in the locale's own FTS5 table
-    // so BM25 statistics stay locale-pure.
-    let knowledge_path = cli.knowledge_db.unwrap_or_else(|| PathBuf::from(IN_MEMORY));
-    let knowledge = SqliteKnowledgeBase::open_for_locale(&knowledge_path, cli_locale)?;
-    // Auto-seed-on-empty: if the KB has no passages and a seed JSONL is
-    // discoverable for this locale, load it. Returns Ok(None) and logs at
-    // info level when no seed file is found — empty KB is a valid runtime
-    // state and the rest of the system handles it gracefully.
-    if let Some(stats) = primer_kb_load::auto_seed_if_empty(&knowledge, cli_locale).await? {
-        tracing::info!(
-            target = "primer::startup",
-            inserted = stats.inserted,
-            sources = stats.sources_seen,
-            "auto-seeded knowledge base for locale {}",
-            cli_locale.pack_id()
-        );
-    }
-
     // Session store — defaults to a per-learner file under `~/.primer/`.
     // We look up HOME here (rather than inside `resolve_session_db_path`)
     // so the function stays a pure path computation that's trivial to test.
@@ -1130,6 +1117,87 @@ async fn async_main() -> anyhow::Result<()> {
             std::process::exit(1);
         }
     };
+
+    // ─── Knowledge base ──────────────────────────────────────────────
+    //
+    // Locale-scoped: passages are indexed in the locale's own FTS5 table
+    // so BM25 statistics stay locale-pure. With an embedder wired the
+    // default KB is a per-model cache under `~/.primer/kb/`, so the seed
+    // corpus is embedded once rather than on every start (#388); without
+    // one it stays `:memory:`. An explicit `--knowledge-db` is seeded only
+    // when empty and never embedded here (`primer-kb-load --reembed` owns
+    // that). An empty KB is a valid runtime state.
+    let knowledge_db = resolve_knowledge_db(
+        cli.knowledge_db.clone(),
+        Some(home.as_path()),
+        embedder.as_ref().map(|e| e.model_id()),
+        cli.no_persist,
+    );
+    let knowledge_path = knowledge_db.path();
+    // The cache is derived data the user never chose, so say where it is.
+    let cache_hint = if matches!(knowledge_db, KnowledgeDb::Cache(_)) {
+        " (a rebuildable cache: safe to delete)"
+    } else {
+        ""
+    };
+    if let KnowledgeDb::Cache(path) = &knowledge_db
+        && let Some(dir) = path.parent()
+    {
+        create_private_dir_all(dir)
+            .with_context(|| format!("creating knowledge-base cache dir {}", dir.display()))?;
+    }
+    let knowledge = SqliteKnowledgeBase::open_for_locale(&knowledge_path, cli_locale)
+        .with_context(|| {
+            format!(
+                "opening knowledge base {}{cache_hint}",
+                knowledge_path.display()
+            )
+        })?;
+    let embed_with = match knowledge_db {
+        KnowledgeDb::Explicit(_) => None,
+        _ => embedder.as_deref(),
+    };
+    let seed_files = primer_kb_load::discover_seed_files(cli_locale);
+    // A fresh KB is still empty here (seeding comes first), so count it in.
+    // Only a hint for the user, so a failed check just skips it.
+    if embed_with.is_some()
+        && !seed_files.is_empty()
+        && (matches!(knowledge.passage_count(), Ok(0))
+            || knowledge
+                .passages_missing_embedding()
+                .is_ok_and(|m| !m.is_empty()))
+    {
+        eprintln!(
+            "Embedding the knowledge base for semantic search (this can take a few minutes)..."
+        );
+    }
+    let prepared = primer_kb_load::prepare_kb(
+        &knowledge,
+        &seed_files,
+        matches!(knowledge_db, KnowledgeDb::Cache(_)),
+        embed_with,
+    )
+    .await
+    .with_context(|| {
+        format!(
+            "seeding knowledge base {}{cache_hint}",
+            knowledge_path.display()
+        )
+    })?;
+    if let Some(e) = &prepared.embed_error {
+        eprintln!(
+            "Warning: knowledge search is partly keyword-only (BM25): embedding failed ({e}); \
+             it retries next start."
+        );
+    }
+    tracing::info!(
+        target = "primer::startup",
+        path = %knowledge_path.display(),
+        seeded = prepared.seeded.map_or(0, |s| s.inserted),
+        embedded = prepared.embedded,
+        "knowledge base ready for locale {}",
+        cli_locale.pack_id()
+    );
 
     // ─── Dialogue manager ────────────────────────────────────────────
 

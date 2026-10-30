@@ -17,10 +17,12 @@
 use crate::SqliteKnowledgeBase;
 use crate::embedding_model::validate_embedder_against_db;
 use crate::vector::{blob_to_vec, cosine};
+use primer_core::consts::retrieval::KB_BM25_ONLY_MIN_SCORE;
 use primer_core::embedder::Embedder;
 use primer_core::error::{PrimerError, Result};
 use primer_core::knowledge::*;
 use primer_core::rrf;
+use std::collections::HashSet;
 
 impl SqliteKnowledgeBase {
     /// Hybrid (BM25 + vector cosine) retrieval. Runs an in-Rust cosine
@@ -38,7 +40,8 @@ impl SqliteKnowledgeBase {
     /// silent degradation would invisibly hurt retrieval. A `min_score`
     /// floor and a `source_filter` allow-list apply post-fusion; the
     /// `min_top_cosine` off-topic gate applies before fusion and empties
-    /// the whole result.
+    /// the result, except for BM25 hits on passages that have no vector
+    /// for the gate to judge (#389).
     pub(crate) async fn retrieve_hybrid_inner(
         &self,
         query: &str,
@@ -66,7 +69,8 @@ impl SqliteKnowledgeBase {
                 embedder.dim()
             )));
         }
-        let vec_hits = self.knn_scan(&q_vec, embedder.model_id(), params.vector_top_k)?;
+        let (vec_hits, embedded) =
+            self.knn_scan(&q_vec, embedder.model_id(), params.vector_top_k)?;
 
         // Off-topic gate (issue #307): `knn_scan` sorts by cosine, so the
         // first hit is the best match. An empty vector leg has nothing to
@@ -74,13 +78,28 @@ impl SqliteKnowledgeBase {
         if let (Some(floor), Some(best)) = (params.min_top_cosine, vec_hits.first())
             && best.score < floor
         {
+            // The cosine judged only passages with a vector. Passages without
+            // one were never judged, so their BM25 hits stay, as BM25-only
+            // results (#389). On a fully embedded KB this is empty.
+            let mut unjudged = self.bm25_search(
+                query,
+                &RetrievalParams {
+                    top_k: params.bm25_top_k,
+                    min_score: KB_BM25_ONLY_MIN_SCORE,
+                    source_filter: params.source_filter.clone(),
+                },
+                true,
+            )?;
+            unjudged.retain(|p| !embedded.contains(&p.id));
+            unjudged.truncate(params.final_top_k);
             tracing::debug!(
                 target: "primer::retrieval",
                 best_cosine = best.score,
                 floor,
-                "off-topic gate: hybrid KB retrieval emptied"
+                kept_unembedded = unjudged.len(),
+                "off-topic gate fired: only BM25 hits on un-embedded passages kept"
             );
-            return Ok(vec![]);
+            return Ok(unjudged);
         }
 
         // 2. BM25 leg. Stopwords are kept while the vector leg has hits
@@ -132,10 +151,17 @@ impl SqliteKnowledgeBase {
     }
 
     /// In-Rust cosine top-K over every stored vector that matches the
-    /// given model id. Returns `Passage`s ranked by similarity. At <=
+    /// given model id. Returns `Passage`s ranked by similarity, plus the
+    /// id of every passage scanned (i.e. every passage with a vector under
+    /// this model), which the off-topic gate needs (#389). At <=
     /// 50 K rows this scan is ~30 ms single-threaded; we revisit when
     /// corpus size justifies a `sqlite-vec` index.
-    fn knn_scan(&self, query: &[f32], model_id: &str, top_k: usize) -> Result<Vec<Passage>> {
+    fn knn_scan(
+        &self,
+        query: &[f32],
+        model_id: &str,
+        top_k: usize,
+    ) -> Result<(Vec<Passage>, HashSet<String>)> {
         let conn = self.conn.lock().unwrap();
         // The model_id filter on the JOIN ensures we never compare
         // vectors from incompatible models — open-time validation
@@ -155,9 +181,11 @@ impl SqliteKnowledgeBase {
             .map_err(|e| PrimerError::Knowledge(format!("knn scan: {e}")))?;
 
         let mut scored: Vec<(f64, Passage)> = Vec::new();
+        let mut embedded = HashSet::new();
         for r in rows {
             let (id, source, text, blob) =
                 r.map_err(|e| PrimerError::Knowledge(format!("read knn row: {e}")))?;
+            embedded.insert(id.clone());
             let v = blob_to_vec(&blob)?;
             if v.len() != query.len() {
                 // Different dim; skip rather than panic. Open-time
@@ -184,7 +212,7 @@ impl SqliteKnowledgeBase {
         }
         scored.sort_by(|a, b| b.0.partial_cmp(&a.0).unwrap_or(std::cmp::Ordering::Equal));
         scored.truncate(top_k);
-        Ok(scored.into_iter().map(|(_, p)| p).collect())
+        Ok((scored.into_iter().map(|(_, p)| p).collect(), embedded))
     }
 }
 
