@@ -1,11 +1,12 @@
-//! Hybrid (BM25 + vector cosine) retrieval read path.
+//! Retrieval read path: the FTS5 BM25 query (`bm25_search`) and hybrid
+//! (BM25 + vector cosine) retrieval.
 //!
-//! `retrieve_hybrid_inner` fuses the FTS5 BM25 leg (`bm25_search`, the
-//! query shared with the BM25-only `KnowledgeBase::retrieve`; stopwords
-//! are kept unless the vector leg is empty — #386) with an in-Rust cosine k-NN leg (`knn_scan`)
-//! through Reciprocal Rank Fusion. The BM25-only trait impl and
-//! the `KnowledgeBase::retrieve_hybrid` override that forwards here live with
-//! the struct in `lib.rs`; this module is the hybrid extension on top of it.
+//! `bm25_search` backs both the BM25-only `KnowledgeBase::retrieve` and
+//! the hybrid BM25 leg; stopwords are dropped unless the hybrid vector
+//! leg has hits (#386). `retrieve_hybrid_inner` fuses that leg with an
+//! in-Rust cosine k-NN leg (`knn_scan`) through Reciprocal Rank Fusion.
+//! The BM25-only trait impl and the `KnowledgeBase::retrieve_hybrid`
+//! override that forwards here live with the struct in `lib.rs`.
 //! The `_inner` name (mirroring `primer-storage`'s
 //! `retrieve_session_turns_hybrid_inner`) keeps the inherent method from
 //! shadowing the trait method — a same-name inherent silently masked the
@@ -22,11 +23,12 @@ use primer_core::knowledge::*;
 use primer_core::rrf;
 
 impl SqliteKnowledgeBase {
-    /// Hybrid (BM25 + vector cosine) retrieval. Runs the existing FTS5
-    /// path with `top_k = bm25_top_k`, runs an in-Rust cosine scan over
-    /// every stored vector keeping the top `vector_top_k`, fuses the
-    /// two ranked lists via Reciprocal Rank Fusion, and returns the top
-    /// `final_top_k` passages by combined score.
+    /// Hybrid (BM25 + vector cosine) retrieval. Runs an in-Rust cosine
+    /// scan over every stored vector keeping the top `vector_top_k`,
+    /// applies the off-topic gate, then runs the FTS5 path with
+    /// `top_k = bm25_top_k` (dropping stopwords only when the vector leg
+    /// is empty), fuses the two ranked lists via Reciprocal Rank Fusion,
+    /// and returns the top `final_top_k` passages by combined score.
     ///
     /// Embedder model identity is validated up-front: a registered
     /// `model_id` with a mismatching `dim` is a hard error (matches the
@@ -68,7 +70,7 @@ impl SqliteKnowledgeBase {
 
         // Off-topic gate (issue #307): `knn_scan` sorts by cosine, so the
         // first hit is the best match. An empty vector leg has nothing to
-        // judge, so it falls through to BM25 as before.
+        // judge, so it falls through to BM25 alone.
         if let (Some(floor), Some(best)) = (params.min_top_cosine, vec_hits.first())
             && best.score < floor
         {
@@ -82,7 +84,7 @@ impl SqliteKnowledgeBase {
         }
 
         // 2. BM25 leg. Stopwords are kept while the vector leg has hits
-        //    (see `bm25_search`); with no stored vectors the result is
+        //    (see `bm25_search`); with an empty vector leg the result is
         //    BM25 alone, so it drops them like BM25-only `retrieve` (#386).
         let bm25 = self.bm25_search(
             query,
@@ -189,8 +191,9 @@ impl SqliteKnowledgeBase {
 impl SqliteKnowledgeBase {
     /// The FTS5 BM25 query behind both retrieval paths.
     /// `drop_stopwords` is `true` for BM25-only [`KnowledgeBase::retrieve`]
-    /// and for a hybrid query whose vector leg is empty (no stored vectors:
-    /// the result is BM25 alone). It is `false` for the hybrid BM25 leg
+    /// and for a hybrid query whose vector leg is empty (e.g. no stored
+    /// vectors, or none under this embedder's model: the result is BM25
+    /// alone). It is `false` for the hybrid BM25 leg
     /// beside a non-empty vector leg, whose off-topic defence is the cosine
     /// gate and whose 100% benchmark recall was measured with stopwords
     /// kept (dropping them cost "what is inside a tiny bug" its

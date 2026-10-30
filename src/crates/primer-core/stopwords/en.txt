@@ -6,8 +6,9 @@
 #
 # Function words + contraction forms + conversational fillers. Words that
 # can carry topic meaning in a child's question ("near", "light", "move",
-# "work", "up", "down", "hot") are deliberately NOT here, nor is "not":
-# #309 keeps negation a searchable term. "how" stays a term too: it asks
+# "work", "up", "down", "hot", "ill" — I'll vs. sick) are deliberately NOT
+# here, nor is "not": #309 keeps "not" a searchable term (other negators
+# such as "no" / "dont" are listed). "how" stays a term too: it asks
 # for a mechanism and explanatory passages are worded that way, so
 # dropping it cost recall ("how does my dog see in the dark" lost
 # `seed:en:eyes-sight` from the top 5).
@@ -140,7 +141,6 @@ please
 im
 ive
 id
-ill
 youre
 youve
 youll

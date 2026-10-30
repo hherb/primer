@@ -5,8 +5,11 @@
 #
 # Function words + conversational fillers. Words that can carry topic
 # meaning in a child's question ("weiß" is also "white", "warm", "nah")
-# are deliberately NOT here, nor is "nicht": #309 keeps negation a
-# searchable term.
+# are deliberately NOT here, nor is "nicht": #309 keeps "nicht" a
+# searchable term (other negators such as "kein" / "nein" are listed).
+# Unlike English "how", "wie" IS listed: dropping it costs no German
+# benchmark recall (`retrieval_quality_de`), so the English exception
+# doesn't carry over.
 
 # Pronouns
 ich

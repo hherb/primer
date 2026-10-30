@@ -1037,7 +1037,7 @@ async fn retrieve_uses_the_kb_locale_stopword_list() {
 
 #[tokio::test]
 async fn hybrid_drops_stopwords_when_the_vector_leg_is_empty() {
-    // No stored vectors (the default `:memory:` KB, #388): the hybrid
+    // No stored vectors (as in the default `:memory:` KB, #388): the hybrid
     // result is BM25 alone, so it filters like BM25-only `retrieve` (#386).
     let db = tmp_db();
     let kb = SqliteKnowledgeBase::open_for_locale(db.path(), Locale::English).unwrap();
@@ -1061,7 +1061,7 @@ async fn hybrid_drops_stopwords_when_the_vector_leg_is_empty() {
 async fn hybrid_bm25_leg_keeps_stopwords_beside_a_vector_leg() {
     // The hybrid leg's recall was measured with stopwords kept (#386).
     // Only "vec" has a vector; "lex" can reach the result only through a
-    // BM25 match on the stopwords "now" / "we".
+    // BM25 match on the stopwords "can" / "we" / "now".
     let db = tmp_db();
     let kb = SqliteKnowledgeBase::open_for_locale(db.path(), Locale::English).unwrap();
     let stub = primer_embedding::StubEmbedder::with_dim(16);

@@ -12,7 +12,10 @@ fn english_function_words_are_stopwords() {
 #[test]
 fn english_content_words_are_kept() {
     // "near" / "not" stay terms (#309: children use them as content words).
-    for w in ["sky", "blue", "near", "not", "light", "volcano", "stomach"] {
+    // "ill" is also "sick", not only "I'll".
+    for w in [
+        "sky", "blue", "near", "not", "how", "ill", "light", "volcano", "stomach",
+    ] {
         assert!(!is_stopword(Locale::English, w), "{w:?}");
     }
 }
