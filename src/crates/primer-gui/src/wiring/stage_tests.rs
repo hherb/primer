@@ -350,7 +350,7 @@ async fn knowledge_base_without_embedder_is_in_memory_and_auto_seeds() {
     let cfg = stub_config();
     assert!(cfg.persistence.knowledge_db.is_none());
 
-    let kb = open_knowledge_base(home.path(), &cfg, Locale::English, None)
+    let (kb, _) = open_knowledge_base(home.path(), &cfg, Locale::English, None)
         .await
         .unwrap();
 
@@ -382,7 +382,7 @@ async fn knowledge_base_with_embedder_is_an_embedded_per_model_cache() {
     )
     .path();
 
-    let kb = open_knowledge_base(home.path(), &cfg, Locale::English, Some(&stub))
+    let (kb, _) = open_knowledge_base(home.path(), &cfg, Locale::English, Some(&stub))
         .await
         .unwrap();
     let passages = kb.passage_count().unwrap();
@@ -391,7 +391,7 @@ async fn knowledge_base_with_embedder_is_an_embedded_per_model_cache() {
     assert!(cache.is_file(), "expected the cache at {}", cache.display());
     drop(kb);
 
-    let again = open_knowledge_base(home.path(), &cfg, Locale::English, Some(&stub))
+    let (again, _) = open_knowledge_base(home.path(), &cfg, Locale::English, Some(&stub))
         .await
         .unwrap();
     assert_eq!(
@@ -429,7 +429,7 @@ async fn knowledge_base_no_persist_embeds_in_memory() {
     assert!(cfg.persistence.no_persist);
     let stub = primer_embedding::StubEmbedder::new();
 
-    let kb = open_knowledge_base(home.path(), &cfg, Locale::English, Some(&stub))
+    let (kb, _) = open_knowledge_base(home.path(), &cfg, Locale::English, Some(&stub))
         .await
         .unwrap();
 
@@ -446,7 +446,7 @@ async fn knowledge_base_explicit_path_is_seeded_but_not_embedded() {
     cfg.persistence.knowledge_db = Some(home.path().join("my-kb.db"));
     let stub = primer_embedding::StubEmbedder::new();
 
-    let kb = open_knowledge_base(home.path(), &cfg, Locale::English, Some(&stub))
+    let (kb, _) = open_knowledge_base(home.path(), &cfg, Locale::English, Some(&stub))
         .await
         .unwrap();
 
@@ -552,9 +552,9 @@ async fn subsystems_vocab_cap_defaults_to_const_when_unset() {
 /// hybrid retrieval is on: neither gets a notice.
 #[test]
 fn retrieval_notice_absent_when_intentional_or_built() {
-    assert_eq!(retrieval_notice("none", false), None);
+    assert_eq!(retrieval_notice("none", false, None), None);
     for kind in ["stub", "fastembed", "ollama", "openai-compat"] {
-        assert_eq!(retrieval_notice(kind, true), None, "kind {kind}");
+        assert_eq!(retrieval_notice(kind, true, None), None, "kind {kind}");
     }
 }
 
@@ -562,7 +562,17 @@ fn retrieval_notice_absent_when_intentional_or_built() {
 /// silently degrades to BM25-only; the notice names the embedder.
 #[test]
 fn retrieval_notice_reports_failed_embedder() {
-    let notice = retrieval_notice("fastembed", false).expect("failed embedder must be reported");
+    let notice =
+        retrieval_notice("fastembed", false, None).expect("failed embedder must be reported");
     assert!(notice.contains("fastembed"), "notice: {notice}");
+    assert!(notice.contains("BM25"), "notice: {notice}");
+}
+
+/// An embedder that started but failed to embed the KB is reported too.
+#[test]
+fn retrieval_notice_reports_failed_kb_embed() {
+    let notice = retrieval_notice("ollama", true, Some("connection refused"))
+        .expect("failed embed must be reported");
+    assert!(notice.contains("connection refused"), "notice: {notice}");
     assert!(notice.contains("BM25"), "notice: {notice}");
 }

@@ -63,8 +63,8 @@ pub struct PersistenceConfig {
     /// `~/.primer/kb/` when an embedder is configured, else `:memory:`.
     pub knowledge_db: Option<PathBuf>,
     /// When true, `session_db` is ignored and no default DB is written to
-    /// disk (the KB stays `:memory:`); an explicit `knowledge_db` is still
-    /// used.
+    /// disk (the KB stays `:memory:`, so with an embedder it is re-embedded
+    /// on every session build); an explicit `knowledge_db` is still used.
     pub no_persist: bool,
 }
 

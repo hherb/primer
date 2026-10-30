@@ -30,6 +30,8 @@ pub(super) struct Stores {
     pub locale: Locale,
     pub learner: LearnerModel,
     pub knowledge: SqliteKnowledgeBase,
+    /// Why embedding the knowledge base failed, if it did (#388).
+    pub embed_error: Option<String>,
 }
 
 /// Open the session store and learner, then the knowledge base under the
@@ -45,12 +47,13 @@ pub(super) async fn open_stores(
 ) -> Result<Stores, String> {
     let (session_store, locale, learner) =
         open_session_store_and_learner(home, config, cfg_locale, strategy).await?;
-    let knowledge = open_knowledge_base(home, config, locale, embedder).await?;
+    let (knowledge, embed_error) = open_knowledge_base(home, config, locale, embedder).await?;
     Ok(Stores {
         session_store,
         locale,
         learner,
         knowledge,
+        embed_error,
     })
 }
 
@@ -190,13 +193,14 @@ pub(super) async fn open_session_store_and_learner(
 /// under `<home>/.primer/kb/`: the bundled corpus is topped up and every
 /// passage without a vector is embedded, so the cost is paid once, not on
 /// every session build. With no embedder (or `no_persist`) it is a
-/// `:memory:` KB seeded per open.
+/// `:memory:` KB seeded per open. Also returns why embedding failed, if
+/// it did: that is soft, the session runs on BM25.
 pub(super) async fn open_knowledge_base(
     home: &Path,
     config: &GuiConfig,
     locale: Locale,
     embedder: Option<&dyn Embedder>,
-) -> Result<SqliteKnowledgeBase, String> {
+) -> Result<(SqliteKnowledgeBase, Option<String>), String> {
     let knowledge_db = resolve_knowledge_db(
         config.persistence.knowledge_db.clone(),
         Some(home),
@@ -232,5 +236,5 @@ pub(super) async fn open_knowledge_base(
         "knowledge base ready for locale {}",
         locale.pack_id()
     );
-    Ok(knowledge)
+    Ok((knowledge, prepared.embed_error))
 }

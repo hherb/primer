@@ -11,7 +11,8 @@ use crate::vector::vec_to_blob;
 use primer_core::embedder::Embedder;
 use primer_core::error::{PrimerError, Result};
 use primer_core::knowledge::SourceMeta;
-use rusqlite::Connection;
+use rusqlite::{Connection, Transaction, TransactionBehavior};
+use std::collections::HashSet;
 
 /// Upsert one `sources` row, refreshing its metadata on conflict. Takes a
 /// `Connection` so it runs both standalone (`KnowledgeBase::upsert_source`)
@@ -65,20 +66,57 @@ impl SqliteKnowledgeBase {
         sources: &[SourceMeta],
         passages: &[(&str, &str, &str)],
     ) -> Result<()> {
+        self.insert_seed_tx(sources, passages, false).map(|_| ())
+    }
+
+    /// [`Self::insert_seed`], skipping every passage whose id is already
+    /// stored. The check runs inside the write transaction, taken
+    /// `IMMEDIATE`, so two processes topping up one shared KB file at once
+    /// can't both insert a passage (`id` has no UNIQUE constraint). Returns
+    /// how many passages were inserted.
+    pub fn insert_seed_new(
+        &self,
+        sources: &[SourceMeta],
+        passages: &[(&str, &str, &str)],
+    ) -> Result<usize> {
+        self.insert_seed_tx(sources, passages, true)
+    }
+
+    fn insert_seed_tx(
+        &self,
+        sources: &[SourceMeta],
+        passages: &[(&str, &str, &str)],
+        skip_existing: bool,
+    ) -> Result<usize> {
         let conn = self.conn.lock().unwrap();
-        let tx = conn
-            .unchecked_transaction()
+        let behavior = if skip_existing {
+            TransactionBehavior::Immediate
+        } else {
+            TransactionBehavior::Deferred
+        };
+        let tx = Transaction::new_unchecked(&conn, behavior)
             .map_err(|e| PrimerError::Knowledge(format!("begin insert tx: {e}")))?;
+        let existing = if skip_existing {
+            Self::passage_ids_in(&tx, &self.content_table)?
+        } else {
+            HashSet::new()
+        };
         let (umbrellas, children): (Vec<_>, Vec<_>) =
             sources.iter().partition(|s| s.parent_source_id.is_none());
         for src in umbrellas.into_iter().chain(children) {
             upsert_source_row(&tx, src)?;
         }
+        let mut inserted = 0;
         for (id, source, text) in passages {
+            if existing.contains(*id) {
+                continue;
+            }
             Self::insert_passage_inner(&tx, &self.sql, id, source, text)?;
+            inserted += 1;
         }
         tx.commit()
-            .map_err(|e| PrimerError::Knowledge(format!("commit insert: {e}")))
+            .map_err(|e| PrimerError::Knowledge(format!("commit insert: {e}")))?;
+        Ok(inserted)
     }
 
     /// Core two-statement insert (content row + FTS index row), shared by

@@ -111,14 +111,25 @@ pub(super) async fn build_subsystems(
 }
 
 /// The UI notice for a configured embedder that failed to start, which
-/// leaves retrieval BM25-only (issue #353). `None` when `kind` is `"none"`
-/// (BM25-only by choice) or the embedder was built. English-only and
+/// leaves retrieval BM25-only (issue #353), or that started but failed to
+/// embed the knowledge base (`embed_error`, #388). `None` when `kind` is
+/// `"none"` (BM25-only by choice) or everything worked. English-only and
 /// operator-facing, like [`primer_engine::BackendNotice`].
-pub(super) fn retrieval_notice(kind: &str, built: bool) -> Option<String> {
-    (kind != "none" && !built).then(|| {
-        format!(
+pub(super) fn retrieval_notice(
+    kind: &str,
+    built: bool,
+    embed_error: Option<&str>,
+) -> Option<String> {
+    if kind != "none" && !built {
+        return Some(format!(
             "Knowledge search is keyword-only (BM25): the '{kind}' embedder could not \
              start (model download or embedding server unavailable)."
+        ));
+    }
+    embed_error.map(|e| {
+        format!(
+            "Knowledge search is partly keyword-only (BM25): embedding the knowledge \
+             base with the '{kind}' embedder failed ({e}); it retries next session."
         )
     })
 }

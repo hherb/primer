@@ -138,7 +138,15 @@ impl SqliteKnowledgeBase {
     /// loader to dedup against existing rows in O(N+M).
     pub fn list_passage_ids(&self) -> Result<std::collections::HashSet<String>> {
         let conn = self.conn.lock().unwrap();
-        let content_table = &self.content_table;
+        Self::passage_ids_in(&conn, &self.content_table)
+    }
+
+    /// [`Self::list_passage_ids`] on a given connection, so a write
+    /// transaction can read the ids it is about to dedup against.
+    pub(crate) fn passage_ids_in(
+        conn: &rusqlite::Connection,
+        content_table: &str,
+    ) -> Result<std::collections::HashSet<String>> {
         let mut stmt = conn
             .prepare(&format!("SELECT id FROM {content_table}"))
             .map_err(|e| PrimerError::Knowledge(format!("prepare list ids: {e}")))?;
@@ -203,6 +211,17 @@ impl SqliteKnowledgeBase {
             |r| r.get(0),
         )
         .map_err(|e| PrimerError::Knowledge(format!("count embeddings: {e}")))
+    }
+
+    /// Check `embedder` against the model registered in this DB: errors
+    /// when its model id is registered at a different dim, the case where
+    /// every stored vector is useless to it and hybrid retrieval fails.
+    pub fn check_embedder(&self, embedder: &dyn primer_core::embedder::Embedder) -> Result<()> {
+        embedding_model::validate_embedder_against_db(
+            &self.conn.lock().unwrap(),
+            embedder.model_id(),
+            embedder.dim(),
+        )
     }
 }
 

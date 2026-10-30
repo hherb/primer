@@ -1041,6 +1041,37 @@ async fn retrieve_hybrid_query_gate_keeps_bm25_hits_on_unembedded_passages() {
     assert_eq!(ids, ["p2"], "{gated:?}");
 }
 
+#[tokio::test]
+async fn retrieve_hybrid_query_gate_caps_unembedded_hits_at_final_top_k() {
+    // A gated query must not hand back the whole BM25 window (#307 keeps
+    // off-topic turns from bloating the prompt).
+    use primer_embedding::StubEmbedder;
+    let db = tmp_db();
+    let kb = SqliteKnowledgeBase::open_for_locale(db.path(), Locale::English).unwrap();
+    let stub = StubEmbedder::with_dim(64);
+    kb.insert_passage_with_embedding("p1", "src", GATE_PASSAGE, &stub)
+        .await
+        .unwrap();
+    for i in 0..4 {
+        kb.insert_passage(&format!("u{i}"), "src", &format!("rayleigh note {i}"))
+            .unwrap();
+    }
+    // Enough unrelated filler to keep "rayleigh" rare (positive BM25 idf).
+    for i in 0..20 {
+        kb.insert_passage_with_embedding(&format!("f{i}"), "src", &format!("filler {i}"), &stub)
+            .await
+            .unwrap();
+    }
+
+    let params = gated_params(Some(QUERY_GATE_TEST_COSINE));
+    let gated = kb
+        .retrieve_hybrid("rayleigh", &stub, &params)
+        .await
+        .unwrap();
+    assert_eq!(gated.len(), params.final_top_k, "{gated:?}");
+    assert!(gated.iter().all(|p| p.id.starts_with('u')), "{gated:?}");
+}
+
 /// Retrieve with no score floor, so only the stopword filter decides.
 async fn retrieve_all(kb: &SqliteKnowledgeBase, query: &str) -> Vec<Passage> {
     let params = RetrievalParams {
@@ -1119,4 +1150,20 @@ async fn hybrid_bm25_leg_keeps_stopwords_beside_a_vector_leg() {
         .await
         .unwrap();
     assert!(got.iter().any(|p| p.id == "lex"), "{got:?}");
+}
+
+/// The seed top-up's id check runs inside its own write transaction, so a
+/// passage another process stored after the caller's read is still skipped.
+#[test]
+fn insert_seed_new_skips_ids_already_stored() {
+    let db = tmp_db();
+    let kb = SqliteKnowledgeBase::open_for_locale(db.path(), Locale::English).unwrap();
+    kb.insert_passage("p1", "src", "first").unwrap();
+
+    let inserted = kb
+        .insert_seed_new(&[], &[("p1", "src", "first"), ("p2", "src", "second")])
+        .unwrap();
+
+    assert_eq!(inserted, 1);
+    assert_eq!(kb.passage_count().unwrap(), 2);
 }

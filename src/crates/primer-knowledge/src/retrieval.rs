@@ -97,7 +97,7 @@ impl SqliteKnowledgeBase {
                 best_cosine = best.score,
                 floor,
                 kept_unembedded = unjudged.len(),
-                "off-topic gate: hybrid KB retrieval emptied"
+                "off-topic gate fired: only BM25 hits on un-embedded passages kept"
             );
             return Ok(unjudged);
         }

@@ -65,6 +65,8 @@ mod tests {
         let home = TempDir::new().unwrap();
         let mut cfg = GuiConfig::default();
         cfg.persistence.no_persist = true;
+        // No embedder: the default fastembed one would embed the corpus (#388).
+        cfg.embedder.kind = "none".to_string();
         let active = build_active_session(home.path(), &cfg).await.unwrap();
 
         let mut responder = ArcDmResponder::new(Arc::clone(&active.dialogue_manager));

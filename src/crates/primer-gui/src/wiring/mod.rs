@@ -153,7 +153,6 @@ async fn build_with_strategy(
     // fills its vectors (#388).
     let subsystems =
         build_subsystems(config, &backend, &backend_name, &display_model, &params).await?;
-    let retrieval_notice = retrieval_notice(&config.embedder.kind, subsystems.embedder.is_some());
 
     // ─── Session store + learner, then the KB under their locale ─────
     let Stores {
@@ -161,6 +160,7 @@ async fn build_with_strategy(
         locale: effective_locale,
         learner,
         knowledge,
+        embed_error,
     } = open_stores(
         home,
         config,
@@ -171,6 +171,11 @@ async fn build_with_strategy(
     .await?;
     let session_store = Arc::new(session_store);
     let knowledge = Arc::new(knowledge);
+    let retrieval_notice = retrieval_notice(
+        &config.embedder.kind,
+        subsystems.embedder.is_some(),
+        embed_error.as_deref(),
+    );
 
     // ─── Pedagogy settings ───────────────────────────────────────────
     let pedagogy_config = PedagogyConfig {

@@ -593,5 +593,47 @@ async fn prepare_kb_embedding_failure_is_soft() {
         .await
         .expect("an embed failure must not fail startup");
     assert_eq!(stats.embedded, 0);
+    assert!(stats.embed_error.is_some(), "the caller must be told");
+    assert_eq!(kb.passage_count().unwrap(), 2);
+}
+
+/// A model re-pulled under the same id at a new dim makes every stored
+/// vector useless; startup re-embeds them all instead of leaving hybrid
+/// retrieval failing on every turn.
+#[tokio::test]
+async fn prepare_kb_reembeds_everything_when_the_model_changes_dim() {
+    let db = tempfile::NamedTempFile::new().unwrap();
+    let kb = SqliteKnowledgeBase::open_for_locale(db.path(), Locale::English).unwrap();
+    let seed = write_jsonl(&[PREP_P1, PREP_P2]);
+    let files = [seed.path().to_path_buf()];
+    prepare_kb(
+        &kb,
+        &files,
+        true,
+        Some(&primer_embedding::StubEmbedder::with_dim(16)),
+    )
+    .await
+    .unwrap();
+
+    let resized = primer_embedding::StubEmbedder::with_dim(8);
+    assert!(kb.check_embedder(&resized).is_err());
+    let stats = prepare_kb(&kb, &files, true, Some(&resized)).await.unwrap();
+    assert_eq!(stats.embedded, 2);
+    assert_eq!(stats.embed_error, None);
+    kb.check_embedder(&resized).unwrap();
+}
+
+/// Topping up an already-current KB writes nothing (no source-row upsert).
+#[tokio::test]
+async fn prepare_kb_top_up_with_nothing_new_inserts_nothing() {
+    let db = tempfile::NamedTempFile::new().unwrap();
+    let kb = SqliteKnowledgeBase::open_for_locale(db.path(), Locale::English).unwrap();
+    let seed = write_jsonl(&[PREP_P1, PREP_P2]);
+    let files = [seed.path().to_path_buf()];
+    prepare_kb(&kb, &files, true, None).await.unwrap();
+
+    let again = prepare_kb(&kb, &files, true, None).await.unwrap();
+    let seeded = again.seeded.expect("top_up always loads");
+    assert_eq!((seeded.inserted, seeded.skipped_existing), (0, 2));
     assert_eq!(kb.passage_count().unwrap(), 2);
 }

@@ -111,6 +111,7 @@ impl KnowledgeDb {
 /// `<home>/.primer/kb/<slug(model_id)>.db`. Keying the file by model
 /// keeps one model's vectors from ever meeting another's dim. Without an
 /// embedder there are no vectors worth caching, so it stays `:memory:`.
+/// An empty `home` (HOME unset) counts as no home, never as the cwd.
 pub fn resolve_knowledge_db(
     explicit: Option<PathBuf>,
     home: Option<&Path>,
@@ -120,7 +121,10 @@ pub fn resolve_knowledge_db(
     if let Some(p) = explicit {
         return KnowledgeDb::Explicit(p);
     }
-    match (home, embedder_model_id) {
+    match (
+        home.filter(|h| !h.as_os_str().is_empty()),
+        embedder_model_id,
+    ) {
         (Some(home), Some(model)) if !no_persist => KnowledgeDb::Cache(
             home.join(PRIMER_HOME_DIR)
                 .join(KB_CACHE_DIR)
@@ -284,6 +288,7 @@ mod tests {
         for db in [
             resolve_knowledge_db(None, Some(home), None, false),
             resolve_knowledge_db(None, None, Some("bge-m3"), false),
+            resolve_knowledge_db(None, Some(Path::new("")), Some("bge-m3"), false),
             resolve_knowledge_db(None, Some(home), Some("bge-m3"), true),
         ] {
             assert_eq!(db, KnowledgeDb::InMemory);

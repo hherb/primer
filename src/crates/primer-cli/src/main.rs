@@ -29,6 +29,7 @@ use std::io::{self, BufRead, Write};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
+use anyhow::Context;
 use clap::Parser;
 use primer_classifier::{ClassifierSettings, EngagementClassifier};
 use primer_core::config::PedagogyConfig;
@@ -206,8 +207,10 @@ struct Cli {
     /// Run the session in-memory only — nothing is written to disk
     /// and the conversation evaporates on exit. Useful for quick
     /// experiments and tests; the per-learner default-path persistence
-    /// stays out of the way. Mutually exclusive with `--resume` and
-    /// `--session-db`.
+    /// stays out of the way. With an embedder the in-memory knowledge
+    /// base is re-embedded on every start (minutes with BGE-M3; add
+    /// `--embedder-backend none` to skip it). Mutually exclusive with
+    /// `--resume` and `--session-db`.
     #[arg(long, conflicts_with_all = ["session_db", "resume"])]
     no_persist: bool,
 
@@ -1126,23 +1129,43 @@ async fn async_main() -> anyhow::Result<()> {
     // that). An empty KB is a valid runtime state.
     let knowledge_db = resolve_knowledge_db(
         cli.knowledge_db.clone(),
-        Some(home.as_path()).filter(|h| !h.as_os_str().is_empty()),
+        Some(home.as_path()),
         embedder.as_ref().map(|e| e.model_id()),
         cli.no_persist,
     );
+    let knowledge_path = knowledge_db.path();
+    // The cache is derived data the user never chose, so say where it is.
+    let cache_hint = if matches!(knowledge_db, KnowledgeDb::Cache(_)) {
+        " (a rebuildable cache: safe to delete)"
+    } else {
+        ""
+    };
     if let KnowledgeDb::Cache(path) = &knowledge_db
         && let Some(dir) = path.parent()
     {
-        create_private_dir_all(dir)?;
+        create_private_dir_all(dir)
+            .with_context(|| format!("creating knowledge-base cache dir {}", dir.display()))?;
     }
-    let knowledge = SqliteKnowledgeBase::open_for_locale(&knowledge_db.path(), cli_locale)?;
+    let knowledge = SqliteKnowledgeBase::open_for_locale(&knowledge_path, cli_locale)
+        .with_context(|| {
+            format!(
+                "opening knowledge base {}{cache_hint}",
+                knowledge_path.display()
+            )
+        })?;
     let embed_with = match knowledge_db {
         KnowledgeDb::Explicit(_) => None,
         _ => embedder.as_deref(),
     };
+    let seed_files = primer_kb_load::discover_seed_files(cli_locale);
     // A fresh KB is still empty here (seeding comes first), so count it in.
+    // Only a hint for the user, so a failed check just skips it.
     if embed_with.is_some()
-        && (knowledge.passage_count()? == 0 || !knowledge.passages_missing_embedding()?.is_empty())
+        && !seed_files.is_empty()
+        && (matches!(knowledge.passage_count(), Ok(0))
+            || knowledge
+                .passages_missing_embedding()
+                .is_ok_and(|m| !m.is_empty()))
     {
         eprintln!(
             "Embedding the knowledge base for semantic search (this can take a few minutes)..."
@@ -1150,14 +1173,26 @@ async fn async_main() -> anyhow::Result<()> {
     }
     let prepared = primer_kb_load::prepare_kb(
         &knowledge,
-        &primer_kb_load::discover_seed_files(cli_locale),
+        &seed_files,
         matches!(knowledge_db, KnowledgeDb::Cache(_)),
         embed_with,
     )
-    .await?;
+    .await
+    .with_context(|| {
+        format!(
+            "seeding knowledge base {}{cache_hint}",
+            knowledge_path.display()
+        )
+    })?;
+    if let Some(e) = &prepared.embed_error {
+        eprintln!(
+            "Warning: knowledge search is partly keyword-only (BM25): embedding failed ({e}); \
+             it retries next start."
+        );
+    }
     tracing::info!(
         target = "primer::startup",
-        path = %knowledge_db.path().display(),
+        path = %knowledge_path.display(),
         seeded = prepared.seeded.map_or(0, |s| s.inserted),
         embedded = prepared.embedded,
         "knowledge base ready for locale {}",

@@ -107,8 +107,8 @@ struct ParsedSeed {
     sources: HashMap<String, SourceMeta>,
 }
 
-/// Load a JSONL file into `kb`. Sources are upserted; passages are
-/// inserted if their `id` is new, skipped otherwise.
+/// Load a JSONL file into `kb`. Passages are inserted if their `id` is
+/// new, skipped otherwise; sources are upserted when any passage is new.
 ///
 /// The whole file is parsed before anything is written, and its sources
 /// and passages land in one transaction, so a failed load writes nothing
@@ -219,7 +219,8 @@ fn parse_jsonl(path: &Path) -> Result<ParsedSeed> {
 
 /// Write a parsed seed corpus — its sources and every passage whose `id`
 /// is not already in the KB (or earlier in the corpus) — in one
-/// transaction.
+/// transaction. With no new passage nothing is written, so topping up an
+/// already-current KB on every startup costs no write.
 async fn write_seed(kb: &SqliteKnowledgeBase, seed: ParsedSeed) -> Result<LoadStats> {
     let ParsedSeed { passages, sources } = seed;
     let mut seen = existing_passage_ids(kb)?;
@@ -229,10 +230,16 @@ async fn write_seed(kb: &SqliteKnowledgeBase, seed: ParsedSeed) -> Result<LoadSt
         .map(|p| (p.id.as_str(), p.source.as_str(), p.text.as_str()))
         .collect();
     let sources: Vec<SourceMeta> = sources.into_values().collect();
-    kb.insert_seed(&sources, &new)?;
+    // `insert_seed_new` re-checks the ids inside its write transaction: the
+    // read above can be stale when another process seeds the same file.
+    let inserted = if new.is_empty() {
+        0
+    } else {
+        kb.insert_seed_new(&sources, &new)?
+    };
     let stats = LoadStats {
-        inserted: new.len(),
-        skipped_existing: passages.len() - new.len(),
+        inserted,
+        skipped_existing: passages.len() - inserted,
         sources_seen: sources.len(),
     };
 
@@ -455,8 +462,12 @@ pub const DEFAULT_EMBED_BATCH_SIZE: usize = 16;
 pub struct PrepareStats {
     /// The seed load, if one ran.
     pub seeded: Option<LoadStats>,
-    /// Passages that got a vector.
+    /// Passages that got a vector (0 when embedding failed, though the
+    /// batches embedded before the failure are kept).
     pub embedded: usize,
+    /// Why embedding failed, for the caller to show the user: retrieval
+    /// runs keyword-only (BM25) on the passages left without a vector.
+    pub embed_error: Option<String>,
 }
 
 /// Get a knowledge base ready at startup (#388): seed it from
@@ -466,8 +477,15 @@ pub struct PrepareStats {
 /// The seed loads when the KB is empty, or always with `top_up` — the
 /// persistent per-model cache passes `true` so a grown corpus reaches an
 /// already-seeded file (existing ids are skipped). A seed failure is an
-/// error, as in [`auto_seed_if_empty`]. An embedding failure only warns:
-/// the session still works on BM25, and the next open retries.
+/// error, as in [`auto_seed_if_empty`]. An embedding failure is soft
+/// (returned in [`PrepareStats::embed_error`]): the session still works
+/// on BM25, and the next open retries.
+///
+/// When `embedder`'s model id is registered at a different dim (a model
+/// re-pulled under the same name), every stored vector is useless to it,
+/// so they are cleared and all passages re-embedded. Startup only passes
+/// an embedder for a KB whose vectors are derived data (`:memory:` or the
+/// per-model cache), never for a user-managed file.
 pub async fn prepare_kb(
     kb: &SqliteKnowledgeBase,
     seed_files: &[PathBuf],
@@ -482,13 +500,28 @@ pub async fn prepare_kb(
         stats.seeded = Some(load_seed_files(kb, seed_files).await?);
     }
     if let Some(embedder) = embedder {
-        match reembed_kb(kb, embedder, false, DEFAULT_EMBED_BATCH_SIZE).await {
+        let force = match kb.check_embedder(embedder) {
+            Ok(()) => false,
+            Err(e) => {
+                tracing::warn!(
+                    target = "primer-kb-load",
+                    model = embedder.model_id(),
+                    "stored vectors don't fit the embedder; re-embedding every passage: {e}"
+                );
+                true
+            }
+        };
+        match reembed_kb(kb, embedder, force, DEFAULT_EMBED_BATCH_SIZE).await {
             Ok(n) => stats.embedded = n,
-            Err(e) => tracing::warn!(
-                target = "primer-kb-load",
-                model = embedder.model_id(),
-                "embedding the knowledge base failed; hybrid retrieval falls back toward BM25: {e}"
-            ),
+            Err(e) => {
+                tracing::warn!(
+                    target = "primer-kb-load",
+                    model = embedder.model_id(),
+                    still_missing = kb.passages_missing_embedding().map(|m| m.len()).ok(),
+                    "embedding the knowledge base failed; hybrid retrieval falls back toward BM25: {e}"
+                );
+                stats.embed_error = Some(e.to_string());
+            }
         }
     }
     Ok(stats)
