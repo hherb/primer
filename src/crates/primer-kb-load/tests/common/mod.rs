@@ -636,7 +636,8 @@ pub const QUERIES: &[BenchQuery] = &[
 /// against them. The regression test in `retrieval_quality.rs`
 /// excludes these from its assertion.
 ///
-/// **Tracked in:** GitHub issues #42 (sun-shine) and #45 (paraphrases).
+/// **Tracked in:** GitHub issues #42 (sun-shine), #45 (paraphrases) and
+/// #386 (stopword filter).
 pub const KNOWN_FAILING_QUERIES: &[&str] = &[
     // strict:FAIL at top_k=5, min_score=0.5 — canonical seed:en:sun
     // is not in top-5 even though loose terms (fus*/hydrogen) appear
@@ -653,9 +654,11 @@ pub const KNOWN_FAILING_QUERIES: &[&str] = &[
     // originally listed here too; they were lifted by the issue #45
     // corpus expansion (added "growl" to seed:en:digestion; added the
     // new seed:en:flowers passage) and now serve as permanent
-    // regression guarantees in the active query set instead.
+    // regression guarantees in the active query set instead. A third,
+    // "why does the brain need oxygen from the lungs", was lifted by the
+    // issue #386 stopword filter (its filler words had pushed
+    // seed:en:brain out of the top 5).
     "what is inside a tiny bug",
-    "why does the brain need oxygen from the lungs",
 ];
 
 /// Queries the hybrid (BM25 + dense-vector RRF) retrieval path with

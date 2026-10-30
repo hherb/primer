@@ -1,0 +1,190 @@
+# English stopwords for KB BM25 retrieval (issue #386).
+#
+# One lowercase alphanumeric token per line; `#` starts a comment line.
+# Entries must be in the form `primer_core::fts_util` hands the filter:
+# punctuation already stripped, so "don't" is listed as "dont".
+#
+# Function words + contraction forms + conversational fillers. Words that
+# can carry topic meaning in a child's question ("near", "light", "move",
+# "work", "up", "down", "hot", "ill" — I'll vs. sick) are deliberately NOT
+# here, nor is "not": #309 keeps "not" a searchable term (other negators
+# such as "no" / "dont" are listed). "how" stays a term too: it asks
+# for a mechanism and explanatory passages are worded that way, so
+# dropping it cost recall ("how does my dog see in the dark" lost
+# `seed:en:eyes-sight` from the top 5).
+
+# Pronouns
+i
+me
+my
+mine
+myself
+we
+us
+our
+ours
+ourselves
+you
+your
+yours
+yourself
+yourselves
+he
+him
+his
+himself
+she
+her
+hers
+herself
+it
+its
+itself
+they
+them
+their
+theirs
+themselves
+
+# Question / determiner words
+what
+which
+who
+whom
+whose
+this
+that
+these
+those
+why
+when
+where
+
+# Auxiliaries and modals
+am
+is
+are
+was
+were
+be
+been
+being
+have
+has
+had
+having
+do
+does
+did
+doing
+can
+could
+will
+would
+shall
+should
+may
+might
+must
+
+# Articles, conjunctions, prepositions
+a
+an
+the
+and
+but
+if
+or
+nor
+because
+as
+so
+than
+then
+of
+at
+by
+for
+with
+about
+to
+from
+into
+onto
+in
+on
+
+# Quantifiers, adverbs, "no"
+all
+any
+both
+each
+some
+such
+no
+only
+own
+same
+too
+very
+just
+also
+now
+here
+there
+again
+really
+anymore
+please
+
+# Contraction forms after punctuation stripping
+im
+ive
+id
+youre
+youve
+youll
+hes
+shes
+theyre
+weve
+thats
+whats
+whos
+wheres
+hows
+lets
+dont
+doesnt
+didnt
+isnt
+arent
+wasnt
+werent
+cant
+couldnt
+wont
+wouldnt
+shouldnt
+havent
+hasnt
+
+# Conversational fillers
+hello
+hi
+hey
+okay
+ok
+yes
+yeah
+yep
+nope
+bye
+goodbye
+thanks
+thank
+hmm
+um
+uh
+oh
+wow

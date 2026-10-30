@@ -63,3 +63,25 @@ pub const KNOWN_LEAKING_OFF_TOPIC: &[&str] = &[
     "can we play a game",
     "mir ist langweilig",
 ];
+
+/// Off-topic utterances that still retrieve on the BM25-only path
+/// (`--embedder-backend none`) at the production `KB_FINAL_TOP_K` /
+/// `KB_BM25_ONLY_MIN_SCORE`, after the per-locale stopword filter (#386).
+/// Each one matches through content words ("good", "stop", "talk",
+/// "name", "funny", "see" / "tomorrow", "know", "heißt", "Lust", "weiß" /
+/// "nicht"), which a stopword list must not drop: a real question uses
+/// the same words.
+///
+/// Keyed by text alone, like [`KNOWN_LEAKING_OFF_TOPIC`].
+pub const KNOWN_LEAKING_OFF_TOPIC_BM25: &[&str] = &[
+    "good morning",
+    "can we stop now",
+    "i don't want to talk anymore",
+    "what is your name",
+    "that is funny",
+    "see you tomorrow",
+    "i don't know",
+    "wie heißt du",
+    "ich habe keine Lust mehr",
+    "weiß ich nicht",
+];

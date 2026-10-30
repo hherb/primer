@@ -34,5 +34,6 @@ pub mod router;
 pub mod rrf;
 pub mod session_timing;
 pub mod speech;
+pub mod stopwords;
 pub mod storage;
 pub mod vocab;

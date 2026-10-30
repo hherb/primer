@@ -73,7 +73,7 @@ async fn reopen_existing_db_is_a_no_op() {
     let kb = SqliteKnowledgeBase::open_for_locale(db.path(), Locale::English).unwrap();
     let got = kb
         .retrieve(
-            "hello",
+            "world",
             &RetrievalParams {
                 top_k: 5,
                 min_score: f64::NEG_INFINITY,
@@ -995,4 +995,84 @@ async fn retrieve_hybrid_query_gate_judges_best_hit_not_first_inserted() {
         .await
         .unwrap();
     assert_eq!(hits.first().map(|p| p.id.as_str()), Some("p1"), "{hits:?}");
+}
+
+/// Retrieve with no score floor, so only the stopword filter decides.
+async fn retrieve_all(kb: &SqliteKnowledgeBase, query: &str) -> Vec<Passage> {
+    let params = RetrievalParams {
+        top_k: 10,
+        min_score: f64::NEG_INFINITY,
+        source_filter: vec![],
+    };
+    kb.retrieve(query, &params).await.unwrap()
+}
+
+#[tokio::test]
+async fn retrieve_ignores_stopwords_in_the_query() {
+    // #386: "can we stop now" matched passages through "we" and "now".
+    let db = tmp_db();
+    let kb = SqliteKnowledgeBase::open_for_locale(db.path(), Locale::English).unwrap();
+    kb.insert_passage("p1", "s", "Now we can see the stars at night.")
+        .unwrap();
+    assert!(retrieve_all(&kb, "can we do it now").await.is_empty());
+    let got = retrieve_all(&kb, "why can we see the stars").await;
+    assert_eq!(got.len(), 1, "content words must still match");
+}
+
+#[tokio::test]
+async fn retrieve_uses_the_kb_locale_stopword_list() {
+    // "die" is a German article but an English content word.
+    let db = tmp_db();
+    let en = SqliteKnowledgeBase::open_for_locale(db.path(), Locale::English).unwrap();
+    en.insert_passage("en", "s", "Stars die when their fuel runs out.")
+        .unwrap();
+    assert_eq!(retrieve_all(&en, "do stars die").await.len(), 1);
+
+    let de = SqliteKnowledgeBase::open_for_locale(db.path(), Locale::German).unwrap();
+    de.insert_passage("de", "s", "Die Sonne ist ein Stern.")
+        .unwrap();
+    assert!(retrieve_all(&de, "die").await.is_empty());
+    assert_eq!(retrieve_all(&de, "die Sonne").await.len(), 1);
+}
+
+#[tokio::test]
+async fn hybrid_drops_stopwords_when_the_vector_leg_is_empty() {
+    // No stored vectors (as in the default `:memory:` KB, #388): the hybrid
+    // result is BM25 alone, so it filters like BM25-only `retrieve` (#386).
+    let db = tmp_db();
+    let kb = SqliteKnowledgeBase::open_for_locale(db.path(), Locale::English).unwrap();
+    kb.insert_passage("p1", "s", "Now we can see the stars at night.")
+        .unwrap();
+    let stub = primer_embedding::StubEmbedder::with_dim(16);
+    let params = HybridParams::default();
+    let got = kb
+        .retrieve_hybrid("can we do it now", &stub, &params)
+        .await
+        .unwrap();
+    assert!(got.is_empty(), "{got:?}");
+    let got = kb
+        .retrieve_hybrid("see the stars", &stub, &params)
+        .await
+        .unwrap();
+    assert_eq!(got.len(), 1, "content words must still match");
+}
+
+#[tokio::test]
+async fn hybrid_bm25_leg_keeps_stopwords_beside_a_vector_leg() {
+    // The hybrid leg's recall was measured with stopwords kept (#386).
+    // Only "vec" has a vector; "lex" can reach the result only through a
+    // BM25 match on the stopwords "can" / "we" / "now".
+    let db = tmp_db();
+    let kb = SqliteKnowledgeBase::open_for_locale(db.path(), Locale::English).unwrap();
+    let stub = primer_embedding::StubEmbedder::with_dim(16);
+    kb.insert_passage_with_embedding("vec", "s", "Volcanoes erupt lava.", &stub)
+        .await
+        .unwrap();
+    kb.insert_passage("lex", "s", "Now we can see the stars at night.")
+        .unwrap();
+    let got = kb
+        .retrieve_hybrid("can we do it now", &stub, &HybridParams::default())
+        .await
+        .unwrap();
+    assert!(got.iter().any(|p| p.id == "lex"), "{got:?}");
 }
