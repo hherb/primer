@@ -447,5 +447,52 @@ pub async fn auto_seed_if_empty(
     Ok(Some(load_seed_files(kb, &files).await?))
 }
 
+/// Passages per embedder call when startup or `--reembed` fills vectors.
+pub const DEFAULT_EMBED_BATCH_SIZE: usize = 16;
+
+/// What [`prepare_kb`] did.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct PrepareStats {
+    /// The seed load, if one ran.
+    pub seeded: Option<LoadStats>,
+    /// Passages that got a vector.
+    pub embedded: usize,
+}
+
+/// Get a knowledge base ready at startup (#388): seed it from
+/// `seed_files` (usually [`discover_seed_files`]), then give every passage
+/// without a vector one when an `embedder` is wired.
+///
+/// The seed loads when the KB is empty, or always with `top_up` — the
+/// persistent per-model cache passes `true` so a grown corpus reaches an
+/// already-seeded file (existing ids are skipped). A seed failure is an
+/// error, as in [`auto_seed_if_empty`]. An embedding failure only warns:
+/// the session still works on BM25, and the next open retries.
+pub async fn prepare_kb(
+    kb: &SqliteKnowledgeBase,
+    seed_files: &[PathBuf],
+    top_up: bool,
+    embedder: Option<&dyn primer_core::embedder::Embedder>,
+) -> Result<PrepareStats> {
+    let mut stats = PrepareStats::default();
+    // shortcut: top-up only adds new ids, so a seed passage edited in place
+    // keeps its old text (and vector) in the cache; upgrade when seed edits
+    // must reach existing caches.
+    if !seed_files.is_empty() && (top_up || kb.passage_count()? == 0) {
+        stats.seeded = Some(load_seed_files(kb, seed_files).await?);
+    }
+    if let Some(embedder) = embedder {
+        match reembed_kb(kb, embedder, false, DEFAULT_EMBED_BATCH_SIZE).await {
+            Ok(n) => stats.embedded = n,
+            Err(e) => tracing::warn!(
+                target = "primer-kb-load",
+                model = embedder.model_id(),
+                "embedding the knowledge base failed; hybrid retrieval falls back toward BM25: {e}"
+            ),
+        }
+    }
+    Ok(stats)
+}
+
 #[cfg(test)]
 mod tests;

@@ -5,6 +5,9 @@ use tempfile::TempDir;
 fn stub_config() -> GuiConfig {
     let mut cfg = GuiConfig::default();
     cfg.persistence.no_persist = true;
+    // No embedder: the default fastembed one would load BGE-M3 and embed
+    // the whole corpus in every test (#388).
+    cfg.embedder.kind = "none".to_string();
     cfg
 }
 
@@ -236,6 +239,7 @@ async fn second_build_after_first_drops_persists_learner_growth() {
     let session_db = home.path().join("roundtrip.db");
 
     let mut cfg = GuiConfig::default();
+    cfg.embedder.kind = "none".to_string();
     cfg.learner.name = "Roundtrip".to_string();
     cfg.persistence.session_db = Some(session_db.clone());
 
@@ -266,6 +270,7 @@ async fn locale_mismatch_on_existing_learner_returns_error() {
     let session_db = home.path().join("locale_mismatch.db");
 
     let mut cfg = GuiConfig::default();
+    cfg.embedder.kind = "none".to_string();
     cfg.learner.name = "Binti".to_string();
     cfg.learner.locale = "en".to_string();
     cfg.persistence.session_db = Some(session_db.clone());
@@ -299,6 +304,7 @@ async fn locale_matches_after_existing_open() {
     let session_db = home.path().join("locale_match.db");
 
     let mut cfg = GuiConfig::default();
+    cfg.embedder.kind = "none".to_string();
     cfg.learner.name = "Binti".to_string();
     cfg.learner.locale = "de".to_string();
     cfg.persistence.session_db = Some(session_db.clone());
@@ -336,6 +342,7 @@ async fn build_active_session_for_resume_opens_session_db_once() {
     let session_db = home.path().join("resume_open_count.db");
 
     let mut cfg_en = GuiConfig::default();
+    cfg_en.embedder.kind = "none".to_string();
     cfg_en.learner.name = "Binti".to_string();
     cfg_en.learner.locale = "en".to_string();
     cfg_en.persistence.session_db = Some(session_db.clone());
@@ -379,6 +386,7 @@ async fn build_active_session_for_resume_uses_cfg_locale_when_no_persisted_learn
     // through to cfg's locale (no inheritance source available).
     let home = TempDir::new().unwrap();
     let mut cfg = GuiConfig::default();
+    cfg.embedder.kind = "none".to_string();
     cfg.learner.name = "Fresh".to_string();
     cfg.learner.locale = "de".to_string();
     cfg.persistence.session_db = Some(home.path().join("fresh.db"));
@@ -396,6 +404,7 @@ async fn build_active_session_for_resume_matches_cfg_when_locales_agree() {
     let home = TempDir::new().unwrap();
     let session_db = home.path().join("agree.db");
     let mut cfg = GuiConfig::default();
+    cfg.embedder.kind = "none".to_string();
     cfg.learner.name = "Agree".to_string();
     cfg.learner.locale = "de".to_string();
     cfg.persistence.session_db = Some(session_db);
@@ -417,6 +426,7 @@ async fn name_reconciles_on_second_open() {
     let session_db = home.path().join("test.db");
 
     let mut cfg = GuiConfig::default();
+    cfg.embedder.kind = "none".to_string();
     cfg.learner.name = "Binti".to_string();
     cfg.persistence.session_db = Some(session_db.clone());
 

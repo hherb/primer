@@ -528,3 +528,70 @@ async fn auto_seed_retries_after_a_failed_startup() {
     let stats = retried.unwrap().expect("the retry should seed");
     assert_eq!(stats.inserted, 2);
 }
+
+const PREP_P1: &str =
+    r#"{"id":"p1","source":"seed","license":"CC0-1.0","attribution":"x","text":"first text"}"#;
+const PREP_P2: &str =
+    r#"{"id":"p2","source":"seed","license":"CC0-1.0","attribution":"x","text":"second text"}"#;
+
+/// Issue #388: startup seeds an empty KB and embeds every passage, so the
+/// hybrid vector leg (and the #307 gate) has something to work with. A
+/// second open has nothing left to embed.
+#[tokio::test]
+async fn prepare_kb_seeds_an_empty_kb_and_embeds_every_passage_once() {
+    let db = tempfile::NamedTempFile::new().unwrap();
+    let kb = SqliteKnowledgeBase::open_for_locale(db.path(), Locale::English).unwrap();
+    let seed = write_jsonl(&[PREP_P1, PREP_P2]);
+    let files = [seed.path().to_path_buf()];
+    let stub = primer_embedding::StubEmbedder::with_dim(16);
+
+    let first = prepare_kb(&kb, &files, false, Some(&stub)).await.unwrap();
+    assert_eq!(first.seeded.map(|s| s.inserted), Some(2));
+    assert_eq!(first.embedded, 2);
+    assert_eq!(kb.embedding_count().unwrap(), 2);
+
+    let again = prepare_kb(&kb, &files, false, Some(&stub)).await.unwrap();
+    assert_eq!(again.seeded, None, "a non-empty KB is not re-seeded");
+    assert_eq!(again.embedded, 0);
+}
+
+/// The cache KB is non-empty from the second run on, so only `top_up`
+/// lets a grown seed corpus reach it — and the new passage gets its vector.
+#[tokio::test]
+async fn prepare_kb_top_up_adds_new_seed_passages_to_a_non_empty_kb() {
+    let db = tempfile::NamedTempFile::new().unwrap();
+    let kb = SqliteKnowledgeBase::open_for_locale(db.path(), Locale::English).unwrap();
+    let stub = primer_embedding::StubEmbedder::with_dim(16);
+    let old = write_jsonl(&[PREP_P1]);
+    prepare_kb(&kb, &[old.path().to_path_buf()], true, Some(&stub))
+        .await
+        .unwrap();
+
+    let grown = write_jsonl(&[PREP_P1, PREP_P2]);
+    let files = [grown.path().to_path_buf()];
+    let no_top_up = prepare_kb(&kb, &files, false, None).await.unwrap();
+    assert_eq!(no_top_up.seeded, None);
+    assert_eq!(kb.passage_count().unwrap(), 1);
+
+    let topped = prepare_kb(&kb, &files, true, Some(&stub)).await.unwrap();
+    assert_eq!(topped.seeded.map(|s| s.inserted), Some(1));
+    assert_eq!(topped.embedded, 1, "only the new passage needs a vector");
+    assert_eq!(kb.embedding_count().unwrap(), 2);
+}
+
+/// A failed embed must not stop the session: the KB stays seeded and the
+/// failure only costs the vector leg (the #389 gate fix covers a partly
+/// embedded KB).
+#[tokio::test]
+async fn prepare_kb_embedding_failure_is_soft() {
+    let db = tempfile::NamedTempFile::new().unwrap();
+    let kb = SqliteKnowledgeBase::open_for_locale(db.path(), Locale::English).unwrap();
+    let seed = write_jsonl(&[PREP_P1, PREP_P2]);
+    let short = DropsLastEmbedder(primer_embedding::StubEmbedder::with_dim(16));
+
+    let stats = prepare_kb(&kb, &[seed.path().to_path_buf()], false, Some(&short))
+        .await
+        .expect("an embed failure must not fail startup");
+    assert_eq!(stats.embedded, 0);
+    assert_eq!(kb.passage_count().unwrap(), 2);
+}

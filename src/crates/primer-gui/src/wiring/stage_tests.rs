@@ -281,6 +281,7 @@ async fn resume_opens_knowledge_base_under_inherited_locale() {
         &cfg,
         Locale::English,
         LocaleStrategy::InheritFromPersistedLearner,
+        None,
     )
     .await
     .unwrap();
@@ -344,16 +345,113 @@ async fn inherit_strategy_retags_store_to_persisted_learner_locale() {
 }
 
 #[tokio::test]
-async fn knowledge_base_defaults_to_in_memory_and_auto_seeds() {
+async fn knowledge_base_without_embedder_is_in_memory_and_auto_seeds() {
+    let home = TempDir::new().unwrap();
     let cfg = stub_config();
     assert!(cfg.persistence.knowledge_db.is_none());
 
-    let kb = open_knowledge_base(&cfg, Locale::English).await.unwrap();
+    let kb = open_knowledge_base(home.path(), &cfg, Locale::English, None)
+        .await
+        .unwrap();
 
     assert!(
         kb.passage_count().unwrap() > 0,
         "an empty in-memory KB must be auto-seeded from the bundled corpus"
     );
+    assert!(
+        !home.path().join(".primer").exists(),
+        "no embedder ⇒ nothing to cache on disk"
+    );
+}
+
+/// Issue #388: with an embedder wired, the shipped wiring embeds the whole
+/// bundled corpus into the per-model cache, so the hybrid vector leg (and
+/// the #307 gate) works on a default run. The next session build reuses
+/// the file and embeds nothing.
+#[tokio::test]
+async fn knowledge_base_with_embedder_is_an_embedded_per_model_cache() {
+    let home = TempDir::new().unwrap();
+    let mut cfg = stub_config();
+    cfg.persistence.no_persist = false;
+    let stub = primer_embedding::StubEmbedder::new();
+    let cache = primer_engine::resolve_knowledge_db(
+        None,
+        Some(home.path()),
+        Some(primer_core::embedder::Embedder::model_id(&stub)),
+        false,
+    )
+    .path();
+
+    let kb = open_knowledge_base(home.path(), &cfg, Locale::English, Some(&stub))
+        .await
+        .unwrap();
+    let passages = kb.passage_count().unwrap();
+    assert!(passages > 0);
+    assert_eq!(kb.embedding_count().unwrap(), passages);
+    assert!(cache.is_file(), "expected the cache at {}", cache.display());
+    drop(kb);
+
+    let again = open_knowledge_base(home.path(), &cfg, Locale::English, Some(&stub))
+        .await
+        .unwrap();
+    assert_eq!(
+        again.passage_count().unwrap(),
+        passages,
+        "top-up adds no duplicates"
+    );
+    assert!(again.passages_missing_embedding().unwrap().is_empty());
+
+    // A gate above any cosine fires on every query, and with every passage
+    // embedded nothing escapes it: the #307 gate is live on this path.
+    let always_gated = primer_core::knowledge::HybridParams {
+        min_top_cosine: Some(GATE_ABOVE_ANY_COSINE),
+        ..Default::default()
+    };
+    let hits = primer_core::knowledge::KnowledgeBase::retrieve_hybrid(
+        &again,
+        "why is the sky blue",
+        &stub,
+        &always_gated,
+    )
+    .await
+    .unwrap();
+    assert!(hits.is_empty(), "{hits:?}");
+}
+
+/// Cosine similarity never exceeds 1.0, so this gate always fires.
+const GATE_ABOVE_ANY_COSINE: f64 = 2.0;
+
+/// `no_persist` writes nothing, but the in-memory KB is still embedded.
+#[tokio::test]
+async fn knowledge_base_no_persist_embeds_in_memory() {
+    let home = TempDir::new().unwrap();
+    let cfg = stub_config();
+    assert!(cfg.persistence.no_persist);
+    let stub = primer_embedding::StubEmbedder::new();
+
+    let kb = open_knowledge_base(home.path(), &cfg, Locale::English, Some(&stub))
+        .await
+        .unwrap();
+
+    assert_eq!(kb.embedding_count().unwrap(), kb.passage_count().unwrap());
+    assert!(!home.path().join(".primer").exists());
+}
+
+/// An explicit Settings path is the user's to manage: seeded when empty,
+/// never embedded behind their back.
+#[tokio::test]
+async fn knowledge_base_explicit_path_is_seeded_but_not_embedded() {
+    let home = TempDir::new().unwrap();
+    let mut cfg = stub_config();
+    cfg.persistence.knowledge_db = Some(home.path().join("my-kb.db"));
+    let stub = primer_embedding::StubEmbedder::new();
+
+    let kb = open_knowledge_base(home.path(), &cfg, Locale::English, Some(&stub))
+        .await
+        .unwrap();
+
+    assert!(kb.passage_count().unwrap() > 0);
+    assert_eq!(kb.embedding_count().unwrap(), 0);
 }
 
 // ─── subsystems ──────────────────────────────────────────────────────

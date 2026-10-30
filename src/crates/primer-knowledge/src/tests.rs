@@ -997,6 +997,50 @@ async fn retrieve_hybrid_query_gate_judges_best_hit_not_first_inserted() {
     assert_eq!(hits.first().map(|p| p.id.as_str()), Some("p1"), "{hits:?}");
 }
 
+#[tokio::test]
+async fn retrieve_hybrid_query_gate_keeps_bm25_hits_on_unembedded_passages() {
+    // Issue #389: the gate judges only passages with a stored vector, so
+    // when it fires it may drop only *their* BM25 hits. "rayleigh" matches
+    // p1 (embedded, judged off-topic) and p2 (no vector, never judged):
+    // p2 must survive the gate.
+    use primer_embedding::StubEmbedder;
+    let db = tmp_db();
+    let kb = SqliteKnowledgeBase::open_for_locale(db.path(), Locale::English).unwrap();
+    let stub = StubEmbedder::with_dim(64);
+    kb.insert_passage_with_embedding("p1", "src", GATE_PASSAGE, &stub)
+        .await
+        .unwrap();
+    kb.insert_passage("p2", "src", "rayleigh waves roll along the ground")
+        .unwrap();
+    // Unrelated filler keeps "rayleigh" rare enough for a real BM25 score.
+    for (i, text) in [
+        "volcanoes erupt when magma rises",
+        "plants make food from sunlight",
+        "the heart pumps blood around the body",
+        "rain falls from clouds",
+        "fish breathe through gills",
+        "the moon orbits the earth",
+    ]
+    .iter()
+    .enumerate()
+    {
+        kb.insert_passage_with_embedding(&format!("f{i}"), "src", text, &stub)
+            .await
+            .unwrap();
+    }
+
+    let gated = kb
+        .retrieve_hybrid(
+            "rayleigh",
+            &stub,
+            &gated_params(Some(QUERY_GATE_TEST_COSINE)),
+        )
+        .await
+        .unwrap();
+    let ids: Vec<&str> = gated.iter().map(|p| p.id.as_str()).collect();
+    assert_eq!(ids, ["p2"], "{gated:?}");
+}
+
 /// Retrieve with no score floor, so only the stopword filter decides.
 async fn retrieve_all(kb: &SqliteKnowledgeBase, query: &str) -> Vec<Passage> {
     let params = RetrievalParams {
