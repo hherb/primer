@@ -1,89 +1,95 @@
 # Primer — Next Session Brief
 
 **Audience:** future Claude Code session continuing work on this repo.
-**Last updated:** 2026-11-05 14:23 (UTC).
+**Last updated:** 2026-11-05 21:00 (UTC).
 
-**One PR is open against `main`** from this session:
+**Two PRs are open against `main`** from this session. They are independent: different crates, no shared files except CLAUDE.md/README, where they edit different sentences.
 
 | PR | Branch | What | Closes |
 |---|---|---|---|
-| **#397** | `fix/kb-seed-edits-392` | Seed top-up replaces a passage edited under the same id; `primer-kb-load/src/lib.rs` split (this brief rides on it) | #392 |
+| **#399** | `fix/de-stopword-folding-391` | German stopwords match NFD and ASCII-transliterated input | #391 |
+| **#400** | `fix/kb-cache-prune-398` | The cache top-up prunes passages removed from the seed corpus (this brief rides on it) | #398 |
 
-- **`main` is at `8c6f3cf`** (#396).
+- **`main` is at `d598a35`** (#397).
 
-**Since the last brief:** #396 merged; #393 is CLOSED.
+**Since the last brief:** #397 merged; #392 is CLOSED.
 
 ## What we shipped this session
 
-### #397 — `79500be` (fix), `caf4a3c` (split), `2322926` (docs) + this brief's commit: closes #392
-- **Approach:** no schema bump and no content hash. The cache already stores each passage's text, so the seed write compares `(source, text)` with the stored row directly.
-- **primer-knowledge:**
-  - `insert_seed_new` is now a sync and returns `(inserted, replaced)`. Inside its `IMMEDIATE` tx it reads `id → (rowid, source, text)` (`stored_passages_in`); unchanged rows skip, changed rows are deleted (`delete_passage_inner`: FTS5 `'delete'` with the old values, then the content row, whose vector cascades) and re-inserted.
-  - `LocaleSql` gained `delete_fts` + `delete_content`.
-  - New `pub fn stored_passages() -> HashMap<id, (source, text)>`; **`list_passage_ids` was removed** (its only caller was the loader).
-- **primer-kb-load:**
-  - `write_seed` sends only new-or-changed passages (first occurrence of an id wins); with none it writes nothing, as before.
-  - `LoadStats` gained `replaced`; the binary prints it.
-  - The `shortcut:` comment in `prepare_kb` is gone. The embed step refills the dropped vectors with no extra code.
-  - **Behaviour change:** `load_jsonl` (the standalone binary) also replaces edited passages now; the module doc says the JSONL is the source of truth for its ids. Those rows lose their vector until a `--reembed`.
-- **Split (behaviour-preserving):** `lib.rs` 560 → 272; `discover.rs` (98) holds seed discovery, `prepare.rs` (209) holds `reembed_kb*` / `auto_seed_if_empty` / `prepare_kb`. `pub use` keeps every path; `cargo test -p primer-kb-load` is 168 before and after.
-- **Tests** (both mutation-checked: skip-instead-of-replace, and content-only delete leaving the FTS row):
-  - `primer-knowledge::insert_seed_new_replaces_a_passage_whose_text_changed`: FTS forgets the old text, only the edited passage lacks a vector;
-  - `primer-kb-load::prepare_kb_top_up_replaces_an_edited_seed_passage`: two JSONL versions through `prepare_kb`; `(inserted, replaced, skipped) = (0, 1, 1)`, one re-embed.
-- **Docs:** CLAUDE.md (the `primer-knowledge` seed-loading sentence, the `LocaleSql` diagnostics list, the `primer-kb-load` bullet + split note); README (the `load_jsonl` sentence). ROADMAP: no change (bug fix + refactor).
+### #399 — `139cd2c`: closes #391
+- `primer_core::stopwords::is_stopword` now **folds** both the list entries and the token the way the FTS5 `unicode61` tokenizer does: NFD, drop combining marks, lowercase (`fold`).
+  - NFD `für`, which the sanitizer leaves as `fur`, now matches.
+  - So does a typed `fur` / `uber`.
+- `stopwords/de.txt` lists the `ae`/`oe`/`ue` spellings of every umlaut entry (`fuer`, `ueber`, `koennen`, …). The test `every_umlaut_entry_has_its_transliteration` keeps the two in step.
+- `primer-core` now depends on `unicode-normalization` (already a workspace dep).
+- **Tests:** 4 new in `stopwords/tests.rs`. The end-to-end one runs the issue's query through `sanitize_fts_phrase_excluding` and **fails on the old code**.
+- **Docs:** CLAUDE.md stopword sentence. README and ROADMAP: no change.
 
-### Gate
-- `cargo test --workspace`: 1482/0.
-- clippy `-D warnings`: workspace `--all-targets`; `primer-kb-load --features fastembed`.
-- fmt; workspace rustdoc (+ `primer-kb-load`/`primer-knowledge` `--document-private-items`).
-- fastembed: `off_topic_gate`, `retrieval_quality_hybrid`, `retrieval_quality_hybrid_de` all green.
-- **Not run:** the GUI `speech` / `android-native` clippy arms and the feature rustdoc arms (no code under those features was touched).
+### #400 — `8b32ca8` + this brief's commit: closes #398
+- `prepare_kb`'s `top_up` (passed only for `KnowledgeDb::Cache`) now also **prunes** stored passages the corpus no longer has. This runs in the same `IMMEDIATE` tx via `delete_passage_inner`, and the vector cascades.
+- `insert_seed_new(sources, passages, keep: Option<&HashSet<&str>>) -> (inserted, replaced, pruned)`.
+- `LoadStats.pruned` was added. `load_jsonl` / `load_seed_files` never prune. The crate-internal `load_seed_corpus(.., prune)` serves `prepare_kb`.
+- **An empty corpus prunes nothing**, so a truncated file can't wipe the cache.
+- **Tests:** 1 in `primer-knowledge` (count, vector, retrieve, FTS integrity-check) and 3 in `primer-kb-load`. Both loader guards were mutation-checked.
+- **Docs:** the CLAUDE.md `prepare_kb` sentence and the README `load_jsonl` sentence. ROADMAP: no change.
+
+### Gate (each branch)
+- `cargo test --workspace`: 1487/0.
+- clippy `-D warnings` (workspace `--all-targets`; also `primer-kb-load --features fastembed` on #400).
+- fmt and workspace rustdoc.
+- #399 also ran `retrieval_quality{,_de}` + `off_topic_bm25` (leak pins unchanged) and `bm25_floor_tripwire`.
+- **Not run:** the fastembed hybrid quality tests on #399 (the hybrid BM25 leg keeps stopwords beside a non-empty vector leg), and the GUI feature clippy arms (no GUI code touched).
 
 > SHAs are branch-tip commits as pushed; squash-merge gives new ones on `main`.
 
 ### Per-session sweep
-- **Inline-test detector:** clean for the twenty-fourth session running.
-- **Oversized list:** `primer-kb-load/src/lib.rs` is off it (272). The production files still over 500: `primer-cli/src/main.rs` 1422, `primer-speech/src/macos/tts.rs` 668, `primer-inference/src/qnn/genie/real.rs` 566, `state_machine/inner.rs` 506, `primer-speech/src/macos/stt.rs` 504. The rest are test files.
+- **Inline-test detector:** clean for the twenty-fifth session running.
+- **Oversized list:** unchanged. Production files over 500: `primer-cli/src/main.rs` 1422, `primer-speech/src/macos/tts.rs` 668, `primer-inference/src/qnn/genie/real.rs` 566, `state_machine/inner.rs` 506, `primer-speech/src/macos/stt.rs` 504.
 
 ## What's next (concrete acceptance criteria)
 
-### 0. Owner review/merge: #397
-- **Acceptance:** CI green and merged; then `gh issue view 392 --json state` shows CLOSED.
-- **Optional owner check:** edit one passage's `text` in `data/seed/seed_passages.en.jsonl` (keep its `id`), start the CLI with the default embedder, and look for `replaced=1` in the `loaded JSONL into knowledge base` log line plus one passage re-embedded. Revert the edit after; the next start replaces it back.
+### 0. Owner review/merge: #399, #400
+- **Acceptance:** CI green and both merged; then `gh issue view 391 --json state` and `gh issue view 398 --json state` both show CLOSED.
+- **Merge order:** either. If the second one conflicts in CLAUDE.md/README, it is a one-line rebase.
 
 ### 1. Sweep + inline-test detector: re-run EVERY session
 Commands are in the resume block.
 
 ### 2. Manual first-run GUI check for #396 (owner)
-Still not watched in the real webview: `mv ~/.primer/kb ~/.primer/kb.bak`, launch the GUI, Start new → Save & start; the button should count "… 0 / 91" upward. Resume on a cold cache shows the same line in the picker.
+Still not watched in the real webview: `mv ~/.primer/kb ~/.primer/kb.bak`, launch the GUI, Start new → Save & start; the button should count "… 0 / 91" upward.
 
 ### 3. Other bugs (host-completable; TDD each)
-- **#371** (voice-loop abort on stop timeout) needs a `JoinHandle::abort` design note first.
-- **#352 remaining:** item 2 needs the owner decision below; items 1 and 4 need a design note before code.
-- **Older:** #312, #315, #316, #325/#326, #362, #364, #365. Read each before choosing.
+- **#395:** the CLI and the GUI duplicate the KB open/prepare wiring, and the CLI copy is untested. A good next pick: move it into `primer-engine` and test it once.
+- **#371:** needs a `JoinHandle::abort` design note first.
+- **#352 remaining:** item 2 needs the owner decision below; items 1 and 4 need a design note first.
+- **Older:** #312, #315, #316, #325/#326, #362, #364, #365.
 
 ### 4. Production-code splits (owner-approved lane, all feature-gated, so dual-verify)
-- **`primer-inference/src/qnn/genie/real.rs`** (566 lines, `qnn`) is the recommended one. Baselines: `cargo test -p primer-inference`; `cargo clippy -p primer-inference --features qnn --all-targets -- -D warnings`; the rustdoc `qnn` arm.
-- **`primer-speech/src/macos/{tts.rs 668, stt.rs 504}`** (`macos-native`).
-- **Low value:** `state_machine/inner.rs` (506). **Hardest:** `primer-cli/src/main.rs` (1422).
+- **`primer-inference/src/qnn/genie/real.rs`** (566, `qnn`) is the recommended one; then `primer-speech/src/macos/{tts.rs, stt.rs}`; `primer-cli/src/main.rs` (1422) is the hardest.
 
 ### Carried / owner-or-hardware-gated
-- **#260:** Android-voice on-device acceptance; also re-check on device that a denied mic keeps the text session (#369).
-- **#192:** manual macOS-native STT + injected TTS smoke.
-- **#170 Stages B, E and F:** the OpenRAIL-M disclosure must ship before any default flip.
-- **#166 item #1:** owner-run WhisperStream reuse smoke.
+- **#260:** Android-voice on-device acceptance; also check that a denied mic keeps the text session (#369).
+- **#192:** macOS-native STT + injected TTS smoke.
+- **#170 Stages B, E and F:** the OpenRAIL-M disclosure ships before any default flip.
+- **#166 item #1:** WhisperStream reuse smoke.
 - **#135:** glib (blocked on Tauri 3).
 - **Branch protection:** make `cargo test (default features)` a required check.
 - **Other:** QNN token stability, NPU tuning, latency-routing calibration.
 
 ## Open decisions / risks
 
-### This session (#397)
-- **A passage *removed* from the seed corpus still stays in the cache.** Only edits and additions sync. Pruning ids absent from the corpus would be wrong for an explicit `load_jsonl` into a user DB holding several corpora, so it would need a cache-only flag. Filed as #398 (latent: no seed passage has ever been removed).
-- **Every startup with a cache now reads every passage's text** (it read only ids before). Trivial at 91/66 passages; linear in corpus size.
-- **Any whitespace change in a seed line's `text` counts as an edit** and costs one re-embed of that passage. Correct, just worth knowing when regenerating the wiki layer.
-- **A replaced passage gets a new rowid.** Nothing keys on passage rowids outside the KB (vectors cascade), so this is harmless.
-- **`load_jsonl` into a user-managed KB now rewrites edited rows** and leaves them without a vector until `primer-kb-load --reembed`; hybrid retrieval treats them as BM25-only meanwhile (#389).
+### This session
+- **#399: folding is per lookup, not per list.** Two different words that fold to one key both count as stopwords. Today this is harmless (`würde`/`wurde`, `hätte`/`hatte` are both on the list or both filler). Re-check whenever a new umlaut word is added.
+- **#399: `ß` is not folded to `ss`**, so `weiß` (the colour white) stays a content word. A typed `weiss` is not a stopword either, which is correct for the same reason.
+- **#399: no NFC pass on the query.** Non-stopword NFD tokens already match, because the tokenizer folds diacritics.
+- **#399: the lookup now always allocates a folded `String`** per token. That is a handful per query, so trivial.
+- **#400: the cache mirrors whatever corpus discovery found.** Pointing `PRIMER_SEED_DIR` at a smaller corpus prunes the cache to it. The next start with the full corpus re-inserts and re-embeds (~1 s per passage on BGE-M3). Nothing is lost: the cache is derived.
+- **#400: a duplicate id stored before #383** is pruned only once (`stored_passages_in` keys by id), so one copy would survive. Latent.
+
+### From #397 (merged)
+- **Every startup with a cache reads every passage's text.** This is linear in corpus size; trivial at 91/66.
+- **Any whitespace change in a seed line's `text` counts as an edit**, and costs one re-embed.
+- **`load_jsonl` into a user-managed KB rewrites edited rows.** Those rows stay BM25-only (#389) until `primer-kb-load --reembed`.
 
 ### From #396 (merged)
 - **Manual first-run GUI check not run** (item 2 above). Progress is one event per 16-passage batch (~18 s apart on BGE-M3); the restart button's long text may wrap on a narrow modal; voice-mode rebuilds report nothing; the CLI prints only its one-line notice.
@@ -138,6 +144,8 @@ Still not watched in the real webview: `mv ~/.primer/kb ~/.primer/kb.bak`, launc
 
 ## Patterns to reuse, not reinvent
 
+- **Python edit guards: assert per replacement, not a total count (new):** a file-wide `s.count(', None)')` also matched an unrelated earlier line and aborted the write. Use a `sub(a, b)` helper that asserts `s.count(a) == 1` for each edit.
+- **Diacritic-insensitive matching (new):** `unicode_normalization::{UnicodeNormalization, char::is_combining_mark}`: `s.nfd().filter(|c| !is_combining_mark(*c)).flat_map(char::to_lowercase)` reproduces FTS5 `unicode61` folding. It does not fold `ß`.
 - **Syncing derived rows against a source of truth (new):** before adding a hash column + schema bump, check whether the stored row already holds what you would hash. #392 compared stored `(source, text)` directly. Deleting from an external-content FTS5 table needs the old values: `INSERT INTO t(t, rowid, …) VALUES('delete', rowid, …)` (`LocaleSql::delete_fts`).
 - **Splitting a lib.rs by byte offsets (new):** slice the file at two unique doc-comment anchors in Python, write the pieces to new files with their own `use` lines, add `mod x; pub use x::*;`, then `cargo build` to find the stale imports. Compare test counts with `git stash -u` / `stash pop`.
 - **Progress from a long Rust step to the webview (new):** pass `&mut (dyn FnMut(..) + Send)` down the call chain (it keeps the Tauri command future `Send`). The command closes over `&AppHandle<R>` and calls `app.emit(CONST, payload)`. Test it with `tauri::test::mock_app()` + `app.listen(CONST, ..)`, then call the generic command with `app.handle().clone(), app.state()`. Rust listeners fire synchronously, so assert straight after the `await`.
@@ -183,7 +191,7 @@ Still not watched in the real webview: `mv ~/.primer/kb ~/.primer/kb.bak`, launc
 
 ```bash
 cd /Users/hherb/src/primer && git status --short && git checkout main && git pull --ff-only && git log --oneline -6 && gh pr list --state open
-# Open at close: #397. After merge: gh issue view 392 --json state
+# Open at close: #399, #400. After merge: gh issue view 391 --json state; gh issue view 398 --json state
 S=/private/tmp/primer-scratch; mkdir -p "$S"   # or the session's scratchpad dir
 
 # === Oversized-file sweep + inline-test detector (re-verify EVERY session) ===
@@ -192,7 +200,8 @@ find crates -name '*.rs' -not -path '*/vendor/*' -not -name 'tests.rs' | xargs w
 for f in $(find crates -name '*.rs' -not -path '*/vendor/*' -not -name 'tests.rs' | xargs wc -l | awk '$1>500 && $2!="total"{print $2}'); do \
   awk '/#\[cfg\(test\)\]/{ln=NR} ln && NR==ln+1 && /^[[:space:]]*mod .*\{/{print FILENAME" inline mod @"NR}' "$f"; done
 
-# === #397 regression check ===
+# === #399 / #400 regression checks ===
+~/.cargo/bin/cargo test -p primer-core --lib stopwords
 ~/.cargo/bin/cargo test -p primer-kb-load --lib prepare_kb
 ~/.cargo/bin/cargo test -p primer-knowledge --lib insert_seed_new
 
@@ -218,4 +227,5 @@ for spec in "-p primer-speech --features voice-loop,silero,whisper,piper,cpal,su
 
 ## Reporting back
 
-- **#397:** when we correct or update an encyclopedia passage that ships with the Primer, installs that already have the library now pick up the corrected text on their next start (and re-index just that passage), instead of keeping the old version forever. Closes #392. The loader's main file was also split into smaller pieces, with no change in behaviour.
+- **#399:** a child typing German without umlauts ("fuer", "ueber"), or a device sending decomposed characters, no longer pulls random encyclopedia passages in through filler words like "für" and "über". Closes #391.
+- **#400:** when we remove a passage from the Primer's built-in library, installs that already have it drop it on their next start, instead of keeping it forever. Closes #398.
