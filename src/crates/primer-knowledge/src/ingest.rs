@@ -12,7 +12,7 @@ use primer_core::embedder::Embedder;
 use primer_core::error::{PrimerError, Result};
 use primer_core::knowledge::SourceMeta;
 use rusqlite::{Connection, Transaction, TransactionBehavior};
-use std::collections::HashSet;
+use std::collections::HashMap;
 
 /// Upsert one `sources` row, refreshing its metadata on conflict. Takes a
 /// `Connection` so it runs both standalone (`KnowledgeBase::upsert_source`)
@@ -69,16 +69,18 @@ impl SqliteKnowledgeBase {
         self.insert_seed_tx(sources, passages, false).map(|_| ())
     }
 
-    /// [`Self::insert_seed`], skipping every passage whose id is already
-    /// stored. The check runs inside the write transaction, taken
-    /// `IMMEDIATE`, so two processes topping up one shared KB file at once
-    /// can't both insert a passage (`id` has no UNIQUE constraint). Returns
-    /// how many passages were inserted.
+    /// [`Self::insert_seed`] as a sync: a passage whose id is already
+    /// stored with the same source and text is skipped; one stored with a
+    /// different source or text is replaced (#392), which drops its vector
+    /// (FK cascade) so the next re-embed refills it. The check runs inside
+    /// the write transaction, taken `IMMEDIATE`, so two processes topping
+    /// up one shared KB file at once can't both insert a passage (`id` has
+    /// no UNIQUE constraint). Returns `(inserted, replaced)`.
     pub fn insert_seed_new(
         &self,
         sources: &[SourceMeta],
         passages: &[(&str, &str, &str)],
-    ) -> Result<usize> {
+    ) -> Result<(usize, usize)> {
         self.insert_seed_tx(sources, passages, true)
     }
 
@@ -87,7 +89,7 @@ impl SqliteKnowledgeBase {
         sources: &[SourceMeta],
         passages: &[(&str, &str, &str)],
         skip_existing: bool,
-    ) -> Result<usize> {
+    ) -> Result<(usize, usize)> {
         let conn = self.conn.lock().unwrap();
         let behavior = if skip_existing {
             TransactionBehavior::Immediate
@@ -97,26 +99,32 @@ impl SqliteKnowledgeBase {
         let tx = Transaction::new_unchecked(&conn, behavior)
             .map_err(|e| PrimerError::Knowledge(format!("begin insert tx: {e}")))?;
         let existing = if skip_existing {
-            Self::passage_ids_in(&tx, &self.content_table)?
+            Self::stored_passages_in(&tx, &self.content_table)?
         } else {
-            HashSet::new()
+            HashMap::new()
         };
         let (umbrellas, children): (Vec<_>, Vec<_>) =
             sources.iter().partition(|s| s.parent_source_id.is_none());
         for src in umbrellas.into_iter().chain(children) {
             upsert_source_row(&tx, src)?;
         }
-        let mut inserted = 0;
+        let (mut inserted, mut replaced) = (0, 0);
         for (id, source, text) in passages {
-            if existing.contains(*id) {
-                continue;
+            match existing.get(*id) {
+                Some((_, old_source, old_text)) if old_source == source && old_text == text => {
+                    continue;
+                }
+                Some((rowid, old_source, old_text)) => {
+                    Self::delete_passage_inner(&tx, &self.sql, *rowid, id, old_source, old_text)?;
+                    replaced += 1;
+                }
+                None => inserted += 1,
             }
             Self::insert_passage_inner(&tx, &self.sql, id, source, text)?;
-            inserted += 1;
         }
         tx.commit()
             .map_err(|e| PrimerError::Knowledge(format!("commit insert: {e}")))?;
-        Ok(inserted)
+        Ok((inserted, replaced))
     }
 
     /// Core two-statement insert (content row + FTS index row), shared by
@@ -142,6 +150,25 @@ impl SqliteKnowledgeBase {
             .map_err(|e| PrimerError::Knowledge(format!("FTS insert passage {id}: {e}")))?;
 
         Ok(rowid)
+    }
+
+    /// Delete one stored passage: its FTS index row (which needs the stored
+    /// values), then its content row, whose vector cascades.
+    fn delete_passage_inner(
+        conn: &Connection,
+        sql: &LocaleSql,
+        rowid: i64,
+        id: &str,
+        source: &str,
+        text: &str,
+    ) -> Result<()> {
+        conn.prepare_cached(&sql.delete_fts)
+            .and_then(|mut s| s.execute(rusqlite::params![id, source, text, rowid]))
+            .map_err(|e| PrimerError::Knowledge(format!("FTS delete passage {id}: {e}")))?;
+        conn.prepare_cached(&sql.delete_content)
+            .and_then(|mut s| s.execute(rusqlite::params![rowid]))
+            .map_err(|e| PrimerError::Knowledge(format!("delete passage {id}: {e}")))?;
+        Ok(())
     }
 
     /// Insert a passage and embed its text in one transaction. The

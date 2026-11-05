@@ -96,8 +96,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let stats = primer_kb_load::load_jsonl(&kb, &jsonl).await?;
 
     println!(
-        "loaded {} passages ({} skipped, {} sources) from {} into {} (locale={})",
+        "loaded {} passages ({} replaced, {} skipped, {} sources) from {} into {} (locale={})",
         stats.inserted,
+        stats.replaced,
         stats.skipped_existing,
         stats.sources_seen,
         jsonl.display(),

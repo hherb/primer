@@ -74,7 +74,7 @@ pub struct SqliteKnowledgeBase {
     locale: Locale,
     /// `passages_<pack_id>_content` — the external-content storage table
     /// name. Cached at `open_for_locale` for the one-shot diagnostic
-    /// queries (`passage_count`, `list_passage_ids`,
+    /// queries (`passage_count`, `stored_passages`,
     /// `passages_missing_embedding`) that build their SQL inline; the
     /// per-row hot paths use [`LocaleSql`] instead.
     content_table: String,
@@ -134,30 +134,33 @@ impl SqliteKnowledgeBase {
         self.locale
     }
 
-    /// All passage ids currently in this locale's table. Used by the
-    /// loader to dedup against existing rows in O(N+M).
-    pub fn list_passage_ids(&self) -> Result<std::collections::HashSet<String>> {
-        let conn = self.conn.lock().unwrap();
-        Self::passage_ids_in(&conn, &self.content_table)
-    }
-
-    /// [`Self::list_passage_ids`] on a given connection, so a write
-    /// transaction can read the ids it is about to dedup against.
-    pub(crate) fn passage_ids_in(
+    /// Every stored passage as `id → (rowid, source, text)`, read on `conn`
+    /// so the seed top-up can compare against it inside its write
+    /// transaction (#392).
+    pub(crate) fn stored_passages_in(
         conn: &rusqlite::Connection,
         content_table: &str,
-    ) -> Result<std::collections::HashSet<String>> {
+    ) -> Result<std::collections::HashMap<String, (i64, String, String)>> {
+        let err = |e: rusqlite::Error| PrimerError::Knowledge(format!("read passages: {e}"));
         let mut stmt = conn
-            .prepare(&format!("SELECT id FROM {content_table}"))
-            .map_err(|e| PrimerError::Knowledge(format!("prepare list ids: {e}")))?;
+            .prepare(&format!(
+                "SELECT id, rowid, source, text FROM {content_table}"
+            ))
+            .map_err(err)?;
         let rows = stmt
-            .query_map([], |r| r.get::<_, String>(0))
-            .map_err(|e| PrimerError::Knowledge(format!("query ids: {e}")))?;
-        let mut out = std::collections::HashSet::new();
-        for r in rows {
-            out.insert(r.map_err(|e| PrimerError::Knowledge(format!("read id row: {e}")))?);
-        }
-        Ok(out)
+            .query_map([], |r| Ok((r.get(0)?, (r.get(1)?, r.get(2)?, r.get(3)?))))
+            .map_err(err)?;
+        rows.collect::<rusqlite::Result<_>>().map_err(err)
+    }
+
+    /// Every stored passage as `id → (source, text)`, so the seed loader
+    /// can tell an edited passage from an unchanged one (#392).
+    pub fn stored_passages(&self) -> Result<std::collections::HashMap<String, (String, String)>> {
+        let conn = self.conn.lock().unwrap();
+        Ok(Self::stored_passages_in(&conn, &self.content_table)?
+            .into_iter()
+            .map(|(id, (_, source, text))| (id, (source, text)))
+            .collect())
     }
 
     /// Number of passages currently in this locale's table. Used by the

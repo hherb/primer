@@ -29,10 +29,11 @@
 //!
 //! ## Idempotency
 //!
-//! The loader treats `id` as the deduplication key — a row already in
-//! `passages_<pack>_content` with the same `id` is **skipped**, not
-//! overwritten, mirroring `primer-storage::SessionStore::save_session`'s
-//! append-only behaviour. Re-running the loader on the same JSONL is a no-op.
+//! The loader treats `id` as the key, and the JSONL as the source of truth
+//! for its ids: a row already in `passages_<pack>_content` with the same
+//! `id`, source and text is **skipped**; one whose source or text changed
+//! is **replaced** and loses its vector, so the next re-embed refills it
+//! (#392). Re-running the loader on the same JSONL is a no-op.
 //! The `sources` table uses upsert semantics (refresh `retrieved_at` and
 //! attribution on every load).
 
@@ -95,6 +96,9 @@ pub struct ParentSource {
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct LoadStats {
     pub inserted: usize,
+    /// Passages already stored under their id whose source or text changed;
+    /// rewritten, with their vector dropped (#392).
+    pub replaced: usize,
     pub skipped_existing: usize,
     pub sources_seen: usize,
 }
@@ -108,7 +112,8 @@ struct ParsedSeed {
 }
 
 /// Load a JSONL file into `kb`. Passages are inserted if their `id` is
-/// new, skipped otherwise; sources are upserted when any passage is new.
+/// new, replaced if their source or text changed, skipped otherwise;
+/// sources are upserted when any passage is written.
 ///
 /// The whole file is parsed before anything is written, and its sources
 /// and passages land in one transaction, so a failed load writes nothing
@@ -217,46 +222,45 @@ fn parse_jsonl(path: &Path) -> Result<ParsedSeed> {
     Ok(ParsedSeed { passages, sources })
 }
 
-/// Write a parsed seed corpus — its sources and every passage whose `id`
-/// is not already in the KB (or earlier in the corpus) — in one
-/// transaction. With no new passage nothing is written, so topping up an
-/// already-current KB on every startup costs no write.
+/// Write a parsed seed corpus — its sources and every passage that is new
+/// to the KB or whose source or text changed (#392) — in one transaction.
+/// The first occurrence of an id in the corpus wins. With nothing to
+/// write nothing is written, so topping up an already-current KB on every
+/// startup costs no write.
 async fn write_seed(kb: &SqliteKnowledgeBase, seed: ParsedSeed) -> Result<LoadStats> {
     let ParsedSeed { passages, sources } = seed;
-    let mut seen = existing_passage_ids(kb)?;
-    let new: Vec<(&str, &str, &str)> = passages
+    let stored = kb.stored_passages()?;
+    let mut seen = HashSet::new();
+    let changed: Vec<(&str, &str, &str)> = passages
         .iter()
-        .filter(|p| seen.insert(p.id.clone()))
+        .filter(|p| seen.insert(p.id.as_str()))
+        .filter(|p| stored.get(&p.id) != Some(&(p.source.clone(), p.text.clone())))
         .map(|p| (p.id.as_str(), p.source.as_str(), p.text.as_str()))
         .collect();
     let sources: Vec<SourceMeta> = sources.into_values().collect();
-    // `insert_seed_new` re-checks the ids inside its write transaction: the
-    // read above can be stale when another process seeds the same file.
-    let inserted = if new.is_empty() {
-        0
+    // `insert_seed_new` re-compares inside its write transaction: the read
+    // above can be stale when another process seeds the same file.
+    let (inserted, replaced) = if changed.is_empty() {
+        (0, 0)
     } else {
-        kb.insert_seed_new(&sources, &new)?
+        kb.insert_seed_new(&sources, &changed)?
     };
     let stats = LoadStats {
         inserted,
-        skipped_existing: passages.len() - inserted,
+        replaced,
+        skipped_existing: passages.len() - inserted - replaced,
         sources_seen: sources.len(),
     };
 
     tracing::info!(
         target = "primer-kb-load",
         inserted = stats.inserted,
+        replaced = stats.replaced,
         skipped = stats.skipped_existing,
         sources = stats.sources_seen,
         "loaded JSONL into knowledge base"
     );
     Ok(stats)
-}
-
-/// Collect the set of passage ids already in the KB, so we can dedup in
-/// O(N+M) instead of one SELECT per row.
-fn existing_passage_ids(kb: &SqliteKnowledgeBase) -> Result<HashSet<String>> {
-    kb.list_passage_ids()
 }
 
 /// Search known locations for `seed_passages.<pack_id>.jsonl`, in order:
@@ -496,8 +500,9 @@ pub struct PrepareStats {
 /// without a vector one when an `embedder` is wired.
 ///
 /// The seed loads when the KB is empty, or always with `top_up` — the
-/// persistent per-model cache passes `true` so a grown corpus reaches an
-/// already-seeded file (existing ids are skipped). A seed failure is an
+/// persistent per-model cache passes `true` so a grown or edited corpus
+/// reaches an already-seeded file (unchanged ids are skipped; an edited
+/// passage is replaced and re-embedded below, #392). A seed failure is an
 /// error, as in [`auto_seed_if_empty`]. An embedding failure is soft
 /// (returned in [`PrepareStats::embed_error`]): the session still works
 /// on BM25, and the next open retries.
@@ -518,9 +523,6 @@ pub async fn prepare_kb(
     on_progress: EmbedProgress<'_>,
 ) -> Result<PrepareStats> {
     let mut stats = PrepareStats::default();
-    // shortcut: top-up only adds new ids, so a seed passage edited in place
-    // keeps its old text (and vector) in the cache; upgrade when seed edits
-    // must reach existing caches.
     if !seed_files.is_empty() && (top_up || kb.passage_count()? == 0) {
         stats.seeded = Some(load_seed_files(kb, seed_files).await?);
     }
