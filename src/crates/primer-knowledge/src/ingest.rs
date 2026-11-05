@@ -80,8 +80,9 @@ impl SqliteKnowledgeBase {
     /// `IMMEDIATE`, so two processes topping up one shared KB file at once
     /// can't both insert a passage (`id` has no UNIQUE constraint).
     ///
-    /// With `keep`, every stored passage whose id is not in it is deleted
-    /// in the same transaction, its vector by cascade (#398). Only a KB
+    /// With `keep`, every stored passage whose id is neither in it nor in
+    /// `passages` is deleted in the same transaction, its vector by cascade
+    /// (#398). Only a KB
     /// that mirrors one corpus (the per-model cache) may pass it: a user
     /// DB can hold several corpora. Returns `(inserted, replaced, pruned)`.
     pub fn insert_seed_new(
@@ -141,7 +142,9 @@ impl SqliteKnowledgeBase {
         let mut pruned = 0;
         if let Some(keep) = keep {
             for (id, (rowid, source, text)) in &existing {
-                if !keep.contains(id.as_str()) {
+                // An id just written above is kept: pruning it would re-run
+                // the FTS delete against its old values and corrupt the index.
+                if !keep.contains(id.as_str()) && !seen.contains(id.as_str()) {
                     Self::delete_passage_inner(&tx, &self.sql, *rowid, id, source, text)?;
                     pruned += 1;
                 }

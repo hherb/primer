@@ -836,7 +836,7 @@ async fn prepare_kb_top_up_with_an_empty_corpus_prunes_nothing() {
         .unwrap();
 
     let empty = write_jsonl(&[]);
-    prepare_kb(
+    let stats = prepare_kb(
         &kb,
         &[empty.path().to_path_buf()],
         true,
@@ -846,5 +846,63 @@ async fn prepare_kb_top_up_with_an_empty_corpus_prunes_nothing() {
     .await
     .unwrap();
 
+    assert_eq!(stats.seeded.expect("top_up always loads").pruned, 0);
     assert_eq!(kb.passage_count().unwrap(), 2);
+}
+
+/// No seed files discovered (an installed binary without `PRIMER_SEED_DIR`)
+/// means no load at all, so a populated cache is left as it is.
+#[tokio::test]
+async fn prepare_kb_top_up_without_seed_files_keeps_the_cache() {
+    let db = tempfile::NamedTempFile::new().unwrap();
+    let kb = SqliteKnowledgeBase::open_for_locale(db.path(), Locale::English).unwrap();
+    let v1 = write_jsonl(&[PREP_P1, PREP_P2]);
+    prepare_kb(&kb, &[v1.path().to_path_buf()], true, None, &mut |_, _| {})
+        .await
+        .unwrap();
+
+    let stats = prepare_kb(&kb, &[], true, None, &mut |_, _| {})
+        .await
+        .unwrap();
+
+    assert!(stats.seeded.is_none());
+    assert_eq!(kb.passage_count().unwrap(), 2);
+}
+
+/// The per-model cache file holds every locale; a prune reads and deletes
+/// only the topped-up locale's own table.
+#[tokio::test]
+async fn prepare_kb_top_up_prune_leaves_other_locales_alone() {
+    let db = tempfile::NamedTempFile::new().unwrap();
+    let stub = primer_embedding::StubEmbedder::with_dim(16);
+    let en = SqliteKnowledgeBase::open_for_locale(db.path(), Locale::English).unwrap();
+    let de = SqliteKnowledgeBase::open_for_locale(db.path(), Locale::German).unwrap();
+    let both = write_jsonl(&[PREP_P1, PREP_P2]);
+    for kb in [&en, &de] {
+        prepare_kb(
+            kb,
+            &[both.path().to_path_buf()],
+            true,
+            Some(&stub),
+            &mut |_, _| {},
+        )
+        .await
+        .unwrap();
+    }
+
+    let smaller = write_jsonl(&[PREP_P1]);
+    let stats = prepare_kb(
+        &en,
+        &[smaller.path().to_path_buf()],
+        true,
+        Some(&stub),
+        &mut |_, _| {},
+    )
+    .await
+    .unwrap();
+
+    assert_eq!(stats.seeded.unwrap().pruned, 1);
+    assert_eq!(en.passage_count().unwrap(), 1);
+    assert_eq!(de.passage_count().unwrap(), 2);
+    assert_eq!(de.embedding_count().unwrap(), 2);
 }

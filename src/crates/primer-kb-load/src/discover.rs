@@ -44,16 +44,26 @@ pub fn discover_seed_files(locale: Locale) -> Vec<PathBuf> {
         let Ok(entries) = std::fs::read_dir(&dir) else {
             continue;
         };
-        for entry in entries.flatten() {
-            let path = entry.path();
-            if !path.is_file() {
-                continue;
-            }
+        for entry in entries {
+            // A skipped seed file is no longer silent: the cache top-up
+            // prunes whatever the discovered corpus lacks (#398).
+            let path = match entry {
+                Ok(e) => e.path(),
+                Err(e) => {
+                    tracing::warn!(dir = %dir.display(), "skipping unreadable seed dir entry: {e}");
+                    continue;
+                }
+            };
             let Some(name) = path.file_name().and_then(|n| n.to_str()) else {
                 continue;
             };
-            if name.ends_with(&suffix) {
+            if !name.ends_with(&suffix) {
+                continue;
+            }
+            if path.is_file() {
                 hits.push(path);
+            } else {
+                tracing::warn!(path = %path.display(), "skipping seed entry that is not a readable file");
             }
         }
         if !hits.is_empty() {

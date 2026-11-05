@@ -237,8 +237,9 @@ fn parse_jsonl(path: &Path) -> Result<ParsedSeed> {
 
 /// Write a parsed seed corpus — its sources and every passage that is new
 /// to the KB or whose source or text changed (#392) — in one transaction.
-/// The first occurrence of an id in the corpus wins. With nothing to
-/// write nothing is written, so topping up an already-current KB on every
+/// The first occurrence of an id in the corpus wins. With `prune`, stored
+/// passages absent from a non-empty corpus are deleted too (#398). With
+/// nothing to write nothing is written, so topping up an already-current KB on every
 /// startup costs no write.
 async fn write_seed(kb: &SqliteKnowledgeBase, seed: ParsedSeed, prune: bool) -> Result<LoadStats> {
     let ParsedSeed { passages, sources } = seed;

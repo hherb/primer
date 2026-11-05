@@ -157,7 +157,10 @@ pub struct PrepareStats {
 /// passage is replaced and re-embedded below, #392). `top_up` also makes
 /// the KB mirror the corpus: a stored passage the seed files no longer
 /// have is deleted (#398), so pass it only for a KB holding this corpus
-/// alone, never a user-managed file. A seed failure is an
+/// alone, never a user-managed file. The cache then mirrors whichever
+/// corpus this run discovered: a seed file that is missing here has its
+/// passages pruned (and re-embedded when it is back). An empty corpus
+/// prunes nothing. A seed failure is an
 /// error, as in [`auto_seed_if_empty`]. An embedding failure is soft
 /// (returned in [`PrepareStats::embed_error`]): the session still works
 /// on BM25, and the next open retries.
