@@ -368,6 +368,24 @@ pub async fn reembed_kb(
     force: bool,
     batch_size: usize,
 ) -> Result<usize> {
+    reembed_kb_with_progress(kb, embedder, force, batch_size, &mut |_, _| {}).await
+}
+
+/// Progress callback for [`reembed_kb_with_progress`] / [`prepare_kb`]:
+/// `(passages embedded so far, passages to embed in total)`.
+pub type EmbedProgress<'a> = &'a mut (dyn FnMut(usize, usize) + Send);
+
+/// [`reembed_kb`] that also reports progress (#393): `(0, total)` before
+/// the first batch, then `(done, total)` after each one, ending at
+/// `(total, total)` on success. Nothing is reported when no passage needs
+/// a vector.
+pub async fn reembed_kb_with_progress(
+    kb: &SqliteKnowledgeBase,
+    embedder: &dyn primer_core::embedder::Embedder,
+    force: bool,
+    batch_size: usize,
+    on_progress: EmbedProgress<'_>,
+) -> Result<usize> {
     if force {
         let cleared = kb.clear_embeddings()?;
         tracing::info!(
@@ -394,6 +412,8 @@ pub async fn reembed_kb(
         "reembedding passages"
     );
 
+    let total = candidates.len();
+    on_progress(0, total);
     let mut done = 0_usize;
     for chunk in candidates.chunks(batch_size.max(1)) {
         let texts: Vec<&str> = chunk.iter().map(|(_, t)| t.as_str()).collect();
@@ -412,6 +432,7 @@ pub async fn reembed_kb(
             kb.upsert_embedding(id, embedder.model_id(), embedder.dim(), &v)?;
             done += 1;
         }
+        on_progress(done, total);
     }
     Ok(done)
 }
@@ -486,11 +507,15 @@ pub struct PrepareStats {
 /// so they are cleared and all passages re-embedded. Startup only passes
 /// an embedder for a KB whose vectors are derived data (`:memory:` or the
 /// per-model cache), never for a user-managed file.
+///
+/// `on_progress` sees the embed step's progress, as in
+/// [`reembed_kb_with_progress`] (#393).
 pub async fn prepare_kb(
     kb: &SqliteKnowledgeBase,
     seed_files: &[PathBuf],
     top_up: bool,
     embedder: Option<&dyn primer_core::embedder::Embedder>,
+    on_progress: EmbedProgress<'_>,
 ) -> Result<PrepareStats> {
     let mut stats = PrepareStats::default();
     // shortcut: top-up only adds new ids, so a seed passage edited in place
@@ -511,7 +536,9 @@ pub async fn prepare_kb(
                 true
             }
         };
-        match reembed_kb(kb, embedder, force, DEFAULT_EMBED_BATCH_SIZE).await {
+        match reembed_kb_with_progress(kb, embedder, force, DEFAULT_EMBED_BATCH_SIZE, on_progress)
+            .await
+        {
             Ok(n) => stats.embedded = n,
             Err(e) => {
                 tracing::warn!(

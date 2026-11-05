@@ -545,12 +545,16 @@ async fn prepare_kb_seeds_an_empty_kb_and_embeds_every_passage_once() {
     let files = [seed.path().to_path_buf()];
     let stub = primer_embedding::StubEmbedder::with_dim(16);
 
-    let first = prepare_kb(&kb, &files, false, Some(&stub)).await.unwrap();
+    let first = prepare_kb(&kb, &files, false, Some(&stub), &mut |_, _| {})
+        .await
+        .unwrap();
     assert_eq!(first.seeded.map(|s| s.inserted), Some(2));
     assert_eq!(first.embedded, 2);
     assert_eq!(kb.embedding_count().unwrap(), 2);
 
-    let again = prepare_kb(&kb, &files, false, Some(&stub)).await.unwrap();
+    let again = prepare_kb(&kb, &files, false, Some(&stub), &mut |_, _| {})
+        .await
+        .unwrap();
     assert_eq!(again.seeded, None, "a non-empty KB is not re-seeded");
     assert_eq!(again.embedded, 0);
 }
@@ -563,17 +567,27 @@ async fn prepare_kb_top_up_adds_new_seed_passages_to_a_non_empty_kb() {
     let kb = SqliteKnowledgeBase::open_for_locale(db.path(), Locale::English).unwrap();
     let stub = primer_embedding::StubEmbedder::with_dim(16);
     let old = write_jsonl(&[PREP_P1]);
-    prepare_kb(&kb, &[old.path().to_path_buf()], true, Some(&stub))
-        .await
-        .unwrap();
+    prepare_kb(
+        &kb,
+        &[old.path().to_path_buf()],
+        true,
+        Some(&stub),
+        &mut |_, _| {},
+    )
+    .await
+    .unwrap();
 
     let grown = write_jsonl(&[PREP_P1, PREP_P2]);
     let files = [grown.path().to_path_buf()];
-    let no_top_up = prepare_kb(&kb, &files, false, None).await.unwrap();
+    let no_top_up = prepare_kb(&kb, &files, false, None, &mut |_, _| {})
+        .await
+        .unwrap();
     assert_eq!(no_top_up.seeded, None);
     assert_eq!(kb.passage_count().unwrap(), 1);
 
-    let topped = prepare_kb(&kb, &files, true, Some(&stub)).await.unwrap();
+    let topped = prepare_kb(&kb, &files, true, Some(&stub), &mut |_, _| {})
+        .await
+        .unwrap();
     assert_eq!(topped.seeded.map(|s| s.inserted), Some(1));
     assert_eq!(topped.embedded, 1, "only the new passage needs a vector");
     assert_eq!(kb.embedding_count().unwrap(), 2);
@@ -589,9 +603,18 @@ async fn prepare_kb_embedding_failure_is_soft() {
     let seed = write_jsonl(&[PREP_P1, PREP_P2]);
     let short = DropsLastEmbedder(primer_embedding::StubEmbedder::with_dim(16));
 
-    let stats = prepare_kb(&kb, &[seed.path().to_path_buf()], false, Some(&short))
-        .await
-        .expect("an embed failure must not fail startup");
+    let mut seen = Vec::new();
+    let stats = prepare_kb(
+        &kb,
+        &[seed.path().to_path_buf()],
+        false,
+        Some(&short),
+        &mut |done, total| seen.push((done, total)),
+    )
+    .await
+    .expect("an embed failure must not fail startup");
+    // Progress stops short; no `(total, total)` is reported on a failure.
+    assert_eq!(seen, [(0, 2)]);
     assert_eq!(stats.embedded, 0);
     assert!(stats.embed_error.is_some(), "the caller must be told");
     assert_eq!(kb.passage_count().unwrap(), 2);
@@ -611,13 +634,16 @@ async fn prepare_kb_reembeds_everything_when_the_model_changes_dim() {
         &files,
         true,
         Some(&primer_embedding::StubEmbedder::with_dim(16)),
+        &mut |_, _| {},
     )
     .await
     .unwrap();
 
     let resized = primer_embedding::StubEmbedder::with_dim(8);
     assert!(kb.check_embedder(&resized).is_err());
-    let stats = prepare_kb(&kb, &files, true, Some(&resized)).await.unwrap();
+    let stats = prepare_kb(&kb, &files, true, Some(&resized), &mut |_, _| {})
+        .await
+        .unwrap();
     assert_eq!(stats.embedded, 2);
     assert_eq!(stats.embed_error, None);
     kb.check_embedder(&resized).unwrap();
@@ -630,10 +656,66 @@ async fn prepare_kb_top_up_with_nothing_new_inserts_nothing() {
     let kb = SqliteKnowledgeBase::open_for_locale(db.path(), Locale::English).unwrap();
     let seed = write_jsonl(&[PREP_P1, PREP_P2]);
     let files = [seed.path().to_path_buf()];
-    prepare_kb(&kb, &files, true, None).await.unwrap();
+    prepare_kb(&kb, &files, true, None, &mut |_, _| {})
+        .await
+        .unwrap();
 
-    let again = prepare_kb(&kb, &files, true, None).await.unwrap();
+    let again = prepare_kb(&kb, &files, true, None, &mut |_, _| {})
+        .await
+        .unwrap();
     let seeded = again.seeded.expect("top_up always loads");
     assert_eq!((seeded.inserted, seeded.skipped_existing), (0, 2));
     assert_eq!(kb.passage_count().unwrap(), 2);
+}
+
+/// Issue #393: a first-run embed reports progress so a UI can show it.
+/// It starts at `(0, total)` before the first (slow) batch, steps once per
+/// batch, and ends at `(total, total)`, where `total` is the number of
+/// passages that had no vector.
+#[tokio::test]
+async fn reembed_reports_progress_per_batch() {
+    let db = tempfile::NamedTempFile::new().unwrap();
+    let kb = SqliteKnowledgeBase::open_for_locale(db.path(), Locale::English).unwrap();
+    for id in ["p1", "p2", "p3"] {
+        kb.insert_passage(id, "src", "some text").unwrap();
+    }
+    let total = kb.passages_missing_embedding().unwrap().len();
+    let stub = primer_embedding::StubEmbedder::with_dim(16);
+    let mut seen = Vec::new();
+
+    reembed_kb_with_progress(&kb, &stub, false, 2, &mut |d, t| seen.push((d, t)))
+        .await
+        .unwrap();
+    assert_eq!(seen, vec![(0, total), (2, total), (total, total)]);
+}
+
+/// `prepare_kb` passes progress through, and reports nothing when there
+/// is nothing to embed (so a UI never flashes a "0 / 0").
+#[tokio::test]
+async fn prepare_kb_reports_embed_progress_only_when_there_is_work() {
+    let db = tempfile::NamedTempFile::new().unwrap();
+    let kb = SqliteKnowledgeBase::open_for_locale(db.path(), Locale::English).unwrap();
+    let seed = write_jsonl(&[PREP_P1, PREP_P2]);
+    let files = [seed.path().to_path_buf()];
+    let stub = primer_embedding::StubEmbedder::with_dim(16);
+    let mut seen = Vec::new();
+
+    prepare_kb(&kb, &files, true, Some(&stub), &mut |d, t| {
+        seen.push((d, t))
+    })
+    .await
+    .unwrap();
+    assert_eq!(seen.first(), Some(&(0, 2)));
+    assert_eq!(seen.last(), Some(&(2, 2)));
+
+    seen.clear();
+    prepare_kb(&kb, &files, true, Some(&stub), &mut |d, t| {
+        seen.push((d, t))
+    })
+    .await
+    .unwrap();
+    assert!(
+        seen.is_empty(),
+        "nothing to embed, nothing reported: {seen:?}"
+    );
 }

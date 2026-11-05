@@ -16,6 +16,7 @@ use primer_engine::{
     ensure_session_db_dir, parse_languages, reconcile_persisted_learner, resolve_knowledge_db,
     resolve_session_db_path,
 };
+use primer_kb_load::EmbedProgress;
 use primer_knowledge::SqliteKnowledgeBase;
 use primer_storage::SqliteSessionStore;
 
@@ -44,10 +45,12 @@ pub(super) async fn open_stores(
     cfg_locale: Locale,
     strategy: LocaleStrategy,
     embedder: Option<&dyn Embedder>,
+    on_progress: EmbedProgress<'_>,
 ) -> Result<Stores, String> {
     let (session_store, locale, learner) =
         open_session_store_and_learner(home, config, cfg_locale, strategy).await?;
-    let (knowledge, embed_error) = open_knowledge_base(home, config, locale, embedder).await?;
+    let (knowledge, embed_error) =
+        open_knowledge_base(home, config, locale, embedder, on_progress).await?;
     Ok(Stores {
         session_store,
         locale,
@@ -194,12 +197,14 @@ pub(super) async fn open_session_store_and_learner(
 /// passage without a vector is embedded, so the cost is paid once, not on
 /// every session build. With no embedder (or `no_persist`) it is a
 /// `:memory:` KB seeded per open. Also returns why embedding failed, if
-/// it did: that is soft, the session runs on BM25.
+/// it did: that is soft, the session runs on BM25. `on_progress` sees the
+/// embed progress (#393).
 pub(super) async fn open_knowledge_base(
     home: &Path,
     config: &GuiConfig,
     locale: Locale,
     embedder: Option<&dyn Embedder>,
+    on_progress: EmbedProgress<'_>,
 ) -> Result<(SqliteKnowledgeBase, Option<String>), String> {
     let knowledge_db = resolve_knowledge_db(
         config.persistence.knowledge_db.clone(),
@@ -225,6 +230,7 @@ pub(super) async fn open_knowledge_base(
         &primer_kb_load::discover_seed_files(locale),
         matches!(knowledge_db, KnowledgeDb::Cache(_)),
         embed_with,
+        on_progress,
     )
     .await
     .map_err(|e| format!("seeding knowledge base: {e}"))?;
