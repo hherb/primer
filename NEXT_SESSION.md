@@ -1,98 +1,85 @@
 # Primer — Next Session Brief
 
 **Audience:** future Claude Code session continuing work on this repo.
-**Last updated:** 2026-10-30 11:21 (UTC).
+**Last updated:** 2026-11-05 13:13 (UTC).
 
 **One PR is open against `main`** from this session:
 
 | PR | Branch | What | Closes |
 |---|---|---|---|
-| **#394** | `fix/embed-default-kb-388` | Default KB is an embedded per-model cache; the gate keeps un-embedded BM25 hits (this brief rides on it) | #388, #389 |
+| **#396** | `fix/kb-embed-progress-393` | GUI shows the first-run KB embed progress (this brief rides on it) | #393 |
 
-- **`main` is at `86e0ecd`** (#390).
+- **`main` is at `55b79d1`** (#394).
 
-**Since the last brief:** #390 merged, #386 is CLOSED. This session filed #392 and #393.
+**Since the last brief:** #394 merged; #388 and #389 are CLOSED.
 
 ## What we shipped this session
 
-### #394 (`8b5603a` + this brief's docs commit): closes #388 and #389
-- **Owner decisions (asked at session start):**
-  - #388: option (a), embed into a persistent per-model cache;
-  - #389: keep the BM25 hits of un-embedded passages (not "gate only at full coverage").
-- **#388:**
-  - `primer_engine::resolve_knowledge_db(explicit, home, embedder_model_id, no_persist) -> KnowledgeDb { InMemory, Explicit, Cache }` (pure, in `paths.rs`).
-    - With an embedder wired, the default KB is `~/.primer/kb/<slug(model_id)>.db`.
-    - An explicit path always wins, even under `no_persist`.
-    - With no embedder, no home, or `no_persist`, it stays `:memory:`.
-  - `primer_kb_load::prepare_kb(kb, seed_files, top_up, embedder)`:
-    - it seeds when the KB is empty, or always with `top_up`, which the cache passes so a grown corpus reaches it;
-    - it then runs `reembed_kb(.., DEFAULT_EMBED_BATCH_SIZE = 16)`;
-    - an embed failure only `warn!`s.
-  - An explicit path is passed `embedder = None`: seeded when empty, never embedded at startup (unchanged).
-  - **CLI:** the KB block moved below the embedder construction in `main.rs`. It prints "Embedding the knowledge base…" when work is pending.
-  - **GUI:** `build_with_strategy` builds subsystems *before* `open_stores`, which now takes `embedder`.
-  - **Doc fix:** the GUI `PersistenceConfig::no_persist` doc used to say `knowledge_db` is ignored, but the code never ignored it. The doc now matches the code.
-- **#389:** `knn_scan` now returns `(hits, embedded_ids)`. When the gate fires, BM25 hits on passages with no vector survive (stopwords dropped, `KB_BM25_ONLY_MIN_SCORE` floor, `final_top_k` cap). On a fully embedded KB that set is empty.
-- **Measured** (real CLI, BGE-M3, sandboxed HOME):
-  - first run 106 s, i.e. 91 EN passages seeded + embedded (≈640 s of CPU);
-  - second run 4.7 s;
-  - "can we stop now" now hits the gate on a default run (best cosine 0.43 < 0.45, 0 passages). Before, the gate never fired there.
-- **Tests:**
-  - #389 KB test (red first; mutation-checked);
-  - `resolve_knowledge_db` × 3;
-  - `prepare_kb` × 3 (mutation-checked: without `top_up`, and with errors propagated);
-  - 4 GUI stage tests that drive the shipped `open_knowledge_base` (mutation-checked by never embedding).
-  
-  GUI test configs that built sessions from `GuiConfig::default()` now set `embedder.kind = "none"`. `primer-gui` tests went from 446 s to 1.4 s.
+### #396 (`7cd493c` + this brief's docs commit): closes #393
+- **Approach:** option 1 from the last brief, a progress event. No background embed.
+- **primer-kb-load:**
+  - new `reembed_kb_with_progress(.., on_progress)` reports `(0, total)` before the first batch, then `(done, total)` after each one;
+  - `reembed_kb` keeps its signature and passes a no-op;
+  - `prepare_kb` gained a 5th parameter, `on_progress: EmbedProgress` (`&mut (dyn FnMut(usize, usize) + Send)`);
+  - nothing is reported when no passage lacks a vector.
+- **primer-gui:**
+  - `start_session` and `resume_session` are now generic over `R: tauri::Runtime` and take an `AppHandle<R>`. They build through `build_reporting_progress`, which calls the now-`pub(crate)` `wiring::build_with_strategy` (`LocaleStrategy` is `pub(crate)` too).
+  - They emit `primer://kb/embedding { done, total }`, defined as `types::KB_EMBEDDING_EVENT` + `KbEmbeddingProgress`.
+  - `build_active_session*` pass a no-op, so the voice rebuilds and the tests are unchanged.
+  - **JS:** `picker.js::listenKbProgress` (exported as `window.primerListenKbProgress`) is used by `resume()` for the loading line, and by `settings.js::onSave` for the busy restart button. Both unlisten in a `finally`. `showLoading()` resets the text.
+- **CLI:** passes a no-op.
+- **Tests** (each mutation-checked):
+  - kb-load × 2: the per-batch sequence, and the `prepare_kb` pass-through (silent when warm);
+  - GUI stage test: the cache test now asserts progress runs from 0 to all passages, then silence;
+  - `start_session_emits_kb_embedding_progress`: `mock_app` + `app.listen` + stub embedder;
+  - `kb_progress_contract.rs` × 2: the event name matches the const, and each listener comes before its invoke and is unlistened after it.
 - **Docs:**
-  - CLAUDE.md: `--knowledge-db` flag text, FTS5 bullet, gate bullet (+ #389), KB-default bullet, `primer-kb-load` bullet;
-  - README: `primer-kb-load` section and the CLI flag table;
-  - `--knowledge-db` help text.
+  - CLAUDE.md: the `primer-kb-load` bullet and the gate bullet;
+  - README: a first-run sentence.
   
   ROADMAP: no change (bug fix).
 
 ### Gate
-- `cargo test --workspace`: 1469/0.
+- `cargo test --workspace`: 1479/0.
 - clippy `-D warnings`:
   - workspace `--all-targets`;
   - `primer-gui` `speech` and `android-native`;
   - `primer-kb-load --features fastembed`.
-- fmt; workspace rustdoc.
-- fastembed: `off_topic_gate`, `retrieval_quality_hybrid{,_de}`. BM25: `retrieval_quality{,_de}`, `off_topic_bm25`. All green.
+- fmt; workspace rustdoc, plus the `primer-gui` speech and android-native arms.
 - **Not run:**
-  - the rustdoc feature arms (no feature-gated code touched);
-  - the 54-cell hybrid sweeps;
-  - the BM25 tripwire (BM25 ranking unchanged).
+  - the other rustdoc feature arms (no code under those features was touched);
+  - the fastembed recall tests (retrieval unchanged; they compile under the fastembed clippy);
+  - **the manual first-run check in the real GUI.**
 
 > SHAs are branch-tip commits as pushed; squash-merge gives new ones on `main`.
 
 ### Per-session sweep
-- **Inline-test detector:** clean for the twenty-second session running.
+- **Inline-test detector:** clean for the twenty-third session running.
 - **Oversized list:**
-  - new entry `primer-gui/src/wiring/stage_tests.rs` (568, a test file);
-  - `primer-cli/src/main.rs` grew from 1353 to 1386.
+  - `primer-kb-load/src/lib.rs` went from 531 to 558 (it was already on the list at session start);
+  - `primer-gui/src/wiring/stage_tests.rs` went from 578 to 610 (a test file);
+  - `primer-cli/src/main.rs` is at 1422.
 
 ## What's next (concrete acceptance criteria)
 
-### 0. Owner review/merge: #394
-- **Acceptance:** CI green, merged; then `gh issue view 388 --json state` and `gh issue view 389 --json state` are both CLOSED.
-- **Owner check:** start the desktop GUI once on a machine without `~/.primer/kb/`. The first session takes ~100 s with no progress shown (#393). Decide whether #393 must land before the next release.
+### 0. Owner review/merge: #396
+- **Acceptance:** CI green and merged; then `gh issue view 393 --json state` shows CLOSED.
+- **Owner check:**
+  1. `mv ~/.primer/kb ~/.primer/kb.bak` (or use a fresh account).
+  2. Launch the desktop GUI, then Start new → Save & start new session.
+  3. The button should read "Preparing the knowledge library (first run only)… 0 / 91" and count up.
+  4. Resuming a session on a cold cache should show the same line in the picker.
 
 ### 1. Sweep + inline-test detector: re-run EVERY session
 Commands are in the resume block.
 
-### 2. #393: GUI first-run feedback for the KB embed (recommended next; host-completable)
-- **Option 1:** emit a `primer://kb/embedding { done, total }` event from the session build; the frontend shows it in the picker/loading state.
-- **Option 2:** open the session at once and embed in the background (retrieval is BM25 + #389 until vectors land). This contends on the KB connection mutex, so it needs a design note first.
-- **Recommendation:** option 1. `prepare_kb` would take a progress callback (or the GUI calls `reembed_kb` per batch).
-- **Acceptance:**
-  - a test that the event fires with `total = passages_missing_embedding().len()` and ends at `done == total`;
-  - a contract test for the JS handler (the `include_str!` pattern);
-  - a manual first-run check.
-
-### 3. #392: seed edits never reach an existing cache (host-completable)
+### 2. #392: seed edits never reach an existing cache (recommended next; host-completable)
 - **Acceptance:** an edited seed passage (same id, new text) replaces the cached row and drops its vector, so the embed step refills it. Test it via `prepare_kb` with two JSONL versions.
-- **Sketch:** a content hash per passage. Needs a KB schema bump (user_version 4 → 5) with the idempotent-migration pattern.
+- **Sketch:** a content hash per passage. Needs a KB schema bump (user_version 4 → 5) with the idempotent-migration pattern. The `shortcut:` comment in `prepare_kb` marks the spot.
+
+### 3. `primer-kb-load/src/lib.rs` split (558 lines; low risk, default features)
+- **Natural seams:** seed discovery (`discover_seed_files`, `candidate_seed_dirs`, `xdg_data_home`, `discover_seed_jsonl`) → `discover.rs`; `reembed_kb*` + `prepare_kb` + `PrepareStats` → `prepare.rs`.
+- **Acceptance:** keep the public paths through `pub use`, with an unchanged `cargo test -p primer-kb-load` count. `--features fastembed` clippy must stay green.
 
 ### 4. Other bugs (host-completable; TDD each)
 - **#371** (voice-loop abort on stop timeout) needs a `JoinHandle::abort` design note first.
@@ -102,7 +89,7 @@ Commands are in the resume block.
 ### 5. Production-code splits (owner-approved lane, all feature-gated, so dual-verify)
 - **`primer-inference/src/qnn/genie/real.rs`** (566 lines, `qnn`) is the recommended one. Baselines: `cargo test -p primer-inference`; `cargo clippy -p primer-inference --features qnn --all-targets -- -D warnings`; the rustdoc `qnn` arm.
 - **`primer-speech/src/macos/{tts.rs 668, stt.rs 504}`** (`macos-native`).
-- **Low value:** `state_machine/inner.rs` (506). **Hardest:** `primer-cli/src/main.rs` (1386).
+- **Low value:** `state_machine/inner.rs` (506). **Hardest:** `primer-cli/src/main.rs` (1422).
 
 ### Carried / owner-or-hardware-gated
 - **#260:** Android-voice on-device acceptance; also re-check on device that a denied mic keeps the text session (#369).
@@ -115,6 +102,13 @@ Commands are in the resume block.
 
 ## Open decisions / risks
 
+### This session (#396)
+- **The manual first-run GUI check was not run.** Tests cover the Rust emit and pin the JS wiring, but nobody has watched the text update in the real webview.
+- **Progress granularity is one event per 16-passage batch.** About 18 s pass between updates on BGE-M3. `(0, total)` is shown at once, so the UI never looks frozen at the start.
+- **The restart button carries the long progress text.** It may wrap on a narrow modal. That is cosmetic.
+- **Voice-mode rebuilds report nothing.** They pass a no-op on the assumption that the cache is warm by then. A locale switch done *inside* voice mode would embed silently, which is unlikely.
+- **The CLI still prints only its one-line notice**, with no per-batch count. The callback is there if wanted.
+
 ### #352 item 2: what counts as a pointless fallback? (owner decision, unchanged)
 `--fallback-backend == --backend` with a different **model** is legitimate (small/big ollama models, or hybrid routing on one server).
 - (a) notice only when kind **and** model match;
@@ -123,7 +117,7 @@ Commands are in the resume block.
 
 **Recommendation:** (a), and downgrade or drop today's kind-only warn on the router path.
 
-### This session (#394)
+### From #394 (merged)
 - **First-run cost is large:** ~106 s for BGE-M3 over 91 EN passages on an M-series Mac. The first `--language de` run pays again for its 66 passages. Weaker hardware will be slower. Android stays `--embedder-backend none` (#157), so no cache is built there.
 - **The cache is per machine and per model, and holds no child data.** It is created with `create_private_dir_all` anyway. Deleting `~/.primer/kb/` is safe: it rebuilds on the next open.
 - **An explicit `--knowledge-db` that was never re-embedded is still BM25-only with `min_score = 0.0` on the hybrid path.** That is the (b) half of #388, not done. Only the stopword filter (#386) defends it.
@@ -165,6 +159,7 @@ Commands are in the resume block.
 
 ## Patterns to reuse, not reinvent
 
+- **Progress from a long Rust step to the webview (new):** pass `&mut (dyn FnMut(..) + Send)` down the call chain (it keeps the Tauri command future `Send`). The command closes over `&AppHandle<R>` and calls `app.emit(CONST, payload)`. Test it with `tauri::test::mock_app()` + `app.listen(CONST, ..)`, then call the generic command with `app.handle().clone(), app.state()`. Rust listeners fire synchronously, so assert straight after the `await`.
 - **Smoke-running the real CLI without touching the owner's home (new):** make a scratch `HOME`, symlink `~/Library/Caches/primer` into `$HOME/Library/Caches/primer` (so BGE-M3 isn't re-downloaded: `dirs::cache_dir` follows `$HOME`), and set `PRIMER_SEED_DIR=/Users/hherb/src/primer/data/seed`. A directly-run binary has no `CARGO_MANIFEST_DIR`, so without it seed discovery finds nothing. Grep `RUST_LOG=primer=info,primer_kb_load=info,primer::retrieval=debug` for `ready` / `reembedding` / `gate`.
 - **GUI tests must not use the default embedder (new):** `GuiConfig::default()` picks fastembed on a default build, and since #394 a session build then embeds the whole corpus (~100 s per test). Set `cfg.embedder.kind = "none"` in any test config that builds a session, or use a `StubEmbedder` when the KB is under test (`stage_tests.rs::knowledge_base_with_embedder_*`). A `primer-gui` test run over ~10 s is the symptom.
 - **Old-behaviour baseline for the stopword filter (new):** open a KB under `Locale::Hindi` (empty list) and `load_jsonl` the EN seed files into it. That gives the pre-#386 ranking side by side with the filtered one in a single probe run.
@@ -207,7 +202,7 @@ Commands are in the resume block.
 
 ```bash
 cd /Users/hherb/src/primer && git status --short && git checkout main && git pull --ff-only && git log --oneline -6 && gh pr list --state open
-# Open at close: #394. After merge: gh issue view 388 --json state; gh issue view 389 --json state
+# Open at close: #396. After merge: gh issue view 393 --json state
 S=/private/tmp/primer-scratch; mkdir -p "$S"   # or the session's scratchpad dir
 
 # === Oversized-file sweep + inline-test detector (re-verify EVERY session) ===
@@ -216,11 +211,11 @@ find crates -name '*.rs' -not -path '*/vendor/*' -not -name 'tests.rs' | xargs w
 for f in $(find crates -name '*.rs' -not -path '*/vendor/*' -not -name 'tests.rs' | xargs wc -l | awk '$1>500 && $2!="total"{print $2}'); do \
   awk '/#\[cfg\(test\)\]/{ln=NR} ln && NR==ln+1 && /^[[:space:]]*mod .*\{/{print FILENAME" inline mod @"NR}' "$f"; done
 
-# === #393 starting point ===
-gh issue view 393; gh issue view 392
-git grep -n "prepare_kb\|fn reembed_kb" -- '*.rs' | grep -v tests
-~/.cargo/bin/cargo test -p primer-gui knowledge_base
+# === #392 starting point ===
+gh issue view 392
+git grep -n "shortcut: top-up\|USER_VERSION" -- '*.rs' | grep primer-k
 ~/.cargo/bin/cargo test -p primer-kb-load --lib prepare_kb
+~/.cargo/bin/cargo test -p primer-knowledge
 
 # === Pick the next bug ===
 gh issue list --state open --limit 40
@@ -244,4 +239,4 @@ for spec in "-p primer-speech --features voice-loop,silero,whisper,piper,cpal,su
 
 ## Reporting back
 
-- **#394:** the Primer's semantic knowledge search now works out of the box. Before, the default setup never prepared the encyclopedia passages for it, so search quietly fell back to keyword matching, and the filter that keeps small talk from pulling in passages never ran. Now the first start prepares them once and saves the result. That takes about a minute and a half on a Mac; later starts take seconds. "Can we stop now" no longer pulls passages into the prompt. Closes #388 and #389.
+- **#396:** the desktop app no longer looks frozen the first time it starts a session. That first start prepares the encyclopedia passages for search, which takes about a minute and a half. The screen now says "Preparing the knowledge library (first run only)… 16 / 91" and counts up. Closes #393.
