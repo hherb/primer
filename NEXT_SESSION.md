@@ -79,7 +79,7 @@ Still not watched in the real webview: `mv ~/.primer/kb ~/.primer/kb.bak`, launc
 ## Open decisions / risks
 
 ### This session (#397)
-- **A passage *removed* from the seed corpus still stays in the cache.** Only edits and additions sync. Pruning ids absent from the corpus would be wrong for an explicit `load_jsonl` into a user DB holding several corpora, so it would need a cache-only flag. Not filed: no seed passage has ever been removed. File it if one is.
+- **A passage *removed* from the seed corpus still stays in the cache.** Only edits and additions sync. Pruning ids absent from the corpus would be wrong for an explicit `load_jsonl` into a user DB holding several corpora, so it would need a cache-only flag. Filed as #398 (latent: no seed passage has ever been removed).
 - **Every startup with a cache now reads every passage's text** (it read only ids before). Trivial at 91/66 passages; linear in corpus size.
 - **Any whitespace change in a seed line's `text` counts as an edit** and costs one re-embed of that passage. Correct, just worth knowing when regenerating the wiki layer.
 - **A replaced passage gets a new rowid.** Nothing keys on passage rowids outside the KB (vectors cascade), so this is harmless.

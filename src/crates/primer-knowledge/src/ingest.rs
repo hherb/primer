@@ -12,7 +12,7 @@ use primer_core::embedder::Embedder;
 use primer_core::error::{PrimerError, Result};
 use primer_core::knowledge::SourceMeta;
 use rusqlite::{Connection, Transaction, TransactionBehavior};
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 /// Upsert one `sources` row, refreshing its metadata on conflict. Takes a
 /// `Connection` so it runs both standalone (`KnowledgeBase::upsert_source`)
@@ -69,13 +69,16 @@ impl SqliteKnowledgeBase {
         self.insert_seed_tx(sources, passages, false).map(|_| ())
     }
 
-    /// [`Self::insert_seed`] as a sync: a passage whose id is already
-    /// stored with the same source and text is skipped; one stored with a
-    /// different source or text is replaced (#392), which drops its vector
-    /// (FK cascade) so the next re-embed refills it. The check runs inside
-    /// the write transaction, taken `IMMEDIATE`, so two processes topping
-    /// up one shared KB file at once can't both insert a passage (`id` has
-    /// no UNIQUE constraint). Returns `(inserted, replaced)`.
+    /// [`Self::insert_seed`], syncing against what is stored: a passage
+    /// whose id is already stored with the same source and text is skipped;
+    /// one stored with a different source or text is replaced (#392), which
+    /// drops its vector (FK cascade) so the next re-embed refills it — also
+    /// on a source-only change, which is rare enough not to special-case.
+    /// The first occurrence of an id in `passages` wins; repeats are
+    /// skipped. The check runs inside the write transaction, taken
+    /// `IMMEDIATE`, so two processes topping up one shared KB file at once
+    /// can't both insert a passage (`id` has no UNIQUE constraint). Returns
+    /// `(inserted, replaced)`.
     pub fn insert_seed_new(
         &self,
         sources: &[SourceMeta],
@@ -109,7 +112,13 @@ impl SqliteKnowledgeBase {
             upsert_source_row(&tx, src)?;
         }
         let (mut inserted, mut replaced) = (0, 0);
+        // A repeated id must not re-run the FTS delete against values the
+        // index no longer holds — that corrupts it.
+        let mut seen = HashSet::new();
         for (id, source, text) in passages {
+            if skip_existing && !seen.insert(*id) {
+                continue;
+            }
             match existing.get(*id) {
                 Some((_, old_source, old_text)) if old_source == source && old_text == text => {
                     continue;

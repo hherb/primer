@@ -1205,3 +1205,35 @@ async fn insert_seed_new_replaces_a_passage_whose_text_changed() {
     assert!(kb.retrieve("lava", &params).await.unwrap().is_empty());
     assert_eq!(kb.retrieve("ocean", &params).await.unwrap()[0].id, "p1");
 }
+
+/// A stored id repeated within one `insert_seed_new` call: the first
+/// occurrence replaces it and the repeat is skipped, instead of re-running
+/// the FTS5 `'delete'` with values the index no longer holds, which
+/// corrupts it.
+#[test]
+fn insert_seed_new_repeated_changed_id_keeps_fts_index_intact() {
+    let db = tmp_db();
+    let kb = SqliteKnowledgeBase::open_for_locale(db.path(), Locale::English).unwrap();
+    kb.insert_passage("p1", "src", "old lava words").unwrap();
+
+    let written = kb
+        .insert_seed_new(
+            &[],
+            &[
+                ("p1", "src", "new ocean words"),
+                ("p1", "src", "newer river words"),
+            ],
+        )
+        .unwrap();
+
+    assert_eq!(written, (0, 1));
+    assert_eq!(kb.passage_count().unwrap(), 1);
+    kb.conn
+        .lock()
+        .unwrap()
+        .execute(
+            "INSERT INTO passages_en(passages_en, rank) VALUES('integrity-check', 1)",
+            [],
+        )
+        .expect("FTS index must stay consistent with its content table");
+}

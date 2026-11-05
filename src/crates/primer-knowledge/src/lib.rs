@@ -73,9 +73,9 @@ pub struct SqliteKnowledgeBase {
     conn: Mutex<Connection>,
     locale: Locale,
     /// `passages_<pack_id>_content` — the external-content storage table
-    /// name. Cached at `open_for_locale` for the one-shot diagnostic
-    /// queries (`passage_count`, `stored_passages`,
-    /// `passages_missing_embedding`) that build their SQL inline; the
+    /// name. Cached at `open_for_locale` for the once-per-call whole-table
+    /// queries (`passage_count`, `passages_missing_embedding`, and the
+    /// seed top-up's `stored_passages`) that build their SQL inline; the
     /// per-row hot paths use [`LocaleSql`] instead.
     content_table: String,
     /// `embeddings_<pack_id>` — the schema-v3 vector storage table. Same

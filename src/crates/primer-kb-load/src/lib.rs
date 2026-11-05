@@ -233,7 +233,10 @@ async fn write_seed(kb: &SqliteKnowledgeBase, seed: ParsedSeed) -> Result<LoadSt
     let changed: Vec<(&str, &str, &str)> = passages
         .iter()
         .filter(|p| seen.insert(p.id.as_str()))
-        .filter(|p| stored.get(&p.id) != Some(&(p.source.clone(), p.text.clone())))
+        .filter(|p| {
+            stored.get(&p.id).map(|(s, t)| (s.as_str(), t.as_str()))
+                != Some((p.source.as_str(), p.text.as_str()))
+        })
         .map(|p| (p.id.as_str(), p.source.as_str(), p.text.as_str()))
         .collect();
     let sources: Vec<SourceMeta> = sources.into_values().collect();
