@@ -188,3 +188,17 @@ hmm
 äh
 ähm
 oh
+
+# ASCII spellings of the umlaut entries above, for a keyboard without
+# umlauts (#391). Plain "fur"/"uber" need no entry: lookup folds diacritics.
+koennen
+koennt
+muessen
+duerfen
+moechte
+moechten
+fuer
+ueber
+tschuess
+aeh
+aehm
