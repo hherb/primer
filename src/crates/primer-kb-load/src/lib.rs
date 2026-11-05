@@ -98,6 +98,9 @@ pub struct LoadStats {
     /// Passages already stored under their id whose source or text changed;
     /// rewritten, with their vector dropped (#392).
     pub replaced: usize,
+    /// Stored passages absent from the corpus, deleted with their vector.
+    /// Only the cache top-up prunes ([`crate::prepare_kb`], #398).
+    pub pruned: usize,
     pub skipped_existing: usize,
     pub sources_seen: usize,
 }
@@ -124,7 +127,7 @@ struct ParsedSeed {
 ///   line number and cause are returned in `PrimerError::Knowledge`;
 ///   nothing from the file is written.
 pub async fn load_jsonl(kb: &SqliteKnowledgeBase, path: &Path) -> Result<LoadStats> {
-    write_seed(kb, parse_jsonl(path)?).await
+    write_seed(kb, parse_jsonl(path)?, false).await
 }
 
 /// Load several seed files as one corpus: every file is parsed, then all
@@ -134,6 +137,17 @@ pub async fn load_jsonl(kb: &SqliteKnowledgeBase, path: &Path) -> Result<LoadSta
 /// (#308). An `id` that also appears in an earlier file is skipped, like
 /// one already in the KB.
 pub async fn load_seed_files(kb: &SqliteKnowledgeBase, paths: &[PathBuf]) -> Result<LoadStats> {
+    load_seed_corpus(kb, paths, false).await
+}
+
+/// [`load_seed_files`]; with `prune`, also delete stored passages whose id
+/// the corpus no longer has (#398). Only for a KB that mirrors this one
+/// corpus (the per-model cache).
+pub(crate) async fn load_seed_corpus(
+    kb: &SqliteKnowledgeBase,
+    paths: &[PathBuf],
+    prune: bool,
+) -> Result<LoadStats> {
     let mut corpus = ParsedSeed::default();
     for path in paths {
         tracing::info!(
@@ -147,7 +161,7 @@ pub async fn load_seed_files(kb: &SqliteKnowledgeBase, paths: &[PathBuf]) -> Res
             corpus.sources.entry(id).or_insert(src);
         }
     }
-    write_seed(kb, corpus).await
+    write_seed(kb, corpus, prune).await
 }
 
 /// Read and parse a JSONL seed file without touching the KB.
@@ -226,7 +240,7 @@ fn parse_jsonl(path: &Path) -> Result<ParsedSeed> {
 /// The first occurrence of an id in the corpus wins. With nothing to
 /// write nothing is written, so topping up an already-current KB on every
 /// startup costs no write.
-async fn write_seed(kb: &SqliteKnowledgeBase, seed: ParsedSeed) -> Result<LoadStats> {
+async fn write_seed(kb: &SqliteKnowledgeBase, seed: ParsedSeed, prune: bool) -> Result<LoadStats> {
     let ParsedSeed { passages, sources } = seed;
     let stored = kb.stored_passages()?;
     let mut seen = HashSet::new();
@@ -239,17 +253,23 @@ async fn write_seed(kb: &SqliteKnowledgeBase, seed: ParsedSeed) -> Result<LoadSt
         })
         .map(|p| (p.id.as_str(), p.source.as_str(), p.text.as_str()))
         .collect();
+    let corpus_ids: HashSet<&str> = passages.iter().map(|p| p.id.as_str()).collect();
+    // An empty corpus (emptied or truncated file) has nothing to mirror;
+    // pruning against it would wipe the cache.
+    let keep = (prune && !corpus_ids.is_empty()).then_some(&corpus_ids);
+    let any_absent = keep.is_some_and(|k| stored.keys().any(|id| !k.contains(id.as_str())));
     let sources: Vec<SourceMeta> = sources.into_values().collect();
     // `insert_seed_new` re-compares inside its write transaction: the read
     // above can be stale when another process seeds the same file.
-    let (inserted, replaced) = if changed.is_empty() {
-        (0, 0)
+    let (inserted, replaced, pruned) = if changed.is_empty() && !any_absent {
+        (0, 0, 0)
     } else {
-        kb.insert_seed_new(&sources, &changed)?
+        kb.insert_seed_new(&sources, &changed, keep)?
     };
     let stats = LoadStats {
         inserted,
         replaced,
+        pruned,
         skipped_existing: passages.len() - inserted - replaced,
         sources_seen: sources.len(),
     };
@@ -258,6 +278,7 @@ async fn write_seed(kb: &SqliteKnowledgeBase, seed: ParsedSeed) -> Result<LoadSt
         target = "primer-kb-load",
         inserted = stats.inserted,
         replaced = stats.replaced,
+        pruned = stats.pruned,
         skipped = stats.skipped_existing,
         sources = stats.sources_seen,
         "loaded JSONL into knowledge base"

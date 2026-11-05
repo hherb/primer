@@ -66,7 +66,8 @@ impl SqliteKnowledgeBase {
         sources: &[SourceMeta],
         passages: &[(&str, &str, &str)],
     ) -> Result<()> {
-        self.insert_seed_tx(sources, passages, false).map(|_| ())
+        self.insert_seed_tx(sources, passages, false, None)
+            .map(|_| ())
     }
 
     /// [`Self::insert_seed`], syncing against what is stored: a passage
@@ -77,14 +78,19 @@ impl SqliteKnowledgeBase {
     /// The first occurrence of an id in `passages` wins; repeats are
     /// skipped. The check runs inside the write transaction, taken
     /// `IMMEDIATE`, so two processes topping up one shared KB file at once
-    /// can't both insert a passage (`id` has no UNIQUE constraint). Returns
-    /// `(inserted, replaced)`.
+    /// can't both insert a passage (`id` has no UNIQUE constraint).
+    ///
+    /// With `keep`, every stored passage whose id is not in it is deleted
+    /// in the same transaction, its vector by cascade (#398). Only a KB
+    /// that mirrors one corpus (the per-model cache) may pass it: a user
+    /// DB can hold several corpora. Returns `(inserted, replaced, pruned)`.
     pub fn insert_seed_new(
         &self,
         sources: &[SourceMeta],
         passages: &[(&str, &str, &str)],
-    ) -> Result<(usize, usize)> {
-        self.insert_seed_tx(sources, passages, true)
+        keep: Option<&HashSet<&str>>,
+    ) -> Result<(usize, usize, usize)> {
+        self.insert_seed_tx(sources, passages, true, keep)
     }
 
     fn insert_seed_tx(
@@ -92,7 +98,8 @@ impl SqliteKnowledgeBase {
         sources: &[SourceMeta],
         passages: &[(&str, &str, &str)],
         skip_existing: bool,
-    ) -> Result<(usize, usize)> {
+        keep: Option<&HashSet<&str>>,
+    ) -> Result<(usize, usize, usize)> {
         let conn = self.conn.lock().unwrap();
         let behavior = if skip_existing {
             TransactionBehavior::Immediate
@@ -131,9 +138,18 @@ impl SqliteKnowledgeBase {
             }
             Self::insert_passage_inner(&tx, &self.sql, id, source, text)?;
         }
+        let mut pruned = 0;
+        if let Some(keep) = keep {
+            for (id, (rowid, source, text)) in &existing {
+                if !keep.contains(id.as_str()) {
+                    Self::delete_passage_inner(&tx, &self.sql, *rowid, id, source, text)?;
+                    pruned += 1;
+                }
+            }
+        }
         tx.commit()
             .map_err(|e| PrimerError::Knowledge(format!("commit insert: {e}")))?;
-        Ok((inserted, replaced))
+        Ok((inserted, replaced, pruned))
     }
 
     /// Core two-statement insert (content row + FTS index row), shared by

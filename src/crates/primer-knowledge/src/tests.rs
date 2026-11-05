@@ -1161,10 +1161,14 @@ fn insert_seed_new_skips_ids_already_stored() {
     kb.insert_passage("p1", "src", "first").unwrap();
 
     let inserted = kb
-        .insert_seed_new(&[], &[("p1", "src", "first"), ("p2", "src", "second")])
+        .insert_seed_new(
+            &[],
+            &[("p1", "src", "first"), ("p2", "src", "second")],
+            None,
+        )
         .unwrap();
 
-    assert_eq!(inserted, (1, 0));
+    assert_eq!(inserted, (1, 0, 0));
     assert_eq!(kb.passage_count().unwrap(), 2);
 }
 
@@ -1187,10 +1191,11 @@ async fn insert_seed_new_replaces_a_passage_whose_text_changed() {
         .insert_seed_new(
             &[],
             &[("p1", "src", "new ocean words"), ("p2", "src", "same text")],
+            None,
         )
         .unwrap();
 
-    assert_eq!(written, (0, 1));
+    assert_eq!(written, (0, 1, 0));
     assert_eq!(kb.passage_count().unwrap(), 2);
     let missing = kb.passages_missing_embedding().unwrap();
     assert_eq!(
@@ -1223,11 +1228,50 @@ fn insert_seed_new_repeated_changed_id_keeps_fts_index_intact() {
                 ("p1", "src", "new ocean words"),
                 ("p1", "src", "newer river words"),
             ],
+            None,
         )
         .unwrap();
 
-    assert_eq!(written, (0, 1));
+    assert_eq!(written, (0, 1, 0));
     assert_eq!(kb.passage_count().unwrap(), 1);
+    kb.conn
+        .lock()
+        .unwrap()
+        .execute(
+            "INSERT INTO passages_en(passages_en, rank) VALUES('integrity-check', 1)",
+            [],
+        )
+        .expect("FTS index must stay consistent with its content table");
+}
+
+/// Issue #398: with a `keep` set, a stored passage whose id is absent from
+/// it is deleted in the same transaction: content row, FTS entry and (by
+/// cascade) its vector. Kept passages are untouched.
+#[tokio::test]
+async fn insert_seed_new_prunes_ids_absent_from_keep() {
+    let db = tmp_db();
+    let kb = SqliteKnowledgeBase::open_for_locale(db.path(), Locale::English).unwrap();
+    let stub = primer_embedding::StubEmbedder::with_dim(16);
+    kb.insert_passage_with_embedding("p1", "src", "volcano lava", &stub)
+        .await
+        .unwrap();
+    kb.insert_passage_with_embedding("p2", "src", "ocean waves", &stub)
+        .await
+        .unwrap();
+
+    let keep: std::collections::HashSet<&str> = ["p1"].into();
+    let written = kb.insert_seed_new(&[], &[], Some(&keep)).unwrap();
+
+    assert_eq!(written, (0, 0, 1));
+    assert_eq!(kb.passage_count().unwrap(), 1);
+    assert_eq!(kb.embedding_count().unwrap(), 1);
+    let params = RetrievalParams {
+        top_k: 5,
+        min_score: f64::NEG_INFINITY,
+        source_filter: vec![],
+    };
+    assert!(kb.retrieve("ocean", &params).await.unwrap().is_empty());
+    assert_eq!(kb.retrieve("volcano", &params).await.unwrap()[0].id, "p1");
     kb.conn
         .lock()
         .unwrap()

@@ -1,7 +1,7 @@
 //! Startup preparation: auto-seed an empty KB, top up the per-model cache,
 //! and backfill missing vectors (`reembed_kb*`, `prepare_kb`).
 
-use crate::{LoadStats, discover_seed_files, load_seed_files};
+use crate::{LoadStats, discover_seed_files, load_seed_corpus, load_seed_files};
 use primer_core::error::{PrimerError, Result};
 use primer_core::i18n::Locale;
 use primer_knowledge::SqliteKnowledgeBase;
@@ -154,7 +154,10 @@ pub struct PrepareStats {
 /// The seed loads when the KB is empty, or always with `top_up` — the
 /// persistent per-model cache passes `true` so a grown or edited corpus
 /// reaches an already-seeded file (unchanged ids are skipped; an edited
-/// passage is replaced and re-embedded below, #392). A seed failure is an
+/// passage is replaced and re-embedded below, #392). `top_up` also makes
+/// the KB mirror the corpus: a stored passage the seed files no longer
+/// have is deleted (#398), so pass it only for a KB holding this corpus
+/// alone, never a user-managed file. A seed failure is an
 /// error, as in [`auto_seed_if_empty`]. An embedding failure is soft
 /// (returned in [`PrepareStats::embed_error`]): the session still works
 /// on BM25, and the next open retries.
@@ -176,7 +179,7 @@ pub async fn prepare_kb(
 ) -> Result<PrepareStats> {
     let mut stats = PrepareStats::default();
     if !seed_files.is_empty() && (top_up || kb.passage_count()? == 0) {
-        stats.seeded = Some(load_seed_files(kb, seed_files).await?);
+        stats.seeded = Some(load_seed_corpus(kb, seed_files, top_up).await?);
     }
     if let Some(embedder) = embedder {
         let force = match kb.check_embedder(embedder) {
