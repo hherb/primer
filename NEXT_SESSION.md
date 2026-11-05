@@ -1,92 +1,68 @@
 # Primer — Next Session Brief
 
 **Audience:** future Claude Code session continuing work on this repo.
-**Last updated:** 2026-11-05 13:13 (UTC).
+**Last updated:** 2026-11-05 14:23 (UTC).
 
 **One PR is open against `main`** from this session:
 
 | PR | Branch | What | Closes |
 |---|---|---|---|
-| **#396** | `fix/kb-embed-progress-393` | GUI shows the first-run KB embed progress (this brief rides on it) | #393 |
+| **#397** | `fix/kb-seed-edits-392` | Seed top-up replaces a passage edited under the same id; `primer-kb-load/src/lib.rs` split (this brief rides on it) | #392 |
 
-- **`main` is at `55b79d1`** (#394).
+- **`main` is at `8c6f3cf`** (#396).
 
-**Since the last brief:** #394 merged; #388 and #389 are CLOSED.
+**Since the last brief:** #396 merged; #393 is CLOSED.
 
 ## What we shipped this session
 
-### #396 (`7cd493c` + this brief's docs commit): closes #393
-- **Approach:** option 1 from the last brief, a progress event. No background embed.
+### #397 — `79500be` (fix), `caf4a3c` (split), `2322926` (docs) + this brief's commit: closes #392
+- **Approach:** no schema bump and no content hash. The cache already stores each passage's text, so the seed write compares `(source, text)` with the stored row directly.
+- **primer-knowledge:**
+  - `insert_seed_new` is now a sync and returns `(inserted, replaced)`. Inside its `IMMEDIATE` tx it reads `id → (rowid, source, text)` (`stored_passages_in`); unchanged rows skip, changed rows are deleted (`delete_passage_inner`: FTS5 `'delete'` with the old values, then the content row, whose vector cascades) and re-inserted.
+  - `LocaleSql` gained `delete_fts` + `delete_content`.
+  - New `pub fn stored_passages() -> HashMap<id, (source, text)>`; **`list_passage_ids` was removed** (its only caller was the loader).
 - **primer-kb-load:**
-  - new `reembed_kb_with_progress(.., on_progress)` reports `(0, total)` before the first batch, then `(done, total)` after each one;
-  - `reembed_kb` keeps its signature and passes a no-op;
-  - `prepare_kb` gained a 5th parameter, `on_progress: EmbedProgress` (`&mut (dyn FnMut(usize, usize) + Send)`);
-  - nothing is reported when no passage lacks a vector.
-- **primer-gui:**
-  - `start_session` and `resume_session` are now generic over `R: tauri::Runtime` and take an `AppHandle<R>`. They build through `build_reporting_progress`, which calls the now-`pub(crate)` `wiring::build_with_strategy` (`LocaleStrategy` is `pub(crate)` too).
-  - They emit `primer://kb/embedding { done, total }`, defined as `types::KB_EMBEDDING_EVENT` + `KbEmbeddingProgress`.
-  - `build_active_session*` pass a no-op, so the voice rebuilds and the tests are unchanged.
-  - **JS:** `picker.js::listenKbProgress` (exported as `window.primerListenKbProgress`) is used by `resume()` for the loading line, and by `settings.js::onSave` for the busy restart button. Both unlisten in a `finally`. `showLoading()` resets the text.
-- **CLI:** passes a no-op.
-- **Tests** (each mutation-checked):
-  - kb-load × 2: the per-batch sequence, and the `prepare_kb` pass-through (silent when warm);
-  - GUI stage test: the cache test now asserts progress runs from 0 to all passages, then silence;
-  - `start_session_emits_kb_embedding_progress`: `mock_app` + `app.listen` + stub embedder;
-  - `kb_progress_contract.rs` × 2: the event name matches the const, and each listener comes before its invoke and is unlistened after it.
-- **Docs:**
-  - CLAUDE.md: the `primer-kb-load` bullet and the gate bullet;
-  - README: a first-run sentence.
-  
-  ROADMAP: no change (bug fix).
+  - `write_seed` sends only new-or-changed passages (first occurrence of an id wins); with none it writes nothing, as before.
+  - `LoadStats` gained `replaced`; the binary prints it.
+  - The `shortcut:` comment in `prepare_kb` is gone. The embed step refills the dropped vectors with no extra code.
+  - **Behaviour change:** `load_jsonl` (the standalone binary) also replaces edited passages now; the module doc says the JSONL is the source of truth for its ids. Those rows lose their vector until a `--reembed`.
+- **Split (behaviour-preserving):** `lib.rs` 560 → 272; `discover.rs` (98) holds seed discovery, `prepare.rs` (209) holds `reembed_kb*` / `auto_seed_if_empty` / `prepare_kb`. `pub use` keeps every path; `cargo test -p primer-kb-load` is 168 before and after.
+- **Tests** (both mutation-checked: skip-instead-of-replace, and content-only delete leaving the FTS row):
+  - `primer-knowledge::insert_seed_new_replaces_a_passage_whose_text_changed`: FTS forgets the old text, only the edited passage lacks a vector;
+  - `primer-kb-load::prepare_kb_top_up_replaces_an_edited_seed_passage`: two JSONL versions through `prepare_kb`; `(inserted, replaced, skipped) = (0, 1, 1)`, one re-embed.
+- **Docs:** CLAUDE.md (the `primer-knowledge` seed-loading sentence, the `LocaleSql` diagnostics list, the `primer-kb-load` bullet + split note); README (the `load_jsonl` sentence). ROADMAP: no change (bug fix + refactor).
 
 ### Gate
-- `cargo test --workspace`: 1479/0.
-- clippy `-D warnings`:
-  - workspace `--all-targets`;
-  - `primer-gui` `speech` and `android-native`;
-  - `primer-kb-load --features fastembed`.
-- fmt; workspace rustdoc, plus the `primer-gui` speech and android-native arms.
-- **Not run:**
-  - the other rustdoc feature arms (no code under those features was touched);
-  - the fastembed recall tests (retrieval unchanged; they compile under the fastembed clippy);
-  - **the manual first-run check in the real GUI.**
+- `cargo test --workspace`: 1482/0.
+- clippy `-D warnings`: workspace `--all-targets`; `primer-kb-load --features fastembed`.
+- fmt; workspace rustdoc (+ `primer-kb-load`/`primer-knowledge` `--document-private-items`).
+- fastembed: `off_topic_gate`, `retrieval_quality_hybrid`, `retrieval_quality_hybrid_de` all green.
+- **Not run:** the GUI `speech` / `android-native` clippy arms and the feature rustdoc arms (no code under those features was touched).
 
 > SHAs are branch-tip commits as pushed; squash-merge gives new ones on `main`.
 
 ### Per-session sweep
-- **Inline-test detector:** clean for the twenty-third session running.
-- **Oversized list:**
-  - `primer-kb-load/src/lib.rs` went from 531 to 558 (it was already on the list at session start);
-  - `primer-gui/src/wiring/stage_tests.rs` went from 578 to 610 (a test file);
-  - `primer-cli/src/main.rs` is at 1422.
+- **Inline-test detector:** clean for the twenty-fourth session running.
+- **Oversized list:** `primer-kb-load/src/lib.rs` is off it (272). The production files still over 500: `primer-cli/src/main.rs` 1422, `primer-speech/src/macos/tts.rs` 668, `primer-inference/src/qnn/genie/real.rs` 566, `state_machine/inner.rs` 506, `primer-speech/src/macos/stt.rs` 504. The rest are test files.
 
 ## What's next (concrete acceptance criteria)
 
-### 0. Owner review/merge: #396
-- **Acceptance:** CI green and merged; then `gh issue view 393 --json state` shows CLOSED.
-- **Owner check:**
-  1. `mv ~/.primer/kb ~/.primer/kb.bak` (or use a fresh account).
-  2. Launch the desktop GUI, then Start new → Save & start new session.
-  3. The button should read "Preparing the knowledge library (first run only)… 0 / 91" and count up.
-  4. Resuming a session on a cold cache should show the same line in the picker.
+### 0. Owner review/merge: #397
+- **Acceptance:** CI green and merged; then `gh issue view 392 --json state` shows CLOSED.
+- **Optional owner check:** edit one passage's `text` in `data/seed/seed_passages.en.jsonl` (keep its `id`), start the CLI with the default embedder, and look for `replaced=1` in the `loaded JSONL into knowledge base` log line plus one passage re-embedded. Revert the edit after; the next start replaces it back.
 
 ### 1. Sweep + inline-test detector: re-run EVERY session
 Commands are in the resume block.
 
-### 2. #392: seed edits never reach an existing cache (recommended next; host-completable)
-- **Acceptance:** an edited seed passage (same id, new text) replaces the cached row and drops its vector, so the embed step refills it. Test it via `prepare_kb` with two JSONL versions.
-- **Sketch:** a content hash per passage. Needs a KB schema bump (user_version 4 → 5) with the idempotent-migration pattern. The `shortcut:` comment in `prepare_kb` marks the spot.
+### 2. Manual first-run GUI check for #396 (owner)
+Still not watched in the real webview: `mv ~/.primer/kb ~/.primer/kb.bak`, launch the GUI, Start new → Save & start; the button should count "… 0 / 91" upward. Resume on a cold cache shows the same line in the picker.
 
-### 3. `primer-kb-load/src/lib.rs` split (558 lines; low risk, default features)
-- **Natural seams:** seed discovery (`discover_seed_files`, `candidate_seed_dirs`, `xdg_data_home`, `discover_seed_jsonl`) → `discover.rs`; `reembed_kb*` + `prepare_kb` + `PrepareStats` → `prepare.rs`.
-- **Acceptance:** keep the public paths through `pub use`, with an unchanged `cargo test -p primer-kb-load` count. `--features fastembed` clippy must stay green.
-
-### 4. Other bugs (host-completable; TDD each)
+### 3. Other bugs (host-completable; TDD each)
 - **#371** (voice-loop abort on stop timeout) needs a `JoinHandle::abort` design note first.
 - **#352 remaining:** item 2 needs the owner decision below; items 1 and 4 need a design note before code.
 - **Older:** #312, #315, #316, #325/#326, #362, #364, #365. Read each before choosing.
 
-### 5. Production-code splits (owner-approved lane, all feature-gated, so dual-verify)
+### 4. Production-code splits (owner-approved lane, all feature-gated, so dual-verify)
 - **`primer-inference/src/qnn/genie/real.rs`** (566 lines, `qnn`) is the recommended one. Baselines: `cargo test -p primer-inference`; `cargo clippy -p primer-inference --features qnn --all-targets -- -D warnings`; the rustdoc `qnn` arm.
 - **`primer-speech/src/macos/{tts.rs 668, stt.rs 504}`** (`macos-native`).
 - **Low value:** `state_machine/inner.rs` (506). **Hardest:** `primer-cli/src/main.rs` (1422).
@@ -102,12 +78,15 @@ Commands are in the resume block.
 
 ## Open decisions / risks
 
-### This session (#396)
-- **The manual first-run GUI check was not run.** Tests cover the Rust emit and pin the JS wiring, but nobody has watched the text update in the real webview.
-- **Progress granularity is one event per 16-passage batch.** About 18 s pass between updates on BGE-M3. `(0, total)` is shown at once, so the UI never looks frozen at the start.
-- **The restart button carries the long progress text.** It may wrap on a narrow modal. That is cosmetic.
-- **Voice-mode rebuilds report nothing.** They pass a no-op on the assumption that the cache is warm by then. A locale switch done *inside* voice mode would embed silently, which is unlikely.
-- **The CLI still prints only its one-line notice**, with no per-batch count. The callback is there if wanted.
+### This session (#397)
+- **A passage *removed* from the seed corpus still stays in the cache.** Only edits and additions sync. Pruning ids absent from the corpus would be wrong for an explicit `load_jsonl` into a user DB holding several corpora, so it would need a cache-only flag. Not filed: no seed passage has ever been removed. File it if one is.
+- **Every startup with a cache now reads every passage's text** (it read only ids before). Trivial at 91/66 passages; linear in corpus size.
+- **Any whitespace change in a seed line's `text` counts as an edit** and costs one re-embed of that passage. Correct, just worth knowing when regenerating the wiki layer.
+- **A replaced passage gets a new rowid.** Nothing keys on passage rowids outside the KB (vectors cascade), so this is harmless.
+- **`load_jsonl` into a user-managed KB now rewrites edited rows** and leaves them without a vector until `primer-kb-load --reembed`; hybrid retrieval treats them as BM25-only meanwhile (#389).
+
+### From #396 (merged)
+- **Manual first-run GUI check not run** (item 2 above). Progress is one event per 16-passage batch (~18 s apart on BGE-M3); the restart button's long text may wrap on a narrow modal; voice-mode rebuilds report nothing; the CLI prints only its one-line notice.
 
 ### #352 item 2: what counts as a pointless fallback? (owner decision, unchanged)
 `--fallback-backend == --backend` with a different **model** is legitimate (small/big ollama models, or hybrid routing on one server).
@@ -159,6 +138,8 @@ Commands are in the resume block.
 
 ## Patterns to reuse, not reinvent
 
+- **Syncing derived rows against a source of truth (new):** before adding a hash column + schema bump, check whether the stored row already holds what you would hash. #392 compared stored `(source, text)` directly. Deleting from an external-content FTS5 table needs the old values: `INSERT INTO t(t, rowid, …) VALUES('delete', rowid, …)` (`LocaleSql::delete_fts`).
+- **Splitting a lib.rs by byte offsets (new):** slice the file at two unique doc-comment anchors in Python, write the pieces to new files with their own `use` lines, add `mod x; pub use x::*;`, then `cargo build` to find the stale imports. Compare test counts with `git stash -u` / `stash pop`.
 - **Progress from a long Rust step to the webview (new):** pass `&mut (dyn FnMut(..) + Send)` down the call chain (it keeps the Tauri command future `Send`). The command closes over `&AppHandle<R>` and calls `app.emit(CONST, payload)`. Test it with `tauri::test::mock_app()` + `app.listen(CONST, ..)`, then call the generic command with `app.handle().clone(), app.state()`. Rust listeners fire synchronously, so assert straight after the `await`.
 - **Smoke-running the real CLI without touching the owner's home (new):** make a scratch `HOME`, symlink `~/Library/Caches/primer` into `$HOME/Library/Caches/primer` (so BGE-M3 isn't re-downloaded: `dirs::cache_dir` follows `$HOME`), and set `PRIMER_SEED_DIR=/Users/hherb/src/primer/data/seed`. A directly-run binary has no `CARGO_MANIFEST_DIR`, so without it seed discovery finds nothing. Grep `RUST_LOG=primer=info,primer_kb_load=info,primer::retrieval=debug` for `ready` / `reembedding` / `gate`.
 - **GUI tests must not use the default embedder (new):** `GuiConfig::default()` picks fastembed on a default build, and since #394 a session build then embeds the whole corpus (~100 s per test). Set `cfg.embedder.kind = "none"` in any test config that builds a session, or use a `StubEmbedder` when the KB is under test (`stage_tests.rs::knowledge_base_with_embedder_*`). A `primer-gui` test run over ~10 s is the symptom.
@@ -202,7 +183,7 @@ Commands are in the resume block.
 
 ```bash
 cd /Users/hherb/src/primer && git status --short && git checkout main && git pull --ff-only && git log --oneline -6 && gh pr list --state open
-# Open at close: #396. After merge: gh issue view 393 --json state
+# Open at close: #397. After merge: gh issue view 392 --json state
 S=/private/tmp/primer-scratch; mkdir -p "$S"   # or the session's scratchpad dir
 
 # === Oversized-file sweep + inline-test detector (re-verify EVERY session) ===
@@ -211,11 +192,9 @@ find crates -name '*.rs' -not -path '*/vendor/*' -not -name 'tests.rs' | xargs w
 for f in $(find crates -name '*.rs' -not -path '*/vendor/*' -not -name 'tests.rs' | xargs wc -l | awk '$1>500 && $2!="total"{print $2}'); do \
   awk '/#\[cfg\(test\)\]/{ln=NR} ln && NR==ln+1 && /^[[:space:]]*mod .*\{/{print FILENAME" inline mod @"NR}' "$f"; done
 
-# === #392 starting point ===
-gh issue view 392
-git grep -n "shortcut: top-up\|USER_VERSION" -- '*.rs' | grep primer-k
+# === #397 regression check ===
 ~/.cargo/bin/cargo test -p primer-kb-load --lib prepare_kb
-~/.cargo/bin/cargo test -p primer-knowledge
+~/.cargo/bin/cargo test -p primer-knowledge --lib insert_seed_new
 
 # === Pick the next bug ===
 gh issue list --state open --limit 40
@@ -239,4 +218,4 @@ for spec in "-p primer-speech --features voice-loop,silero,whisper,piper,cpal,su
 
 ## Reporting back
 
-- **#396:** the desktop app no longer looks frozen the first time it starts a session. That first start prepares the encyclopedia passages for search, which takes about a minute and a half. The screen now says "Preparing the knowledge library (first run only)… 16 / 91" and counts up. Closes #393.
+- **#397:** when we correct or update an encyclopedia passage that ships with the Primer, installs that already have the library now pick up the corrected text on their next start (and re-index just that passage), instead of keeping the old version forever. Closes #392. The loader's main file was also split into smaller pieces, with no change in behaviour.
