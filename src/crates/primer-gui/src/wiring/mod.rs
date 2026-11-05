@@ -12,8 +12,9 @@
 //! [`crate::validation`] and the settings modal; here we fail fast on
 //! construction errors.
 //!
-//! Layout: this file holds the two public entry points and the
-//! orchestrating `build_with_strategy`; the steps live in
+//! Layout: this file holds the two public no-progress entry points and
+//! the orchestrating `build_with_strategy` (which the `start_session` /
+//! `resume_session` commands call directly, to report KB embed progress); the steps live in
 //! `backend_params` (GUI config → `BackendParams` + model/key resolvers),
 //! `stores` (session store + learner/locale resolution + knowledge base),
 //! and `subsystems` (classifier / extractor / comprehension / embedder).
@@ -70,8 +71,10 @@ pub(crate) enum LocaleStrategy {
 ///   under `<home>/.primer/<slug>.db` unless an explicit path is given.
 /// - Loads or mints a `LearnerModel`; reconciles with the GUI settings
 ///   (age refresh + name-mismatch warning) when one is already on disk.
-/// - Opens or creates the per-locale knowledge DB and auto-seeds it
-///   from the bundled JSONL if empty.
+/// - Opens the knowledge DB (with an embedder, the per-model cache
+///   under `<home>/.primer/kb/`), seeds / tops it up from the bundled
+///   JSONL, and embeds passages that lack a vector, reporting no
+///   progress (the voice-mode rebuilds use this).
 ///
 /// `home` is the user's home directory. Tests can pass a synthetic dir
 /// from `tempfile::TempDir`. The function never reads `$HOME` directly.
@@ -85,7 +88,8 @@ pub async fn build_active_session(
 /// Variant of [`build_active_session`] that silently inherits the
 /// persisted learner's locale on mismatch instead of erroring.
 ///
-/// Used by the GUI's `resume_session` Tauri command: the user has chosen
+/// The `resume_session` Tauri command uses the same strategy (via
+/// `build_with_strategy`, to report KB embed progress): the user has chosen
 /// a saved session whose locale was set when it was originally created;
 /// the `cfg.learner.locale` value reflects what the picker would use for
 /// a NEW session, not what this resumed session was tagged under. Issue
@@ -110,13 +114,15 @@ pub async fn build_active_session_for_resume(
     .await
 }
 
-/// Shared body of `build_active_session` and
-/// `build_active_session_for_resume`. The two callers differ only in
-/// how they treat a locale mismatch between `cfg.learner.locale` and
-/// the persisted learner row (see [`LocaleStrategy`]).
+/// Shared body of `build_active_session`, `build_active_session_for_resume`
+/// and the `start_session` / `resume_session` commands. Callers differ in
+/// how they treat a locale mismatch between `cfg.learner.locale` and the
+/// persisted learner row (see [`LocaleStrategy`]) and in whether they
+/// report progress.
 ///
-/// `on_kb_progress` sees the knowledge-base embed progress on a first run
-/// (#393); the session commands forward it to the frontend.
+/// `on_kb_progress` sees the knowledge-base embed progress whenever
+/// passages lack a vector (#393; normally the first run, every build
+/// under `no_persist`); the session commands forward it to the frontend.
 pub(crate) async fn build_with_strategy(
     home: &Path,
     config: &GuiConfig,

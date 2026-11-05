@@ -685,8 +685,9 @@ async function onSave({ restart }) {
       // close_session is a no-op when no session is active, so we can
       // call it unconditionally.
       await invoke("close_session").catch(() => {});
-      // First run embeds the knowledge base (#393): show its progress on
-      // the busy button. setButtonsBusy(false) restores the label.
+      // The build may embed the knowledge base (#393; normally first run
+      // only): show its progress on the busy button. setButtonsBusy(false)
+      // restores the label. primerListenKbProgress never rejects.
       const unlisten = await window.primerListenKbProgress((text) => {
         dom.saveRestart.textContent = text;
       });

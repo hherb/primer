@@ -1,8 +1,9 @@
 //! Pin the GUI's first-run knowledge-base embed progress (issue #393).
 //!
 //! `start_session` / `resume_session` emit
-//! [`crate::types::KB_EMBEDDING_EVENT`] while a first run embeds the KB
-//! (~100 s for BGE-M3). Without a listener the picker or the settings
+//! [`crate::types::KB_EMBEDDING_EVENT`] while the build embeds KB
+//! passages that lack a vector (~100 s for BGE-M3; normally the first run
+//! only, every build under `no_persist`). Without a listener the picker or the settings
 //! modal just looks hung. There is no JS test runner in this crate, so —
 //! like [`crate::voice_stop_contract`] — the guard `include_str!`s the UI
 //! assets and asserts the wiring.
@@ -64,9 +65,14 @@ mod tests {
                 .find(invoke)
                 .unwrap_or_else(|| panic!("{signature} must call {invoke}"));
             assert!(listen_at < invoke_at, "{signature}: listen before {invoke}");
+            // In a `finally`, so a failed build doesn't leak the handler.
+            let after = &body[invoke_at..];
+            let finally_at = after
+                .find("finally {")
+                .unwrap_or_else(|| panic!("{signature}: finally after {invoke}"));
             assert!(
-                body[invoke_at..].contains("unlisten();"),
-                "{signature}: unlisten after {invoke}"
+                after[finally_at..].contains("unlisten();"),
+                "{signature}: unlisten in the finally after {invoke}"
             );
         }
     }

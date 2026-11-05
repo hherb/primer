@@ -57,12 +57,17 @@ wireFooterButtons();
 window.PrimerPicker = { show, hide };
 window.primerListenKbProgress = listenKbProgress;
 
-/// Call `onText` with a progress line for every KB-embedding event until
-/// the returned unlisten function is called. Shared with settings.js.
+/// Call `onText` with a progress line for every KB-embedding event.
+/// Resolves to an unlisten function; never rejects — a failed listen only
+/// loses the (cosmetic) progress line, it must not abort the session
+/// build. Shared with settings.js.
 function listenKbProgress(onText) {
   return listen(KB_EMBEDDING_EVENT, (evt) => {
     const { done, total } = evt.payload;
-    onText(`Preparing the knowledge library (first run only)… ${done} / ${total}`);
+    onText(`Preparing the knowledge library… ${done} / ${total}`);
+  }).catch((e) => {
+    console.warn(`listen(${KB_EMBEDDING_EVENT}) failed; no embed progress shown:`, e);
+    return () => {};
   });
 }
 
@@ -201,10 +206,11 @@ async function resume(sessionId) {
   // second resume_session while the first is still constructing.
   setRowsBusy(true);
   showLoading();
-  const unlisten = await listenKbProgress((text) => {
-    dom.loading.querySelector("span").textContent = text;
-  });
+  let unlisten = () => {};
   try {
+    unlisten = await listenKbProgress((text) => {
+      dom.loading.querySelector("span").textContent = text;
+    });
     const info = await invoke("resume_session", { sessionId });
     hide();
     if (state.onResumed) {

@@ -603,15 +603,18 @@ async fn prepare_kb_embedding_failure_is_soft() {
     let seed = write_jsonl(&[PREP_P1, PREP_P2]);
     let short = DropsLastEmbedder(primer_embedding::StubEmbedder::with_dim(16));
 
+    let mut seen = Vec::new();
     let stats = prepare_kb(
         &kb,
         &[seed.path().to_path_buf()],
         false,
         Some(&short),
-        &mut |_, _| {},
+        &mut |done, total| seen.push((done, total)),
     )
     .await
     .expect("an embed failure must not fail startup");
+    // Progress stops short; no `(total, total)` is reported on a failure.
+    assert_eq!(seen, [(0, 2)]);
     assert_eq!(stats.embedded, 0);
     assert!(stats.embed_error.is_some(), "the caller must be told");
     assert_eq!(kb.passage_count().unwrap(), 2);

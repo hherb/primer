@@ -19,7 +19,7 @@ use crate::types::{
 };
 use crate::wiring::{self, LocaleStrategy};
 
-/// Build a session, forwarding first-run KB embed progress to the
+/// Build a session, forwarding knowledge-base embed progress to the
 /// frontend as [`KB_EMBEDDING_EVENT`] (#393). An emit failure only warns:
 /// the progress line is cosmetic.
 async fn build_reporting_progress<R: Runtime>(
@@ -106,7 +106,7 @@ pub async fn resume_session<R: Runtime>(
 
     prepare_for_session_change(&state).await?;
 
-    // Issue #86: `build_active_session_for_resume` opens the session DB
+    // Issue #86: `InheritFromPersistedLearner` opens the session DB
     // exactly once, reads the persisted learner inline, and silently
     // inherits the persisted locale on mismatch (the cfg value reflects
     // what the picker would pass for a NEW session, not what this
