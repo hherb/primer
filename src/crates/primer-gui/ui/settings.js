@@ -685,7 +685,16 @@ async function onSave({ restart }) {
       // close_session is a no-op when no session is active, so we can
       // call it unconditionally.
       await invoke("close_session").catch(() => {});
-      await invoke("start_session");
+      // First run embeds the knowledge base (#393): show its progress on
+      // the busy button. setButtonsBusy(false) restores the label.
+      const unlisten = await window.primerListenKbProgress((text) => {
+        dom.saveRestart.textContent = text;
+      });
+      try {
+        await invoke("start_session");
+      } finally {
+        unlisten();
+      }
       // Snapshot the callback before closeModal() clears it.
       const cb = state.onSessionRestarted;
       closeModal();

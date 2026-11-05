@@ -1176,6 +1176,7 @@ async fn async_main() -> anyhow::Result<()> {
         &seed_files,
         matches!(knowledge_db, KnowledgeDb::Cache(_)),
         embed_with,
+        &mut |_, _| {},
     )
     .await
     .with_context(|| {

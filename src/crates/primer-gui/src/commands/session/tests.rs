@@ -1034,3 +1034,33 @@ async fn session_switch_rebuilds_under_new_locale() {
              `start_voice_mode` would build LoopBackends against this same cfg"
     );
 }
+
+/// Issue #393: a first-run `start_session` forwards the KB embed progress
+/// to the frontend, from `done == 0` up to `done == total`.
+#[tokio::test]
+async fn start_session_emits_kb_embedding_progress() {
+    use tauri::{Listener, Manager};
+
+    let home = TempDir::new().unwrap();
+    let mut cfg = stub_config_with_persistence(home.path());
+    cfg.embedder.kind = "stub".to_string();
+    let app = tauri::test::mock_app();
+    app.manage(AppState::new(home.path().to_path_buf(), cfg));
+    let seen = Arc::new(std::sync::Mutex::new(Vec::<serde_json::Value>::new()));
+    let sink = Arc::clone(&seen);
+    app.listen(crate::types::KB_EMBEDDING_EVENT, move |e| {
+        sink.lock()
+            .unwrap()
+            .push(serde_json::from_str(e.payload()).unwrap());
+    });
+
+    start_session(app.handle().clone(), app.state())
+        .await
+        .unwrap();
+
+    let seen = seen.lock().unwrap();
+    let (first, last) = (seen.first().unwrap(), seen.last().unwrap());
+    assert_eq!(first["done"], 0);
+    assert!(first["total"].as_u64().unwrap() > 0);
+    assert_eq!(last["done"], last["total"], "{seen:?}");
+}

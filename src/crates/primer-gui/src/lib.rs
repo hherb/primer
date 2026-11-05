@@ -14,6 +14,7 @@ pub mod commands;
 pub mod config;
 pub mod csp;
 pub mod diagnostics_toggle_contract;
+pub mod kb_progress_contract;
 #[cfg(not(target_os = "android"))]
 pub mod log_sink;
 pub mod modal_dialog_contract;

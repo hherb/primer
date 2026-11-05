@@ -18,6 +18,12 @@
 // inter-script communication still go on `window.*`.
 (() => {
 const { invoke } = window.__TAURI__.core;
+const { listen } = window.__TAURI__.event;
+
+/// Emitted while a session build embeds the knowledge base on a first
+/// run (#393). Mirrors `primer_gui::types::KB_EMBEDDING_EVENT`.
+const KB_EMBEDDING_EVENT = "primer://kb/embedding";
+const LOADING_TEXT = "Loading sessions…";
 
 // Default placeholder name a fresh learner profile carries until the
 // user supplies their own. Mirrors `primer_core::consts::learner::DEFAULT_NAME`
@@ -49,6 +55,16 @@ const state = {
 
 wireFooterButtons();
 window.PrimerPicker = { show, hide };
+window.primerListenKbProgress = listenKbProgress;
+
+/// Call `onText` with a progress line for every KB-embedding event until
+/// the returned unlisten function is called. Shared with settings.js.
+function listenKbProgress(onText) {
+  return listen(KB_EMBEDDING_EVENT, (evt) => {
+    const { done, total } = evt.payload;
+    onText(`Preparing the knowledge library (first run only)… ${done} / ${total}`);
+  });
+}
 
 /// Show the picker overlay. Re-fetches the session list every call so
 /// "what's on screen" stays trivially aligned with disk. Callbacks
@@ -69,6 +85,7 @@ function hide() {
 }
 
 function showLoading() {
+  dom.loading.querySelector("span").textContent = LOADING_TEXT;
   dom.loading.hidden = false;
   dom.error.hidden = true;
   dom.empty.hidden = true;
@@ -184,6 +201,9 @@ async function resume(sessionId) {
   // second resume_session while the first is still constructing.
   setRowsBusy(true);
   showLoading();
+  const unlisten = await listenKbProgress((text) => {
+    dom.loading.querySelector("span").textContent = text;
+  });
   try {
     const info = await invoke("resume_session", { sessionId });
     hide();
@@ -201,6 +221,8 @@ async function resume(sessionId) {
     // freshly-changed listings as a bonus.
     await refresh();
     showError(`Couldn't resume session: ${formatErr(err)}`);
+  } finally {
+    unlisten();
   }
 }
 

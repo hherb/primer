@@ -54,6 +54,18 @@ pub struct LearnerSummary {
 /// in steps 5–6 by extending this struct — the event name stays the
 /// same so the frontend listener doesn't need to know which fields
 /// are present until it tries to render them.
+/// Event the session-build commands emit while a first run embeds the
+/// knowledge base (#393). The picker and the settings modal show it.
+pub const KB_EMBEDDING_EVENT: &str = "primer://kb/embedding";
+
+/// Payload of [`KB_EMBEDDING_EVENT`]: passages embedded so far out of
+/// `total`. Starts at `done == 0` and ends at `done == total`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+pub struct KbEmbeddingProgress {
+    pub done: usize,
+    pub total: usize,
+}
+
 #[derive(Debug, Clone, Serialize)]
 pub struct TurnComplete {
     /// UUID of the underlying `Session`. Useful for the frontend to

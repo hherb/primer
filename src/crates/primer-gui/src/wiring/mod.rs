@@ -29,6 +29,7 @@ use primer_core::config::PedagogyConfig;
 use primer_core::i18n::Locale;
 use primer_core::storage::{LearnerStore, SessionStore};
 use primer_engine::{build_main_backend, served_identity};
+use primer_kb_load::EmbedProgress;
 use tokio::sync::Mutex;
 
 use crate::config::GuiConfig;
@@ -56,7 +57,7 @@ use stores::{open_knowledge_base, open_session_store_and_learner};
 /// the persisted locale; the cfg value is only relevant for new
 /// sessions, never for continuing an existing one).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-enum LocaleStrategy {
+pub(crate) enum LocaleStrategy {
     UseCfg,
     InheritFromPersistedLearner,
 }
@@ -78,7 +79,7 @@ pub async fn build_active_session(
     home: &Path,
     config: &GuiConfig,
 ) -> Result<ActiveSession, String> {
-    build_with_strategy(home, config, LocaleStrategy::UseCfg).await
+    build_with_strategy(home, config, LocaleStrategy::UseCfg, &mut |_, _| {}).await
 }
 
 /// Variant of [`build_active_session`] that silently inherits the
@@ -100,17 +101,27 @@ pub async fn build_active_session_for_resume(
     home: &Path,
     config: &GuiConfig,
 ) -> Result<ActiveSession, String> {
-    build_with_strategy(home, config, LocaleStrategy::InheritFromPersistedLearner).await
+    build_with_strategy(
+        home,
+        config,
+        LocaleStrategy::InheritFromPersistedLearner,
+        &mut |_, _| {},
+    )
+    .await
 }
 
 /// Shared body of `build_active_session` and
 /// `build_active_session_for_resume`. The two callers differ only in
 /// how they treat a locale mismatch between `cfg.learner.locale` and
 /// the persisted learner row (see [`LocaleStrategy`]).
-async fn build_with_strategy(
+///
+/// `on_kb_progress` sees the knowledge-base embed progress on a first run
+/// (#393); the session commands forward it to the frontend.
+pub(crate) async fn build_with_strategy(
     home: &Path,
     config: &GuiConfig,
     strategy: LocaleStrategy,
+    on_kb_progress: EmbedProgress<'_>,
 ) -> Result<ActiveSession, String> {
     let learner_config = &config.learner;
     let backend_config = &config.backend;
@@ -167,6 +178,7 @@ async fn build_with_strategy(
         cfg_locale,
         strategy,
         subsystems.embedder.as_deref(),
+        on_kb_progress,
     )
     .await?;
     let session_store = Arc::new(session_store);

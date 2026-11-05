@@ -282,6 +282,7 @@ async fn resume_opens_knowledge_base_under_inherited_locale() {
         Locale::English,
         LocaleStrategy::InheritFromPersistedLearner,
         None,
+        &mut |_, _| {},
     )
     .await
     .unwrap();
@@ -350,7 +351,7 @@ async fn knowledge_base_without_embedder_is_in_memory_and_auto_seeds() {
     let cfg = stub_config();
     assert!(cfg.persistence.knowledge_db.is_none());
 
-    let (kb, _) = open_knowledge_base(home.path(), &cfg, Locale::English, None)
+    let (kb, _) = open_knowledge_base(home.path(), &cfg, Locale::English, None, &mut |_, _| {})
         .await
         .unwrap();
 
@@ -382,18 +383,37 @@ async fn knowledge_base_with_embedder_is_an_embedded_per_model_cache() {
     )
     .path();
 
-    let (kb, _) = open_knowledge_base(home.path(), &cfg, Locale::English, Some(&stub))
-        .await
-        .unwrap();
+    let mut progress = Vec::new();
+    let (kb, _) = open_knowledge_base(
+        home.path(),
+        &cfg,
+        Locale::English,
+        Some(&stub),
+        &mut |d, t| progress.push((d, t)),
+    )
+    .await
+    .unwrap();
     let passages = kb.passage_count().unwrap();
     assert!(passages > 0);
     assert_eq!(kb.embedding_count().unwrap(), passages);
+    // #393: the first run reports the embed from 0 to every passage.
+    let total = usize::try_from(passages).unwrap();
+    assert_eq!(progress.first(), Some(&(0, total)));
+    assert_eq!(progress.last(), Some(&(total, total)));
     assert!(cache.is_file(), "expected the cache at {}", cache.display());
     drop(kb);
 
-    let (again, _) = open_knowledge_base(home.path(), &cfg, Locale::English, Some(&stub))
-        .await
-        .unwrap();
+    progress.clear();
+    let (again, _) = open_knowledge_base(
+        home.path(),
+        &cfg,
+        Locale::English,
+        Some(&stub),
+        &mut |d, t| progress.push((d, t)),
+    )
+    .await
+    .unwrap();
+    assert!(progress.is_empty(), "a warm cache reports nothing");
     assert_eq!(
         again.passage_count().unwrap(),
         passages,
@@ -429,9 +449,15 @@ async fn knowledge_base_no_persist_embeds_in_memory() {
     assert!(cfg.persistence.no_persist);
     let stub = primer_embedding::StubEmbedder::new();
 
-    let (kb, _) = open_knowledge_base(home.path(), &cfg, Locale::English, Some(&stub))
-        .await
-        .unwrap();
+    let (kb, _) = open_knowledge_base(
+        home.path(),
+        &cfg,
+        Locale::English,
+        Some(&stub),
+        &mut |_, _| {},
+    )
+    .await
+    .unwrap();
 
     assert_eq!(kb.embedding_count().unwrap(), kb.passage_count().unwrap());
     assert!(!home.path().join(".primer").exists());
@@ -446,9 +472,15 @@ async fn knowledge_base_explicit_path_is_seeded_but_not_embedded() {
     cfg.persistence.knowledge_db = Some(home.path().join("my-kb.db"));
     let stub = primer_embedding::StubEmbedder::new();
 
-    let (kb, _) = open_knowledge_base(home.path(), &cfg, Locale::English, Some(&stub))
-        .await
-        .unwrap();
+    let (kb, _) = open_knowledge_base(
+        home.path(),
+        &cfg,
+        Locale::English,
+        Some(&stub),
+        &mut |_, _| {},
+    )
+    .await
+    .unwrap();
 
     assert!(kb.passage_count().unwrap() > 0);
     assert_eq!(kb.embedding_count().unwrap(), 0);

@@ -11,9 +11,30 @@ use uuid::Uuid;
 
 use primer_core::storage::SessionStore;
 
+use tauri::{AppHandle, Emitter, Runtime};
+
 use crate::state::{ActiveSession, AppState};
-use crate::types::{LearnerSummary, SessionInfo, SessionListingDto};
-use crate::wiring;
+use crate::types::{
+    KB_EMBEDDING_EVENT, KbEmbeddingProgress, LearnerSummary, SessionInfo, SessionListingDto,
+};
+use crate::wiring::{self, LocaleStrategy};
+
+/// Build a session, forwarding first-run KB embed progress to the
+/// frontend as [`KB_EMBEDDING_EVENT`] (#393). An emit failure only warns:
+/// the progress line is cosmetic.
+async fn build_reporting_progress<R: Runtime>(
+    app: &AppHandle<R>,
+    state: &AppState,
+    strategy: LocaleStrategy,
+) -> Result<ActiveSession, String> {
+    let cfg = state.config.lock().await.clone();
+    wiring::build_with_strategy(&state.home, &cfg, strategy, &mut |done, total| {
+        if let Err(e) = app.emit(KB_EMBEDDING_EVENT, KbEmbeddingProgress { done, total }) {
+            tracing::warn!("emitting {KB_EMBEDDING_EVENT} failed: {e}");
+        }
+    })
+    .await
+}
 
 /// Construct an `ActiveSession` from the persisted settings and store
 /// it in `AppState`. Errors surface as `String` for inline rendering.
@@ -23,11 +44,13 @@ use crate::wiring;
 /// previous learner's state is saved as part of `close_session`'s
 /// internal drain.
 #[tauri::command]
-pub async fn start_session(state: tauri::State<'_, AppState>) -> Result<SessionInfo, String> {
+pub async fn start_session<R: Runtime>(
+    app: AppHandle<R>,
+    state: tauri::State<'_, AppState>,
+) -> Result<SessionInfo, String> {
     prepare_for_session_change(&state).await?;
 
-    let cfg = state.config.lock().await.clone();
-    let active = wiring::build_active_session(&state.home, &cfg).await?;
+    let active = build_reporting_progress(&app, &state, LocaleStrategy::UseCfg).await?;
     let info = info_from(&active).await;
     *state.session.lock().await = Some(active);
     Ok(info)
@@ -73,7 +96,8 @@ pub async fn close_session(state: tauri::State<'_, AppState>) -> Result<(), Stri
 /// - No session with that id on disk → "session not found" error.
 /// - Construction failure (embedder, model resolution, etc.) → wiring-level error.
 #[tauri::command]
-pub async fn resume_session(
+pub async fn resume_session<R: Runtime>(
+    app: AppHandle<R>,
     state: tauri::State<'_, AppState>,
     session_id: String,
 ) -> Result<SessionInfo, String> {
@@ -82,8 +106,6 @@ pub async fn resume_session(
 
     prepare_for_session_change(&state).await?;
 
-    let cfg = state.config.lock().await.clone();
-
     // Issue #86: `build_active_session_for_resume` opens the session DB
     // exactly once, reads the persisted learner inline, and silently
     // inherits the persisted locale on mismatch (the cfg value reflects
@@ -91,7 +113,8 @@ pub async fn resume_session(
     // resumed session was originally tagged under). The pre-#86 path
     // opened the DB twice — once for a `probe_learner_locale` helper
     // and again for `build_active_session`.
-    let active = wiring::build_active_session_for_resume(&state.home, &cfg).await?;
+    let active =
+        build_reporting_progress(&app, &state, LocaleStrategy::InheritFromPersistedLearner).await?;
 
     let loaded = active
         .session_store
