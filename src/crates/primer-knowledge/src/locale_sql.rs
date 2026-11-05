@@ -23,6 +23,12 @@ pub(crate) struct LocaleSql {
     /// Embedding backfill upsert (the `--reembed` per-row path); binds
     /// `content_rowid`, `model_id`, `vec` as `?1..?3`.
     pub(crate) upsert_embedding: String,
+    /// Remove a row from the external-content FTS5 index; binds `rowid` as
+    /// `?4` and the row's stored `id`/`source`/`text` as `?1..?3` (FTS5's
+    /// `'delete'` command needs the old values to un-index them).
+    pub(crate) delete_fts: String,
+    /// Delete one content row by `rowid` (`?1`); its vector cascades.
+    pub(crate) delete_content: String,
     /// Resolve a content rowid from a passage id (`?1`); the per-row lookup
     /// inside `upsert_embedding`.
     pub(crate) select_rowid_by_id: String,
@@ -58,6 +64,11 @@ impl LocaleSql {
                     model_id = excluded.model_id,
                     vec      = excluded.vec"
             ),
+            delete_fts: format!(
+                "INSERT INTO {passages_table}({passages_table}, rowid, id, source, text)
+                 VALUES ('delete', ?4, ?1, ?2, ?3)"
+            ),
+            delete_content: format!("DELETE FROM {content_table} WHERE rowid = ?1"),
             select_rowid_by_id: format!("SELECT rowid FROM {content_table} WHERE id = ?1"),
             retrieve: format!(
                 "SELECT id, source, text, rank

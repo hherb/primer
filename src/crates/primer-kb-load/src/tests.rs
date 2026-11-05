@@ -719,3 +719,53 @@ async fn prepare_kb_reports_embed_progress_only_when_there_is_work() {
         "nothing to embed, nothing reported: {seen:?}"
     );
 }
+
+/// Issue #392: a seed passage edited under the same id replaces the cached
+/// row on top-up, and its stale vector is dropped so the embed step
+/// refills it. The unchanged passage keeps its vector.
+#[tokio::test]
+async fn prepare_kb_top_up_replaces_an_edited_seed_passage() {
+    let db = tempfile::NamedTempFile::new().unwrap();
+    let kb = SqliteKnowledgeBase::open_for_locale(db.path(), Locale::English).unwrap();
+    let stub = primer_embedding::StubEmbedder::with_dim(16);
+    let v1 = write_jsonl(&[PREP_P1, PREP_P2]);
+    prepare_kb(
+        &kb,
+        &[v1.path().to_path_buf()],
+        true,
+        Some(&stub),
+        &mut |_, _| {},
+    )
+    .await
+    .unwrap();
+
+    let edited = r#"{"id":"p1","source":"seed","license":"CC0-1.0","attribution":"x","text":"corrected volcano text"}"#;
+    let v2 = write_jsonl(&[edited, PREP_P2]);
+    let stats = prepare_kb(
+        &kb,
+        &[v2.path().to_path_buf()],
+        true,
+        Some(&stub),
+        &mut |_, _| {},
+    )
+    .await
+    .unwrap();
+
+    let seeded = stats.seeded.expect("top_up always loads");
+    assert_eq!(
+        (seeded.inserted, seeded.replaced, seeded.skipped_existing),
+        (0, 1, 1)
+    );
+    assert_eq!(stats.embedded, 1, "only the edited passage is re-embedded");
+    assert_eq!(kb.passage_count().unwrap(), 2);
+    assert_eq!(kb.embedding_count().unwrap(), 2);
+    let params = RetrievalParams {
+        top_k: 5,
+        min_score: f64::NEG_INFINITY,
+        source_filter: vec![],
+    };
+    let new = kb.retrieve("volcano", &params).await.unwrap();
+    assert_eq!(new.len(), 1);
+    assert_eq!(new[0].text, "corrected volcano text");
+    assert!(kb.retrieve("first", &params).await.unwrap().is_empty());
+}
