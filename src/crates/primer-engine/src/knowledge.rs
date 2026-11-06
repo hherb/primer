@@ -8,6 +8,7 @@
 use std::path::PathBuf;
 
 use primer_core::embedder::Embedder;
+use primer_core::error::{PrimerError, Result};
 use primer_core::i18n::Locale;
 use primer_kb_load::{EmbedProgress, PrepareStats};
 use primer_knowledge::SqliteKnowledgeBase;
@@ -28,38 +29,38 @@ use crate::paths::{KnowledgeDb, create_private_dir_all};
 ///
 /// `on_progress` sees the embed progress (see `prepare_kb`). An embed
 /// failure is soft, reported in [`PrepareStats::embed_error`]; an open or
-/// seed failure is an error naming the path.
+/// seed failure is a [`PrimerError::Knowledge`] naming the path.
 pub async fn open_prepared_kb(
     db: &KnowledgeDb,
     locale: Locale,
     seed_files: &[PathBuf],
     embedder: Option<&dyn Embedder>,
     on_progress: EmbedProgress<'_>,
-) -> Result<(SqliteKnowledgeBase, PrepareStats), String> {
+) -> Result<(SqliteKnowledgeBase, PrepareStats)> {
     let path = db.path();
     let is_cache = matches!(db, KnowledgeDb::Cache(_));
     // The cache is derived data the user never chose, so say what it is.
+    // No "knowledge base" here: `PrimerError::Knowledge` already says it.
     let what = if is_cache {
-        format!(
-            "knowledge base {} (a rebuildable cache: safe to delete)",
-            path.display()
-        )
+        format!("{} (a rebuildable cache: safe to delete)", path.display())
     } else {
-        format!("knowledge base {}", path.display())
+        path.display().to_string()
+    };
+    let fail = |step: &str, e: &dyn std::fmt::Display| {
+        PrimerError::Knowledge(format!("{step} {what}: {e}"))
     };
     if is_cache && let Some(dir) = path.parent() {
-        create_private_dir_all(dir)
-            .map_err(|e| format!("creating the directory of {what}: {e}"))?;
+        create_private_dir_all(dir).map_err(|e| fail("creating the directory of", &e))?;
     }
-    let kb = SqliteKnowledgeBase::open_for_locale(&path, locale)
-        .map_err(|e| format!("opening {what}: {e}"))?;
+    let kb =
+        SqliteKnowledgeBase::open_for_locale(&path, locale).map_err(|e| fail("opening", &e))?;
     let embed_with = match db {
         KnowledgeDb::Explicit(_) => None,
         _ => embedder,
     };
     let stats = primer_kb_load::prepare_kb(&kb, seed_files, is_cache, embed_with, on_progress)
         .await
-        .map_err(|e| format!("seeding {what}: {e}"))?;
+        .map_err(|e| fail("seeding", &e))?;
     tracing::info!(
         target: "primer::startup",
         path = %path.display(),

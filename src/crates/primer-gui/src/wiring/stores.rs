@@ -215,6 +215,7 @@ pub(super) async fn open_knowledge_base(
         embedder,
         on_progress,
     )
-    .await?;
+    .await
+    .map_err(|e| e.to_string())?;
     Ok((knowledge, prepared.embed_error))
 }

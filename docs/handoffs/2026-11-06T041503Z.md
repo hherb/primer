@@ -12,7 +12,7 @@
 ## What we shipped this session
 
 ### #402 — `ae81444` + this brief's commit: closes #395
-- **New `primer_engine::open_prepared_kb(&KnowledgeDb, locale, seed_files, embedder, on_progress) -> Result<(SqliteKnowledgeBase, PrepareStats), String>`** in `primer-engine/src/knowledge.rs`. It owns the KB startup policy:
+- **New `primer_engine::open_prepared_kb(&KnowledgeDb, locale, seed_files, embedder, on_progress) -> primer_core::error::Result<(SqliteKnowledgeBase, PrepareStats)>` (errors are `PrimerError::Knowledge` naming the path)** in `primer-engine/src/knowledge.rs`. It owns the KB startup policy:
   - **Cache:** creates the parent dir (owner-only), tops up, embeds.
   - **Explicit:** seeded only when empty, never embedded.
   - **InMemory:** seeded, and embedded when an embedder is given.
@@ -72,7 +72,7 @@ Still not watched in the real webview: `mv ~/.primer/kb ~/.primer/kb.bak`, launc
 ### This session (#402)
 - **The CLI embed hint now prints after seeding, not before.** On a fresh cache the seed load (~a second) runs before the line appears. On a cache that is already complete, the hint is now correctly silent; the old pre-check could misfire.
 - **The GUI "knowledge base ready" log target changed** from `primer-gui::startup` to `primer::startup`. Anything filtering `gui.log` by the old target would miss it. Nothing in-repo does.
-- **The helper returns `String` errors** (the GUI's convention). The CLI wraps them with `anyhow::Error::msg`, so the CLI error text lost its `anyhow` context chain. The text is now "opening knowledge base <path> …: <cause>", in one line.
+- **The helper returns `PrimerError::Knowledge`** (switched from `String` in review, per the CLAUDE.md error rule). The CLI propagates it with plain `?`; the GUI converts with `.map_err(|e| e.to_string())`. The text is "Knowledge base error: opening <path> …: <cause>", in one line.
 - **The `primer-engine` dep graph grew:** it now pulls `primer-kb-load`, and with it `clap` + `tracing-subscriber` as normal deps. Both binaries already had these.
 
 ### From #399 / #400 (merged)

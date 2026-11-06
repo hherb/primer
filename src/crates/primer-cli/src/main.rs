@@ -1130,8 +1130,10 @@ async fn async_main() -> anyhow::Result<()> {
         embedder.as_ref().map(|e| e.model_id()),
         cli.no_persist,
     );
-    // `(0, total)` comes once, before the first batch, and only when a
-    // passage lacks a vector: a fresh or grown cache, or `:memory:`.
+    // `(0, total)` comes once, before the first batch, and only when there
+    // is something to embed: a passage lacks a vector (a fresh or grown
+    // cache, or `:memory:`), or a model re-registered at a new dim forces
+    // a full re-embed.
     let mut announce_embed = |done: usize, total: usize| {
         if done == 0 && total > 0 {
             eprintln!(
@@ -1146,8 +1148,7 @@ async fn async_main() -> anyhow::Result<()> {
         embedder.as_deref(),
         &mut announce_embed,
     )
-    .await
-    .map_err(anyhow::Error::msg)?;
+    .await?;
     if let Some(e) = &prepared.embed_error {
         eprintln!(
             "Warning: knowledge search is partly keyword-only (BM25): embedding failed ({e}); \

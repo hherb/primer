@@ -39,6 +39,15 @@ async fn cache_creates_its_dir_tops_up_and_embeds() {
     assert_eq!(stats.embedded, 1);
     assert!(stats.embed_error.is_none());
     assert_eq!(progress.first(), Some(&(0, 1)));
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let mode = std::fs::metadata(tmp.path().join("a/b/kb"))
+            .unwrap()
+            .permissions()
+            .mode();
+        assert_eq!(mode & 0o777, 0o700, "the cache dir is owner-only");
+    }
     drop(kb);
 
     // A grown corpus reaches the existing cache: top-up, not seed-when-empty.
@@ -92,5 +101,26 @@ async fn a_failed_open_names_the_path() {
         .await
         .err()
         .expect("opening a directory must fail");
+    let err = err.to_string();
     assert!(err.contains(&tmp.path().display().to_string()), "{err}");
+}
+
+#[tokio::test]
+async fn a_failed_seed_names_the_path() {
+    let tmp = tempfile::tempdir().unwrap();
+    let path = tmp.path().join("mine.db");
+    let bad = vec![write_corpus(tmp.path(), "bad.en.jsonl", &[P1, "{not json"])];
+    let err = open_prepared_kb(
+        &KnowledgeDb::Explicit(path.clone()),
+        Locale::English,
+        &bad,
+        None,
+        &mut |_, _| {},
+    )
+    .await
+    .err()
+    .expect("a malformed seed line must fail")
+    .to_string();
+    assert!(err.contains("seeding"), "{err}");
+    assert!(err.contains(&path.display().to_string()), "{err}");
 }
