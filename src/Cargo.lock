@@ -3592,8 +3592,10 @@ dependencies = [
 name = "primer-engine"
 version = "0.1.0"
 dependencies = [
+ "async-trait",
  "chrono",
  "dotenvy",
+ "futures",
  "primer-classifier",
  "primer-comprehension",
  "primer-core",

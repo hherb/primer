@@ -1,62 +1,78 @@
 # Primer — Next Session Brief
 
 **Audience:** future Claude Code session continuing work on this repo.
-**Last updated:** 2026-11-06 04:15 (UTC).
+**Last updated:** 2026-11-06 (UTC).
 
-**One PR is open against `main`:** **#402** (`fix/kb-open-helper-395`), which closes #395. This brief rides on it.
+**Two PRs are open against `main`:**
+- **#403** (`fix/stub-subsystem-model-warn-365`) closes #365 and #362. This brief rides on it.
+- **#405** (`fix/kb-cache-per-seed-dir-401`) closes #401 and adds the `finalcheck` skill.
 
-- **`main` is at `54ef3cc`** (#400).
+The two touch different files and merge in either order.
 
-**Since the last brief:** #399 and #400 merged; #391 and #398 are CLOSED.
+- **`main` is at `7e8f2c5`** (#402).
+
+**Since the last brief:** #402 merged; #395 is CLOSED.
 
 ## What we shipped this session
 
-### #402 — `ae81444` + this brief's commit: closes #395
-- **New `primer_engine::open_prepared_kb(&KnowledgeDb, locale, seed_files, embedder, on_progress) -> primer_core::error::Result<(SqliteKnowledgeBase, PrepareStats)>` (errors are `PrimerError::Knowledge` naming the path)** in `primer-engine/src/knowledge.rs`. It owns the KB startup policy:
-  - **Cache:** creates the parent dir (owner-only), tops up, embeds.
-  - **Explicit:** seeded only when empty, never embedded.
-  - **InMemory:** seeded, and embedded when an embedder is given.
-  - It also logs "knowledge base ready" (target `primer::startup`).
-- **Callers:** both the CLI `async_main` KB block and the GUI `wiring/stores.rs::open_knowledge_base` call it, after `resolve_knowledge_db`.
-  - **CLI:** the "Embedding the knowledge base…" hint now prints from the progress callback's `(0, total > 0)` call. It replaces a pre-check that guessed via `passage_count` / `passages_missing_embedding`.
-  - **Error wording:** the "(a rebuildable cache: safe to delete)" hint is in the helper's error text, so the GUI gets it too.
-- **Deps:** `primer-engine` now depends on `primer-knowledge` + `primer-kb-load`. `primer-cli` dropped its unused `primer-knowledge` dep (the CLI file is 1422 → 1377 lines).
-- **Tests:** 4 in `primer-engine/src/knowledge/tests.rs`, one per variant plus open-error wording.
-  - Mutation-checked: `top_up=false`, embedding Explicit, and skipping the dir creation each fail one test.
-  - The GUI `stage_tests.rs` `knowledge_base_*` tests are unchanged and green.
-- **Docs:** one sentence in the CLAUDE.md hybrid-retrieval bullet. README and ROADMAP: no change (internal wiring only).
+### #403 — `87dd4b6` + this brief's commit: closes #365 and #362
+- **#365:** a new pure `stub_ignores_model(served_kind, backend_override, model) -> Option<&'static str>` in `primer-engine/src/wiring/subsystems.rs` replaces the three duplicated "model ignored" warn blocks in `build_classifier` / `build_extractor` / `build_comprehension`.
+  - It now also warns on the `("stub", None)` arm: a stub primary, or a stub fallback serving alone under `PrimaryUnavailable`. That override used to vanish silently.
+  - Behaviour is unchanged (the stub still wins); only the log line is new. The message is `--<subsystem>-model ignored: <reason> (deterministic, no model)`.
+- **#362:** `classifier_without_override_classifies_through_main_backend` (in `wiring/classifier_construction_tests.rs`) gives `build_classifier` a canned-JSON main backend under an `openai-compat` served kind. It asserts `classify` returns the canned assessment, which a freshly built backend could not produce.
+  - The pin lives in the engine, where `build_classifier` is, not in the GUI `stage_tests.rs` the issue named. The GUI test only reaches the same function.
+- **Tests:** 4 for the helper, plus 1 for inheritance. Mutation-checked: dropping the `("stub", None)` arm fails one; swapping `Arc::clone` for `build_backend` fails the other.
+- **Deps:** `primer-engine` gained dev-deps `async-trait` + `futures` (for the test double).
+- **Docs:** README, ROADMAP and CLAUDE.md: no change (log line plus tests only).
 
-### Gate
-- `cargo test --workspace`: 1499/0.
-- clippy `-D warnings`: workspace `--all-targets`, `primer-gui --features speech`, `primer-gui --features android-native`, `primer-cli --features speech`, `primer-cli --no-default-features`.
+### #405 — `ae098a5` + `1f7b453`: closes #401; tracks the project skills
+- **#401 (your option (a)):** the KB cache is now `~/.primer/kb/<slug(model)>-<fnv1a-64 hex of the canonical seed dir>.db`, or `<slug>.db` when no seed file is found.
+  - New `primer_engine::seed_corpus_dir(seed_files)`; `resolve_knowledge_db` takes `seed_dir`. The CLI and the GUI (`wiring/stores.rs`) discover the seed files once and pass them to both calls.
+  - The hash is FNV-1a, not std's hasher, so the file name survives Rust upgrades. A test pins the literal (`bge-m3-07d65507b49cba97.db` for `/s`).
+  - The GUI stage test `knowledge_base_with_embedder_is_an_embedded_per_model_cache` now resolves with the seed dir, so a caller passing `None` fails it (mutation-checked).
+  - Docs: the CLAUDE.md `--knowledge-db` + hybrid-gate bullets, the README CLI flag table, and the CLI `--knowledge-db` doc comment.
+- **Skills:** `.gitignore` is now `.claude/*` + `!.claude/skills/`, so `finalcheck`, `fixall` and `nextsession` are tracked. Settings and worktrees stay local.
+  - `finalcheck` was adapted from `~/src/secretary`: primer's `ci.yml` jobs with local repro commands, an explicit `origin/main` merge before `fixall` (ours doesn't merge), the NEXT_SESSION/handoff exact-copy rule, `cancel-in-progress` semantics, the docs-only gap (#404), and the checks CI doesn't run.
+- **Filed #404:** branch protection already requires `cargo test (default features)`, but `ci.yml`'s workflow-level `paths-ignore` means a docs-only PR never posts it.
+- **Gate:** `RUSTFLAGS=-D warnings cargo test --workspace --no-fail-fast` 1502/0. Clippy `-D warnings` on the workspace, `primer-gui --features speech`, `primer-cli --features speech` and `primer-gui --features android-native`; fmt; rustdoc. The fastembed recall tests were not run (no retrieval code changed).
+
+### Gate (#403)
+- `cargo test --workspace`: 1505/0.
+- clippy `-D warnings`: workspace `--all-targets` and `primer-gui --features speech`.
 - fmt and workspace rustdoc.
-- CLI smoke run: `echo bye | cargo run --bin primer -- --no-persist --embedder-backend stub` prints the hint once.
-- **Not run:** the rustdoc feature-arm loop, and the fastembed hybrid tests. No retrieval code changed.
+- **Not run:** the other clippy feature arms and the rustdoc feature-arm loop. Only `primer-engine` default-feature code changed.
 
 > SHAs are branch-tip commits as pushed; squash-merge gives new ones on `main`.
 
 ### Per-session sweep
-- **Inline-test detector:** clean for the twenty-sixth session running.
-- **Oversized list:** production files over 500 are `primer-cli/src/main.rs` 1377 (was 1422), `primer-speech/src/macos/tts.rs` 668, `primer-inference/src/qnn/genie/real.rs` 566, `state_machine/inner.rs` 506, `primer-speech/src/macos/stt.rs` 504.
+- **Inline-test detector:** clean for the twenty-seventh session running.
+- **Oversized list:** unchanged. Production files over 500 lines: `primer-cli/src/main.rs` 1378, `primer-speech/src/macos/tts.rs` 668, `primer-inference/src/qnn/genie/real.rs` 566, `state_machine/inner.rs` 506, `primer-speech/src/macos/stt.rs` 504.
 
 ## What's next (concrete acceptance criteria)
 
-### 0. Owner review/merge: #402
-- **Acceptance:** CI green and merged; then `gh issue view 395 --json state` shows CLOSED.
+### 0. Owner review/merge: #403 and #405
+- **Acceptance:** CI green and both merged. Then `gh issue view <n> --json state` shows CLOSED for 365, 362 and 401.
+- Try `/finalcheck` on one of them: it is new, so watch whether its repro commands match what CI runs.
 
 ### 1. Sweep + inline-test detector: re-run EVERY session
 Commands are in the resume block.
 
-### 2. Manual first-run GUI check for #396 (owner)
+### 2. #404: docs-only PRs vs the required check
+- **Acceptance:** a PR touching only `*.md` gets a passing `cargo test (default features)` (or skipped, which counts as passing) without running the heavy jobs.
+- Also refresh the stale `ci.yml` header comment that says branch protection "is not yet wired".
+- This is a CI-config change, so confirm the approach with the owner first (`dorny/paths-filter` + job-level `if:` is the recommendation in the issue).
+
+### 3. Manual first-run GUI check for #396 (owner)
 Still not watched in the real webview: `mv ~/.primer/kb ~/.primer/kb.bak`, launch the GUI, Start new → Save & start; the button should count "… 0 / 91" upward.
 
-### 3. Other bugs (host-completable; TDD each)
+### 4. Other bugs (host-completable; TDD each)
+- **#364:** a CLI test seam for subsystem wiring under `PrimaryUnavailable`. It is the closest to this session's work.
 - **#371:** needs a `JoinHandle::abort` design note first.
 - **#352 remaining:** item 2 needs the owner decision below; items 1 and 4 need a design note first.
-- **Older:** #312, #315, #316, #325/#326, #362, #364, #365. Run `gh issue list` to pick; read each before starting.
+- **Older:** #312, #315, #316, #325/#326. Run `gh issue list` to pick; read each before starting.
 
-### 4. Production-code splits (owner-approved lane, all feature-gated, so dual-verify)
-- **`primer-inference/src/qnn/genie/real.rs`** (566, `qnn`) is the recommended one; then `primer-speech/src/macos/{tts.rs, stt.rs}`; `primer-cli/src/main.rs` (1377) is the hardest.
+### 5. Production-code splits (owner-approved lane, all feature-gated, so dual-verify)
+- **`primer-inference/src/qnn/genie/real.rs`** (566, `qnn`) is the recommended one; then `primer-speech/src/macos/{tts.rs, stt.rs}`; `primer-cli/src/main.rs` (1378) is the hardest.
 
 ### Carried / owner-or-hardware-gated
 - **#260:** Android-voice on-device acceptance; also check that a denied mic keeps the text session (#369).
@@ -64,16 +80,35 @@ Still not watched in the real webview: `mv ~/.primer/kb ~/.primer/kb.bak`, launc
 - **#170 Stages B, E and F:** the OpenRAIL-M disclosure ships before any default flip.
 - **#166 item #1:** WhisperStream reuse smoke.
 - **#135:** glib (blocked on Tauri 3).
-- **Branch protection:** make `cargo test (default features)` a required check.
 - **Other:** QNN token stability, NPU tuning, latency-routing calibration.
 
 ## Open decisions / risks
 
-### This session (#402)
-- **The CLI embed hint now prints after seeding, not before.** On a fresh cache the seed load (~a second) runs before the line appears. On a cache that is already complete, the hint is now correctly silent; the old pre-check could misfire.
-- **The GUI "knowledge base ready" log target changed** from `primer-gui::startup` to `primer::startup`. Anything filtering `gui.log` by the old target would miss it. Nothing in-repo does.
-- **The helper returns `PrimerError::Knowledge`** (switched from `String` in review, per the CLAUDE.md error rule). The CLI propagates it with plain `?`; the GUI converts with `.map_err(|e| e.to_string())`. The text is "Knowledge base error: opening <path> …: <cause>", in one line.
-- **The `primer-engine` dep graph grew:** it now pulls `primer-kb-load`, and with it `clap` + `tracing-subscriber` as normal deps. Both binaries already had these.
+### This session (#403)
+- **The new warn fires on a stub primary run with a `--*-model` override.** Before, that run was silent. Under the default `RUST_LOG` it shows on stderr. Nothing in-repo passes that combination.
+- **The warn text now says "the subsystem backend is stub" / "the served backend is stub"** instead of naming `--<subsystem>-backend`. Anything grepping logs for the old wording would miss it. Nothing in-repo does.
+- **#362's pin covers `build_classifier` only.** Extractor and comprehension were already pinned by their ids (`llm:<backend>:<model>`).
+
+### #405 (#401)
+- **Upgrade cost:** existing `~/.primer/kb/<model>.db` caches are left in place (safe to delete) and orphaned. The first start after upgrading re-embeds into the new file: ~100 s on BGE-M3 for EN, again for DE. No automatic adoption: renaming a live SQLite file with sidecars wasn't worth the risk for a rebuildable cache.
+- **Orphans accumulate**, one per seed dir ever used (a few MB each). Nothing cleans them.
+- **A moved checkout or a renamed app bundle is a new folder**, so it costs one full re-embed.
+- **No seed files found** falls back to `<model>.db`, the legacy name. With an empty corpus `prepare_kb` prunes nothing, so a legacy cache stays intact.
+- **The CLI's caller has no test seam** (same as #364). Only the GUI caller is pinned.
+
+### #401: how should the KB cache be keyed? (DECIDED: (a), shipped in #405)
+Today the cache file is `~/.primer/kb/<slug(model)>.db`. Two seed corpora on one machine (an installed `.app` plus a dev checkout) prune and re-embed each other on every switch. Nothing is lost, but each switch re-embeds the differing passages.
+- (a) Key by model **plus a short hash of the canonical seed-dir path**. Each corpus location gets its own cache. Edits in place still go through the incremental #392/#398 path. Old caches pile up, one per seed dir, a few hundred KB each.
+- (b) Key by model plus a **content** hash, as the issue suggests. Every corpus edit then orphans the whole cache and re-embeds all ~91 passages (~100 s on BGE-M3), which throws away #392's incremental replace.
+- (c) Accept the flip as designed; the `prepare_kb` docs already say the cache mirrors the discovered corpus.
+
+**Owner chose (a)**, shipped in #405.
+
+### From #402 (merged)
+- **The CLI embed hint prints after seeding, not before.** On a cache that is already complete it is correctly silent.
+- **The GUI "knowledge base ready" log target is now `primer::startup`** (was `primer-gui::startup`).
+- **`open_prepared_kb` returns `PrimerError::Knowledge`**; the GUI converts it with `.map_err(|e| e.to_string())`.
+- **`primer-engine` now pulls `primer-kb-load`**, and with it `clap` + `tracing-subscriber` as normal deps.
 
 ### From #399 / #400 (merged)
 - **#399: folding is per lookup, not per list.** Two different words that fold to one key both count as stopwords. Today this is harmless (`würde`/`wurde`, `hätte`/`hatte` are both on the list or both filler). Re-check whenever a new umlaut word is added.
@@ -141,6 +176,8 @@ Still not watched in the real webview: `mv ~/.primer/kb ~/.primer/kb.bak`, launc
 
 ## Patterns to reuse, not reinvent
 
+- **Proving an `Arc` is shared, not rebuilt (new):** when an id can't tell a clone from a fresh build, hand in a test double whose output no real backend could produce (canned engagement JSON), and assert the consumer returns it. See `CannedAssessmentBackend` in `primer-engine/src/wiring/classifier_construction_tests.rs`.
+- **Warn-only branches (new):** pull the condition into a pure `fn … -> Option<&'static str>` reason and test that, instead of capturing `tracing` output. See #403's `stub_ignores_model`.
 - **Startup hints from progress callbacks (new):** instead of pre-checking state to guess whether a slow step will run, print from the step's own progress callback on its first `(0, total > 0)` call. #402's CLI embed hint was the example.
 - **Python edit guards: assert per replacement, not a total count (new):** a file-wide `s.count(', None)')` also matched an unrelated earlier line and aborted the write. Use a `sub(a, b)` helper that asserts `s.count(a) == 1` for each edit.
 - **Diacritic-insensitive matching (new):** `unicode_normalization::{UnicodeNormalization, char::is_combining_mark}`: `s.nfd().filter(|c| !is_combining_mark(*c)).flat_map(char::to_lowercase)` reproduces FTS5 `unicode61` folding. It does not fold `ß`.
@@ -189,7 +226,7 @@ Still not watched in the real webview: `mv ~/.primer/kb ~/.primer/kb.bak`, launc
 
 ```bash
 cd /Users/hherb/src/primer && git status --short && git checkout main && git pull --ff-only && git log --oneline -6 && gh pr list --state open
-# Open at close: #402. After merge: gh issue view 395 --json state
+# Open at close: #403, #405. After merge: for n in 365 362 401; do gh issue view $n --json state; done
 S=/private/tmp/primer-scratch; mkdir -p "$S"   # or the session's scratchpad dir
 
 # === Oversized-file sweep + inline-test detector (re-verify EVERY session) ===
@@ -198,8 +235,9 @@ find crates -name '*.rs' -not -path '*/vendor/*' -not -name 'tests.rs' | xargs w
 for f in $(find crates -name '*.rs' -not -path '*/vendor/*' -not -name 'tests.rs' | xargs wc -l | awk '$1>500 && $2!="total"{print $2}'); do \
   awk '/#\[cfg\(test\)\]/{ln=NR} ln && NR==ln+1 && /^[[:space:]]*mod .*\{/{print FILENAME" inline mod @"NR}' "$f"; done
 
-# === #402 regression checks ===
-~/.cargo/bin/cargo test -p primer-engine --lib knowledge
+# === #403 / #405 regression checks ===
+~/.cargo/bin/cargo test -p primer-engine --lib classifier_construction
+~/.cargo/bin/cargo test -p primer-engine --lib paths
 ~/.cargo/bin/cargo test -p primer-gui --lib knowledge_base
 
 # === Pick the next bug ===
@@ -224,4 +262,5 @@ for spec in "-p primer-speech --features voice-loop,silero,whisper,piper,cpal,su
 
 ## Reporting back
 
-- **#402:** the desktop app and the command-line Primer now share one tested piece of code to open and prepare the built-in library. Previously each had its own copy, and only the desktop copy was tested, so a mistake in the command-line copy could have shipped unnoticed. Nothing changes for the child. Closes #395.
+- **#403:** if the main model is the built-in test stand-in and someone asks for a specific model for one of the helper checks (engagement, concepts, comprehension), the Primer used to drop that request without a word. Now it logs a warning. A new test also proves the engagement check shares the main model, which is how it inherits the cloud fallback. Nothing changes for the child. Closes #365 and #362.
+- **#405:** the built-in library's saved cache is now kept separately for each copy of the library on the computer, so an installed app and a developer copy no longer overwrite each other's work. Expect one slow first start after updating while it rebuilds. The PR also adds a `/finalcheck` command for the final review-and-CI pass before merging. Closes #401.

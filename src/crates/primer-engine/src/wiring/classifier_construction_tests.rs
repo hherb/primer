@@ -1,5 +1,7 @@
 use super::*;
 use primer_classifier::ClassifierSettings;
+use primer_core::inference::InferenceBackend;
+use std::sync::Arc;
 
 /// Build a minimal `BackendParams` for testing.
 fn params_with(classifier_backend: Option<&str>, classifier_model: Option<&str>) -> BackendParams {
@@ -156,4 +158,103 @@ async fn unknown_classifier_backend_returns_error() {
         result.is_err(),
         "should error when --classifier-backend names an unknown backend"
     );
+}
+
+// ── Arc::clone inheritance, pinned behaviourally (issue #362) ──────────────
+
+/// Main-backend double whose every reply is one canned engagement-assessment
+/// JSON. A freshly built backend could never produce it, so a classifier that
+/// returns it must be talking to this exact instance.
+struct CannedAssessmentBackend;
+
+const CANNED_ASSESSMENT: &str =
+    r#"{"state": "FrustratedStuck", "confidence": 0.85, "reasoning": "canned"}"#;
+
+#[async_trait::async_trait]
+impl InferenceBackend for CannedAssessmentBackend {
+    fn name(&self) -> &str {
+        "canned"
+    }
+
+    async fn is_available(&self) -> bool {
+        true
+    }
+
+    async fn generate_stream(
+        &self,
+        _prompt: &primer_core::inference::Prompt,
+        _params: &primer_core::inference::GenerationParams,
+    ) -> primer_core::error::Result<primer_core::inference::TokenStream> {
+        let chunk = primer_core::inference::TokenChunk {
+            text: CANNED_ASSESSMENT.into(),
+            done: true,
+            ..Default::default()
+        };
+        Ok(Box::pin(futures::stream::once(async move { Ok(chunk) })))
+    }
+}
+
+/// No `--classifier-*` override on a non-stub served kind: the classifier
+/// must reuse the main backend via `Arc::clone` (that is how it inherits a
+/// `FallbackBackend` / `RouterBackend`). The id (`llm:<model>`) carries no
+/// backend name, so only a real `classify` call can tell a clone from a
+/// fresh `build_backend("openai-compat", …)`, which would get no canned reply.
+#[tokio::test]
+async fn classifier_without_override_classifies_through_main_backend() {
+    use primer_core::classifier::EngagementContext;
+    use primer_core::learner::EngagementState;
+
+    let params = params_with(None, None);
+    let main: Arc<dyn InferenceBackend> = Arc::new(CannedAssessmentBackend);
+    let c = build_classifier(
+        main,
+        "openai-compat",
+        "inherited-model",
+        &params,
+        ClassifierSettings::default(),
+    )
+    .await
+    .unwrap();
+    let a = c
+        .classify(EngagementContext {
+            recent_child_turns: &[],
+            prior_assessments: &[],
+        })
+        .await
+        .unwrap();
+    assert_eq!(a.state, EngagementState::FrustratedStuck);
+}
+
+// ── stub_ignores_model (issue #365) ─────────────────────────────────────────
+// Shared by all three subsystem builders: says why a `--*-model` override has
+// no effect, so the builder can warn instead of dropping it silently.
+
+use super::subsystems::stub_ignores_model;
+
+/// Explicit `--*-backend stub` + a model: ignored (the pre-#365 warning).
+#[test]
+fn stub_ignores_model_explicit_stub_override() {
+    assert!(stub_ignores_model("ollama", Some("stub"), Some("m")).is_some());
+}
+
+/// Served backend is stub, no subsystem backend, a model: ignored. This is the
+/// case #365 found silent (stub primary, or a stub fallback serving alone).
+#[test]
+fn stub_ignores_model_stub_served_backend() {
+    assert!(stub_ignores_model("stub", None, Some("m")).is_some());
+}
+
+/// No model override: nothing to ignore, whatever the backends are.
+#[test]
+fn stub_ignores_model_no_model_is_none() {
+    assert_eq!(stub_ignores_model("stub", None, None), None);
+    assert_eq!(stub_ignores_model("ollama", Some("stub"), None), None);
+}
+
+/// A model that takes effect (non-stub served kind or explicit non-stub
+/// subsystem backend) is not reported — even when the served kind is stub.
+#[test]
+fn stub_ignores_model_effective_model_is_none() {
+    assert_eq!(stub_ignores_model("ollama", None, Some("m")), None);
+    assert_eq!(stub_ignores_model("stub", Some("ollama"), Some("m")), None);
 }
