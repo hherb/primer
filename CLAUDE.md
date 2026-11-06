@@ -50,7 +50,7 @@ git config core.hooksPath .githooks
 
 Bypass a single commit with `git commit --no-verify`. Disable permanently with `git config --unset core.hooksPath`. The CI step in [.github/workflows/ci.yml](.github/workflows/ci.yml) is the source of truth; the hook is an early-warning copy so drift fails locally instead of after a CI round-trip. The hook skips (with a one-line warning) when `cargo` isn't on `PATH` and `$CARGO` is unset, so docs-only contributors aren't forced to install rustup.
 
-**Branch protection is the structural fix** for `main`. The recommended setup, configurable from GitHub repo settings, is to require the `cargo test (default features)` status check before merging to `main`. The local hook complements but does not replace this — the local hook closes the loop for direct `git commit` use; branch protection closes it at the merge boundary regardless of contributor discipline. Closes issue #96.
+**Branch protection is the structural fix** for `main`, and it is wired: the `cargo test (default features)` status check is required before merging to `main`. A docs-only PR still gets that check: `ci.yml` no longer skips the whole workflow on `pull_request`; a cheap `changes` job (`dorny/paths-filter`) decides whether anything but `**/*.md` / `docs/**` / `.gitignore` / `LICENSE` changed, and the heavy jobs are skipped via `if:` otherwise (a skipped job counts as passing). The gate fails open: a failed `changes` job runs the heavy jobs anyway (issue #404). The local hook complements but does not replace this — the local hook closes the loop for direct `git commit` use; branch protection closes it at the merge boundary regardless of contributor discipline. Closes issue #96.
 
 ## Architecture: trait-based hardware abstraction
 

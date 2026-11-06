@@ -1,9 +1,9 @@
 name: CI
 
-# Skip the workflow for changes that touch only documentation surfaces.
+# Skip the heavy jobs for changes that touch only documentation surfaces.
 # Rationale (closes #168):
 #   - macOS-runner minutes are ~10× the cost of Linux minutes on GitHub's
-#     billing. A docs-only push (README, ROADMAP, CLAUDE.md, NEXT_SESSION.md,
+#     billing. A docs-only change (README, ROADMAP, CLAUDE.md, NEXT_SESSION.md,
 #     anything under docs/, handoff snapshots) cannot break the build, so
 #     spinning up the macOS feature-combos drift-guard + the Android
 #     cross-compile + the Linux test/clippy jobs is pure waste.
@@ -17,17 +17,21 @@ name: CI
 #     `data/seed/` (corpus JSONL) or `data/ingest/` (Python ingest pipeline)
 #     can change retrieval-quality test expectations and MUST run CI.
 #
-# Branch-protection caveat: if `cargo test (default features)` is wired as
-# a required status check on `main` (still overdue per CLAUDE.md), a
-# docs-only PR would be stuck waiting for a job that never runs. Two known
-# mitigations:
-#   1. "Skipped-but-required" stub job whose name matches the required-check
-#      name and always passes on docs-only paths.
-#   2. Per-job `paths:` allowlists so non-matching jobs get a `skipped`
-#      conclusion (which branch protection accepts as passing).
-# Branch protection is not yet wired, so the simpler workflow-level
-# `paths-ignore` is sufficient today. Revisit at the same time as flipping
-# the branch-protection setting.
+# How (issue #404): `cargo test (default features)` is a required status
+# check on `main`. A workflow-level `paths-ignore` on `pull_request` would
+# skip the whole workflow, so a docs-only PR would never post that check and
+# could not merge. Instead, every PR runs the cheap `changes` job, and each
+# heavy job is skipped via `if:` when the filter says `code == 'false'`. A job
+# skipped by `if:` reports success to branch protection, so docs-only PRs go
+# green while the runner minutes are still saved. The gate fails OPEN: if the
+# `changes` job itself fails, the heavy jobs still run (`!cancelled()` lifts
+# the implicit `success()`), because a failed `needs:` would otherwise skip
+# them, and a skipped required check would pass a PR nothing checked. The ignore list lives in ONE place:
+# the `changes` job's filter (plus the `push` paths-ignore below).
+#
+# On `push` to `main` the filter step does not run (its output is empty, so
+# `!= 'false'` runs every job); the workflow-level `paths-ignore` there is
+# still the skip, because nothing is required on a push.
 on:
   push:
     branches: [main]
@@ -37,11 +41,6 @@ on:
       - '.gitignore'
       - 'LICENSE'
   pull_request:
-    paths-ignore:
-      - '**/*.md'
-      - 'docs/**'
-      - '.gitignore'
-      - 'LICENSE'
 
 permissions:
   contents: read
@@ -55,11 +54,40 @@ env:
   CARGO_TERM_COLOR: always
 
 jobs:
+  # Decides whether a PR touches anything but the documentation surfaces
+  # (see the header). `code` is 'true' when at least one changed file is
+  # outside the ignore list; 'false' for a docs-only PR; empty on push.
+  changes:
+    name: detect code changes
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      pull-requests: read
+    outputs:
+      code: ${{ steps.filter.outputs.code }}
+    steps:
+      - id: filter
+        if: github.event_name == 'pull_request'
+        uses: dorny/paths-filter@v3
+        with:
+          # A file counts only if it matches EVERY pattern: inside '**' and
+          # outside each '!' exclusion.
+          predicate-quantifier: every
+          filters: |
+            code:
+              - '**'
+              - '!**/*.md'
+              - '!docs/**'
+              - '!.gitignore'
+              - '!LICENSE'
+
   # Default-feature build + test on Linux. The full speech-feature build
   # needs ONNX Runtime + espeak-ng and significantly more time; left to a
   # later workflow once the speech path stabilises.
   test:
     name: cargo test (default features)
+    needs: changes
+    if: ${{ !cancelled() && (needs.changes.result != 'success' || needs.changes.outputs.code != 'false') }}
     runs-on: ubuntu-latest
     defaults:
       run:
@@ -150,6 +178,8 @@ jobs:
   # runners; see issues #129 and #151 for the broader matrix proposal.
   feature-combos:
     name: cargo check (non-default features)
+    needs: changes
+    if: ${{ !cancelled() && (needs.changes.result != 'success' || needs.changes.outputs.code != 'false') }}
     runs-on: ubuntu-latest
     defaults:
       run:
@@ -344,6 +374,8 @@ jobs:
   #   addition until a bug actually surfaces.
   feature-combos-macos:
     name: cargo clippy (macOS feature combos)
+    needs: changes
+    if: ${{ !cancelled() && (needs.changes.result != 'success' || needs.changes.outputs.code != 'false') }}
     runs-on: macos-latest
     # Defensive cap on macOS-runner billing. macOS minutes are ~10× the
     # cost of Linux minutes; a wedged clippy invocation should not be
@@ -421,6 +453,8 @@ jobs:
   # documented in docs/devel/redmagic-termux-quickstart.md.
   android-cross-compile:
     name: cargo build (aarch64-linux-android)
+    needs: changes
+    if: ${{ !cancelled() && (needs.changes.result != 'success' || needs.changes.outputs.code != 'false') }}
     runs-on: ubuntu-latest
     defaults:
       run:
@@ -621,6 +655,8 @@ jobs:
   # committed jar exists. Mirrors Gradle's own recommended hardening.
   gradle-wrapper-validation:
     name: validate gradle wrapper
+    needs: changes
+    if: ${{ !cancelled() && (needs.changes.result != 'success' || needs.changes.outputs.code != 'false') }}
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
