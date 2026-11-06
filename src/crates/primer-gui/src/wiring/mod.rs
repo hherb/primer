@@ -71,8 +71,8 @@ pub(crate) enum LocaleStrategy {
 ///   under `<home>/.primer/<slug>.db` unless an explicit path is given.
 /// - Loads or mints a `LearnerModel`; reconciles with the GUI settings
 ///   (age refresh + name-mismatch warning) when one is already on disk.
-/// - Opens the knowledge DB (with an embedder, the per-model cache
-///   under `<home>/.primer/kb/`), seeds / tops it up from the bundled
+/// - Opens the knowledge DB (with an embedder, the cache under
+///   `<home>/.primer/kb/`, one per model and seed-corpus folder), seeds / tops it up from the bundled
 ///   JSONL, and embeds passages that lack a vector, reporting no
 ///   progress (the voice-mode rebuilds use this).
 ///

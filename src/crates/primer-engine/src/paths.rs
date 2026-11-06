@@ -5,6 +5,8 @@
 //! - `should_show_first_run_banner` — first-launch banner gate
 //! - `resolve_knowledge_db` — in-memory / explicit / embedded-cache
 //!   dispatch for the knowledge base (issue #388)
+//! - `seed_corpus_dir` — the canonical seed folder that keys the cache
+//!   alongside the model (issue #401)
 //! - `create_private_dir_all` / `ensure_session_db_dir` — owner-only
 //!   (`0700` on Unix) directories for learner data (issue #358)
 
@@ -105,17 +107,44 @@ impl KnowledgeDb {
     }
 }
 
+/// FNV-1a 64-bit offset basis and prime (the algorithm's constants).
+const FNV1A_OFFSET: u64 = 0xcbf2_9ce4_8422_2325;
+const FNV1A_PRIME: u64 = 0x0000_0100_0000_01b3;
+
+/// FNV-1a 64 over `bytes`. Used instead of `std`'s hasher because a cache
+/// file name must stay the same across Rust releases.
+fn fnv1a_64(bytes: &[u8]) -> u64 {
+    bytes.iter().fold(FNV1A_OFFSET, |h, b| {
+        (h ^ u64::from(*b)).wrapping_mul(FNV1A_PRIME)
+    })
+}
+
+/// The folder a discovered seed corpus lives in (every file
+/// `primer_kb_load::discover_seed_files` returns shares one), canonicalized
+/// so two spellings of one folder share a cache; as given if that fails.
+/// `None` when no seed file was found.
+pub fn seed_corpus_dir(seed_files: &[PathBuf]) -> Option<PathBuf> {
+    let dir = seed_files.first()?.parent()?;
+    Some(std::fs::canonicalize(dir).unwrap_or_else(|_| dir.to_path_buf()))
+}
+
 /// Resolve where the knowledge base lives. An explicit path always wins.
 /// Otherwise, with an embedder wired (its `model_id` given), a home
-/// directory, and persistence on, the KB is the per-model cache
-/// `<home>/.primer/kb/<slug(model_id)>.db`. Keying the file by model
-/// keeps one model's vectors from ever meeting another's dim. Without an
-/// embedder there are no vectors worth caching, so it stays `:memory:`.
-/// An empty `home` (HOME unset) counts as no home, never as the cwd.
+/// directory, and persistence on, the KB is the cache
+/// `<home>/.primer/kb/<slug(model_id)>-<fnv1a-64 hex of seed_dir>.db`
+/// (`<slug(model_id)>.db` when no seed corpus was found). Keying by model
+/// keeps one model's vectors from ever meeting another's dim; keying by
+/// the corpus folder (from [`seed_corpus_dir`]) keeps two corpora on one
+/// machine from pruning each other, since the cache mirrors its corpus
+/// (#401). An edit inside one folder still updates its cache in place.
+/// Without an embedder there are no vectors worth caching, so it stays
+/// `:memory:`. An empty `home` (HOME unset) counts as no home, never as
+/// the cwd.
 pub fn resolve_knowledge_db(
     explicit: Option<PathBuf>,
     home: Option<&Path>,
     embedder_model_id: Option<&str>,
+    seed_dir: Option<&Path>,
     no_persist: bool,
 ) -> KnowledgeDb {
     if let Some(p) = explicit {
@@ -125,11 +154,17 @@ pub fn resolve_knowledge_db(
         home.filter(|h| !h.as_os_str().is_empty()),
         embedder_model_id,
     ) {
-        (Some(home), Some(model)) if !no_persist => KnowledgeDb::Cache(
-            home.join(PRIMER_HOME_DIR)
-                .join(KB_CACHE_DIR)
-                .join(format!("{}.db", slug(model))),
-        ),
+        (Some(home), Some(model)) if !no_persist => {
+            let name = match seed_dir {
+                Some(dir) => format!(
+                    "{}-{:016x}.db",
+                    slug(model),
+                    fnv1a_64(dir.as_os_str().as_encoded_bytes())
+                ),
+                None => format!("{}.db", slug(model)),
+            };
+            KnowledgeDb::Cache(home.join(PRIMER_HOME_DIR).join(KB_CACHE_DIR).join(name))
+        }
         _ => KnowledgeDb::InMemory,
     }
 }
@@ -266,7 +301,13 @@ mod tests {
         let home = Path::new("/h");
         for no_persist in [false, true] {
             assert_eq!(
-                resolve_knowledge_db(Some(p.clone()), Some(home), Some("bge-m3"), no_persist),
+                resolve_knowledge_db(
+                    Some(p.clone()),
+                    Some(home),
+                    Some("bge-m3"),
+                    None,
+                    no_persist
+                ),
                 KnowledgeDb::Explicit(p.clone())
             );
         }
@@ -274,7 +315,13 @@ mod tests {
 
     #[test]
     fn resolve_knowledge_db_caches_per_model_under_home() {
-        let db = resolve_knowledge_db(None, Some(Path::new("/h")), Some("BAAI/bge-m3"), false);
+        let db = resolve_knowledge_db(
+            None,
+            Some(Path::new("/h")),
+            Some("BAAI/bge-m3"),
+            None,
+            false,
+        );
         assert_eq!(
             db,
             KnowledgeDb::Cache(PathBuf::from("/h/.primer/kb/baai-bge-m3.db"))
@@ -282,14 +329,56 @@ mod tests {
         assert_eq!(db.path(), PathBuf::from("/h/.primer/kb/baai-bge-m3.db"));
     }
 
+    /// Issue #401: one cache per (model, seed dir), so two corpora on one
+    /// machine (an installed app's bundle and a dev checkout) stop pruning
+    /// and re-embedding each other's passages. The literal pins the hash:
+    /// changing it orphans every existing cache (a full re-embed).
+    #[test]
+    fn resolve_knowledge_db_keys_cache_by_seed_dir() {
+        let home = Path::new("/h");
+        let at = |dir: &str| {
+            resolve_knowledge_db(
+                None,
+                Some(home),
+                Some("bge-m3"),
+                Some(Path::new(dir)),
+                false,
+            )
+        };
+        assert_eq!(
+            at("/s"),
+            KnowledgeDb::Cache(PathBuf::from("/h/.primer/kb/bge-m3-07d65507b49cba97.db"))
+        );
+        assert_eq!(at("/s"), at("/s"));
+        assert_ne!(at("/s"), at("/t"));
+    }
+
+    #[test]
+    fn seed_corpus_dir_is_the_canonical_parent_of_the_seed_files() {
+        assert_eq!(seed_corpus_dir(&[]), None);
+        let tmp = tempfile::tempdir().unwrap();
+        let file = tmp.path().join(".").join("a.en.jsonl");
+        assert_eq!(
+            seed_corpus_dir(&[file]),
+            Some(std::fs::canonicalize(tmp.path()).unwrap())
+        );
+        // A dir that can't be canonicalized (gone) keys by its path as given.
+        let gone = PathBuf::from("/no/such/dir/a.en.jsonl");
+        assert_eq!(
+            seed_corpus_dir(&[gone]),
+            Some(PathBuf::from("/no/such/dir"))
+        );
+    }
+
     #[test]
     fn resolve_knowledge_db_stays_in_memory_without_embedder_home_or_persistence() {
         let home = Path::new("/h");
+        let seed = Path::new("/s");
         for db in [
-            resolve_knowledge_db(None, Some(home), None, false),
-            resolve_knowledge_db(None, None, Some("bge-m3"), false),
-            resolve_knowledge_db(None, Some(Path::new("")), Some("bge-m3"), false),
-            resolve_knowledge_db(None, Some(home), Some("bge-m3"), true),
+            resolve_knowledge_db(None, Some(home), None, Some(seed), false),
+            resolve_knowledge_db(None, None, Some("bge-m3"), Some(seed), false),
+            resolve_knowledge_db(None, Some(Path::new("")), Some("bge-m3"), Some(seed), false),
+            resolve_knowledge_db(None, Some(home), Some("bge-m3"), Some(seed), true),
         ] {
             assert_eq!(db, KnowledgeDb::InMemory);
             assert_eq!(db.path(), PathBuf::from(IN_MEMORY));
