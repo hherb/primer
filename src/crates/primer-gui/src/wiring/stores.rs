@@ -12,9 +12,8 @@ use primer_core::i18n::Locale;
 use primer_core::learner::LearnerModel;
 use primer_core::storage::{LearnerStore, SessionStore};
 use primer_engine::{
-    KnowledgeDb, adopt_or_mint_learner_id, create_learner_with_id, create_private_dir_all,
-    ensure_session_db_dir, parse_languages, reconcile_persisted_learner, resolve_knowledge_db,
-    resolve_session_db_path,
+    adopt_or_mint_learner_id, create_learner_with_id, ensure_session_db_dir, open_prepared_kb,
+    parse_languages, reconcile_persisted_learner, resolve_knowledge_db, resolve_session_db_path,
 };
 use primer_kb_load::EmbedProgress;
 use primer_knowledge::SqliteKnowledgeBase;
@@ -190,15 +189,12 @@ pub(super) async fn open_session_store_and_learner(
     Ok((session_store_inner, effective_locale, learner))
 }
 
-/// Open the knowledge base under `locale` and get it ready (#388). An
-/// explicit Settings path is seeded only when empty and never embedded
-/// here. Otherwise, with an embedder wired, the KB is the per-model cache
-/// under `<home>/.primer/kb/`: the bundled corpus is topped up and every
-/// passage without a vector is embedded, so the cost is paid once, not on
-/// every session build. With no embedder (or `no_persist`) it is a
-/// `:memory:` KB seeded per open. Also returns why embedding failed, if
-/// it did: that is soft, the session runs on BM25. `on_progress` sees the
-/// embed progress (#393).
+/// Open the knowledge base under `locale` and get it ready (#388): the
+/// Settings path, else the per-model cache under `<home>/.primer/kb/`
+/// when an embedder is wired, else `:memory:`. What each implies is
+/// `primer_engine::open_prepared_kb`'s policy, shared with the CLI
+/// (#395). Also returns why embedding failed, if it did: that is soft,
+/// the session runs on BM25. `on_progress` sees the embed progress (#393).
 pub(super) async fn open_knowledge_base(
     home: &Path,
     config: &GuiConfig,
@@ -212,35 +208,13 @@ pub(super) async fn open_knowledge_base(
         embedder.map(|e| e.model_id()),
         config.persistence.no_persist,
     );
-    let knowledge_path = knowledge_db.path();
-    if let KnowledgeDb::Cache(_) = knowledge_db
-        && let Some(dir) = knowledge_path.parent()
-    {
-        create_private_dir_all(dir)
-            .map_err(|e| format!("creating knowledge-base cache dir {}: {e}", dir.display()))?;
-    }
-    let knowledge = SqliteKnowledgeBase::open_for_locale(&knowledge_path, locale)
-        .map_err(|e| format!("opening knowledge base {}: {e}", knowledge_path.display()))?;
-    let embed_with = match knowledge_db {
-        KnowledgeDb::Explicit(_) => None,
-        _ => embedder,
-    };
-    let prepared = primer_kb_load::prepare_kb(
-        &knowledge,
+    let (knowledge, prepared) = open_prepared_kb(
+        &knowledge_db,
+        locale,
         &primer_kb_load::discover_seed_files(locale),
-        matches!(knowledge_db, KnowledgeDb::Cache(_)),
-        embed_with,
+        embedder,
         on_progress,
     )
-    .await
-    .map_err(|e| format!("seeding knowledge base: {e}"))?;
-    tracing::info!(
-        target: "primer-gui::startup",
-        path = %knowledge_path.display(),
-        seeded = prepared.seeded.map_or(0, |s| s.inserted),
-        embedded = prepared.embedded,
-        "knowledge base ready for locale {}",
-        locale.pack_id()
-    );
+    .await?;
     Ok((knowledge, prepared.embed_error))
 }

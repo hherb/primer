@@ -11,6 +11,8 @@ primer-extractor.workspace = true
 primer-comprehension.workspace = true
 primer-inference = { path = "../primer-inference" }
 primer-embedding = { path = "../primer-embedding" }
+primer-knowledge.workspace = true
+primer-kb-load.workspace = true
 chrono.workspace = true
 dotenvy.workspace = true
 tracing.workspace = true

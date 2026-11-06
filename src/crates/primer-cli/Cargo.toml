@@ -15,7 +15,6 @@ primer-extractor.workspace = true
 primer-comprehension.workspace = true
 primer-inference = { path = "../primer-inference" }
 primer-speech = { path = "../primer-speech" }
-primer-knowledge = { path = "../primer-knowledge" }
 primer-kb-load = { path = "../primer-kb-load" }
 primer-embedding = { path = "../primer-embedding" }
 primer-pedagogy = { path = "../primer-pedagogy" }
