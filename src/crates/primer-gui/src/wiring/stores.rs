@@ -191,8 +191,8 @@ pub(super) async fn open_session_store_and_learner(
 }
 
 /// Open the knowledge base under `locale` and get it ready (#388): the
-/// Settings path, else the per-model cache under `<home>/.primer/kb/`
-/// when an embedder is wired, else `:memory:`. What each implies is
+/// Settings path, else the per-model, per-seed-folder cache under
+/// `<home>/.primer/kb/` (#401) when an embedder is wired, else `:memory:`. What each implies is
 /// `primer_engine::open_prepared_kb`'s policy, shared with the CLI
 /// (#395). Also returns why embedding failed, if it did: that is soft,
 /// the session runs on BM25. `on_progress` sees the embed progress (#393).

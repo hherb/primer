@@ -59,8 +59,9 @@ pub struct PersistenceConfig {
     /// Explicit session DB path. `None` → default to
     /// `~/.primer/<slug(name)>.db` at session-start time.
     pub session_db: Option<PathBuf>,
-    /// Knowledge DB path. `None` → the per-embedder-model cache under
-    /// `~/.primer/kb/` when an embedder is configured, else `:memory:`.
+    /// Knowledge DB path. `None` → the cache under `~/.primer/kb/`, one
+    /// per embedder model and seed-corpus folder, when an embedder is
+    /// configured, else `:memory:`.
     pub knowledge_db: Option<PathBuf>,
     /// When true, `session_db` is ignored and no default DB is written to
     /// disk (the KB stays `:memory:`, so with an embedder it is re-embedded

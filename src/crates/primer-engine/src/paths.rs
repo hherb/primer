@@ -5,6 +5,8 @@
 //! - `should_show_first_run_banner` — first-launch banner gate
 //! - `resolve_knowledge_db` — in-memory / explicit / embedded-cache
 //!   dispatch for the knowledge base (issue #388)
+//! - `seed_corpus_dir` — the canonical seed folder that keys the cache
+//!   alongside the model (issue #401)
 //! - `create_private_dir_all` / `ensure_session_db_dir` — owner-only
 //!   (`0700` on Unix) directories for learner data (issue #358)
 

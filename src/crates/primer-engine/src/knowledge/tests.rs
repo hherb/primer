@@ -124,3 +124,36 @@ async fn a_failed_seed_names_the_path() {
     assert!(err.contains("seeding"), "{err}");
     assert!(err.contains(&path.display().to_string()), "{err}");
 }
+
+/// Issue #401 end to end: two corpus folders on one home and one model
+/// resolve to two caches, so opening B never prunes A's passages and
+/// reopening A needs no re-embed.
+#[tokio::test]
+async fn two_seed_folders_keep_separate_caches() {
+    let tmp = tempfile::tempdir().unwrap();
+    let home = tmp.path().join("home");
+    let embedder = StubEmbedder::new();
+    let corpus = |dir: &str, line: &str| {
+        let d = tmp.path().join(dir);
+        std::fs::create_dir_all(&d).unwrap();
+        vec![write_corpus(&d, "seed.en.jsonl", &[line])]
+    };
+    let (a, b) = (corpus("a", P1), corpus("b", P2));
+    let db_for = |files: &[PathBuf]| {
+        crate::resolve_knowledge_db(
+            None,
+            Some(&home),
+            Some(embedder.model_id()),
+            crate::seed_corpus_dir(files).as_deref(),
+            false,
+        )
+    };
+    assert_ne!(db_for(&a), db_for(&b));
+
+    drop(open(&db_for(&a), &a, Some(&embedder)).await);
+    drop(open(&db_for(&b), &b, Some(&embedder)).await);
+    let (kb, stats, progress) = open(&db_for(&a), &a, Some(&embedder)).await;
+    assert_eq!(kb.passage_count().unwrap(), 1, "B's top-up never touched A");
+    assert_eq!(stats.embedded, 0);
+    assert!(progress.is_empty(), "A's vectors survived: no re-embed");
+}
