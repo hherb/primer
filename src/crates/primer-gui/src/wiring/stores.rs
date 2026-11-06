@@ -14,6 +14,7 @@ use primer_core::storage::{LearnerStore, SessionStore};
 use primer_engine::{
     adopt_or_mint_learner_id, create_learner_with_id, ensure_session_db_dir, open_prepared_kb,
     parse_languages, reconcile_persisted_learner, resolve_knowledge_db, resolve_session_db_path,
+    seed_corpus_dir,
 };
 use primer_kb_load::EmbedProgress;
 use primer_knowledge::SqliteKnowledgeBase;
@@ -202,20 +203,17 @@ pub(super) async fn open_knowledge_base(
     embedder: Option<&dyn Embedder>,
     on_progress: EmbedProgress<'_>,
 ) -> Result<(SqliteKnowledgeBase, Option<String>), String> {
+    let seed_files = primer_kb_load::discover_seed_files(locale);
     let knowledge_db = resolve_knowledge_db(
         config.persistence.knowledge_db.clone(),
         Some(home),
         embedder.map(|e| e.model_id()),
+        seed_corpus_dir(&seed_files).as_deref(),
         config.persistence.no_persist,
     );
-    let (knowledge, prepared) = open_prepared_kb(
-        &knowledge_db,
-        locale,
-        &primer_kb_load::discover_seed_files(locale),
-        embedder,
-        on_progress,
-    )
-    .await
-    .map_err(|e| e.to_string())?;
+    let (knowledge, prepared) =
+        open_prepared_kb(&knowledge_db, locale, &seed_files, embedder, on_progress)
+            .await
+            .map_err(|e| e.to_string())?;
     Ok((knowledge, prepared.embed_error))
 }

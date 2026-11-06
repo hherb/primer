@@ -379,6 +379,8 @@ async fn knowledge_base_with_embedder_is_an_embedded_per_model_cache() {
         None,
         Some(home.path()),
         Some(primer_core::embedder::Embedder::model_id(&stub)),
+        primer_engine::seed_corpus_dir(&primer_kb_load::discover_seed_files(Locale::English))
+            .as_deref(),
         false,
     )
     .path();

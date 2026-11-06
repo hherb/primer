@@ -22,7 +22,7 @@ pub use learner::{
 };
 pub use paths::{
     IN_MEMORY, KB_CACHE_DIR, KnowledgeDb, PRIMER_HOME_DIR, create_private_dir_all,
-    ensure_session_db_dir, resolve_knowledge_db, resolve_session_db_path,
+    ensure_session_db_dir, resolve_knowledge_db, resolve_session_db_path, seed_corpus_dir,
     should_show_first_run_banner, slug,
 };
 pub use wiring::{

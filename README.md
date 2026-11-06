@@ -330,9 +330,9 @@ Project-local `.env` wins over the home file. Both are gitignored. See `.env.exa
 --name <name>                   Child's name for the learner profile (default: Explorer)
 --age <age>                     Child's age in years (default: 8)
 --knowledge-db <path>           Path to SQLite knowledge base (default: with an embedder,
-                                an embedded per-model cache under ~/.primer/kb/ — the
-                                first run embeds the corpus, which can take a few
-                                minutes; without one, in-memory)
+                                an embedded cache under ~/.primer/kb/, one per model and
+                                seed-corpus folder — the first run embeds the corpus,
+                                which can take a few minutes; without one, in-memory)
 --session-db <path>             Path to SQLite session store
                                 (default: ~/.primer/<slugified-name>.db, created if missing)
 --resume <uuid>                 Resume a past session by UUID. Reads from --session-db; errors if

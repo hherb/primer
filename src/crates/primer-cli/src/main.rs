@@ -42,7 +42,7 @@ use primer_engine::{
     build_extractor, build_fastembed_embedder, build_main_backend, build_ollama_embedder,
     build_openai_compat_embedder, create_learner_with_id, ensure_session_db_dir, open_prepared_kb,
     parse_languages, reconcile_persisted_learner, resolve_knowledge_db, resolve_session_db_path,
-    served_identity, should_show_first_run_banner, verify_resume_locale_match,
+    seed_corpus_dir, served_identity, should_show_first_run_banner, verify_resume_locale_match,
 };
 use primer_extractor::{ConceptExtractor, ExtractorSettings};
 use primer_pedagogy::DialogueManager;
@@ -181,8 +181,9 @@ struct Cli {
 
     /// Path to knowledge base SQLite file (seeded when empty; never
     /// embedded at startup — use `primer-kb-load --reembed`). If omitted:
-    /// with an embedder, an embedded per-model cache under `~/.primer/kb/`;
-    /// without one (or with `--no-persist`), an in-memory database.
+    /// with an embedder, an embedded cache under `~/.primer/kb/`, one per
+    /// model and seed-corpus folder; without one (or with `--no-persist`),
+    /// an in-memory database.
     #[arg(long)]
     knowledge_db: Option<PathBuf>,
 
@@ -1124,10 +1125,12 @@ async fn async_main() -> anyhow::Result<()> {
     // one it stays `:memory:`. An explicit `--knowledge-db` is seeded only
     // when empty and never embedded here (`primer-kb-load --reembed` owns
     // that). An empty KB is a valid runtime state.
+    let seed_files = primer_kb_load::discover_seed_files(cli_locale);
     let knowledge_db = resolve_knowledge_db(
         cli.knowledge_db.clone(),
         Some(home.as_path()),
         embedder.as_ref().map(|e| e.model_id()),
+        seed_corpus_dir(&seed_files).as_deref(),
         cli.no_persist,
     );
     // `(0, total)` comes once, before the first batch, and only when there
@@ -1144,7 +1147,7 @@ async fn async_main() -> anyhow::Result<()> {
     let (knowledge, prepared) = open_prepared_kb(
         &knowledge_db,
         cli_locale,
-        &primer_kb_load::discover_seed_files(cli_locale),
+        &seed_files,
         embedder.as_deref(),
         &mut announce_embed,
     )
