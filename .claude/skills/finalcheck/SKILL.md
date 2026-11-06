@@ -29,9 +29,10 @@ Every cargo command runs from `src/` (the workspace root) as `~/.cargo/bin/cargo
 3. **Drive CI to green.** Loop:
    - Watch the checks for the pushed head commit with `gh pr checks --watch --fail-fast`. Checks can take a
      minute to register, so wait if it reports none yet.
-   - `ci.yml` has a workflow-level `paths-ignore` (`**/*.md`, `docs/**`, `.gitignore`, `LICENSE`). A push
-     that touches only those posts **no checks at all**. If the whole PR is docs-only, the required check
-     never reports (issue #404). Tell me; don't change CI to get around it.
+   - `ci.yml` has a workflow-level `paths-ignore` (`**/*.md`, `docs/**`, `.gitignore`, `LICENSE`). On a
+     PR it is matched against the **whole PR diff**, so a docs-only push onto a PR that also changes code
+     still runs CI. A PR that is docs-only overall posts **no checks at all**, so the required check never
+     reports (issue #404). Tell me; don't change CI to get around it.
    - `ci.yml` uses `concurrency: cancel-in-progress`, so a run on an older commit shows CANCELLED once a
      newer push lands. That is normal. Only the head commit's run counts.
    - All green → done. Report the PR URL and the final check list. "All green" means every check on the
