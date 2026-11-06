@@ -146,7 +146,13 @@ impl InferenceBackend for RouterBackend {
         let order = order_legs(self.mode, score);
         let first = self.leg(order.first);
 
-        match first.generate_stream(prompt, params).await {
+        // A leg with a failover behind it gets one attempt: the other leg
+        // is the retry (#312). A lone leg keeps its full budget.
+        let first_params = match order.second {
+            Some(_) => params.for_failover_leg(),
+            None => params.clone(),
+        };
+        match first.generate_stream(prompt, &first_params).await {
             Ok(stream) => Ok(self.maybe_time(order.first, stream)),
             Err(e) => match order.second {
                 Some(second_leg) => {

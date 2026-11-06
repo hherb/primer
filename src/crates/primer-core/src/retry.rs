@@ -39,6 +39,19 @@ impl Default for RetrySettings {
     }
 }
 
+impl RetrySettings {
+    /// These settings with `max_attempts` lowered to `cap` (never raised).
+    /// `None` returns them unchanged. A cap of 0 behaves like 1:
+    /// [`retry_with_backoff`] always makes the first call.
+    pub fn capped(&self, cap: Option<u32>) -> Self {
+        let mut s = self.clone();
+        if let Some(cap) = cap {
+            s.max_attempts = s.max_attempts.min(cap);
+        }
+        s
+    }
+}
+
 /// Compute the delay before the (attempt+1)-th try, given the previous
 /// attempt index (0-based). Pure — no I/O, no time. The `jitter_seed`
 /// parameter is the source of randomness; tests pin it to 0.0 for
@@ -147,6 +160,36 @@ mod tests {
             jitter_fraction: 0.0, // deterministic — no jitter in tests
             retry_after_budget: Duration::from_secs(2),
         }
+    }
+
+    #[test]
+    fn capped_none_leaves_settings_unchanged() {
+        assert_eq!(settings_for_test().capped(None).max_attempts, 3);
+    }
+
+    #[test]
+    fn capped_lowers_but_never_raises_attempts() {
+        assert_eq!(settings_for_test().capped(Some(1)).max_attempts, 1);
+        assert_eq!(settings_for_test().capped(Some(9)).max_attempts, 3);
+    }
+
+    #[test]
+    fn capped_to_one_attempt_makes_a_single_call_with_no_wait() {
+        let calls = Rc::new(RefCell::new(0u32));
+        let calls_for_op = calls.clone();
+        let settings = settings_for_test().capped(Some(1));
+        let result: Result<(), InferenceError> = run_async(async move {
+            retry_with_backoff(&settings, || {
+                let calls_for_op = calls_for_op.clone();
+                async move {
+                    *calls_for_op.borrow_mut() += 1;
+                    Err(InferenceError::ServiceUnavailable)
+                }
+            })
+            .await
+        });
+        assert!(matches!(result, Err(InferenceError::ServiceUnavailable)));
+        assert_eq!(*calls.borrow(), 1);
     }
 
     #[test]

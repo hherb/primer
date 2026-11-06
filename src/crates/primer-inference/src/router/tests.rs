@@ -17,6 +17,8 @@ struct MockBackend {
     name: String,
     calls: Arc<AtomicUsize>,
     behavior: Behavior,
+    /// `params.max_retry_attempts` of every call, in order.
+    caps: std::sync::Mutex<Vec<Option<u32>>>,
 }
 
 impl MockBackend {
@@ -26,6 +28,7 @@ impl MockBackend {
             name: name.to_string(),
             calls: calls.clone(),
             behavior,
+            caps: Default::default(),
         });
         (b, calls)
     }
@@ -42,9 +45,10 @@ impl InferenceBackend for MockBackend {
     async fn generate_stream(
         &self,
         _prompt: &Prompt,
-        _params: &GenerationParams,
+        params: &GenerationParams,
     ) -> Result<TokenStream> {
         self.calls.fetch_add(1, Ordering::SeqCst);
+        self.caps.lock().unwrap().push(params.max_retry_attempts);
         match &self.behavior {
             Behavior::Ok(text) => {
                 let chunk = TokenChunk {
@@ -169,6 +173,38 @@ async fn pre_stream_failure_falls_over_to_other_leg() {
         r.ttft_ema_for_test().is_some(),
         "primary serving the fallover is still timed"
     );
+}
+
+#[tokio::test]
+async fn first_leg_gets_one_attempt_and_last_leg_the_full_budget() {
+    // Issue #312, for both leg orders: whichever leg has a failover behind
+    // it is capped; the leg that would be last keeps its retry budget.
+    let one = Some(primer_core::consts::retry::FAILOVER_LEG_MAX_ATTEMPTS);
+    for mode in [RouterMode::Hybrid, RouterMode::CloudPreferred] {
+        let (primary, _) = MockBackend::new("llamacpp:m", Behavior::PreStreamErr);
+        let (secondary, _) = MockBackend::new("cloud", Behavior::PreStreamErr);
+        let r = RouterBackend::new(primary.clone(), secondary.clone(), mode);
+        let _ = r
+            .generate_stream(&prompt(), &params_with(PedagogicalIntent::Scaffolding, 0))
+            .await;
+        let (first, last) = match mode {
+            RouterMode::Hybrid => (&primary, &secondary),
+            _ => (&secondary, &primary),
+        };
+        assert_eq!(*first.caps.lock().unwrap(), vec![one], "{mode:?} first leg");
+        assert_eq!(*last.caps.lock().unwrap(), vec![None], "{mode:?} last leg");
+    }
+}
+
+#[tokio::test]
+async fn single_leg_order_keeps_the_full_budget() {
+    let (primary, _) = MockBackend::new("llamacpp:m", Behavior::PreStreamErr);
+    let (secondary, _) = MockBackend::new("cloud", Behavior::Ok("x".into()));
+    let r = RouterBackend::new(primary.clone(), secondary, RouterMode::LocalOnly);
+    let _ = r
+        .generate_stream(&prompt(), &GenerationParams::default())
+        .await;
+    assert_eq!(*primary.caps.lock().unwrap(), vec![None]);
 }
 
 #[tokio::test]

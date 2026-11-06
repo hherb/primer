@@ -33,6 +33,26 @@ pub struct GenerationParams {
     /// the dialogue manager; read ONLY by `RouterBackend`. Every other backend
     /// ignores it. `None` ⇒ no routing context (router scores it 0.0).
     pub routing: Option<crate::router::RoutingSignals>,
+    /// Optional cap on this call's pre-stream retry attempts. Set by
+    /// `FallbackBackend` / `RouterBackend` on a leg that has a failover
+    /// behind it (see [`GenerationParams::for_failover_leg`]); HTTP
+    /// backends apply it via [`crate::retry::RetrySettings::capped`].
+    /// `None` ⇒ the backend's own retry settings.
+    #[serde(default)]
+    pub max_retry_attempts: Option<u32>,
+}
+
+impl GenerationParams {
+    /// A copy for a decorated leg with another leg behind it: retries are
+    /// capped at [`crate::consts::retry::FAILOVER_LEG_MAX_ATTEMPTS`] (or a
+    /// tighter cap already set), so failover happens fast (issue #312).
+    pub fn for_failover_leg(&self) -> Self {
+        let cap = crate::consts::retry::FAILOVER_LEG_MAX_ATTEMPTS;
+        Self {
+            max_retry_attempts: Some(self.max_retry_attempts.map_or(cap, |c| c.min(cap))),
+            ..self.clone()
+        }
+    }
 }
 
 impl Default for GenerationParams {
@@ -43,6 +63,7 @@ impl Default for GenerationParams {
             top_p: 0.9,
             stop_sequences: vec![],
             routing: None,
+            max_retry_attempts: None,
         }
     }
 }
@@ -157,6 +178,7 @@ pub trait InferenceBackend: Send + Sync {
             top_p: 0.9,
             stop_sequences: vec![],
             routing: None,
+            max_retry_attempts: None,
         };
         self.generate(&prompt, &params).await
     }
@@ -203,6 +225,36 @@ mod gen_params_tests {
     fn default_generation_params_have_no_routing() {
         let p = GenerationParams::default();
         assert!(p.routing.is_none());
+    }
+
+    #[test]
+    fn default_generation_params_have_no_retry_cap() {
+        assert!(GenerationParams::default().max_retry_attempts.is_none());
+    }
+
+    #[test]
+    fn failover_leg_caps_retries_and_keeps_every_other_field() {
+        let p = GenerationParams {
+            max_tokens: 7,
+            stop_sequences: vec!["x".into()],
+            ..Default::default()
+        };
+        let leg = p.for_failover_leg();
+        assert_eq!(
+            leg.max_retry_attempts,
+            Some(crate::consts::retry::FAILOVER_LEG_MAX_ATTEMPTS)
+        );
+        assert_eq!(leg.max_tokens, 7);
+        assert_eq!(leg.stop_sequences, vec!["x".to_string()]);
+    }
+
+    #[test]
+    fn failover_leg_keeps_a_tighter_existing_cap() {
+        let p = GenerationParams {
+            max_retry_attempts: Some(0),
+            ..Default::default()
+        };
+        assert_eq!(p.for_failover_leg().max_retry_attempts, Some(0));
     }
 }
 

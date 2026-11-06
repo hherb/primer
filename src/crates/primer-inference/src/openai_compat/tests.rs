@@ -441,3 +441,16 @@ async fn stream_parses_unterminated_final_event_at_eof() {
     assert!(terminal.done);
     assert_eq!(terminal.finish_reason, FinishReason::Length);
 }
+
+/// Issue #312: a failover leg's one-attempt cap (`max_retry_attempts`)
+/// is honoured, so a down leg fails fast instead of spending its whole
+/// retry budget before the decorator can fail over.
+#[tokio::test]
+async fn failover_leg_cap_makes_a_single_request() {
+    let n = crate::test_http::requests_until_pre_stream_error(
+        |url| OpenAiCompatBackend::new(url, "m".into(), None),
+        &crate::test_http::failover_leg_params(),
+    )
+    .await;
+    assert_eq!(n, 1);
+}
