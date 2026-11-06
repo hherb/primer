@@ -36,7 +36,10 @@ pub use backend::{
 pub use embedders::{
     build_fastembed_embedder, build_ollama_embedder, build_openai_compat_embedder,
 };
-pub use subsystems::{build_classifier, build_comprehension, build_extractor};
+pub use subsystems::{
+    ServedSubsystems, SubsystemSettings, build_classifier, build_comprehension, build_extractor,
+    build_served_subsystems,
+};
 
 /// Parameters needed by `build_backend` and the per-subsystem builders
 /// that would otherwise require borrowing from the binary's `Cli` /
@@ -196,3 +199,5 @@ mod main_backend_plan_tests;
 mod qnn_dispatch_tests;
 #[cfg(test)]
 mod resolve_fallback_model_tests;
+#[cfg(test)]
+mod served_subsystems_tests;

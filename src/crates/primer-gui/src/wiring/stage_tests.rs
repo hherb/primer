@@ -539,7 +539,7 @@ async fn subsystems_match_main_stub_and_apply_gui_settings() {
     cfg.vocab.max_per_prompt = Some(CUSTOM_VOCAB_MAX_PER_PROMPT);
     let (backend, params) = stub_backend(&cfg).await;
 
-    let s = build_subsystems(&cfg, &backend, &cfg.backend.kind, "stub", &params)
+    let (s, _) = build_subsystems(&cfg, &backend, &cfg.backend.kind, "stub", None, &params)
         .await
         .unwrap();
 
@@ -578,7 +578,7 @@ async fn subsystems_inherit_main_backend_via_arc_clone() {
     let params = build_backend_params(&cfg);
     let main: Arc<dyn InferenceBackend> = Arc::new(primer_inference::stub::StubBackend);
 
-    let s = build_subsystems(&cfg, &main, &cfg.backend.kind, MAIN_MODEL, &params)
+    let (s, _) = build_subsystems(&cfg, &main, &cfg.backend.kind, MAIN_MODEL, None, &params)
         .await
         .unwrap();
 
@@ -597,7 +597,7 @@ async fn subsystems_vocab_cap_defaults_to_const_when_unset() {
     cfg.vocab.max_per_prompt = None;
     let (backend, params) = stub_backend(&cfg).await;
 
-    let s = build_subsystems(&cfg, &backend, &cfg.backend.kind, "stub", &params)
+    let (s, _) = build_subsystems(&cfg, &backend, &cfg.backend.kind, "stub", None, &params)
         .await
         .unwrap();
 

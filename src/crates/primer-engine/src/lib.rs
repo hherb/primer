@@ -26,7 +26,8 @@ pub use paths::{
     should_show_first_run_banner, slug,
 };
 pub use wiring::{
-    BackendNotice, BackendParams, build_backend, build_classifier, build_comprehension,
-    build_extractor, build_fastembed_embedder, build_main_backend, build_ollama_embedder,
-    build_openai_compat_embedder, default_qairt_lib_dir, served_identity,
+    BackendNotice, BackendParams, ServedSubsystems, SubsystemSettings, build_backend,
+    build_classifier, build_comprehension, build_extractor, build_fastembed_embedder,
+    build_main_backend, build_ollama_embedder, build_openai_compat_embedder,
+    build_served_subsystems, default_qairt_lib_dir, served_identity,
 };

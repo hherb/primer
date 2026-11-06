@@ -29,7 +29,7 @@ use std::sync::Arc;
 use primer_core::config::PedagogyConfig;
 use primer_core::i18n::Locale;
 use primer_core::storage::{LearnerStore, SessionStore};
-use primer_engine::{build_main_backend, served_identity};
+use primer_engine::build_main_backend;
 use primer_kb_load::EmbedProgress;
 use tokio::sync::Mutex;
 
@@ -155,21 +155,20 @@ pub(crate) async fn build_with_strategy(
 
     let main_model = rebind_main_model(&backend_config.kind, main_model, backend.name());
 
-    // What actually serves turns; differs from the config when the fallback
-    // serves alone (#338). The sidebar shows it, and inherited subsystems run
-    // on it, so their provenance ids name it too (#351).
-    let (backend_name, display_model) = served_identity(
+    // ─── Subsystems (classifier, extractor, comprehension, embedder) ─
+    // Built before the stores: the embedder picks the KB cache file and
+    // fills its vectors (#388). Also yields what actually serves turns, which
+    // differs from the config when the fallback serves alone (#338): the
+    // sidebar shows it, and the inherited subsystems run on it (#351).
+    let (subsystems, (backend_name, display_model)) = build_subsystems(
+        config,
+        &backend,
         &backend_config.kind,
         &main_model,
         notice.as_ref(),
-        backend.name(),
-    );
-
-    // ─── Subsystems (classifier, extractor, comprehension, embedder) ─
-    // Built before the stores: the embedder picks the KB cache file and
-    // fills its vectors (#388).
-    let subsystems =
-        build_subsystems(config, &backend, &backend_name, &display_model, &params).await?;
+        &params,
+    )
+    .await?;
 
     // ─── Session store + learner, then the KB under their locale ─────
     let Stores {

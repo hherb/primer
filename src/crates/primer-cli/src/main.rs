@@ -30,7 +30,7 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use clap::Parser;
-use primer_classifier::{ClassifierSettings, EngagementClassifier};
+use primer_classifier::ClassifierSettings;
 use primer_core::config::PedagogyConfig;
 use primer_core::error::PrimerError;
 use primer_core::i18n::{Locale, render_inference_error};
@@ -38,13 +38,14 @@ use primer_core::inference::InferenceBackend;
 use primer_core::knowledge::KnowledgeBase;
 use primer_core::storage::{LearnerStore, SessionStore};
 use primer_engine::{
-    BackendParams, adopt_or_mint_learner_id, build_classifier, build_comprehension,
-    build_extractor, build_fastembed_embedder, build_main_backend, build_ollama_embedder,
-    build_openai_compat_embedder, create_learner_with_id, ensure_session_db_dir, open_prepared_kb,
-    parse_languages, reconcile_persisted_learner, resolve_knowledge_db, resolve_session_db_path,
-    seed_corpus_dir, served_identity, should_show_first_run_banner, verify_resume_locale_match,
+    BackendNotice, BackendParams, ServedSubsystems, SubsystemSettings, adopt_or_mint_learner_id,
+    build_fastembed_embedder, build_main_backend, build_ollama_embedder,
+    build_openai_compat_embedder, build_served_subsystems, create_learner_with_id,
+    ensure_session_db_dir, open_prepared_kb, parse_languages, reconcile_persisted_learner,
+    resolve_knowledge_db, resolve_session_db_path, seed_corpus_dir, should_show_first_run_banner,
+    verify_resume_locale_match,
 };
-use primer_extractor::{ConceptExtractor, ExtractorSettings};
+use primer_extractor::ExtractorSettings;
 use primer_pedagogy::DialogueManager;
 use uuid::Uuid;
 
@@ -796,11 +797,6 @@ async fn async_main() -> anyhow::Result<()> {
     } else {
         main_model
     };
-    // Inherited subsystems run on whatever serves turns — the fallback when
-    // the primary is unavailable — so their provenance ids must name it, and
-    // a subsystem model override must build on a kind that constructs (#351).
-    let (served_kind, served_model) =
-        served_identity(&cli.backend, &main_model, notice.as_ref(), backend.name());
 
     match cli.backend.as_str() {
         "stub" => eprintln!("Using stub inference backend (canned Socratic responses)."),
@@ -815,7 +811,10 @@ async fn async_main() -> anyhow::Result<()> {
         ),
         "qnn" => {
             eprintln!("Using qnn (Qualcomm NPU) backend with {main_model}.");
-            warn_on_npu_serialisation(&cli);
+            // Only meaningful when the NPU actually serves, not its fallback.
+            if !matches!(notice, Some(BackendNotice::PrimaryUnavailable { .. })) {
+                warn_on_npu_serialisation(&cli);
+            }
         }
         "llamacpp" => {
             eprintln!("Using embedded llama.cpp backend with {main_model}.");
@@ -975,78 +974,48 @@ async fn async_main() -> anyhow::Result<()> {
         ..PedagogyConfig::default()
     };
 
-    let classifier_settings = ClassifierSettings {
-        blocking_timeout: std::time::Duration::from_millis(cli.classifier_timeout_ms),
-        ..ClassifierSettings::default()
+    let subsystem_settings = SubsystemSettings {
+        classifier: ClassifierSettings {
+            blocking_timeout: std::time::Duration::from_millis(cli.classifier_timeout_ms),
+            ..ClassifierSettings::default()
+        },
+        extractor: ExtractorSettings {
+            blocking_timeout: std::time::Duration::from_millis(cli.extractor_timeout_ms),
+            ..ExtractorSettings::default()
+        },
+        comprehension: primer_comprehension::ComprehensionSettings {
+            blocking_timeout: std::time::Duration::from_millis(cli.comprehension_timeout_ms),
+            ..primer_comprehension::ComprehensionSettings::default()
+        },
     };
 
-    let classifier: Arc<dyn EngagementClassifier> = match build_classifier(
-        Arc::clone(&backend),
-        &served_kind,
-        &served_model,
+    // Inherited subsystems run on whatever serves turns — the fallback when
+    // the primary is unavailable — so the shared helper resolves that first
+    // (#351, #364).
+    let ServedSubsystems {
+        classifier,
+        extractor,
+        comprehension,
+        ..
+    } = match build_served_subsystems(
+        &backend,
+        &cli.backend,
+        &main_model,
+        notice.as_ref(),
         &backend_params,
-        classifier_settings.clone(),
+        &subsystem_settings,
     )
     .await
     {
-        Ok(c) => {
-            eprintln!("Engagement classifier: {}", c.identifier());
-            c
-        }
+        Ok(built) => built,
         Err(e) => {
-            eprintln!("Error constructing engagement classifier: {e}");
+            eprintln!("Error {e}");
             std::process::exit(1);
         }
     };
-
-    let extractor_settings = ExtractorSettings {
-        blocking_timeout: std::time::Duration::from_millis(cli.extractor_timeout_ms),
-        ..ExtractorSettings::default()
-    };
-
-    let extractor: Arc<dyn ConceptExtractor> = match build_extractor(
-        Arc::clone(&backend),
-        &served_kind,
-        &served_model,
-        &backend_params,
-        extractor_settings.clone(),
-    )
-    .await
-    {
-        Ok(e) => {
-            eprintln!("Concept extractor: {}", e.identifier());
-            e
-        }
-        Err(e) => {
-            eprintln!("Error constructing concept extractor: {e}");
-            std::process::exit(1);
-        }
-    };
-
-    let comprehension_settings = primer_comprehension::ComprehensionSettings {
-        blocking_timeout: std::time::Duration::from_millis(cli.comprehension_timeout_ms),
-        ..primer_comprehension::ComprehensionSettings::default()
-    };
-
-    let comprehension: Arc<dyn primer_comprehension::ComprehensionClassifier> =
-        match build_comprehension(
-            Arc::clone(&backend),
-            &served_kind,
-            &served_model,
-            &backend_params,
-            comprehension_settings.clone(),
-        )
-        .await
-        {
-            Ok(c) => {
-                eprintln!("Comprehension classifier: {}", c.identifier());
-                c
-            }
-            Err(e) => {
-                eprintln!("Error constructing comprehension classifier: {e}");
-                std::process::exit(1);
-            }
-        };
+    eprintln!("Engagement classifier: {}", classifier.identifier());
+    eprintln!("Concept extractor: {}", extractor.identifier());
+    eprintln!("Comprehension classifier: {}", comprehension.identifier());
 
     // ─── Embedder ────────────────────────────────────────────────────
     //
@@ -1173,11 +1142,11 @@ async fn async_main() -> anyhow::Result<()> {
     };
     let subsystems = primer_pedagogy::DialogueManagerSubsystems {
         classifier,
-        classifier_settings,
+        classifier_settings: subsystem_settings.classifier,
         extractor,
-        extractor_settings,
+        extractor_settings: subsystem_settings.extractor,
         comprehension,
-        comprehension_settings,
+        comprehension_settings: subsystem_settings.comprehension,
         vocab_settings,
         embedder: embedder.clone(),
     };
