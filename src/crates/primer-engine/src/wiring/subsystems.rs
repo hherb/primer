@@ -22,6 +22,26 @@ use primer_extractor::{
 use super::BackendParams;
 use super::backend::build_backend;
 
+/// Why a subsystem's `--*-model` override has no effect, or `None` when it
+/// does (or there is none). The subsystem resolves to the deterministic stub,
+/// which takes no model, either because its own backend override is `stub` or
+/// because none is set and the served kind is `stub` — a stub primary, or a
+/// stub fallback serving alone under `PrimaryUnavailable` (issue #365). The
+/// builders warn with it rather than drop the override silently; the stub
+/// still wins.
+pub(super) fn stub_ignores_model(
+    served_kind: &str,
+    backend_override: Option<&str>,
+    model: Option<&str>,
+) -> Option<&'static str> {
+    model?;
+    match (served_kind, backend_override) {
+        (_, Some("stub")) => Some("the subsystem backend is stub"),
+        ("stub", None) => Some("the served backend is stub"),
+        _ => None,
+    }
+}
+
 /// Construct the engagement classifier according to the dispatch matrix.
 ///
 /// `main_backend_name` / `main_model` are the kind + model that actually
@@ -44,15 +64,14 @@ pub async fn build_classifier(
     params: &BackendParams,
     settings: ClassifierSettings,
 ) -> Result<Arc<dyn EngagementClassifier>> {
-    // Warn on a flag combination the user probably didn't mean: passing
-    // --classifier-model alongside an explicit --classifier-backend stub
-    // looks like the model name will take effect, but stub ignores it.
-    if matches!(params.classifier_backend.as_deref(), Some("stub"))
-        && params.classifier_model.is_some()
-    {
+    if let Some(reason) = stub_ignores_model(
+        main_backend_name,
+        params.classifier_backend.as_deref(),
+        params.classifier_model.as_deref(),
+    ) {
         tracing::warn!(
             model = ?params.classifier_model,
-            "--classifier-model ignored: --classifier-backend is stub (deterministic, no model)"
+            "--classifier-model ignored: {reason} (deterministic, no model)"
         );
     }
 
@@ -128,15 +147,14 @@ pub async fn build_extractor(
     params: &BackendParams,
     settings: ExtractorSettings,
 ) -> Result<Arc<dyn ConceptExtractor>> {
-    // Warn on a flag combination the user probably didn't mean: passing
-    // --extractor-model alongside an explicit --extractor-backend stub
-    // looks like the model name will take effect, but stub ignores it.
-    if matches!(params.extractor_backend.as_deref(), Some("stub"))
-        && params.extractor_model.is_some()
-    {
+    if let Some(reason) = stub_ignores_model(
+        main_backend_name,
+        params.extractor_backend.as_deref(),
+        params.extractor_model.as_deref(),
+    ) {
         tracing::warn!(
             model = ?params.extractor_model,
-            "--extractor-model ignored: --extractor-backend is stub (deterministic, no model)"
+            "--extractor-model ignored: {reason} (deterministic, no model)"
         );
     }
 
@@ -195,12 +213,14 @@ pub async fn build_comprehension(
     params: &BackendParams,
     settings: primer_comprehension::ComprehensionSettings,
 ) -> Result<Arc<dyn primer_comprehension::ComprehensionClassifier>> {
-    if matches!(params.comprehension_backend.as_deref(), Some("stub"))
-        && params.comprehension_model.is_some()
-    {
+    if let Some(reason) = stub_ignores_model(
+        main_backend_name,
+        params.comprehension_backend.as_deref(),
+        params.comprehension_model.as_deref(),
+    ) {
         tracing::warn!(
             model = ?params.comprehension_model,
-            "--comprehension-model ignored: --comprehension-backend is stub (deterministic, no model)"
+            "--comprehension-model ignored: {reason} (deterministic, no model)"
         );
     }
 
