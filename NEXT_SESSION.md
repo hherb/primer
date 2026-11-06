@@ -18,8 +18,8 @@ The two touch different lines (both edit CLAUDE.md, in different paragraphs) and
 ### #407 — `92f9ea0` + this brief's commit: closes #364
 - **New `primer_engine::build_served_subsystems`** (+ `SubsystemSettings`, `ServedSubsystems`) in `primer-engine/src/wiring/subsystems.rs`. It runs `served_identity` and then the classifier / extractor / comprehension builders, and its `Err(String)` names the failing subsystem (`constructing concept extractor: …`).
   - The CLI (`main.rs`, now 1347 lines, was 1381) and the GUI's `build_subsystems` both call it. The GUI's `build_subsystems` now takes `primary_kind`, `main_model` and `notice`, and returns `(DialogueManagerSubsystems, (served_kind, served_model))` for the sidebar.
-  - `wiring/served_subsystems_tests.rs` (3 tests): a synthetic `PrimaryUnavailable` (qnn primary, ollama fallback, `--classifier-model` override), the no-notice case, and the error naming. Mutation-checked: dispatching on the primary fails the first test.
-- **CLI fix found by the smoke run:** the "every subsystem is set to qnn … serialise" warning fired even when qnn was unavailable and the fallback served. It is now gated on `notice` not being `PrimaryUnavailable`. Untested (a one-line condition in untestable `async_main`).
+  - `wiring/served_subsystems_tests.rs` (3 tests): a synthetic `PrimaryUnavailable` (qnn primary, ollama fallback, `--classifier-model` override, explicit `--comprehension-backend stub`), the no-notice case, and the error naming for all three subsystems. Mutation-checked: dispatching on the primary fails the first test.
+- **CLI fix found by the smoke run:** the "every subsystem is set to qnn … serialise" warning fired even when qnn was unavailable and the fallback served. `npu_serialisation_warning` now takes `npu_serves` (false under `PrimaryUnavailable`), which drops only the all-qnn warning; the all-stub feature-loss warning still fires (finalcheck review caught the first version skipping both). Pinned by `fallback_serving_drops_only_the_qnn_warning`.
 - **Sweep regression fixed:** #405 pushed `primer-engine/src/paths.rs` past 500 lines with an inline test module. The tests moved to `paths/tests.rs` (count unchanged: 116 + 3 new = 119 in `primer-engine --lib`).
 - **Docs:** the CLAUDE.md `FallbackBackend` bullet now names the helper. README and ROADMAP: no change.
 
@@ -75,7 +75,6 @@ Still not watched in the real webview: `mv ~/.primer/kb ~/.primer/kb.bak`, launc
 
 ### This session (#407)
 - **The CLI prints its three `Engagement classifier: …` / `Concept extractor: …` / `Comprehension classifier: …` lines after all three are built**, not one at a time. On a failure, the earlier lines no longer print; the error still names the subsystem.
-- **The NPU-serialisation gate is untested** (one `matches!` in `async_main`). The pure `npu_serialisation_warning` stays tested.
 - **`build_served_subsystems` returns `Result<_, String>`**, not `PrimerError`, so both binaries keep their exact error text. A future caller wanting a typed error has to wrap it.
 
 ### This session (#408)

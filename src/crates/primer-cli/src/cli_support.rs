@@ -206,11 +206,12 @@ pub(crate) fn validate_speech_assets(
 /// Pure inspection of the `Cli` struct — no I/O. Kept as a free
 /// function so we can unit-test the decision logic via the small
 /// `npu_serialisation_warning` helper below.
-pub(crate) fn warn_on_npu_serialisation(cli: &crate::Cli) {
+pub(crate) fn warn_on_npu_serialisation(cli: &crate::Cli, npu_serves: bool) {
     let decision = npu_serialisation_warning(
         cli.classifier_backend.as_deref(),
         cli.extractor_backend.as_deref(),
         cli.comprehension_backend.as_deref(),
+        npu_serves,
     );
     if let Some(msg) = decision {
         eprintln!("Warning: {msg}");
@@ -225,10 +226,15 @@ pub(crate) fn warn_on_npu_serialisation(cli: &crate::Cli) {
 /// Inputs are `Option<&str>` because each subsystem flag defaults to
 /// "unset → reuse the main backend". Under `--backend qnn`, "unset"
 /// effectively means "qnn".
+///
+/// `npu_serves` is false when the qnn primary is unavailable and its
+/// fallback serves: then nothing serialises on the NPU, so only the
+/// all-qnn warning is dropped; the all-stub one still applies.
 pub(crate) fn npu_serialisation_warning(
     classifier: Option<&str>,
     extractor: Option<&str>,
     comprehension: Option<&str>,
+    npu_serves: bool,
 ) -> Option<String> {
     // Resolve each subsystem to its effective backend name under
     // `--backend qnn`: None → "qnn" (inherit), explicit value wins.
@@ -238,7 +244,7 @@ pub(crate) fn npu_serialisation_warning(
         comprehension.unwrap_or("qnn"),
     ];
 
-    if resolved.iter().all(|&b| b == "qnn") {
+    if npu_serves && resolved.iter().all(|&b| b == "qnn") {
         return Some(
             "every subsystem (classifier, extractor, comprehension) is set to qnn — \
              all background LLM work will serialise behind the chat turn through the \

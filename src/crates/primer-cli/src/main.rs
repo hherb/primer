@@ -811,10 +811,9 @@ async fn async_main() -> anyhow::Result<()> {
         ),
         "qnn" => {
             eprintln!("Using qnn (Qualcomm NPU) backend with {main_model}.");
-            // Only meaningful when the NPU actually serves, not its fallback.
-            if !matches!(notice, Some(BackendNotice::PrimaryUnavailable { .. })) {
-                warn_on_npu_serialisation(&cli);
-            }
+            // The NPU serialises only when it serves, not its fallback.
+            let npu_serves = !matches!(notice, Some(BackendNotice::PrimaryUnavailable { .. }));
+            warn_on_npu_serialisation(&cli, npu_serves);
         }
         "llamacpp" => {
             eprintln!("Using embedded llama.cpp backend with {main_model}.");

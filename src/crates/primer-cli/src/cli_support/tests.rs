@@ -292,7 +292,7 @@ mod cli_parse_tests {
         // No overrides → each subsystem inherits the main backend.
         // Under --backend qnn this means everything runs on the NPU
         // and serialises through the dialog mutex.
-        let w = npu_serialisation_warning(None, None, None);
+        let w = npu_serialisation_warning(None, None, None, true);
         assert!(w.is_some(), "expected a warning; got None");
         let msg = w.unwrap();
         assert!(
@@ -308,7 +308,7 @@ mod cli_parse_tests {
         // rule), but pinned separately because a future refactor
         // that handled the explicit case differently from the
         // inherit case would silently break this contract.
-        let w = npu_serialisation_warning(Some("qnn"), Some("qnn"), Some("qnn"));
+        let w = npu_serialisation_warning(Some("qnn"), Some("qnn"), Some("qnn"), true);
         assert!(w.is_some(), "expected a warning; got None");
         let msg = w.unwrap();
         assert!(
@@ -322,7 +322,7 @@ mod cli_parse_tests {
         // All-stub means the conversation runs without classifier-
         // driven features. Deliberate for smoke tests, but worth
         // calling out so a fresh user doesn't think it's broken.
-        let w = npu_serialisation_warning(Some("stub"), Some("stub"), Some("stub"));
+        let w = npu_serialisation_warning(Some("stub"), Some("stub"), Some("stub"), true);
         assert!(w.is_some(), "expected a warning; got None");
         let msg = w.unwrap();
         assert!(msg.contains("stub"), "expected stub hint; got: {msg}");
@@ -333,18 +333,27 @@ mod cli_parse_tests {
         // One subsystem stubbed, two inherited → reasonable shape,
         // no warning. Specifically: classifier-on-stub is the
         // canonical "let me focus the NPU on chat" configuration.
-        let w = npu_serialisation_warning(Some("stub"), None, None);
+        let w = npu_serialisation_warning(Some("stub"), None, None, true);
         assert!(w.is_none(), "mixed config should not warn; got: {w:?}");
     }
 
     #[test]
     fn no_warning_when_subsystems_use_external_backend() {
         // Classifier on cloud, others inherit qnn → mixed shape.
-        let w = npu_serialisation_warning(Some("cloud"), None, None);
+        let w = npu_serialisation_warning(Some("cloud"), None, None, true);
         assert!(
             w.is_none(),
             "cloud-classifier config should not warn; got: {w:?}"
         );
+    }
+
+    #[test]
+    fn fallback_serving_drops_only_the_qnn_warning() {
+        // qnn primary unavailable, fallback serves: nothing runs on the
+        // NPU, but an all-stub config still loses its features.
+        assert_eq!(npu_serialisation_warning(None, None, None, false), None);
+        let w = npu_serialisation_warning(Some("stub"), Some("stub"), Some("stub"), false);
+        assert!(w.is_some_and(|m| m.contains("stub")));
     }
 
     // ─── --backend qnn clap parse acceptance ─────────────────────────────

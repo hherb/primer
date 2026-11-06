@@ -59,7 +59,9 @@ fn primary_unavailable() -> BackendNotice {
 /// inherited subsystems are labelled with the fallback's model.
 #[tokio::test]
 async fn primary_unavailable_builds_every_subsystem_on_the_fallback() {
-    let params = params();
+    let mut params = params();
+    // An explicit subsystem backend still builds exactly the kind asked for.
+    params.comprehension_backend = Some("stub".into());
     // The Arc is a stub; only the kind/model strings drive dispatch.
     let backend = build_backend("stub", "served".into(), &params)
         .await
@@ -83,19 +85,16 @@ async fn primary_unavailable_builds_every_subsystem_on_the_fallback() {
         built.classifier.identifier(),
         format!("llm:{OVERRIDE_MODEL}")
     );
-    for id in [
-        built.extractor.identifier(),
-        built.comprehension.identifier(),
-    ] {
-        assert!(
-            id.contains(FALLBACK_MODEL),
-            "inherited id {id:?} must name the fallback"
-        );
-        assert!(
-            !id.contains("qnn"),
-            "inherited id {id:?} must not name the primary"
-        );
-    }
+    let id = built.extractor.identifier();
+    assert!(
+        id.contains(FALLBACK_MODEL),
+        "inherited id {id:?} must name the fallback"
+    );
+    assert!(
+        !id.contains("qnn"),
+        "inherited id {id:?} must not name the primary"
+    );
+    assert_eq!(built.comprehension.identifier(), "stub");
 }
 
 /// Without a notice the configured primary is what serves.
@@ -121,20 +120,33 @@ async fn no_notice_builds_on_the_configured_primary() {
 /// A failing subsystem names itself in the error, as both binaries used to.
 #[tokio::test]
 async fn failing_subsystem_is_named_in_the_error() {
-    let mut params = params();
-    params.extractor_backend = Some("nonexistent".into());
-    params.extractor_model = Some("m".into());
-    let backend = build_backend("stub", "served".into(), &params)
-        .await
-        .unwrap();
+    type BreakOne = fn(&mut BackendParams);
+    let cases: [(BreakOne, &str); 3] = [
+        (
+            |p| p.classifier_backend = Some("nonexistent".into()),
+            "constructing engagement classifier: ",
+        ),
+        (
+            |p| p.extractor_backend = Some("nonexistent".into()),
+            "constructing concept extractor: ",
+        ),
+        (
+            |p| p.comprehension_backend = Some("nonexistent".into()),
+            "constructing comprehension classifier: ",
+        ),
+    ];
+    for (break_one, prefix) in cases {
+        let mut params = params();
+        break_one(&mut params);
+        let backend = build_backend("stub", "served".into(), &params)
+            .await
+            .unwrap();
 
-    let err = build_served_subsystems(&backend, "ollama", "main", None, &params, &settings())
-        .await
-        .err()
-        .expect("unknown extractor backend must fail");
+        let err = build_served_subsystems(&backend, "ollama", "main", None, &params, &settings())
+            .await
+            .err()
+            .expect("an unknown subsystem backend must fail");
 
-    assert!(
-        err.starts_with("constructing concept extractor: "),
-        "got {err:?}"
-    );
+        assert!(err.starts_with(prefix), "want {prefix:?}, got {err:?}");
+    }
 }
