@@ -1,7 +1,7 @@
 # Primer — Next Session Brief
 
 **Audience:** future Claude Code session continuing work on this repo.
-**Last updated:** 2026-11-07 (UTC).
+**Last updated:** 2026-11-06 (UTC).
 
 **Two PRs are open against `main`:**
 - **#407** (`fix/cli-subsystem-seam-364`) closes #364. This brief rides on it.
