@@ -20,7 +20,7 @@ use primer_extractor::{
 };
 
 use super::BackendParams;
-use super::backend::build_backend;
+use super::backend::{BackendNotice, build_backend, served_identity};
 
 /// Why a subsystem's `--*-model` override has no effect, or `None` when it
 /// does (or there is none). The subsystem resolves to the deterministic stub,
@@ -269,4 +269,82 @@ pub async fn build_comprehension(
             }
         },
     }
+}
+
+/// The settings for the three LLM subsystems [`build_served_subsystems`]
+/// builds. The caller keeps its copy: the dialogue manager needs them too.
+pub struct SubsystemSettings {
+    pub classifier: ClassifierSettings,
+    pub extractor: ExtractorSettings,
+    pub comprehension: primer_comprehension::ComprehensionSettings,
+}
+
+/// The three LLM subsystems plus the served kind + model they were built on.
+pub struct ServedSubsystems {
+    /// What serves turns: the fallback's kind under
+    /// `BackendNotice::PrimaryUnavailable`, else the configured primary's.
+    pub served_kind: String,
+    /// The served backend's model id (see [`served_identity`]).
+    pub served_model: String,
+    pub classifier: Arc<dyn EngagementClassifier>,
+    pub extractor: Arc<dyn ConceptExtractor>,
+    pub comprehension: Arc<dyn primer_comprehension::ComprehensionClassifier>,
+}
+
+/// Resolve what actually serves turns ([`served_identity`]) and build the
+/// classifier, extractor and comprehension classifier on it, in that order.
+///
+/// `primary_kind` / `main_model` are the *configured* primary (the model
+/// already rebound from any `*-pending` placeholder); `notice` is what
+/// `build_main_backend` returned. Both binaries call this one helper, so
+/// neither can hand the builders the unavailable primary's kind (#351, #364).
+/// The error names the failing subsystem, e.g.
+/// `"constructing concept extractor: …"`.
+pub async fn build_served_subsystems(
+    backend: &Arc<dyn InferenceBackend>,
+    primary_kind: &str,
+    main_model: &str,
+    notice: Option<&BackendNotice>,
+    params: &BackendParams,
+    settings: &SubsystemSettings,
+) -> std::result::Result<ServedSubsystems, String> {
+    let (served_kind, served_model) =
+        served_identity(primary_kind, main_model, notice, backend.name());
+    let (kind, model) = (served_kind.as_str(), served_model.as_str());
+
+    let classifier = build_classifier(
+        Arc::clone(backend),
+        kind,
+        model,
+        params,
+        settings.classifier.clone(),
+    )
+    .await
+    .map_err(|e| format!("constructing engagement classifier: {e}"))?;
+    let extractor = build_extractor(
+        Arc::clone(backend),
+        kind,
+        model,
+        params,
+        settings.extractor.clone(),
+    )
+    .await
+    .map_err(|e| format!("constructing concept extractor: {e}"))?;
+    let comprehension = build_comprehension(
+        Arc::clone(backend),
+        kind,
+        model,
+        params,
+        settings.comprehension.clone(),
+    )
+    .await
+    .map_err(|e| format!("constructing comprehension classifier: {e}"))?;
+
+    Ok(ServedSubsystems {
+        served_kind,
+        served_model,
+        classifier,
+        extractor,
+        comprehension,
+    })
 }
