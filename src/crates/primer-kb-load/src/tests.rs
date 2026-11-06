@@ -769,3 +769,140 @@ async fn prepare_kb_top_up_replaces_an_edited_seed_passage() {
     assert_eq!(new[0].text, "corrected volcano text");
     assert!(kb.retrieve("first", &params).await.unwrap().is_empty());
 }
+
+/// Issue #398: the cache top-up mirrors the corpus, so a passage removed
+/// from the seed files is pruned along with its vector.
+#[tokio::test]
+async fn prepare_kb_top_up_prunes_a_passage_removed_from_the_seed() {
+    let db = tempfile::NamedTempFile::new().unwrap();
+    let kb = SqliteKnowledgeBase::open_for_locale(db.path(), Locale::English).unwrap();
+    let stub = primer_embedding::StubEmbedder::with_dim(16);
+    let v1 = write_jsonl(&[PREP_P1, PREP_P2]);
+    prepare_kb(
+        &kb,
+        &[v1.path().to_path_buf()],
+        true,
+        Some(&stub),
+        &mut |_, _| {},
+    )
+    .await
+    .unwrap();
+
+    let v2 = write_jsonl(&[PREP_P1]);
+    let stats = prepare_kb(
+        &kb,
+        &[v2.path().to_path_buf()],
+        true,
+        Some(&stub),
+        &mut |_, _| {},
+    )
+    .await
+    .unwrap();
+
+    let seeded = stats.seeded.expect("top_up always loads");
+    assert_eq!((seeded.inserted, seeded.replaced, seeded.pruned), (0, 0, 1));
+    assert_eq!(stats.embedded, 0);
+    assert_eq!(kb.passage_count().unwrap(), 1);
+    assert_eq!(kb.embedding_count().unwrap(), 1);
+}
+
+/// `load_jsonl` serves user DBs that may hold several corpora, so it never
+/// prunes ids absent from the one file it loads (#398).
+#[tokio::test]
+async fn load_jsonl_keeps_passages_absent_from_the_file() {
+    let db = tempfile::NamedTempFile::new().unwrap();
+    let kb = SqliteKnowledgeBase::open_for_locale(db.path(), Locale::English).unwrap();
+    load_jsonl(&kb, write_jsonl(&[PREP_P1, PREP_P2]).path())
+        .await
+        .unwrap();
+
+    let stats = load_jsonl(&kb, write_jsonl(&[PREP_P1]).path())
+        .await
+        .unwrap();
+
+    assert_eq!(stats.pruned, 0);
+    assert_eq!(kb.passage_count().unwrap(), 2);
+}
+
+/// A seed corpus with no passages (an emptied or truncated file) must not
+/// wipe the cache: there is nothing to mirror.
+#[tokio::test]
+async fn prepare_kb_top_up_with_an_empty_corpus_prunes_nothing() {
+    let db = tempfile::NamedTempFile::new().unwrap();
+    let kb = SqliteKnowledgeBase::open_for_locale(db.path(), Locale::English).unwrap();
+    let v1 = write_jsonl(&[PREP_P1, PREP_P2]);
+    prepare_kb(&kb, &[v1.path().to_path_buf()], true, None, &mut |_, _| {})
+        .await
+        .unwrap();
+
+    let empty = write_jsonl(&[]);
+    let stats = prepare_kb(
+        &kb,
+        &[empty.path().to_path_buf()],
+        true,
+        None,
+        &mut |_, _| {},
+    )
+    .await
+    .unwrap();
+
+    assert_eq!(stats.seeded.expect("top_up always loads").pruned, 0);
+    assert_eq!(kb.passage_count().unwrap(), 2);
+}
+
+/// No seed files discovered (an installed binary without `PRIMER_SEED_DIR`)
+/// means no load at all, so a populated cache is left as it is.
+#[tokio::test]
+async fn prepare_kb_top_up_without_seed_files_keeps_the_cache() {
+    let db = tempfile::NamedTempFile::new().unwrap();
+    let kb = SqliteKnowledgeBase::open_for_locale(db.path(), Locale::English).unwrap();
+    let v1 = write_jsonl(&[PREP_P1, PREP_P2]);
+    prepare_kb(&kb, &[v1.path().to_path_buf()], true, None, &mut |_, _| {})
+        .await
+        .unwrap();
+
+    let stats = prepare_kb(&kb, &[], true, None, &mut |_, _| {})
+        .await
+        .unwrap();
+
+    assert!(stats.seeded.is_none());
+    assert_eq!(kb.passage_count().unwrap(), 2);
+}
+
+/// The per-model cache file holds every locale; a prune reads and deletes
+/// only the topped-up locale's own table.
+#[tokio::test]
+async fn prepare_kb_top_up_prune_leaves_other_locales_alone() {
+    let db = tempfile::NamedTempFile::new().unwrap();
+    let stub = primer_embedding::StubEmbedder::with_dim(16);
+    let en = SqliteKnowledgeBase::open_for_locale(db.path(), Locale::English).unwrap();
+    let de = SqliteKnowledgeBase::open_for_locale(db.path(), Locale::German).unwrap();
+    let both = write_jsonl(&[PREP_P1, PREP_P2]);
+    for kb in [&en, &de] {
+        prepare_kb(
+            kb,
+            &[both.path().to_path_buf()],
+            true,
+            Some(&stub),
+            &mut |_, _| {},
+        )
+        .await
+        .unwrap();
+    }
+
+    let smaller = write_jsonl(&[PREP_P1]);
+    let stats = prepare_kb(
+        &en,
+        &[smaller.path().to_path_buf()],
+        true,
+        Some(&stub),
+        &mut |_, _| {},
+    )
+    .await
+    .unwrap();
+
+    assert_eq!(stats.seeded.unwrap().pruned, 1);
+    assert_eq!(en.passage_count().unwrap(), 1);
+    assert_eq!(de.passage_count().unwrap(), 2);
+    assert_eq!(de.embedding_count().unwrap(), 2);
+}

@@ -486,6 +486,33 @@ async fn knowledge_base_explicit_path_is_seeded_but_not_embedded() {
     assert_eq!(kb.embedding_count().unwrap(), 0);
 }
 
+/// The cache top-up prunes passages the seed corpus lacks (#398); an
+/// explicit Settings path never gets it, so a user's own passage survives.
+#[tokio::test]
+async fn knowledge_base_explicit_path_keeps_user_passages() {
+    let home = TempDir::new().unwrap();
+    let mut cfg = stub_config();
+    let path = home.path().join("my-kb.db");
+    cfg.persistence.knowledge_db = Some(path.clone());
+    primer_knowledge::SqliteKnowledgeBase::open_for_locale(&path, Locale::English)
+        .unwrap()
+        .insert_passage("user:my-note", "user", "my own volcano note")
+        .unwrap();
+    let stub = primer_embedding::StubEmbedder::new();
+
+    let (kb, _) = open_knowledge_base(
+        home.path(),
+        &cfg,
+        Locale::English,
+        Some(&stub),
+        &mut |_, _| {},
+    )
+    .await
+    .unwrap();
+
+    assert!(kb.stored_passages().unwrap().contains_key("user:my-note"));
+}
+
 // ─── subsystems ──────────────────────────────────────────────────────
 
 /// Build the stub main backend plus the params it was built from.
