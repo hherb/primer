@@ -14,8 +14,8 @@ use primer_classifier::ClassifierSettings;
 use primer_comprehension::ComprehensionSettings;
 use primer_core::inference::InferenceBackend;
 use primer_engine::{
-    BackendParams, build_classifier, build_comprehension, build_extractor,
-    build_fastembed_embedder, build_ollama_embedder, build_openai_compat_embedder,
+    BackendNotice, BackendParams, ServedSubsystems, SubsystemSettings, build_fastembed_embedder,
+    build_ollama_embedder, build_openai_compat_embedder, build_served_subsystems,
 };
 use primer_extractor::ExtractorSettings;
 use primer_pedagogy::DialogueManagerSubsystems;
@@ -23,65 +23,48 @@ use primer_pedagogy::vocab::VocabSettings;
 
 use crate::config::{EmbedderConfig, GuiConfig};
 
-/// Build every subsystem the dialogue manager needs from the GUI config.
+/// Build every subsystem the dialogue manager needs from the GUI config,
+/// and return it with the *served* `(kind, model)` for the sidebar.
 ///
 /// `backend` is the (possibly fallback/router-wrapped) main backend;
 /// subsystems with neither a kind nor a model override reuse it via
-/// `Arc::clone`.
-/// `backend_kind` / `main_model` are the *served* kind and model id
-/// (`primer_engine::served_identity`: the fallback's when the primary is
-/// unavailable, #351; the model already rebound from any `*-pending`
-/// placeholder), so inherited subsystems are labelled by what runs them and
-/// overrides build on a kind that actually constructs. The openai-compat
-/// embedder reuses the key the main backend resolved in `params`.
+/// `Arc::clone`. `primary_kind` / `main_model` are the configured primary
+/// (the model already rebound from any `*-pending` placeholder) and `notice`
+/// is what `build_main_backend` returned: the shared
+/// [`primer_engine::build_served_subsystems`] turns them into what actually
+/// serves (the fallback when the primary is unavailable, #351, #364). The
+/// openai-compat embedder reuses the key the main backend resolved in
+/// `params`.
 pub(super) async fn build_subsystems(
     config: &GuiConfig,
     backend: &Arc<dyn InferenceBackend>,
-    backend_kind: &str,
+    primary_kind: &str,
     main_model: &str,
+    notice: Option<&BackendNotice>,
     params: &BackendParams,
-) -> Result<DialogueManagerSubsystems, String> {
-    let classifier_settings = ClassifierSettings {
-        blocking_timeout: Duration::from_millis(config.classifier.timeout_ms),
-        ..ClassifierSettings::default()
+) -> Result<(DialogueManagerSubsystems, (String, String)), String> {
+    let settings = SubsystemSettings {
+        classifier: ClassifierSettings {
+            blocking_timeout: Duration::from_millis(config.classifier.timeout_ms),
+            ..ClassifierSettings::default()
+        },
+        extractor: ExtractorSettings {
+            blocking_timeout: Duration::from_millis(config.extractor.timeout_ms),
+            ..ExtractorSettings::default()
+        },
+        comprehension: ComprehensionSettings {
+            blocking_timeout: Duration::from_millis(config.comprehension.timeout_ms),
+            ..ComprehensionSettings::default()
+        },
     };
-    let classifier = build_classifier(
-        Arc::clone(backend),
-        backend_kind,
-        main_model,
-        params,
-        classifier_settings.clone(),
-    )
-    .await
-    .map_err(|e| format!("constructing engagement classifier: {e}"))?;
-
-    let extractor_settings = ExtractorSettings {
-        blocking_timeout: Duration::from_millis(config.extractor.timeout_ms),
-        ..ExtractorSettings::default()
-    };
-    let extractor = build_extractor(
-        Arc::clone(backend),
-        backend_kind,
-        main_model,
-        params,
-        extractor_settings.clone(),
-    )
-    .await
-    .map_err(|e| format!("constructing concept extractor: {e}"))?;
-
-    let comprehension_settings = ComprehensionSettings {
-        blocking_timeout: Duration::from_millis(config.comprehension.timeout_ms),
-        ..ComprehensionSettings::default()
-    };
-    let comprehension = build_comprehension(
-        Arc::clone(backend),
-        backend_kind,
-        main_model,
-        params,
-        comprehension_settings.clone(),
-    )
-    .await
-    .map_err(|e| format!("constructing comprehension classifier: {e}"))?;
+    let ServedSubsystems {
+        served_kind,
+        served_model,
+        classifier,
+        extractor,
+        comprehension,
+    } = build_served_subsystems(backend, primary_kind, main_model, notice, params, &settings)
+        .await?;
 
     let embedder = build_embedder(
         &config.embedder,
@@ -98,16 +81,17 @@ pub(super) async fn build_subsystems(
             .unwrap_or(primer_core::consts::vocab::DEFAULT_VOCAB_MAX_PER_PROMPT),
     };
 
-    Ok(DialogueManagerSubsystems {
+    let subsystems = DialogueManagerSubsystems {
         classifier,
-        classifier_settings,
+        classifier_settings: settings.classifier,
         extractor,
-        extractor_settings,
+        extractor_settings: settings.extractor,
         comprehension,
-        comprehension_settings,
+        comprehension_settings: settings.comprehension,
         vocab_settings,
         embedder,
-    })
+    };
+    Ok((subsystems, (served_kind, served_model)))
 }
 
 /// The UI notice for a configured embedder that failed to start, which
