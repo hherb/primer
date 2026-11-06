@@ -29,16 +29,17 @@ Every cargo command runs from `src/` (the workspace root) as `~/.cargo/bin/cargo
 3. **Drive CI to green.** Loop:
    - Watch the checks for the pushed head commit with `gh pr checks --watch --fail-fast`. Checks can take a
      minute to register, so wait if it reports none yet.
-   - `ci.yml` has a workflow-level `paths-ignore` (`**/*.md`, `docs/**`, `.gitignore`, `LICENSE`). On a
-     PR it is matched against the **whole PR diff**, so a docs-only push onto a PR that also changes code
-     still runs CI. A PR that is docs-only overall posts **no checks at all**, so the required check never
-     reports (issue #404). Tell me; don't change CI to get around it.
+   - `ci.yml`'s `changes` job filters out `**/*.md`, `docs/**`, `.gitignore` and `LICENSE`, matched against
+     the **whole PR diff**. A PR that is docs-only overall shows `detect code changes` passing and every
+     other job **skipped**. Skipped counts as passing for the required check (issue #404), so that is
+     green. A docs-only push onto a PR that also changes code still runs everything.
    - `ci.yml` uses `concurrency: cancel-in-progress`, so a run on an older commit shows CANCELLED once a
      newer push lands. That is normal. Only the head commit's run counts.
    - All green → done. Report the PR URL and the final check list. "All green" means every check on the
      head commit passed. That includes the drift guards (`cargo check (non-default features)`,
      `cargo clippy (macOS feature combos)`, `cargo build (aarch64-linux-android)`,
-     `validate gradle wrapper`), not just the required ones. To see the required contexts, run
+     `validate gradle wrapper`) and `detect code changes`, not just the required ones. A heavy job
+     showing **skipped** on a PR that changes code means the `changes` filter misfired: report it. To see the required contexts, run
      `gh api repos/hherb/primer/branches/main/protection --jq .required_status_checks.contexts`. Repo
      rulesets are listed by `gh api repos/hherb/primer/rules/branches/main`.
    - A check failed → read the cause: `gh run list --branch "$(git branch --show-current)" --limit 5`, then
