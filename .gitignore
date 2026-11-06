@@ -23,8 +23,10 @@ target
 # stays local — never commit it.
 scripts/apple-notarize-env.sh
 
-# Claude Code local settings (per-checkout, not project state)
-.claude/
+# Claude Code local settings (per-checkout, not project state). The
+# project skills under .claude/skills/ are shared workflow, so they are tracked.
+.claude/*
+!.claude/skills/
 
 # RustRover
 #  JetBrains specific template is maintained in a separate JetBrains.gitignore that can
