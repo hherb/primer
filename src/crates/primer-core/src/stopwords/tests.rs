@@ -73,3 +73,52 @@ fn list_entries_are_in_sanitized_lowercase_form_without_duplicates() {
         }
     }
 }
+
+#[test]
+fn german_matching_folds_diacritics_like_the_fts_tokenizer() {
+    // NFD input (u + U+0308) reaches the filter as "fur" because the
+    // sanitizer drops the combining mark; a child may also type it (#391).
+    for w in ["fur", "uber", "Konnen", "mussen", "tschuss"] {
+        assert!(is_stopword(Locale::German, w), "{w:?}");
+    }
+    // A precomposed-umlaut token still matches after folding.
+    assert!(is_stopword(Locale::German, "Über"));
+}
+
+#[test]
+fn german_ascii_transliterations_are_stopwords() {
+    // ae/oe/ue spellings from a keyboard without umlauts (#391).
+    for w in [
+        "fuer", "ueber", "koennen", "muessen", "duerfen", "moechte", "tschuess",
+    ] {
+        assert!(is_stopword(Locale::German, w), "{w:?}");
+    }
+}
+
+#[test]
+fn every_umlaut_entry_has_its_transliteration() {
+    // Keeps the two spellings in step when the list grows.
+    let list: HashSet<&str> = parse(list_source(Locale::German)).collect();
+    for w in &list {
+        if w.contains(['ä', 'ö', 'ü']) {
+            let t = w.replace('ä', "ae").replace('ö', "oe").replace('ü', "ue");
+            assert!(list.contains(t.as_str()), "missing {t:?} for {w:?}");
+        }
+    }
+}
+
+#[test]
+fn issue_391_queries_keep_only_content_words_after_sanitizing() {
+    let de = |t: &str| is_stopword(Locale::German, t);
+    let nfd_fuer = "f\u{0075}\u{0308}r"; // "für" decomposed
+    for q in [
+        "kannst du mir was ueber vulkane sagen".to_string(),
+        format!("was {nfd_fuer} vulkane gibt es"),
+    ] {
+        let got = crate::fts_util::sanitize_fts_phrase_excluding(&q, de);
+        assert!(got.contains("\"vulkane\""), "{q:?} -> {got}");
+        for filler in ["ueber", "fur", "was", "du"] {
+            assert!(!got.contains(&format!("\"{filler}\"")), "{q:?} -> {got}");
+        }
+    }
+}

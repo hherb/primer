@@ -14,6 +14,7 @@
 use crate::i18n::Locale;
 use std::collections::HashSet;
 use std::sync::OnceLock;
+use unicode_normalization::{UnicodeNormalization, char::is_combining_mark};
 
 const EN: &str = include_str!("../stopwords/en.txt");
 const DE: &str = include_str!("../stopwords/de.txt");
@@ -37,25 +38,35 @@ fn parse(source: &str) -> impl Iterator<Item = &str> {
         .filter(|l| !l.is_empty() && !l.starts_with('#'))
 }
 
-/// The parsed set for `locale`, built once per process.
-fn set(locale: Locale) -> &'static HashSet<&'static str> {
-    static EN_SET: OnceLock<HashSet<&'static str>> = OnceLock::new();
-    static DE_SET: OnceLock<HashSet<&'static str>> = OnceLock::new();
-    static HI_SET: OnceLock<HashSet<&'static str>> = OnceLock::new();
+/// Lookup key: lowercase with diacritics removed, the way the FTS5
+/// `unicode61` tokenizer folds terms. So "für", NFD "für" (which the
+/// sanitizer leaves as "fur") and a typed "fur" all match one entry (#391).
+fn fold(token: &str) -> String {
+    token
+        .nfd()
+        .filter(|c| !is_combining_mark(*c))
+        .flat_map(char::to_lowercase)
+        .collect()
+}
+
+/// The parsed, folded set for `locale`, built once per process.
+fn set(locale: Locale) -> &'static HashSet<String> {
+    static EN_SET: OnceLock<HashSet<String>> = OnceLock::new();
+    static DE_SET: OnceLock<HashSet<String>> = OnceLock::new();
+    static HI_SET: OnceLock<HashSet<String>> = OnceLock::new();
     let cell = match locale {
         Locale::English => &EN_SET,
         Locale::German => &DE_SET,
         Locale::Hindi => &HI_SET,
     };
-    cell.get_or_init(|| parse(list_source(locale)).collect())
+    cell.get_or_init(|| parse(list_source(locale)).map(fold).collect())
 }
 
-/// Whether `token` is a stopword in `locale`. Case-insensitive; `token`
-/// is expected in the punctuation-stripped form the FTS sanitizer yields.
+/// Whether `token` is a stopword in `locale`. Case- and
+/// diacritic-insensitive (see `fold`); `token` is expected in the
+/// punctuation-stripped form the FTS sanitizer yields.
 pub fn is_stopword(locale: Locale, token: &str) -> bool {
-    let set = set(locale);
-    // Lists are lowercase, so an already-lowercase token skips the allocation.
-    set.contains(token) || set.contains(token.to_lowercase().as_str())
+    set(locale).contains(&fold(token))
 }
 
 #[cfg(test)]
