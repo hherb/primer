@@ -293,36 +293,39 @@ impl InferenceBackend for OpenAiCompatBackend {
         let url = format!("{}/v1/chat/completions", self.base_url);
         let model = self.model.clone();
 
-        let response = primer_core::retry::retry_with_backoff(&self.retry_settings, || {
-            let client = &self.client;
-            let request = &request;
-            let api_key = &api_key;
-            let url = &url;
-            let model = &model;
-            async move {
-                let mut req_builder = client
-                    .post(url.as_str())
-                    .header("content-type", "application/json")
-                    .header("accept", "text/event-stream")
-                    .json(request);
-                if let Some(key) = api_key {
-                    req_builder = req_builder.header("authorization", format!("Bearer {key}"));
+        let response = primer_core::retry::retry_with_backoff(
+            &self.retry_settings.capped(params.max_retry_attempts),
+            || {
+                let client = &self.client;
+                let request = &request;
+                let api_key = &api_key;
+                let url = &url;
+                let model = &model;
+                async move {
+                    let mut req_builder = client
+                        .post(url.as_str())
+                        .header("content-type", "application/json")
+                        .header("accept", "text/event-stream")
+                        .json(request);
+                    if let Some(key) = api_key {
+                        req_builder = req_builder.header("authorization", format!("Bearer {key}"));
+                    }
+                    let resp = req_builder
+                        .send()
+                        .await
+                        .map_err(|e| classify_reqwest_error(&e))?;
+                    let status = resp.status();
+                    if !status.is_success() {
+                        let headers = resp.headers().clone();
+                        let body = resp.text().await.unwrap_or_default();
+                        return Err(classify_openai_compat_status(
+                            status, &headers, &body, model,
+                        ));
+                    }
+                    Ok(resp)
                 }
-                let resp = req_builder
-                    .send()
-                    .await
-                    .map_err(|e| classify_reqwest_error(&e))?;
-                let status = resp.status();
-                if !status.is_success() {
-                    let headers = resp.headers().clone();
-                    let body = resp.text().await.unwrap_or_default();
-                    return Err(classify_openai_compat_status(
-                        status, &headers, &body, model,
-                    ));
-                }
-                Ok(resp)
-            }
-        })
+            },
+        )
         .await
         .map_err(PrimerError::Inference)?;
 

@@ -1,13 +1,21 @@
 ---
 name: finalcheck
-description: final pre-merge pass on the current PR — review, fix everything, then drive GitHub CI to green
+description: final pre-merge pass on the current PR (or the earliest open PR when the branch has none) — review, fix everything, then drive GitHub CI to green
 disable-model-invocation: false
 allowed-tools: Bash(git *), Bash(gh *), Bash(cargo *), Bash(~/.cargo/bin/cargo *), Bash(uv *), Bash(bash *), Bash(actionlint *)
 ---
 Run these steps in order on the PR for the current branch. First run
 `pwd && git branch --show-current && git worktree list`. If the PR's branch is checked out in a worktree,
-`cd` into it. Then find the PR with `gh pr view --json number,url,headRefOid`. If there is none, stop and
-tell me.
+`cd` into it. Then find the PR with `gh pr view --json number,url,headRefOid`.
+
+If the current branch has no PR, take the earliest open one instead:
+`gh pr list --state open --json number,headRefName,createdAt --jq 'sort_by(.createdAt) | .[0]'`.
+If there are no open PRs at all, stop and tell me. Otherwise say which PR you picked, then switch to it:
+- If its branch is checked out in a worktree (`git worktree list`), `cd` into that worktree.
+- Otherwise run `gh pr checkout <number>`. Do this only when `git status --porcelain` is empty. With
+  uncommitted changes, stop and tell me rather than stashing or discarding them.
+
+Then re-run `gh pr view --json number,url,headRefOid` to confirm you are on the PR.
 
 Every cargo command runs from `src/` (the workspace root) as `~/.cargo/bin/cargo`, never a Homebrew cargo
 (see CLAUDE.md). A foreground `cargo test --workspace` can exceed the 600 s tool timeout, so run it with
