@@ -1,7 +1,8 @@
-//! One-shot local HTTP server for driving a real backend's
-//! `generate_stream` end to end (issue #313). The buffer unit tests
-//! cover parsing; these cover the spawn loop's EOF handling, which only
-//! a closing connection exercises.
+//! Local HTTP test servers for driving a real backend's `generate_stream`
+//! end to end: a one-shot body server (issue #313 — the buffer unit tests
+//! cover parsing; this covers the spawn loop's EOF handling, which only a
+//! closing connection exercises) and an always-503 request counter that
+//! measures pre-stream retry attempts (issue #312).
 
 use futures::StreamExt;
 use primer_core::inference::{GenerationParams, InferenceBackend, Prompt, TokenChunk, TokenStream};

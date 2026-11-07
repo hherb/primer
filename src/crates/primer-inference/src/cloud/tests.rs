@@ -347,4 +347,15 @@ async fn failover_leg_cap_makes_a_single_request() {
     )
     .await;
     assert_eq!(n, 1);
+    // Control: uncapped, the same server gets the full budget, so the
+    // cap (not a non-retryable 503) is what stopped at one request.
+    let full = crate::test_http::requests_until_pre_stream_error(
+        |url| CloudBackend::new(url, "k".into(), "m".into()),
+        &primer_core::inference::GenerationParams::default(),
+    )
+    .await;
+    assert_eq!(
+        full,
+        primer_core::consts::retry::DEFAULT_MAX_ATTEMPTS as usize
+    );
 }

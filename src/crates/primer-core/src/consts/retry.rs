@@ -9,7 +9,7 @@ pub const DEFAULT_MAX_ATTEMPTS: u32 = 3;
 /// Initial backoff delay before the second attempt.
 pub const DEFAULT_BASE_DELAY: Duration = Duration::from_millis(250);
 
-/// Multiplicative growth factor between attempts (250 → 500 → 1000 ms).
+/// Multiplicative growth factor between attempts (250 → 500 ms at the default 3 attempts).
 pub const DEFAULT_BACKOFF_FACTOR: u32 = 2;
 
 /// Jitter as a fraction of the computed delay (±50 %).
