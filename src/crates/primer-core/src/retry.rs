@@ -193,32 +193,6 @@ mod tests {
     }
 
     #[test]
-    fn capped_to_one_attempt_ignores_an_in_budget_retry_after() {
-        // A rate-limited failover leg must fail over at once, not sleep its
-        // Retry-After first (issue #312). Paused clock: elapsed is virtual.
-        let calls = Rc::new(RefCell::new(0u32));
-        let calls_for_op = calls.clone();
-        let settings = settings_for_test().capped(Some(1)); // budget = 2 s
-        let (result, elapsed): (Result<(), InferenceError>, Duration) = run_async(async move {
-            let start = tokio::time::Instant::now();
-            let r = retry_with_backoff(&settings, || {
-                let calls_for_op = calls_for_op.clone();
-                async move {
-                    *calls_for_op.borrow_mut() += 1;
-                    Err(InferenceError::RateLimited {
-                        retry_after: Some(Duration::from_secs(1)),
-                    })
-                }
-            })
-            .await;
-            (r, start.elapsed())
-        });
-        assert!(matches!(result, Err(InferenceError::RateLimited { .. })));
-        assert_eq!(*calls.borrow(), 1);
-        assert_eq!(elapsed, Duration::ZERO);
-    }
-
-    #[test]
     fn succeeds_on_first_attempt_with_one_call() {
         let calls = Rc::new(RefCell::new(0u32));
         let calls_for_op = calls.clone();

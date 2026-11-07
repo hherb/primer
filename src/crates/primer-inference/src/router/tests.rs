@@ -176,10 +176,10 @@ async fn pre_stream_failure_falls_over_to_other_leg() {
 }
 
 #[tokio::test]
-async fn first_leg_gets_one_attempt_and_last_leg_the_full_budget() {
+async fn first_leg_gets_the_failover_cap_and_last_leg_the_full_budget() {
     // Issue #312, for both leg orders: whichever leg has a failover behind
     // it is capped; the leg that would be last keeps its retry budget.
-    let one = Some(primer_core::consts::retry::FAILOVER_LEG_MAX_ATTEMPTS);
+    let cap = Some(primer_core::consts::retry::FAILOVER_LEG_MAX_ATTEMPTS);
     for mode in [RouterMode::Hybrid, RouterMode::CloudPreferred] {
         let (primary, _) = MockBackend::new("llamacpp:m", Behavior::PreStreamErr);
         let (secondary, _) = MockBackend::new("cloud", Behavior::PreStreamErr);
@@ -191,7 +191,7 @@ async fn first_leg_gets_one_attempt_and_last_leg_the_full_budget() {
             RouterMode::Hybrid => (&primary, &secondary),
             _ => (&secondary, &primary),
         };
-        assert_eq!(*first.caps.lock().unwrap(), vec![one], "{mode:?} first leg");
+        assert_eq!(*first.caps.lock().unwrap(), vec![cap], "{mode:?} first leg");
         assert_eq!(*last.caps.lock().unwrap(), vec![None], "{mode:?} last leg");
     }
 }

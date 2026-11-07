@@ -8,7 +8,7 @@
 //!   error propagates and the partial turn drops at the dialogue-manager layer,
 //!   exactly as without a fallback. **No mid-stream fallback / re-generation.**
 //! - If the primary returns `Err` (pre-stream failure), the secondary is tried.
-//! - The primary gets one pre-stream attempt (`GenerationParams::for_failover_leg`);
+//! - The primary gets one pre-stream retry (`GenerationParams::for_failover_leg`);
 //!   only the secondary keeps its full retry budget, so the two don't stack (#312).
 //!
 //! Startup/construction fallback (primary fails to *build*) is handled one layer
@@ -54,7 +54,7 @@ impl InferenceBackend for FallbackBackend {
         prompt: &Prompt,
         params: &GenerationParams,
     ) -> Result<TokenStream> {
-        // One attempt on the primary: the secondary is the retry (#312).
+        // One retry on the primary, then the secondary (#312).
         match self
             .primary
             .generate_stream(prompt, &params.for_failover_leg())
@@ -242,7 +242,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn primary_gets_one_attempt_and_secondary_the_full_budget() {
+    async fn primary_gets_the_failover_cap_and_secondary_the_full_budget() {
         // Issue #312: the primary's own retries must not stack in front of
         // the secondary's. Only the last leg keeps its retry budget.
         let (primary, _) = MockBackend::new("llamacpp:m", Behavior::PreStreamErr);
@@ -251,16 +251,16 @@ mod tests {
         let _ = fb
             .generate_stream(&prompt(), &GenerationParams::default())
             .await;
-        let one = Some(primer_core::consts::retry::FAILOVER_LEG_MAX_ATTEMPTS);
-        assert_eq!(*primary.caps.lock().unwrap(), vec![one]);
+        let cap = Some(primer_core::consts::retry::FAILOVER_LEG_MAX_ATTEMPTS);
+        assert_eq!(*primary.caps.lock().unwrap(), vec![cap]);
         assert_eq!(*secondary.caps.lock().unwrap(), vec![None]);
     }
 
     /// Issue #312's worst case, end to end over real HTTP: both legs down
-    /// (always 503). The primary spends one request, only the secondary
-    /// its full retry budget — the budgets no longer stack.
+    /// (always 503). The primary spends the failover cap (one retry), only
+    /// the secondary its full retry budget — the budgets no longer stack.
     #[tokio::test]
-    async fn two_down_legs_spend_one_plus_one_full_budget() {
+    async fn two_down_legs_spend_the_cap_plus_one_full_budget() {
         use crate::ollama::OllamaBackend;
         use crate::test_http::serve_503_counting;
         let (u1, primary_reqs) = serve_503_counting().await;
@@ -273,7 +273,10 @@ mod tests {
             .generate_stream(&prompt(), &GenerationParams::default())
             .await;
         assert!(result.is_err());
-        assert_eq!(primary_reqs.load(Ordering::SeqCst), 1);
+        assert_eq!(
+            primary_reqs.load(Ordering::SeqCst),
+            primer_core::consts::retry::FAILOVER_LEG_MAX_ATTEMPTS as usize
+        );
         assert_eq!(
             secondary_reqs.load(Ordering::SeqCst),
             primer_core::consts::retry::DEFAULT_MAX_ATTEMPTS as usize

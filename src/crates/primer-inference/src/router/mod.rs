@@ -146,8 +146,8 @@ impl InferenceBackend for RouterBackend {
         let order = order_legs(self.mode, score);
         let first = self.leg(order.first);
 
-        // A leg with a failover behind it gets one attempt: the other leg
-        // is the retry (#312). A lone leg keeps its full budget.
+        // A leg with a failover behind it gets one retry, then the other leg
+        // takes over (#312). A lone leg keeps its full budget.
         let first_params = match order.second {
             Some(_) => params.for_failover_leg(),
             None => params.clone(),

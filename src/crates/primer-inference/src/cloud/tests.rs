@@ -336,19 +336,22 @@ async fn stream_parses_unterminated_final_event_at_eof() {
     assert_eq!(terminal.finish_reason, FinishReason::Length);
 }
 
-/// Issue #312: a failover leg's one-attempt cap (`max_retry_attempts`)
+/// Issue #312: a failover leg's retry cap (`max_retry_attempts`)
 /// is honoured, so a down leg fails fast instead of spending its whole
 /// retry budget before the decorator can fail over.
 #[tokio::test]
-async fn failover_leg_cap_makes_a_single_request() {
+async fn failover_leg_cap_limits_requests() {
     let n = crate::test_http::requests_until_pre_stream_error(
         |url| CloudBackend::new(url, "k".into(), "m".into()),
         &crate::test_http::failover_leg_params(),
     )
     .await;
-    assert_eq!(n, 1);
+    assert_eq!(
+        n,
+        primer_core::consts::retry::FAILOVER_LEG_MAX_ATTEMPTS as usize
+    );
     // Control: uncapped, the same server gets the full budget, so the
-    // cap (not a non-retryable 503) is what stopped at one request.
+    // cap (not a non-retryable 503) is what stopped it early.
     let full = crate::test_http::requests_until_pre_stream_error(
         |url| CloudBackend::new(url, "k".into(), "m".into()),
         &primer_core::inference::GenerationParams::default(),

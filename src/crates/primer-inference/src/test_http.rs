@@ -70,7 +70,7 @@ pub(crate) async fn requests_until_pre_stream_error<B: InferenceBackend>(
     count.load(Ordering::SeqCst)
 }
 
-/// [`GenerationParams`] carrying a one-attempt retry cap, as
+/// [`GenerationParams`] carrying the failover-leg retry cap, as
 /// `FallbackBackend` / `RouterBackend` hand a leg with a failover behind it.
 pub(crate) fn failover_leg_params() -> GenerationParams {
     GenerationParams::default().for_failover_leg()

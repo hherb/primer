@@ -20,8 +20,11 @@ pub const DEFAULT_JITTER_FRACTION: f32 = 0.5;
 pub const DEFAULT_RETRY_AFTER_BUDGET: Duration = Duration::from_secs(5);
 
 /// Pre-stream attempts for a decorated leg that has another leg behind it
-/// (`FallbackBackend` primary, `RouterBackend` first leg). One attempt, no
-/// backoff: the decorator's failover is the retry, so a down or
-/// rate-limited first leg can't stack its whole budget in front of the
-/// second leg's (issue #312). The last leg keeps the full budget.
-pub const FAILOVER_LEG_MAX_ATTEMPTS: u32 = 1;
+/// (`FallbackBackend` primary, `RouterBackend` first leg): the first try
+/// plus one retry, then the decorator fails over, so a down first leg
+/// can't stack its whole budget in front of the second leg's (issue #312).
+/// The last leg keeps the full budget.
+pub const FAILOVER_LEG_MAX_ATTEMPTS: u32 = 2;
+
+// Owner policy: a leg always gets at least one retry before failover.
+const _: () = assert!(FAILOVER_LEG_MAX_ATTEMPTS >= 2);

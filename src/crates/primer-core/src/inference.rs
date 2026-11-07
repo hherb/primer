@@ -45,7 +45,7 @@ pub struct GenerationParams {
 impl GenerationParams {
     /// A copy for a decorated leg with another leg behind it: retries are
     /// capped at [`crate::consts::retry::FAILOVER_LEG_MAX_ATTEMPTS`] (or a
-    /// tighter cap already set), so failover happens fast (issue #312).
+    /// tighter cap already set): one retry, then failover (issue #312).
     pub fn for_failover_leg(&self) -> Self {
         let cap = crate::consts::retry::FAILOVER_LEG_MAX_ATTEMPTS;
         Self {
