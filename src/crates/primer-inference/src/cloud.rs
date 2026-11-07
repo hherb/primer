@@ -413,26 +413,29 @@ impl InferenceBackend for CloudBackend {
         // response and start consuming the byte stream, mid-stream errors
         // propagate as before (the partial Primer turn is dropped at a
         // higher layer).
-        let response = primer_core::retry::retry_with_backoff(&self.retry_settings, || async {
-            let resp = self
-                .client
-                .post(format!("{}/v1/messages", self.api_endpoint))
-                .header("x-api-key", &self.api_key)
-                .header("anthropic-version", "2023-06-01")
-                .header("content-type", "application/json")
-                .header("accept", "text/event-stream")
-                .json(&request)
-                .send()
-                .await
-                .map_err(|e| classify_reqwest_error(&e))?;
-            let status = resp.status();
-            if !status.is_success() {
-                let headers = resp.headers().clone();
-                let body = resp.text().await.unwrap_or_default();
-                return Err(classify_anthropic_status(status, &headers, &body));
-            }
-            Ok(resp)
-        })
+        let response = primer_core::retry::retry_with_backoff(
+            &self.retry_settings.capped(params.max_retry_attempts),
+            || async {
+                let resp = self
+                    .client
+                    .post(format!("{}/v1/messages", self.api_endpoint))
+                    .header("x-api-key", &self.api_key)
+                    .header("anthropic-version", "2023-06-01")
+                    .header("content-type", "application/json")
+                    .header("accept", "text/event-stream")
+                    .json(&request)
+                    .send()
+                    .await
+                    .map_err(|e| classify_reqwest_error(&e))?;
+                let status = resp.status();
+                if !status.is_success() {
+                    let headers = resp.headers().clone();
+                    let body = resp.text().await.unwrap_or_default();
+                    return Err(classify_anthropic_status(status, &headers, &body));
+                }
+                Ok(resp)
+            },
+        )
         .await
         .map_err(PrimerError::Inference)?;
 

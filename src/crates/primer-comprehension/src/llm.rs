@@ -63,6 +63,7 @@ impl ComprehensionClassifier for LlmComprehensionClassifier {
             top_p: self.settings.generation_top_p,
             stop_sequences: vec![],
             routing: None,
+            max_retry_attempts: None,
         };
         let raw = match self.backend.generate(&prompt, &params).await {
             Ok(r) => r,
