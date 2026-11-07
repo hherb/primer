@@ -1,53 +1,55 @@
 # Primer — Next Session Brief
 
 **Audience:** future Claude Code session continuing work on this repo.
-**Last updated:** 2026-11-06 (UTC).
+**Last updated:** 2026-11-07 (UTC).
 
-**Two PRs are open against `main`:**
-- **#407** (`fix/cli-subsystem-seam-364`) closes #364. This brief rides on it.
-- **#408** (`ci/docs-only-required-check-404`) closes #404 (CI config only).
+**Three PRs are open against `main`. They touch different files and merge in any order:**
+- **#409** (`refactor/split-qnn-genie-real`): splits `qnn/genie/real.rs`.
+- **#410** (`fix/failover-retry-budget-312`): closes #312.
+- **The docs-only handoff PR** (`docs/next-session-2026-11-07`) carries this brief and is the #404 proof (item 0).
 
-The two touch different lines (both edit CLAUDE.md, in different paragraphs) and merge in either order.
+- **`main` is at `f8afd12`** (#408).
 
-- **`main` is at `a614395`** (#405).
-
-**Since the last brief:** #403 and #405 merged; #365, #362 and #401 are CLOSED.
+**Since the last brief:** #407 and #408 merged; #364 and #404 are CLOSED.
 
 ## What we shipped this session
 
-### #407 — `92f9ea0` + this brief's commit: closes #364
-- **New `primer_engine::build_served_subsystems`** (+ `SubsystemSettings`, `ServedSubsystems`) in `primer-engine/src/wiring/subsystems.rs`. It runs `served_identity` and then the classifier / extractor / comprehension builders, and its `Err(String)` names the failing subsystem (`constructing concept extractor: …`).
-  - The CLI (`main.rs`, now 1347 lines, was 1381) and the GUI's `build_subsystems` both call it. The GUI's `build_subsystems` now takes `primary_kind`, `main_model` and `notice`, and returns `(DialogueManagerSubsystems, (served_kind, served_model))` for the sidebar.
-  - `wiring/served_subsystems_tests.rs` (3 tests): a synthetic `PrimaryUnavailable` (qnn primary, ollama fallback, `--classifier-model` override, explicit `--comprehension-backend stub`), the no-notice case, and the error naming for all three subsystems. Mutation-checked: dispatching on the primary fails the first test.
-- **CLI fix found by the smoke run:** the "every subsystem is set to qnn … serialise" warning fired even when qnn was unavailable and the fallback served. `npu_serialisation_warning` now takes `npu_serves` (false under `PrimaryUnavailable`), which drops only the all-qnn warning; the all-stub feature-loss warning still fires (finalcheck review caught the first version skipping both). Pinned by `fallback_serving_drops_only_the_qnn_warning`.
-- **Sweep regression fixed:** #405 pushed `primer-engine/src/paths.rs` past 500 lines with an inline test module. The tests moved to `paths/tests.rs` (count unchanged: 116 + 3 new = 119 in `primer-engine --lib`).
-- **Docs:** the CLAUDE.md `FallbackBackend` bullet now names the helper. README and ROADMAP: no change.
+### #409 — `ca2d6d5`: split `primer-inference/src/qnn/genie/real.rs` (566 lines, behaviour-preserving)
+- It is now `real/mod.rs` (188 lines: library, `open_dialog`, config guard), `real/logger.rs` (167: optional `PRIMER_GENIE_LOG_PATH` logging and the log guard), and `real/dialog.rs` (244: the owning dialog and the C callback).
+- Only `pub(super)` and module paths changed. The normalised code diff shows only imports and the `mod` lines.
+- Three rustdoc links to `RealGenieLibrary::open_dialog` now point at `GenieLibrary::open_dialog`. It is a trait method, so the old link does not resolve without the trait in scope.
+- `primer-inference --features qnn`: 292/0 before and after. clippy is clean on host and on `aarch64-linux-android`. qnn rustdoc is clean.
+- There is a one-line CLAUDE.md note in the QNN bullet.
 
-### #408 — `aa6bcf6`: closes #404 (owner chose the paths-filter approach)
-- `pull_request` no longer has `paths-ignore`. A new `changes` job (`dorny/paths-filter@v3`, `predicate-quantifier: every`) outputs `code`. The five heavy jobs `needs: changes` and are skipped when `code == 'false'`. A skipped job counts as passing for branch protection.
-- **The gate fails open:** `if: ${{ !cancelled() && (needs.changes.result != 'success' || needs.changes.outputs.code != 'false') }}`. A failed filter runs everything instead of skipping (and so passing) the required check.
-- `push` to `main` is unchanged (it keeps `paths-ignore`; the filter step is skipped there, and its empty output runs every job).
-- **Docs:** the `ci.yml` header, the CLAUDE.md branch-protection paragraph, and `finalcheck`'s docs-only note.
-- `actionlint` clean. **The docs-only path itself is not yet proven on GitHub** (see item 0).
+### #410 — `be17124`: closes #312 (retry budgets stacked under `FallbackBackend` / `RouterBackend`)
+- New `GenerationParams.max_retry_attempts: Option<u32>` (`#[serde(default)]`).
+- New `GenerationParams::for_failover_leg()`, which caps it at the new `consts::retry::FAILOVER_LEG_MAX_ATTEMPTS = 1`.
+- New `RetrySettings::capped(cap)`, which lowers `max_attempts` and never raises it. The cloud, Ollama and openai-compat backends apply it.
+- `FallbackBackend` caps the primary. `RouterBackend` caps the first leg when a second leg exists. The last leg keeps the full budget. Two down legs now cost 1 request plus one full budget, instead of two full budgets.
+- **Tests (all mutation-checked):**
+  - pure `capped` and `for_failover_leg`;
+  - the decorator mocks record each leg's cap (both router orders, plus `LocalOnly`);
+  - each HTTP backend makes 1 request against an always-503 server (new `test_http::serve_503_counting` / `requests_until_pre_stream_error`);
+  - the two-leg worst case end to end: `fallback::tests::two_down_legs_spend_one_plus_one_full_budget`.
+- There is a CLAUDE.md note in the retry bullet.
 
-### Gate (#407)
-- `cargo test --workspace --no-fail-fast`: 1511/0.
-- clippy `-D warnings`: workspace `--all-targets`, `primer-gui --features speech` and `android-native`, `primer-cli --features speech`, `qnn` and `llamacpp`.
+### Gate (#410, which includes everything)
+- `cargo test --workspace --no-fail-fast`: 1525/0.
+- clippy `-D warnings`: workspace `--all-targets`, `primer-gui --features speech` / `android-native`, `primer-cli --features qnn` / `llamacpp`.
 - fmt and workspace rustdoc.
-- Real CLI smoke: `--backend qnn --fallback-backend ollama --fallback-model small --classifier-model big` prints `llm:big`, `llm:ollama:small` ×2, and no NPU warning.
-- **Not run:** the rustdoc feature-arm loop and the fastembed recall tests (no retrieval or feature-gated code changed).
+- **Not run:** the rustdoc feature-arm loop (except the qnn arm for #409) and the fastembed recall tests. No retrieval code changed.
 
 > SHAs are branch-tip commits as pushed; squash-merge gives new ones on `main`.
 
 ### Per-session sweep
-- **Inline-test detector:** it caught `primer-engine/src/paths.rs` (fixed in #407). After that, clean.
-- **Oversized list:** production files over 500 lines: `primer-cli/src/main.rs` 1347, `primer-speech/src/macos/tts.rs` 668, `primer-inference/src/qnn/genie/real.rs` 566, `state_machine/inner.rs` 506, `primer-speech/src/macos/stt.rs` 504.
+- **Inline-test detector:** clean.
+- **Oversized list:** production files over 500 lines, after #409: `primer-cli/src/main.rs` 1349, `primer-speech/src/macos/tts.rs` 668, `state_machine/inner.rs` 506, `primer-speech/src/macos/stt.rs` 504.
 
 ## What's next (concrete acceptance criteria)
 
-### 0. Owner review/merge: #407 and #408, then prove #404 on a docs-only PR
-- **Acceptance:** CI green and both merged. Then `gh issue view <n> --json state` shows CLOSED for 364 and 404.
-- **#404 proof:** the next docs-only PR (the next handoff, if it carries no code) shows `detect code changes` passing, every heavy job **skipped**, and merges without a bypass. If the heavy jobs run instead, or the PR is blocked, reopen #404.
+### 0. Owner review/merge: #409, #410, and the handoff PR (#404 proof)
+- **Acceptance:** CI green and all three merged. Then `gh issue view 312 --json state` shows CLOSED.
+- **#404 proof:** the handoff PR touches only `NEXT_SESSION.md` and `docs/handoffs/`. It must show `detect code changes` passing, every heavy job **skipped**, and it must merge without a bypass. If the heavy jobs run, or the PR is blocked, reopen #404.
 
 ### 1. Sweep + inline-test detector: re-run EVERY session
 Commands are in the resume block.
@@ -56,12 +58,18 @@ Commands are in the resume block.
 Still not watched in the real webview: `mv ~/.primer/kb ~/.primer/kb.bak`, launch the GUI, Start new → Save & start; the button should count "… 0 / 91" upward.
 
 ### 3. Other bugs (host-completable; TDD each)
+- **#406 (new from #405):** stale KB cache files are never cleaned up. Decide a pruning policy first.
 - **#371:** needs a `JoinHandle::abort` design note first.
 - **#352 remaining:** item 2 needs the owner decision below; items 1 and 4 need a design note first.
-- **Older:** #312, #315, #316, #325/#326. Run `gh issue list` to pick; read each before starting.
+- **Older:** #315, #316, #325/#326. Run `gh issue list` to pick; read each before starting.
 
 ### 4. Production-code splits (owner-approved lane, all feature-gated, so dual-verify)
-- **`primer-inference/src/qnn/genie/real.rs`** (566, `qnn`) is the recommended one; then `primer-speech/src/macos/{tts.rs, stt.rs}`; `primer-cli/src/main.rs` (1347) is the hardest.
+- **`primer-speech/src/macos/tts.rs`** (668, `macos-native`) is next; then `stt.rs` (504), `state_machine/inner.rs` (506); `primer-cli/src/main.rs` (1349) is the hardest.
+- **Recipe that worked for #409:**
+  1. In Python, slice the file at unique `///` anchors, assert the pieces add up to the whole file, and write the new files.
+  2. Fix visibility and paths.
+  3. Compare the code lines with a normalised diff (drop comments and `use` lines, sort).
+  4. Compare test counts with `git stash`.
 
 ### Carried / owner-or-hardware-gated
 - **#260:** Android-voice on-device acceptance; also check that a denied mic keeps the text session (#369).
@@ -73,15 +81,24 @@ Still not watched in the real webview: `mv ~/.primer/kb ~/.primer/kb.bak`, launc
 
 ## Open decisions / risks
 
-### This session (#407)
-- **The CLI prints its three `Engagement classifier: …` / `Concept extractor: …` / `Comprehension classifier: …` lines after all three are built**, not one at a time. On a failure, the earlier lines no longer print; the error still names the subsystem.
-- **`build_served_subsystems` returns `Result<_, String>`**, not `PrimerError`, so both binaries keep their exact error text. A future caller wanting a typed error has to wrap it.
+### This session (#410)
+- **A transient blip on a local primary now fails over at once** to the secondary (often cloud) instead of retrying locally. More turns can reach the cloud on a flaky local server. The `--fallback-backend` / router opt-in is the consent, but the owner should confirm the trade-off (it is flagged in the PR).
+- **Under the router, the cap follows leg order, not leg identity.** In `CloudPreferred` mode, or for a high-score hybrid turn, the *cloud* leg gets one attempt and local keeps the full budget.
+- **The pin is a request count, not wall-clock.** The ceiling is now one full budget: ~1.75 s of backoff, or up to 2 × 5 s with `Retry-After`.
+- **QNN and llamacpp ignore the cap** (they have no retry loop). Only the three HTTP backends read it.
+- **`GenerationParams` is `Serialize`/`Deserialize`:** the new field defaults to `None` when absent.
 
-### This session (#408)
-- **`dorny/paths-filter@v3` is a third-party action pinned by tag**, like the repo's other actions (no SHA pins). It needs `pull-requests: read` on the `changes` job only.
-- **The ignore list now lives in two places:** the `changes` filter and the `push` `paths-ignore`. Keep them in sync; the `ci.yml` header says so.
-- **Every PR now pays for one tiny `changes` job** (a few seconds on ubuntu).
-- **`validate gradle wrapper` is gated too**, so a docs-only PR skips it. That is fine: it only checks the committed jar.
+### This session (#409)
+- **No behaviour change.** It is still device-unverified: the Genie FFI path only runs on Android.
+
+### From #407 (merged)
+- **The CLI prints its three `Engagement classifier: …` / `Concept extractor: …` / `Comprehension classifier: …` lines after all three are built**, not one at a time. On a failure, the earlier lines no longer print; the error still names the subsystem.
+- **`build_served_subsystems` returns `Result<_, String>`**, not `PrimerError`, so both binaries keep their exact error text.
+
+### From #408 (merged)
+- **`dorny/paths-filter@v3` is a third-party action pinned by tag.** It needs `pull-requests: read` on the `changes` job only.
+- **The ignore list lives in two places:** the `changes` filter and the `push` `paths-ignore`. Keep them in sync.
+- **`validate gradle wrapper` is gated too**, so a docs-only PR skips it.
 
 ### From #403 (merged)
 - **The stub-model warn fires on a stub primary run with a `--*-model` override.** Before, that run was silent.
@@ -167,6 +184,9 @@ Still not watched in the real webview: `mv ~/.primer/kb ~/.primer/kb.bak`, launc
 
 ## Patterns to reuse, not reinvent
 
+- **Per-call knobs a decorator sets on its legs (new):** add an `Option` field to `GenerationParams` (`#[serde(default)]`) and a method that returns a modified copy (`for_failover_leg`). Don't rebuild backends with different settings: the router's leg order changes per turn. Each decorator mock records `params.<field>` in a `Mutex<Vec<_>>`; clone the `Arc` before handing it to the decorator, so the test can still read it.
+- **Counting retries over real HTTP (new):** `test_http::serve_503_counting()` answers every request with 503 and counts them, and `requests_until_pre_stream_error(|url| Backend::new(url, …), &params)` wraps it. Assert on request counts, not elapsed time.
+- **Local Android cross-clippy (new):** `ring`'s build script needs the NDK C compiler. Set `CC_aarch64_linux_android`, `AR_aarch64_linux_android` and `CARGO_TARGET_AARCH64_LINUX_ANDROID_LINKER` from `~/Library/Android/sdk/ndk/29.*/toolchains/llvm/prebuilt/darwin-x86_64/bin` (command in the resume block).
 - **One helper for a sequence both binaries repeat (new):** when the CLI's monolithic `async_main` copies a GUI construction step, move the step into `primer-engine` and test it there (#402's `open_prepared_kb`, #407's `build_served_subsystems`). The CLI then has nothing left to get wrong.
 - **CI gates that skip a required job must fail open (new):** a job skipped because a `needs:` job failed counts as passing. Use `!cancelled() && (needs.X.result != 'success' || …)` so a broken filter runs everything.
 - **Proving an `Arc` is shared, not rebuilt (new):** when an id can't tell a clone from a fresh build, hand in a test double whose output no real backend could produce (canned engagement JSON), and assert the consumer returns it. See `CannedAssessmentBackend` in `primer-engine/src/wiring/classifier_construction_tests.rs`.
@@ -219,7 +239,7 @@ Still not watched in the real webview: `mv ~/.primer/kb ~/.primer/kb.bak`, launc
 
 ```bash
 cd /Users/hherb/src/primer && git status --short && git checkout main && git pull --ff-only && git log --oneline -6 && gh pr list --state open
-# Open at close: #407, #408. After merge: for n in 364 404; do gh issue view $n --json state; done
+# Open at close: #409, #410, the handoff PR. After merge: gh issue view 312 --json state
 S=/private/tmp/primer-scratch; mkdir -p "$S"   # or the session's scratchpad dir
 
 # === Oversized-file sweep + inline-test detector (re-verify EVERY session) ===
@@ -228,11 +248,14 @@ find crates -name '*.rs' -not -path '*/vendor/*' -not -name 'tests.rs' | xargs w
 for f in $(find crates -name '*.rs' -not -path '*/vendor/*' -not -name 'tests.rs' | xargs wc -l | awk '$1>500 && $2!="total"{print $2}'); do \
   awk '/#\[cfg\(test\)\]/{ln=NR} ln && NR==ln+1 && /^[[:space:]]*mod .*\{/{print FILENAME" inline mod @"NR}' "$f"; done
 
-# === #407 regression checks ===
-~/.cargo/bin/cargo test -p primer-engine --lib served_subsystems
-~/.cargo/bin/cargo test -p primer-gui --lib subsystems
+# === #410 regression checks ===
+~/.cargo/bin/cargo test -p primer-inference --lib -- fallback router failover_leg_cap
+~/.cargo/bin/cargo test -p primer-core --lib -- retry gen_params
+# === #409: qnn arm (host + android; NDK env for ring) ===
+~/.cargo/bin/cargo test -p primer-inference --features qnn 2>&1 | grep '^test result'
+B=~/Library/Android/sdk/ndk/29.0.14206865/toolchains/llvm/prebuilt/darwin-x86_64/bin; CC_aarch64_linux_android=$B/aarch64-linux-android24-clang AR_aarch64_linux_android=$B/llvm-ar CARGO_TARGET_AARCH64_LINUX_ANDROID_LINKER=$B/aarch64-linux-android24-clang ~/.cargo/bin/cargo clippy -p primer-inference --features qnn --target aarch64-linux-android --all-targets -- -D warnings
 
-# === #408: after merge, on the next docs-only PR ===
+# === #404 proof: on the handoff PR ===
 gh pr checks <n>   # expect: detect code changes = pass; every other CI job = skipping
 actionlint .github/workflows/ci.yml   # after any workflow edit
 
@@ -258,5 +281,5 @@ for spec in "-p primer-speech --features voice-loop,silero,whisper,piper,cpal,su
 
 ## Reporting back
 
-- **#407:** the command-line app and the desktop app now set up the background helpers (engagement, concepts, comprehension) through one shared, tested step. If the main model can't start and a backup model takes over, the helpers are guaranteed to use the backup, in both apps. Also, a misleading warning about the phone's AI chip no longer shows when that chip isn't the one in use. Nothing changes for the child. Closes #364.
-- **#408:** a pull request that only changes documentation used to get stuck, because the required test check never ran. Now a quick first step spots docs-only changes, the heavy checks are skipped, and the PR can merge. If that first step ever breaks, everything runs as before. Closes #404.
+- **#409:** a housekeeping change. The code that talks to the phone's AI chip is now in three smaller files instead of one large one. Nothing behaves differently.
+- **#410:** when a backup model is configured and the main one is down or busy, the Primer used to keep retrying the main one for up to ~10 seconds before trying the backup, and then retry the backup for up to ~10 more. A child could wait ~20 seconds in silence. Now the main model gets one try, then the backup takes over straight away. Closes #312.
