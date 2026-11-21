@@ -11,6 +11,7 @@ fn params(
         ollama_url: "http://localhost:11434".into(),
         openai_compat_url: "http://localhost:8000".into(),
         openai_compat_api_key: None,
+        deepseek_api_key: None,
         classifier_backend: None,
         classifier_model: None,
         extractor_backend: None,

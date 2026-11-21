@@ -86,7 +86,7 @@ use cli_support::{pair_reasoning_markers, warn_on_npu_serialisation};
 )]
 struct Cli {
     /// Inference backend: "stub", "cloud", "ollama", "openai-compat",
-    /// "qnn", or "llamacpp" (qnn requires `--features qnn` at build time
+    /// "deepseek", "qnn", or "llamacpp" (qnn requires `--features qnn` at build time
     /// and targets the Qualcomm NPU on Android; llamacpp requires a
     /// `--features llamacpp*` build).
     #[arg(long, default_value = "stub")]
@@ -95,22 +95,23 @@ struct Cli {
     /// Model identifier. For cloud: Anthropic model id (default: claude-sonnet-4-6).
     /// For ollama: local model tag (e.g., "llama3.2", "qwen2.5:7b") — required.
     /// For openai-compat: server-specific model id — required.
+    /// For deepseek: DeepSeek model id (default: deepseek-flash).
     /// For qnn: ignored — the model id is read from `primer-meta.json`
     /// inside the bundle and surfaced as `qnn:<model_id>`.
     /// For llamacpp: filesystem path to the .gguf file — required.
     #[arg(long)]
     model: Option<String>,
 
-    /// Opt-in fallback inference backend: "stub", "cloud", "ollama", or
-    /// "openai-compat". When set, a failing/unavailable primary `--backend`
+    /// Opt-in fallback inference backend: "stub", "cloud", "ollama",
+    /// "openai-compat", or "deepseek". When set, a failing/unavailable primary `--backend`
     /// falls back to this one at startup and before any token streams (never
     /// mid-stream). Absent ⇒ no fallback ⇒ local-only. Setting cloud here is
     /// the explicit consent to send a child's turn to the cloud on fallback.
     #[arg(long)]
     fallback_backend: Option<String>,
 
-    /// Model for `--fallback-backend`. For cloud, defaults to the standard
-    /// cloud model; for ollama/openai-compat a model is required; stub ignores
+    /// Model for `--fallback-backend`. For cloud and deepseek, defaults to
+    /// that provider's standard model; for ollama/openai-compat a model is required; stub ignores
     /// it.
     #[arg(long)]
     fallback_model: Option<String>,
@@ -151,6 +152,11 @@ struct Cli {
     /// typically don't need one.
     #[arg(long, env = "OPENAI_COMPAT_API_KEY")]
     openai_compat_api_key: Option<String>,
+
+    /// DeepSeek API key (used when --backend or --fallback-backend is
+    /// deepseek).
+    #[arg(long, env = "DEEPSEEK_API_KEY")]
+    deepseek_api_key: Option<String>,
 
     /// Child's name (for the learner profile).
     #[arg(long, default_value = primer_core::consts::learner::DEFAULT_NAME)]
@@ -660,6 +666,10 @@ async fn async_main() -> anyhow::Result<()> {
             .model
             .clone()
             .unwrap_or_else(|| primer_core::consts::inference::DEFAULT_CLOUD_MODEL.to_string()),
+        "deepseek" => cli
+            .model
+            .clone()
+            .unwrap_or_else(|| primer_core::consts::inference::DEFAULT_DEEPSEEK_MODEL.to_string()),
         "ollama" => cli.model.clone().unwrap_or_else(|| {
             eprintln!("Error: --model required for ollama backend (e.g., --model llama3.2).");
             std::process::exit(1);
@@ -729,6 +739,7 @@ async fn async_main() -> anyhow::Result<()> {
         ollama_url: cli.ollama_url.clone(),
         openai_compat_url: cli.openai_compat_url.clone(),
         openai_compat_api_key: cli.openai_compat_api_key.clone(),
+        deepseek_api_key: cli.deepseek_api_key.clone(),
         classifier_backend: cli.classifier_backend.clone(),
         classifier_model: cli.classifier_model.clone(),
         extractor_backend: cli.extractor_backend.clone(),
@@ -801,6 +812,7 @@ async fn async_main() -> anyhow::Result<()> {
     match cli.backend.as_str() {
         "stub" => eprintln!("Using stub inference backend (canned Socratic responses)."),
         "cloud" => eprintln!("Using cloud inference backend (Anthropic {main_model})."),
+        "deepseek" => eprintln!("Using deepseek cloud inference backend ({main_model})."),
         "ollama" => eprintln!(
             "Using ollama backend at {} with model {main_model}.",
             cli.ollama_url
@@ -820,7 +832,7 @@ async fn async_main() -> anyhow::Result<()> {
         }
         other => {
             eprintln!(
-                "Unknown backend: {other}. Use 'stub', 'cloud', 'ollama', 'openai-compat', 'qnn', or 'llamacpp'."
+                "Unknown backend: {other}. Use 'stub', 'cloud', 'ollama', 'openai-compat', 'deepseek', 'qnn', or 'llamacpp'."
             );
             std::process::exit(1);
         }

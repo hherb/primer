@@ -56,6 +56,9 @@ pub struct BackendParams {
     pub ollama_url: String,
     pub openai_compat_url: String,
     pub openai_compat_api_key: Option<String>,
+    /// DeepSeek API key (`DEEPSEEK_API_KEY`). Consumed only by the `"deepseek"`
+    /// arm of [`build_backend`].
+    pub deepseek_api_key: Option<String>,
     pub classifier_backend: Option<String>,
     pub classifier_model: Option<String>,
     pub extractor_backend: Option<String>,

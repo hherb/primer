@@ -43,3 +43,11 @@ fn openai_compat_requires_model() {
         Some("Qwen3-8B".to_string())
     );
 }
+
+#[test]
+fn deepseek_defaults_when_unset() {
+    assert_eq!(
+        resolve_fallback_model("deepseek", None).unwrap(),
+        Some(primer_core::consts::inference::DEFAULT_DEEPSEEK_MODEL.to_string())
+    );
+}

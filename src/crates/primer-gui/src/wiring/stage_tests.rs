@@ -637,3 +637,17 @@ fn retrieval_notice_reports_failed_kb_embed() {
     assert!(notice.contains("connection refused"), "notice: {notice}");
     assert!(notice.contains("BM25"), "notice: {notice}");
 }
+
+/// `DEEPSEEK_API_KEY` is read for a deepseek primary or fallback, and only then.
+#[test]
+fn backend_params_deepseek_key_read_only_when_deepseek_in_use() {
+    let mut cfg = stub_config();
+    let asked = RefCell::new(Vec::new());
+    let p = build_backend_params_with(&cfg, recording_env(&[("DEEPSEEK_API_KEY", "ds")], &asked));
+    assert_eq!(p.deepseek_api_key, None);
+    assert!(!asked.borrow().iter().any(|k| k == "DEEPSEEK_API_KEY"));
+
+    cfg.backend.fallback_backend = Some("deepseek".to_string());
+    let p = build_backend_params_with(&cfg, recording_env(&[("DEEPSEEK_API_KEY", "ds")], &asked));
+    assert_eq!(p.deepseek_api_key.as_deref(), Some("ds"));
+}

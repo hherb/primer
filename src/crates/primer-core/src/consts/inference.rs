@@ -5,6 +5,14 @@
 /// without an explicit model (primary `--model` or `--fallback-model`).
 pub const DEFAULT_CLOUD_MODEL: &str = "claude-sonnet-4-6";
 
+/// DeepSeek API base URL (OpenAI-compatible; the backend appends
+/// `/v1/chat/completions`).
+pub const DEEPSEEK_API_URL: &str = "https://api.deepseek.com";
+
+/// Default DeepSeek model id when the deepseek backend is selected without an
+/// explicit model (primary `--model` or `--fallback-model`).
+pub const DEFAULT_DEEPSEEK_MODEL: &str = "deepseek-flash";
+
 /// `n_gpu_layers` value meaning "offload every layer to the GPU".
 /// The default when a GPU passthrough feature (metal/cuda/vulkan) is
 /// compiled in.

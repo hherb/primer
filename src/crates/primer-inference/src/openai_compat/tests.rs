@@ -316,6 +316,7 @@ fn request_serialization_includes_all_fields() {
         top_p: 0.9,
         max_tokens: 512,
         stop: vec![],
+        thinking: None,
     };
     let json = serde_json::to_string(&req).unwrap();
     assert!(json.contains("\"model\":\"test-model\""));
@@ -339,6 +340,7 @@ fn request_serialization_includes_stop_when_nonempty() {
         top_p: 0.9,
         max_tokens: 512,
         stop: vec!["END".to_string()],
+        thinking: None,
     };
     let json = serde_json::to_string(&req).unwrap();
     assert!(json.contains("\"stop\":[\"END\"]"));
@@ -467,4 +469,22 @@ async fn failover_leg_cap_limits_requests() {
         full,
         primer_core::consts::retry::DEFAULT_MAX_ATTEMPTS as usize
     );
+}
+
+#[test]
+fn thinking_field_only_serialized_when_set() {
+    let req = |thinking| ChatCompletionRequest {
+        model: "m".into(),
+        messages: Vec::new(),
+        stream: true,
+        temperature: 0.0,
+        top_p: 1.0,
+        max_tokens: 1,
+        stop: Vec::new(),
+        thinking,
+    };
+    let off = serde_json::to_value(req(Some(serde_json::json!({ "type": "disabled" })))).unwrap();
+    assert_eq!(off["thinking"]["type"], "disabled");
+    let plain = serde_json::to_value(req(None)).unwrap();
+    assert!(plain.get("thinking").is_none());
 }

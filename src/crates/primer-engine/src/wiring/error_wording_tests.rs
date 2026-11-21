@@ -16,6 +16,7 @@ fn params(subsystem_backend: Option<&str>) -> BackendParams {
         ollama_url: "http://localhost:11434".into(),
         openai_compat_url: "http://localhost:8000".into(),
         openai_compat_api_key: None,
+        deepseek_api_key: None,
         classifier_backend: subsystem_backend.map(String::from),
         classifier_model: None,
         extractor_backend: subsystem_backend.map(String::from),
@@ -172,4 +173,26 @@ async fn openai_compat_embedder_model_required_names_flag_and_setting() {
         .err()
         .unwrap();
     assert_names_both(&msg, "--embedder-openai-compat-model", "Embedder → Model");
+}
+
+/// The GUI has no inline DeepSeek key field, so the hint must name the env
+/// var (and the files both binaries auto-load) as well as the CLI flag.
+#[tokio::test]
+async fn deepseek_missing_key_names_env_var_and_flag() {
+    let msg = err_text(build_backend("deepseek", "deepseek-flash".into(), &params(None)).await);
+    assert!(msg.contains("DEEPSEEK_API_KEY"), "{msg}");
+    assert!(msg.contains("~/.primer_env"), "{msg}");
+    assert!(msg.contains("--deepseek-api-key"), "{msg}");
+}
+
+#[tokio::test]
+async fn deepseek_builds_with_key() {
+    let p = BackendParams {
+        deepseek_api_key: Some("k".into()),
+        ..params(None)
+    };
+    let backend = build_backend("deepseek", "deepseek-flash".into(), &p)
+        .await
+        .expect("deepseek backend builds with a key");
+    assert_eq!(backend.name(), "openai-compat");
 }

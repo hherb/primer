@@ -195,6 +195,10 @@ struct ChatCompletionRequest {
     max_tokens: u32,
     #[serde(skip_serializing_if = "Vec::is_empty")]
     stop: Vec<String>,
+    /// DeepSeek's thinking-mode toggle (`{"type": "disabled"}`); omitted for
+    /// every other server.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    thinking: Option<serde_json::Value>,
 }
 
 #[derive(Debug, Serialize)]
@@ -215,6 +219,8 @@ pub struct OpenAiCompatBackend {
     retry_settings: primer_core::retry::RetrySettings,
     /// Marker pairs whose enclosed reasoning is stripped from the stream.
     pub(crate) reasoning_markers: Vec<primer_core::reasoning::ReasoningMarker>,
+    /// Send DeepSeek's `thinking: disabled` (see [`Self::with_thinking_disabled`]).
+    thinking_disabled: bool,
 }
 
 impl OpenAiCompatBackend {
@@ -226,7 +232,17 @@ impl OpenAiCompatBackend {
             api_key,
             retry_settings: primer_core::retry::RetrySettings::default(),
             reasoning_markers: primer_core::reasoning::default_markers(),
+            thinking_disabled: false,
         }
+    }
+
+    /// Ask the server to skip its thinking phase (DeepSeek's `thinking`
+    /// request field). Thinking is DeepSeek's default and otherwise spends
+    /// the small token budgets of the classifier / extractor / comprehension
+    /// calls before any answer, leaving their output empty.
+    pub fn with_thinking_disabled(mut self) -> Self {
+        self.thinking_disabled = true;
+        self
     }
 
     /// Append custom `(open, close)` reasoning-marker pairs to the built-in
@@ -287,6 +303,9 @@ impl InferenceBackend for OpenAiCompatBackend {
             top_p: params.top_p,
             max_tokens: params.max_tokens,
             stop: params.stop_sequences.clone(),
+            thinking: self
+                .thinking_disabled
+                .then(|| serde_json::json!({ "type": "disabled" })),
         };
 
         let api_key = self.api_key.clone();

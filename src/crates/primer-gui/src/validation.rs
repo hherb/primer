@@ -85,9 +85,10 @@ fn validate_backend(kind: &str) -> Result<(), String> {
         // libGenie.so loadable) is a wiring-layer concern that surfaces
         // its own error inline — mirroring how ollama-without-model is a
         // wiring check, not a validation one.
-        "stub" | "cloud" | "ollama" | "openai-compat" | "qnn" => Ok(()),
+        "stub" | "cloud" | "ollama" | "openai-compat" | "deepseek" | "qnn" | "llamacpp" => Ok(()),
         other => Err(format!(
-            "unknown backend kind {other:?}: expected one of stub, cloud, ollama, openai-compat, qnn"
+            "unknown backend kind {other:?}: expected one of stub, cloud, ollama, \
+             openai-compat, deepseek, qnn, llamacpp"
         )),
     }
 }
@@ -187,6 +188,15 @@ mod tests {
         cfg.backend.kind = "openai-compat".to_string();
         cfg.backend.model = Some("mlx-community/Qwen3-8B-4bit".to_string());
         validate(&cfg).expect("openai-compat is a known backend kind");
+    }
+
+    #[test]
+    fn deepseek_and_llamacpp_backend_kinds_accepted() {
+        for kind in ["deepseek", "llamacpp"] {
+            let mut cfg = GuiConfig::default();
+            cfg.backend.kind = kind.to_string();
+            validate(&cfg).unwrap_or_else(|e| panic!("{kind} is a known backend kind: {e}"));
+        }
     }
 
     #[test]

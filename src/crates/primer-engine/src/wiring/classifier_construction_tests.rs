@@ -10,6 +10,7 @@ fn params_with(classifier_backend: Option<&str>, classifier_model: Option<&str>)
         ollama_url: "http://localhost:11434".into(),
         openai_compat_url: "http://localhost:8000".into(),
         openai_compat_api_key: None,
+        deepseek_api_key: None,
         classifier_backend: classifier_backend.map(String::from),
         classifier_model: classifier_model.map(String::from),
         extractor_backend: None,

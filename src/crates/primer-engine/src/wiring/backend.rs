@@ -118,6 +118,7 @@ pub fn plan_main_backend(
 ///
 /// - `stub` ⇒ `Ok(None)` (model ignored by the stub backend).
 /// - `cloud` ⇒ `Ok(Some(model | DEFAULT_CLOUD_MODEL))`.
+/// - `deepseek` ⇒ `Ok(Some(model | DEFAULT_DEEPSEEK_MODEL))`.
 /// - `ollama` / `openai-compat` ⇒ model required ⇒ `Err` when `None`.
 /// - any other name ⇒ `Ok(model)` passthrough (`build_backend` rejects the
 ///   unknown name later with its own clear error).
@@ -129,6 +130,9 @@ pub fn resolve_fallback_model(
         "stub" => Ok(None),
         "cloud" => Ok(Some(model.unwrap_or_else(|| {
             primer_core::consts::inference::DEFAULT_CLOUD_MODEL.to_string()
+        }))),
+        "deepseek" => Ok(Some(model.unwrap_or_else(|| {
+            primer_core::consts::inference::DEFAULT_DEEPSEEK_MODEL.to_string()
         }))),
         "ollama" | "openai-compat" => model.map(Some).ok_or_else(|| {
             format!(
@@ -178,6 +182,27 @@ pub async fn build_backend(
             )
             .with_extra_markers(params.reasoning_markers.clone()),
         )),
+        // DeepSeek speaks the OpenAI chat-completions format. Thinking is off:
+        // it would eat the subsystems' small token budgets (and adds latency).
+        "deepseek" => {
+            let api_key = params.deepseek_api_key.clone().ok_or_else(|| {
+                PrimerError::Inference(
+                    "the deepseek backend requires a DeepSeek API key: set DEEPSEEK_API_KEY \
+                     (in the environment, `.env`, or `~/.primer_env`) or pass \
+                     `--deepseek-api-key`"
+                        .into(),
+                )
+            })?;
+            Ok(Arc::new(
+                primer_inference::openai_compat::OpenAiCompatBackend::new(
+                    primer_core::consts::inference::DEEPSEEK_API_URL.to_string(),
+                    model,
+                    Some(api_key),
+                )
+                .with_thinking_disabled()
+                .with_extra_markers(params.reasoning_markers.clone()),
+            ))
+        }
         "qnn" => build_qnn_backend(params).await,
         "llamacpp" => build_llamacpp_backend(params).await,
         other => Err(PrimerError::Inference(
