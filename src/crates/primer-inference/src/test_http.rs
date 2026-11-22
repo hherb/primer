@@ -76,15 +76,35 @@ pub(crate) fn failover_leg_params() -> GenerationParams {
     GenerationParams::default().for_failover_leg()
 }
 
+/// Like [`serve_once`], but also hands back the raw request (headers +
+/// body, lossily decoded) so a test can assert what went on the wire.
+pub(crate) async fn serve_once_capturing(
+    body: &'static str,
+) -> (String, tokio::sync::oneshot::Receiver<String>) {
+    let listener = TcpListener::bind("127.0.0.1:0").await.expect("bind");
+    let addr = listener.local_addr().expect("local addr");
+    let (tx, rx) = tokio::sync::oneshot::channel();
+    tokio::spawn(async move {
+        let (mut sock, _) = listener.accept().await.expect("accept");
+        let _ = tx.send(read_request(&mut sock).await);
+        let head =
+            "HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nConnection: close\r\n\r\n";
+        sock.write_all(head.as_bytes()).await.expect("write head");
+        sock.write_all(body.as_bytes()).await.expect("write body");
+        sock.shutdown().await.expect("shutdown");
+    });
+    (format!("http://{addr}"), rx)
+}
+
 /// Consume the request (headers + `Content-Length` body) so closing the
-/// socket doesn't reset the connection over unread bytes.
-async fn read_request(sock: &mut tokio::net::TcpStream) {
+/// socket doesn't reset the connection over unread bytes. Returns it.
+async fn read_request(sock: &mut tokio::net::TcpStream) -> String {
     let mut buf = Vec::new();
     let mut chunk = [0u8; 4096];
     loop {
         let n = sock.read(&mut chunk).await.expect("read request");
         if n == 0 {
-            return;
+            return String::from_utf8_lossy(&buf).into_owned();
         }
         buf.extend_from_slice(&chunk[..n]);
         let Some(end) = buf.windows(4).position(|w| w == b"\r\n\r\n") else {
@@ -97,7 +117,7 @@ async fn read_request(sock: &mut tokio::net::TcpStream) {
             .and_then(|v| v.trim().parse().ok())
             .unwrap_or(0);
         if buf.len() >= end + 4 + body_len {
-            return;
+            return String::from_utf8_lossy(&buf).into_owned();
         }
     }
 }

@@ -77,11 +77,19 @@ pub(super) fn build_backend_params_with(
         ApiKeySource::Env => env("OPENAI_COMPAT_API_KEY"),
     };
 
+    // Env-only (no inline key field in Settings); read only when deepseek
+    // is the primary or the fallback.
+    let deepseek_api_key = (backend_config.kind == "deepseek"
+        || backend_config.fallback_backend.as_deref() == Some("deepseek"))
+    .then(|| env("DEEPSEEK_API_KEY"))
+    .flatten();
+
     BackendParams {
         api_key,
         ollama_url: backend_config.ollama_url.clone(),
         openai_compat_url: backend_config.openai_compat_url.clone(),
         openai_compat_api_key,
+        deepseek_api_key,
         classifier_backend: subsystem_kind(&config.classifier),
         classifier_model: subsystem_model(&config.classifier),
         extractor_backend: subsystem_kind(&config.extractor),
@@ -174,6 +182,9 @@ pub(super) fn resolve_main_model(kind: &str, model: Option<&str>) -> Result<Stri
         "cloud" => Ok(model
             .map(String::from)
             .unwrap_or_else(|| primer_core::consts::inference::DEFAULT_CLOUD_MODEL.to_string())),
+        "deepseek" => Ok(model
+            .map(String::from)
+            .unwrap_or_else(|| primer_core::consts::inference::DEFAULT_DEEPSEEK_MODEL.to_string())),
         "ollama" => model.map(String::from).ok_or_else(|| {
             "ollama backend requires a model name (e.g. \"llama3.2\") in settings".to_string()
         }),
@@ -202,7 +213,7 @@ pub(super) fn resolve_main_model(kind: &str, model: Option<&str>) -> Result<Stri
             Ok("llamacpp-pending".to_string())
         }
         other => Err(format!(
-            "unknown backend kind {other:?}: expected one of stub, cloud, ollama, openai-compat, qnn, llamacpp"
+            "unknown backend kind {other:?}: expected one of stub, cloud, ollama, openai-compat, deepseek, qnn, llamacpp"
         )),
     }
 }

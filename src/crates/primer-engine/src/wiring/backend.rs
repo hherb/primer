@@ -118,6 +118,7 @@ pub fn plan_main_backend(
 ///
 /// - `stub` ⇒ `Ok(None)` (model ignored by the stub backend).
 /// - `cloud` ⇒ `Ok(Some(model | DEFAULT_CLOUD_MODEL))`.
+/// - `deepseek` ⇒ `Ok(Some(model | DEFAULT_DEEPSEEK_MODEL))`.
 /// - `ollama` / `openai-compat` ⇒ model required ⇒ `Err` when `None`.
 /// - any other name ⇒ `Ok(model)` passthrough (`build_backend` rejects the
 ///   unknown name later with its own clear error).
@@ -130,6 +131,9 @@ pub fn resolve_fallback_model(
         "cloud" => Ok(Some(model.unwrap_or_else(|| {
             primer_core::consts::inference::DEFAULT_CLOUD_MODEL.to_string()
         }))),
+        "deepseek" => Ok(Some(model.unwrap_or_else(|| {
+            primer_core::consts::inference::DEFAULT_DEEPSEEK_MODEL.to_string()
+        }))),
         "ollama" | "openai-compat" => model.map(Some).ok_or_else(|| {
             format!(
                 "a fallback model is required when the fallback backend is {backend} \
@@ -138,6 +142,13 @@ pub fn resolve_fallback_model(
         }),
         _ => Ok(model),
     }
+}
+
+/// An API key, with an empty or blank value treated as unset: `.env.example`
+/// ships `KEY=` lines, and an empty `.env` entry shadows `~/.primer_env`, so
+/// passing `""` on would turn the clear missing-key error into a 401.
+fn present_key(key: &Option<String>) -> Option<String> {
+    key.clone().filter(|k| !k.trim().is_empty())
 }
 
 /// Construct an `InferenceBackend` of the named type with the given model.
@@ -152,7 +163,7 @@ pub async fn build_backend(
     match backend_name {
         "stub" => Ok(Arc::new(StubBackend)),
         "cloud" => {
-            let api_key = params.api_key.clone().ok_or_else(|| {
+            let api_key = present_key(&params.api_key).ok_or_else(|| {
                 PrimerError::Inference(
                     "the cloud backend requires an Anthropic API key: set ANTHROPIC_API_KEY, \
                      pass `--api-key`, or enter an inline key in \
@@ -174,10 +185,26 @@ pub async fn build_backend(
             primer_inference::openai_compat::OpenAiCompatBackend::new(
                 params.openai_compat_url.clone(),
                 model,
-                params.openai_compat_api_key.clone(),
+                present_key(&params.openai_compat_api_key),
             )
             .with_extra_markers(params.reasoning_markers.clone()),
         )),
+        // DeepSeek speaks the OpenAI chat-completions format. Thinking is off:
+        // it would eat the subsystems' small token budgets (and adds latency).
+        "deepseek" => {
+            let api_key = present_key(&params.deepseek_api_key).ok_or_else(|| {
+                PrimerError::Inference(
+                    "the deepseek backend requires a DeepSeek API key: set DEEPSEEK_API_KEY \
+                     (in the environment, `.env`, or `~/.primer_env`) or pass \
+                     `--deepseek-api-key`"
+                        .into(),
+                )
+            })?;
+            Ok(Arc::new(
+                primer_inference::openai_compat::OpenAiCompatBackend::deepseek(model, api_key)
+                    .with_extra_markers(params.reasoning_markers.clone()),
+            ))
+        }
         "qnn" => build_qnn_backend(params).await,
         "llamacpp" => build_llamacpp_backend(params).await,
         other => Err(PrimerError::Inference(

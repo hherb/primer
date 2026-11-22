@@ -153,6 +153,15 @@ fn cloud_key_not_needed_when_cloud_absent() {
 }
 
 #[test]
+fn resolve_main_model_deepseek_defaults_and_honours_override() {
+    assert_eq!(
+        resolve_main_model("deepseek", None).unwrap(),
+        primer_core::consts::inference::DEFAULT_DEEPSEEK_MODEL
+    );
+    assert_eq!(resolve_main_model("deepseek", Some("x")).unwrap(), "x");
+}
+
+#[test]
 fn resolve_main_model_qnn_returns_placeholder() {
     // The qnn model id is read from the bundle at construction, so the
     // override is ignored and a placeholder is returned (rebound to

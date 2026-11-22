@@ -316,6 +316,7 @@ fn request_serialization_includes_all_fields() {
         top_p: 0.9,
         max_tokens: 512,
         stop: vec![],
+        thinking: None,
     };
     let json = serde_json::to_string(&req).unwrap();
     assert!(json.contains("\"model\":\"test-model\""));
@@ -339,6 +340,7 @@ fn request_serialization_includes_stop_when_nonempty() {
         top_p: 0.9,
         max_tokens: 512,
         stop: vec!["END".to_string()],
+        thinking: None,
     };
     let json = serde_json::to_string(&req).unwrap();
     assert!(json.contains("\"stop\":[\"END\"]"));
@@ -467,4 +469,62 @@ async fn failover_leg_cap_limits_requests() {
         full,
         primer_core::consts::retry::DEFAULT_MAX_ATTEMPTS as usize
     );
+}
+
+#[test]
+fn thinking_field_only_serialized_when_set() {
+    let req = |thinking| ChatCompletionRequest {
+        model: "m".into(),
+        messages: Vec::new(),
+        stream: true,
+        temperature: 0.0,
+        top_p: 1.0,
+        max_tokens: 1,
+        stop: Vec::new(),
+        thinking,
+    };
+    let off = serde_json::to_value(req(Some(serde_json::json!({ "type": "disabled" })))).unwrap();
+    assert_eq!(off["thinking"]["type"], "disabled");
+    let plain = serde_json::to_value(req(None)).unwrap();
+    assert!(plain.get("thinking").is_none());
+}
+
+#[test]
+fn deepseek_constructor_targets_api_with_thinking_off() {
+    let b = OpenAiCompatBackend::deepseek("deepseek-flash".into(), "k".into());
+    assert_eq!(b.base_url, primer_core::consts::inference::DEEPSEEK_API_URL);
+    assert_eq!(b.api_key.as_deref(), Some("k"));
+    assert!(b.thinking_disabled);
+}
+
+/// The `thinking` toggle and the bearer key reach the wire; a plain
+/// backend sends neither field.
+#[tokio::test]
+async fn thinking_and_bearer_key_on_the_wire() {
+    async fn sent(thinking_off: bool) -> String {
+        let (url, req) = crate::test_http::serve_once_capturing("data: [DONE]\n\n").await;
+        let mut b = OpenAiCompatBackend::new(url, "m".into(), Some("sk-test".into()));
+        if thinking_off {
+            b = b.with_thinking_disabled();
+        }
+        let prompt = Prompt {
+            system: String::new(),
+            messages: vec![],
+        };
+        let stream = b
+            .generate_stream(&prompt, &GenerationParams::default())
+            .await
+            .unwrap();
+        crate::test_http::collect(stream).await;
+        req.await.expect("request captured")
+    }
+    let off = sent(true).await;
+    assert!(off.contains(r#""thinking":{"type":"disabled"}"#), "{off}");
+    assert!(
+        off.to_ascii_lowercase()
+            .contains("authorization: bearer sk-test"),
+        "{off}"
+    );
+    let plain = sent(false).await;
+    assert!(!plain.contains("thinking"), "{plain}");
 }
