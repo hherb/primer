@@ -518,8 +518,9 @@
                 >If the main backend is unavailable at startup or fails before
                 any reply streams, serve the turn from this one instead. Leave
                 as "no fallback" to stay local-only — choosing
-                <strong>cloud</strong> here is explicit consent to send the
-                child's turn to the cloud on fallback.</small
+                <strong>cloud</strong> or <strong>deepseek</strong> here is
+                explicit consent to send the child's turn to that cloud
+                provider on fallback.</small
               >
             </label>
             <label class="field" id="f-backend-fallback-model-field">
@@ -531,7 +532,8 @@
               />
               <small class="hint muted"
                 >Model for the fallback backend. Cloud defaults to
-                <code>claude-sonnet-4-6</code> when blank; ollama and
+                <code>claude-sonnet-4-6</code> and deepseek to
+                <code>deepseek-flash</code> when blank; ollama and
                 openai-compat require an explicit model name.</small
               >
             </label>

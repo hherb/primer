@@ -213,7 +213,7 @@ pub(super) fn resolve_main_model(kind: &str, model: Option<&str>) -> Result<Stri
             Ok("llamacpp-pending".to_string())
         }
         other => Err(format!(
-            "unknown backend kind {other:?}: expected one of stub, cloud, ollama, openai-compat, qnn, llamacpp"
+            "unknown backend kind {other:?}: expected one of stub, cloud, ollama, openai-compat, deepseek, qnn, llamacpp"
         )),
     }
 }

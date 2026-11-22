@@ -567,10 +567,10 @@ function applyBackendKindReveal(kind) {
   dom.fields.backendGgufPathField.hidden = !llamacpp;
   dom.fields.backendLlamacppGpuLayersField.hidden = !llamacpp;
   dom.fields.backendLlamacppNCtxField.hidden = !llamacpp;
-  // Reasoning markers only apply to the ollama / openai-compat backends
-  // (stub/cloud/qnn ignore them).
+  // Reasoning markers only apply to the ollama / openai-compat / deepseek
+  // backends (stub/cloud/qnn ignore them).
   dom.fields.backendReasoningMarkersField.hidden =
-    kind !== "ollama" && kind !== "openai-compat";
+    kind !== "ollama" && kind !== "openai-compat" && kind !== "deepseek";
   // Each API-key fieldset is only relevant for its own backend — fade
   // the others so the user isn't tempted to put a key where it'd be
   // ignored. `hidden` removes the openai-compat fieldset entirely for

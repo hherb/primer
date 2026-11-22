@@ -236,6 +236,17 @@ impl OpenAiCompatBackend {
         }
     }
 
+    /// The DeepSeek API (`consts::inference::DEEPSEEK_API_URL`) with its
+    /// thinking phase disabled — the one place both facts live.
+    pub fn deepseek(model: String, api_key: String) -> Self {
+        Self::new(
+            primer_core::consts::inference::DEEPSEEK_API_URL.to_string(),
+            model,
+            Some(api_key),
+        )
+        .with_thinking_disabled()
+    }
+
     /// Ask the server to skip its thinking phase (DeepSeek's `thinking`
     /// request field). Thinking is DeepSeek's default and otherwise spends
     /// the small token budgets of the classifier / extractor / comprehension

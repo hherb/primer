@@ -650,4 +650,9 @@ fn backend_params_deepseek_key_read_only_when_deepseek_in_use() {
     cfg.backend.fallback_backend = Some("deepseek".to_string());
     let p = build_backend_params_with(&cfg, recording_env(&[("DEEPSEEK_API_KEY", "ds")], &asked));
     assert_eq!(p.deepseek_api_key.as_deref(), Some("ds"));
+
+    cfg.backend.fallback_backend = None;
+    cfg.backend.kind = "deepseek".to_string();
+    let p = build_backend_params_with(&cfg, recording_env(&[("DEEPSEEK_API_KEY", "ds")], &asked));
+    assert_eq!(p.deepseek_api_key.as_deref(), Some("ds"));
 }

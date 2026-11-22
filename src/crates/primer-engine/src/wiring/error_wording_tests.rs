@@ -196,3 +196,27 @@ async fn deepseek_builds_with_key() {
         .expect("deepseek backend builds with a key");
     assert_eq!(backend.name(), "openai-compat");
 }
+
+/// An empty `DEEPSEEK_API_KEY=` (as `.env.example` ships it) is no key: it
+/// must surface the missing-key hint, not build and 401 on the first turn.
+#[tokio::test]
+async fn deepseek_blank_key_is_missing() {
+    for blank in ["", "  "] {
+        let p = BackendParams {
+            deepseek_api_key: Some(blank.into()),
+            ..params(None)
+        };
+        let msg = err_text(build_backend("deepseek", "deepseek-flash".into(), &p).await);
+        assert!(msg.contains("DEEPSEEK_API_KEY"), "{msg}");
+    }
+}
+
+#[tokio::test]
+async fn cloud_blank_key_is_missing() {
+    let p = BackendParams {
+        api_key: Some(String::new()),
+        ..params(None)
+    };
+    let msg = err_text(build_backend("cloud", "m".into(), &p).await);
+    assert!(msg.contains("ANTHROPIC_API_KEY"), "{msg}");
+}

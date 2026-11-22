@@ -16,7 +16,8 @@ use serde::{Deserialize, Serialize};
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct BackendConfig {
-    /// "stub" | "cloud" | "ollama" | "openai-compat"
+    /// "stub" | "cloud" | "ollama" | "openai-compat" | "deepseek" | "qnn" |
+    /// "llamacpp"
     pub kind: String,
     /// Model id. None means "use the CLI's per-kind default".
     pub model: Option<String>,

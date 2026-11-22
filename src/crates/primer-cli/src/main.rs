@@ -105,8 +105,9 @@ struct Cli {
     /// Opt-in fallback inference backend: "stub", "cloud", "ollama",
     /// "openai-compat", or "deepseek". When set, a failing/unavailable primary `--backend`
     /// falls back to this one at startup and before any token streams (never
-    /// mid-stream). Absent ⇒ no fallback ⇒ local-only. Setting cloud here is
-    /// the explicit consent to send a child's turn to the cloud on fallback.
+    /// mid-stream). Absent ⇒ no fallback ⇒ local-only. Setting cloud or
+    /// deepseek here is the explicit consent to send a child's turn to that
+    /// cloud provider on fallback.
     #[arg(long)]
     fallback_backend: Option<String>,
 
@@ -150,12 +151,12 @@ struct Cli {
     /// API key for OpenAI-compatible servers that require auth
     /// (Together, Groq, OpenRouter). Local servers like oMLX/LM Studio
     /// typically don't need one.
-    #[arg(long, env = "OPENAI_COMPAT_API_KEY")]
+    #[arg(long, env = "OPENAI_COMPAT_API_KEY", hide_env_values = true)]
     openai_compat_api_key: Option<String>,
 
     /// DeepSeek API key (used when --backend or --fallback-backend is
     /// deepseek).
-    #[arg(long, env = "DEEPSEEK_API_KEY")]
+    #[arg(long, env = "DEEPSEEK_API_KEY", hide_env_values = true)]
     deepseek_api_key: Option<String>,
 
     /// Child's name (for the learner profile).
@@ -220,7 +221,7 @@ struct Cli {
     no_persist: bool,
 
     /// Anthropic API key (for cloud backend).
-    #[arg(long, env = "ANTHROPIC_API_KEY")]
+    #[arg(long, env = "ANTHROPIC_API_KEY", hide_env_values = true)]
     api_key: Option<String>,
 
     /// Backend used for the engagement classifier. Defaults to the same
