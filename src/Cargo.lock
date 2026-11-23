@@ -6424,10 +6424,8 @@ dependencies = [
 [[package]]
 name = "whisper-cpp-plus-sys"
 version = "0.1.4"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "631b412ee374ccbc15e46a477acfabf557d748627bd3101c335d5c2893dae6cd"
 dependencies = [
- "bindgen 0.69.5",
+ "bindgen 0.72.1",
  "cc",
  "cmake",
  "flate2",
