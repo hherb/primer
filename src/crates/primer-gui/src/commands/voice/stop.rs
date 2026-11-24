@@ -6,10 +6,48 @@
 
 use crate::state::AppState;
 
+/// How long a stop waits for the voice loop to exit cleanly before
+/// aborting it, so a stuck audio thread cannot hang the GUI.
+#[cfg(any(feature = "speech", feature = "android-native"))]
+const VOICE_LOOP_STOP_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(5);
+
+/// Aborts the guarded task when dropped. The start paths store a wrapper
+/// task that awaits the inner `run_loop` task; holding this in the
+/// wrapper makes aborting the wrapper abort the loop too, because a
+/// dropped tokio `JoinHandle` only detaches its task (#371).
+#[cfg(any(feature = "speech", feature = "android-native"))]
+pub(crate) struct AbortOnDrop(pub(crate) tokio::task::AbortHandle);
+
+#[cfg(any(feature = "speech", feature = "android-native"))]
+impl Drop for AbortOnDrop {
+    fn drop(&mut self) {
+        self.0.abort();
+    }
+}
+
+/// Wait up to `timeout` for `join`; on timeout abort the task and return
+/// `None` (#371: dropping the handle would only detach it). The abort
+/// takes effect at the task's next `.await`; the desktop wrapper's
+/// `LocalBackends` drop then stops the audio thread, and on Android the
+/// dropped recognizer stop sender stops the recognizer (#373).
+#[cfg(any(feature = "speech", feature = "android-native"))]
+pub(super) async fn join_or_abort<T>(
+    mut join: tokio::task::JoinHandle<T>,
+    timeout: std::time::Duration,
+) -> Option<Result<T, tokio::task::JoinError>> {
+    match tokio::time::timeout(timeout, &mut join).await {
+        Ok(joined) => Some(joined),
+        Err(_) => {
+            join.abort();
+            None
+        }
+    }
+}
+
 /// Stop the active voice loop, if any, and turn the sticky toggle off.
 ///
 /// Sends the stop signal then joins the loop task with a 5-second timeout.
-/// On timeout, the join handle is dropped, which aborts the task.
+/// On timeout the task is aborted.
 /// Idempotent — with no voice loop active it only persists the toggle off.
 #[cfg(feature = "speech")]
 #[tauri::command]
@@ -82,9 +120,7 @@ pub(crate) async fn stop_voice_mode_inner(
     };
     // Signal the loop to exit cleanly at the next LISTEN boundary.
     let _ = active.stop_tx.send(());
-    // Bound the join wait: a stuck audio thread cannot hang the GUI.
-    let timeout = std::time::Duration::from_secs(5);
-    let join_result = tokio::time::timeout(timeout, active.join).await;
+    let join_result = join_or_abort(active.join, VOICE_LOOP_STOP_TIMEOUT).await;
 
     // Flip the sticky toggle off — voice mode just stopped. Skipped on a
     // transient teardown (`preserve_toggle == true`).
@@ -103,12 +139,13 @@ pub(crate) async fn stop_voice_mode_inner(
     }
 
     match join_result {
-        Ok(Ok(Ok(()))) => Ok(()),
-        Ok(Ok(Err(e))) => Err(format!("voice loop returned error: {e}")),
-        Ok(Err(e)) => Err(format!("voice loop join failed: {e}")),
-        Err(_) => {
-            tracing::warn!("voice loop did not stop within 5s; the runtime will abort it");
-            // Falling out of scope drops the JoinHandle, which aborts the task.
+        Some(Ok(Ok(()))) => Ok(()),
+        Some(Ok(Err(e))) => Err(format!("voice loop returned error: {e}")),
+        Some(Err(e)) => Err(format!("voice loop join failed: {e}")),
+        None => {
+            tracing::warn!(
+                "voice loop did not stop within {VOICE_LOOP_STOP_TIMEOUT:?}; aborted it"
+            );
             Ok(())
         }
     }
