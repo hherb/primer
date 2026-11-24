@@ -1,55 +1,56 @@
 # Primer — Next Session Brief
 
 **Audience:** future Claude Code session continuing work on this repo.
-**Last updated:** 2026-11-07 (UTC).
+**Last updated:** 2026-11-23 (UTC).
 
 **Three PRs are open against `main`. They touch different files and merge in any order:**
-- **#409** (`refactor/split-qnn-genie-real`): splits `qnn/genie/real.rs`.
-- **#410** (`fix/failover-retry-budget-312`): closes #312.
-- **The docs-only handoff PR** (`docs/next-session-2026-11-07`) carries this brief and is the #404 proof (item 0).
+- **#415** (`fix/whisper-bindgen-414`): closes #414. CI is green.
+- **#416** (`refactor/split-macos-tts`): splits `macos/tts.rs`. CI is green.
+- **The docs-only handoff PR** (`docs/next-session-2026-11-23`) carries this brief.
 
-- **`main` is at `f8afd12`** (#408).
+- **`main` is at `6f0d72d`** (#413, the DeepSeek backend).
 
-**Since the last brief:** #407 and #408 merged; #364 and #404 are CLOSED.
+**Since the last brief:**
+- #409, #410, #411 and #413 merged. #312 is CLOSED.
+- **#404 proof passed:** on #411, `detect code changes` passed, every heavy job was skipped, and the PR merged.
+- **New #414:** GitHub moved `ubuntu-latest` to ubuntu-26.04 (libclang 22). #413 had pinned LLVM 21 in CI as a stopgap.
 
 ## What we shipped this session
 
-### #409 — `ca2d6d5`: split `primer-inference/src/qnn/genie/real.rs` (566 lines, behaviour-preserving)
-- It is now `real/mod.rs` (188 lines: library, `open_dialog`, config guard), `real/logger.rs` (167: optional `PRIMER_GENIE_LOG_PATH` logging and the log guard), and `real/dialog.rs` (244: the owning dialog and the C callback).
-- Only `pub(super)` and module paths changed. The normalised code diff shows only imports and the `mod` lines.
-- Three rustdoc links to `RealGenieLibrary::open_dialog` now point at `GenieLibrary::open_dialog`. It is a trait method, so the old link does not resolve without the trait in scope.
-- `primer-inference --features qnn`: 292/0 before and after. clippy is clean on host and on `aarch64-linux-android`. qnn rustdoc is clean.
-- There is a one-line CLAUDE.md note in the QNN bullet.
+### #415 — `b83bea4`: closes #414 (the Linux speech build breaks under libclang 22)
+- **Cause:** `whisper-cpp-plus-sys` 0.1.4, and the newer 0.1.5, pin `bindgen 0.69`. Under clang 22 that emits `whisper_full_params` as an empty struct (rust-bindgen#3264, fixed in 0.72.1), so `whisper-cpp-plus` fails with 40× E0609.
+- **Fix:** the crate is vendored verbatim at `src/vendor/whisper-cpp-plus-sys/` (~100 KB; it downloads whisper.cpp at build time). The only change is `bindgen = "0.72.1"`. It is wired via `[patch.crates-io]`.
+- The CI `LIBCLANG_PATH=/usr/lib/llvm-21/lib` pin is dropped.
+- The `Cargo.lock` diff is minimal: bindgen 0.69.5 → 0.72.1 for this crate only.
+- There is a CLAUDE.md vendor bullet.
+- **Proof:** #415's `cargo check (non-default features)` ran on the `ubuntu-26.04` image with no pin. It compiled the vendored crate fresh, regenerated the bindings, and checked `whisper-cpp-plus` cleanly.
+- **On macOS:** clippy `-D warnings` is clean for `primer-speech --features whisper` and `primer-cli --features speech`. `primer-speech --features whisper` tests pass.
 
-### #410 — `be17124`: closes #312 (retry budgets stacked under `FallbackBackend` / `RouterBackend`)
-- New `GenerationParams.max_retry_attempts: Option<u32>` (`#[serde(default)]`).
-- New `GenerationParams::for_failover_leg()`, which caps it at the new `consts::retry::FAILOVER_LEG_MAX_ATTEMPTS = 1`.
-- New `RetrySettings::capped(cap)`, which lowers `max_attempts` and never raises it. The cloud, Ollama and openai-compat backends apply it.
-- `FallbackBackend` caps the primary. `RouterBackend` caps the first leg when a second leg exists. The last leg keeps the full budget. Two down legs now cost 1 request plus one full budget, instead of two full budgets.
-- **Tests (all mutation-checked):**
-  - pure `capped` and `for_failover_leg`;
-  - the decorator mocks record each leg's cap (both router orders, plus `LocalOnly`);
-  - each HTTP backend makes 1 request against an always-503 server (new `test_http::serve_503_counting` / `requests_until_pre_stream_error`);
-  - the two-leg worst case end to end: `fallback::tests::two_down_legs_spend_one_plus_one_full_budget`.
-- There is a CLAUDE.md note in the retry bullet.
-
-### Gate (#410, which includes everything)
-- `cargo test --workspace --no-fail-fast`: 1525/0.
-- clippy `-D warnings`: workspace `--all-targets`, `primer-gui --features speech` / `android-native`, `primer-cli --features qnn` / `llamacpp`.
-- fmt and workspace rustdoc.
-- **Not run:** the rustdoc feature-arm loop (except the qnn arm for #409) and the fastembed recall tests. No retrieval code changed.
+### #416 — `6ad4833`: split `primer-speech/src/macos/tts.rs` (668 lines; behaviour-preserving)
+- **`tts/mod.rs` (329):** the struct, its trait impls, `MacosTtsSession` and the sample-rate query.
+- **`tts/synthesis.rs` (353):** `synthesize_streaming` (now `pub(super)`), the main-thread and background paths, `stream_pcm_callback`, and the drain consts.
+- **Verification:**
+  - In Python, the file was sliced at unique anchors, with an assert that the pieces rebuild the original.
+  - The normalised code diff shows only rewrapped `use` lists.
+  - Test counts are unchanged: 132 (`macos-native`) and 168 (`macos-native-26`). Both arms pass, including the real-AVSpeech `macos_tts` binary.
+  - clippy and rustdoc are clean on both arms.
+- CLAUDE.md and two path comments are updated.
 
 > SHAs are branch-tip commits as pushed; squash-merge gives new ones on `main`.
 
 ### Per-session sweep
 - **Inline-test detector:** clean.
-- **Oversized list:** production files over 500 lines, after #409: `primer-cli/src/main.rs` 1349, `primer-speech/src/macos/tts.rs` 668, `state_machine/inner.rs` 506, `primer-speech/src/macos/stt.rs` 504.
+- **Oversized list:** production files over 500 lines, after #416:
+  - `primer-cli/src/main.rs`: 1362 (grew by 13 with #413);
+  - `state_machine/inner.rs`: 506;
+  - `primer-speech/src/macos/stt.rs`: 504;
+  - `primer-inference/src/cloud.rs`: 503 (new to the list).
 
 ## What's next (concrete acceptance criteria)
 
-### 0. Owner review/merge: #409, #410, and the handoff PR (#404 proof)
-- **Acceptance:** CI green and all three merged. Then `gh issue view 312 --json state` shows CLOSED.
-- **#404 proof:** the handoff PR touches only `NEXT_SESSION.md` and `docs/handoffs/`. It must show `detect code changes` passing, every heavy job **skipped**, and it must merge without a bypass. If the heavy jobs run, or the PR is blocked, reopen #404.
+### 0. Owner review/merge: #415, #416, and the handoff PR
+- **Acceptance:** CI green and all three merged. Then `gh issue view 414 --json state` shows CLOSED.
+- If #416's `cargo clippy (macOS feature combos)` fails, check the `macos-native` arm first. The other arms don't compile `macos/tts/`.
 
 ### 1. Sweep + inline-test detector: re-run EVERY session
 Commands are in the resume block.
@@ -58,18 +59,21 @@ Commands are in the resume block.
 Still not watched in the real webview: `mv ~/.primer/kb ~/.primer/kb.bak`, launch the GUI, Start new → Save & start; the button should count "… 0 / 91" upward.
 
 ### 3. Other bugs (host-completable; TDD each)
-- **#406 (new from #405):** stale KB cache files are never cleaned up. Decide a pruning policy first.
+- **#406:** stale KB cache files are never cleaned up. Decide a pruning policy first (owner).
 - **#371:** needs a `JoinHandle::abort` design note first.
 - **#352 remaining:** item 2 needs the owner decision below; items 1 and 4 need a design note first.
 - **Older:** #315, #316, #325/#326. Run `gh issue list` to pick; read each before starting.
 
 ### 4. Production-code splits (owner-approved lane, all feature-gated, so dual-verify)
-- **`primer-speech/src/macos/tts.rs`** (668, `macos-native`) is next; then `stt.rs` (504), `state_machine/inner.rs` (506); `primer-cli/src/main.rs` (1349) is the hardest.
-- **Recipe that worked for #409:**
-  1. In Python, slice the file at unique `///` anchors, assert the pieces add up to the whole file, and write the new files.
-  2. Fix visibility and paths.
-  3. Compare the code lines with a normalised diff (drop comments and `use` lines, sort).
-  4. Compare test counts with `git stash`.
+- **`primer-cli/src/main.rs` (1362)** is the only real offender left, and the hardest. Its `async_main` is monolithic.
+- Prefer the "one helper both binaries repeat → `primer-engine`" pattern over a mechanical slice. That moves logic *and* gives it a test seam.
+- `inner.rs` (506), `stt.rs` (504) and `cloud.rs` (503) are only marginally over the limit. Split them only if a change grows them.
+- **Recipe that worked for #409 / #416:**
+  1. In Python, slice the file at unique anchors (section banners are best; check that a doc-line anchor isn't repeated further down).
+  2. Assert that the pieces rebuild the whole file, and write the new files.
+  3. `cargo clippy` lists the stale imports.
+  4. Compare the code lines with a normalised diff (drop comments and `use` lines, sort).
+  5. Compare test counts with `--list | grep -c ': test$'` before and after.
 
 ### Carried / owner-or-hardware-gated
 - **#260:** Android-voice on-device acceptance; also check that a denied mic keeps the text session (#369).
@@ -81,15 +85,28 @@ Still not watched in the real webview: `mv ~/.primer/kb ~/.primer/kb.bak`, launc
 
 ## Open decisions / risks
 
-### This session (#410)
+### This session (#415)
+- **One more vendor patch to carry.** Drop it when an upstream `whisper-cpp-plus-sys` release depends on bindgen ≥ 0.72.1 (0.1.5 still pins 0.69). Check with `curl -s https://crates.io/api/v1/crates/whisper-cpp-plus-sys/<ver>/dependencies`.
+- **The vendored crate still downloads whisper.cpp from GitHub at build time.** It did before too; that is build-time only, and the runtime stays offline.
+- **Users on Linux with libclang 22+ are fixed only once #415 merges.** Before that, `LIBCLANG_PATH=/usr/lib/llvm-21/lib` is the workaround.
+- **Not checked:** whether any other bindgen-0.69 consumer (`bindgen 0.69.5` remains in the lock) breaks under clang 22. CI's speech and default arms passed on ubuntu-26.04, so none of the built ones do.
+
+### This session (#416)
+- **No behaviour change.** CI has no `macos-native-26` arm; it was verified locally only.
+- **Local gotcha:** this session hit the stale-CMake-cache failure in `espeak-rs-sys` (`'math.h' file not found`) on the `--features …macos-native` test build. `cargo clean -p espeak-rs-sys` fixed it.
+
+### From #410 (merged)
 - **A transient blip on a local primary now fails over at once** to the secondary (often cloud) instead of retrying locally. More turns can reach the cloud on a flaky local server. The `--fallback-backend` / router opt-in is the consent, but the owner should confirm the trade-off (it is flagged in the PR).
 - **Under the router, the cap follows leg order, not leg identity.** In `CloudPreferred` mode, or for a high-score hybrid turn, the *cloud* leg gets one attempt and local keeps the full budget.
 - **The pin is a request count, not wall-clock.** The ceiling is now one full budget: ~1.75 s of backoff, or up to 2 × 5 s with `Retry-After`.
 - **QNN and llamacpp ignore the cap** (they have no retry loop). Only the three HTTP backends read it.
 - **`GenerationParams` is `Serialize`/`Deserialize`:** the new field defaults to `None` when absent.
 
-### This session (#409)
+### From #409 (merged)
 - **No behaviour change.** It is still device-unverified: the Genie FFI path only runs on Android.
+
+### From #413 (merged; DeepSeek backend)
+- **`deepseek` uses `OpenAiCompatBackend::deepseek`**, with thinking disabled. The key comes from `DEEPSEEK_API_KEY`; the GUI reads the env var only.
 
 ### From #407 (merged)
 - **The CLI prints its three `Engagement classifier: …` / `Concept extractor: …` / `Comprehension classifier: …` lines after all three are built**, not one at a time. On a failure, the earlier lines no longer print; the error still names the subsystem.
@@ -184,6 +201,13 @@ Still not watched in the real webview: `mv ~/.primer/kb ~/.primer/kb.bak`, launc
 
 ## Patterns to reuse, not reinvent
 
+- **Vendoring a `-sys` crate for a one-line dep bump (new, #415):**
+  1. `cp -R ~/.cargo/registry/src/*/<crate>-<ver> src/vendor/<crate>`.
+  2. Edit the normalised `Cargo.toml` (the one cargo reads) and `Cargo.toml.orig`.
+  3. Add a `[patch.crates-io]` entry with a rationale comment.
+  4. **Do not run `cargo update -p`**: it re-resolved unrelated windows-sys versions. Run `git checkout Cargo.lock`, then `cargo metadata`, to get the minimal lock diff.
+- **Proving a CI fix really ran (new):** `gh run view --job <id> --log | grep -E 'Image:|Compiling <crate>'`. It confirms both the runner image and that the crate was built fresh rather than restored from cache.
+
 - **Per-call knobs a decorator sets on its legs (new):** add an `Option` field to `GenerationParams` (`#[serde(default)]`) and a method that returns a modified copy (`for_failover_leg`). Don't rebuild backends with different settings: the router's leg order changes per turn. Each decorator mock records `params.<field>` in a `Mutex<Vec<_>>`; clone the `Arc` before handing it to the decorator, so the test can still read it.
 - **Counting retries over real HTTP (new):** `test_http::serve_503_counting()` answers every request with 503 and counts them, and `requests_until_pre_stream_error(|url| Backend::new(url, …), &params)` wraps it. Assert on request counts, not elapsed time.
 - **Local Android cross-clippy (new):** `ring`'s build script needs the NDK C compiler. Set `CC_aarch64_linux_android`, `AR_aarch64_linux_android` and `CARGO_TARGET_AARCH64_LINUX_ANDROID_LINKER` from `~/Library/Android/sdk/ndk/29.*/toolchains/llvm/prebuilt/darwin-x86_64/bin` (command in the resume block).
@@ -239,7 +263,7 @@ Still not watched in the real webview: `mv ~/.primer/kb ~/.primer/kb.bak`, launc
 
 ```bash
 cd /Users/hherb/src/primer && git status --short && git checkout main && git pull --ff-only && git log --oneline -6 && gh pr list --state open
-# Open at close: #409, #410, the handoff PR. After merge: gh issue view 312 --json state
+# Open at close: #415, #416, the handoff PR. After merge: gh issue view 414 --json state
 S=/private/tmp/primer-scratch; mkdir -p "$S"   # or the session's scratchpad dir
 
 # === Oversized-file sweep + inline-test detector (re-verify EVERY session) ===
@@ -248,6 +272,10 @@ find crates -name '*.rs' -not -path '*/vendor/*' -not -name 'tests.rs' | xargs w
 for f in $(find crates -name '*.rs' -not -path '*/vendor/*' -not -name 'tests.rs' | xargs wc -l | awk '$1>500 && $2!="total"{print $2}'); do \
   awk '/#\[cfg\(test\)\]/{ln=NR} ln && NR==ln+1 && /^[[:space:]]*mod .*\{/{print FILENAME" inline mod @"NR}' "$f"; done
 
+# === #416: both macOS arms (test count 132 / 168) ===
+for f in macos-native macos-native-26; do ~/.cargo/bin/cargo test -p primer-speech --features voice-loop,silero,cpal,$f -- --list 2>/dev/null | grep -c ': test$'; done
+# === #415: whisper path with the vendored bindgen 0.72.1 ===
+~/.cargo/bin/cargo clippy -p primer-cli --features speech --all-targets -- -D warnings
 # === #410 regression checks ===
 ~/.cargo/bin/cargo test -p primer-inference --lib -- fallback router failover_leg_cap
 ~/.cargo/bin/cargo test -p primer-core --lib -- retry gen_params
@@ -255,8 +283,6 @@ for f in $(find crates -name '*.rs' -not -path '*/vendor/*' -not -name 'tests.rs
 ~/.cargo/bin/cargo test -p primer-inference --features qnn 2>&1 | grep '^test result'
 B=~/Library/Android/sdk/ndk/29.0.14206865/toolchains/llvm/prebuilt/darwin-x86_64/bin; CC_aarch64_linux_android=$B/aarch64-linux-android24-clang AR_aarch64_linux_android=$B/llvm-ar CARGO_TARGET_AARCH64_LINUX_ANDROID_LINKER=$B/aarch64-linux-android24-clang ~/.cargo/bin/cargo clippy -p primer-inference --features qnn --target aarch64-linux-android --all-targets -- -D warnings
 
-# === #404 proof: on the handoff PR ===
-gh pr checks <n>   # expect: detect code changes = pass; every other CI job = skipping
 actionlint .github/workflows/ci.yml   # after any workflow edit
 
 # === Pick the next bug ===
@@ -281,5 +307,5 @@ for spec in "-p primer-speech --features voice-loop,silero,whisper,piper,cpal,su
 
 ## Reporting back
 
-- **#409:** a housekeeping change. The code that talks to the phone's AI chip is now in three smaller files instead of one large one. Nothing behaves differently.
-- **#410:** when a backup model is configured and the main one is down or busy, the Primer used to keep retrying the main one for up to ~10 seconds before trying the backup, and then retry the backup for up to ~10 more. A child could wait ~20 seconds in silence. Now the main model gets one try, then the backup takes over straight away. Closes #312.
+- **#415:** Linux machines with the newest compiler tools (Ubuntu 26.04, which GitHub now uses for CI) could no longer build the Primer's voice mode. A third-party speech component used an outdated code generator. We now ship our own copy of that component with the generator updated, so voice mode builds there again with no workaround. Closes #414.
+- **#416:** a housekeeping change. The Mac's built-in text-to-speech code is now in two smaller files instead of one large one. Nothing behaves differently.
