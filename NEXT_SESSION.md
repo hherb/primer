@@ -5,7 +5,7 @@
 
 **Three PRs are open against `main`. They touch different files and merge in any order:**
 - **#415** (`fix/whisper-bindgen-414`): closes #414. CI is green.
-- **#416** (`refactor/split-macos-tts`): splits `macos/tts.rs`. CI was still running at close.
+- **#416** (`refactor/split-macos-tts`): splits `macos/tts.rs`. CI is green.
 - **The docs-only handoff PR** (`docs/next-session-2026-11-23`) carries this brief.
 
 - **`main` is at `6f0d72d`** (#413, the DeepSeek backend).
