@@ -167,3 +167,11 @@ silero-vad-rust = { path = "vendor/silero-vad-rust" }
 # on aarch64-linux-android. See issue #157. Drop once the workspace can move off
 # the rc.10 pin (upstream main already defines cache_dir unconditionally).
 ort-sys = { path = "vendor/ort-sys" }
+# Vendored whisper-cpp-plus-sys 0.1.4 (verbatim) with one change: the bindgen
+# build-dependency bumped 0.69 -> 0.72.1. Under libclang 22 (Ubuntu 26.04,
+# current Fedora/Arch) bindgen < 0.72.1 emits whisper_full_params as an empty
+# placeholder struct (rust-bindgen#3264, fixed by #3278), so whisper-cpp-plus
+# fails to compile on those hosts. The workspace already resolves 0.72.1 for
+# llama-cpp-2. See issue #414. Drop once upstream (0.1.5 still pins 0.69)
+# moves to bindgen >= 0.72.1.
+whisper-cpp-plus-sys = { path = "vendor/whisper-cpp-plus-sys" }
