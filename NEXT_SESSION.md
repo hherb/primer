@@ -1,78 +1,82 @@
 # Primer — Next Session Brief
 
 **Audience:** future Claude Code session continuing work on this repo.
-**Last updated:** 2026-11-23 (UTC).
+**Last updated:** 2026-11-24 (UTC).
 
-**Three PRs are open against `main`. They touch different files and merge in any order:**
-- **#415** (`fix/whisper-bindgen-414`): closes #414. CI is green.
-- **#416** (`refactor/split-macos-tts`): splits `macos/tts.rs`. CI is green.
-- **The docs-only handoff PR** (`docs/next-session-2026-11-23`) carries this brief.
-
-- **`main` is at `6f0d72d`** (#413, the DeepSeek backend).
+**Open against `main`:**
+- **#418** (`fix/noise-transcript-guard-326`): closes #326. This brief rides on the same branch.
 
 **Since the last brief:**
-- #409, #410, #411 and #413 merged. #312 is CLOSED.
-- **#404 proof passed:** on #411, `detect code changes` passed, every heavy job was skipped, and the PR merged.
-- **New #414:** GitHub moved `ubuntu-latest` to ubuntu-26.04 (libclang 22). #413 had pinned LLVM 21 in CI as a stopgap.
+- **`main` is at `a05a221`.** #415, #416 and #417 are merged, and #414 is CLOSED.
+- **The sweep and inline-test detector were clean at session start.** No new file is over 500 lines except `inner.rs` (see below).
 
 ## What we shipped this session
 
-### #415 — `b83bea4`: closes #414 (the Linux speech build breaks under libclang 22)
-- **Cause:** `whisper-cpp-plus-sys` 0.1.4, and the newer 0.1.5, pin `bindgen 0.69`. Under clang 22 that emits `whisper_full_params` as an empty struct (rust-bindgen#3264, fixed in 0.72.1), so `whisper-cpp-plus` fails with 40× E0609.
-- **Fix:** the crate is vendored verbatim at `src/vendor/whisper-cpp-plus-sys/` (~100 KB; it downloads whisper.cpp at build time). The only change is `bindgen = "0.72.1"`. It is wired via `[patch.crates-io]`.
-- The CI `LIBCLANG_PATH=/usr/lib/llvm-21/lib` pin is dropped.
-- The `Cargo.lock` diff is minimal: bindgen 0.69.5 → 0.72.1 for this crate only.
-- There is a CLAUDE.md vendor bullet.
-- **Proof:** #415's `cargo check (non-default features)` ran on the `ubuntu-26.04` image with no pin. It compiled the vendored crate fresh, regenerated the bindings, and checked `whisper-cpp-plus` cleanly.
-- **On macOS:** clippy `-D warnings` is clean for `primer-speech --features whisper` and `primer-cli --features speech`. `primer-speech --features whisper` tests pass.
-
-### #416 — `6ad4833`: split `primer-speech/src/macos/tts.rs` (668 lines; behaviour-preserving)
-- **`tts/mod.rs` (329):** the struct, its trait impls, `MacosTtsSession` and the sample-rate query.
-- **`tts/synthesis.rs` (353):** `synthesize_streaming` (now `pub(super)`), the main-thread and background paths, `stream_pcm_callback`, and the drain consts.
-- **Verification:**
-  - In Python, the file was sliced at unique anchors, with an assert that the pieces rebuild the original.
-  - The normalised code diff shows only rewrapped `use` lists.
-  - Test counts are unchanged: 132 (`macos-native`) and 168 (`macos-native-26`). Both arms pass, including the real-AVSpeech `macos_tts` binary.
-  - clippy and rustdoc are clean on both arms.
-- CLAUDE.md and two path comments are updated.
+### #418 — `def265c` (+ `f5e7fef` README): closes #326 (STT noise became a persisted child turn)
+- **The problem:** Whisper hallucinates on silence (`Thank you.`, `[BLANK_AUDIO]`, subtitle credits), and the voice loop only checked `is_empty()`. Each phantom exchange was persisted and fed the extractor and comprehension classifier. Depth promotion only goes up, so it could never be undone.
+- **New pure `voice_loop/noise_transcript.rs::is_noise_transcript(transcript, locale)`.** It rejects a transcript that:
+  - has no letter or digit;
+  - is one short `[…]` / `(…)` / `*…*` annotation (≤ `consts::speech::NOISE_ANNOTATION_MAX_CHARS` = 40, with no closer inside);
+  - equals a per-locale silence phrase (EN/DE);
+  - contains a subtitle-credit marker.
+  It reuses `quit_detect::normalise_for_match`, which is now `pub(super)`.
+- **The wiring:** `inner.rs` clears the transcript at the LATENT_THINK empty gate, *before* `responder.respond`. The noise then takes the existing empty path: no LLM call, no turn, no spawn, no observer transcript. It logs at `tracing::debug!(target: "primer::speech")`.
+- **Tests:**
+  - 7 pure tests.
+  - State-machine test `mocks.rs::noise_transcript_never_reaches_responder`. It was red before the wiring.
+  - `primer-speech` tests pass on the `voice-loop`, `android-native`, whisper/piper and `macos-native` arms.
+  - clippy and rustdoc are clean on the same arms, plus `primer-cli --features speech`.
+- CLAUDE.md has a new bullet, and the README voice-POC line has one new sentence.
 
 > SHAs are branch-tip commits as pushed; squash-merge gives new ones on `main`.
 
 ### Per-session sweep
 - **Inline-test detector:** clean.
-- **Oversized list:** production files over 500 lines, after #416:
-  - `primer-cli/src/main.rs`: 1362 (grew by 13 with #413);
-  - `state_machine/inner.rs`: 506;
+- **Oversized production files:**
+  - `primer-cli/src/main.rs`: 1362;
+  - `state_machine/inner.rs`: **513** (+7 with #418);
   - `primer-speech/src/macos/stt.rs`: 504;
-  - `primer-inference/src/cloud.rs`: 503 (new to the list).
+  - `primer-inference/src/cloud.rs`: 503.
 
 ## What's next (concrete acceptance criteria)
 
-### 0. Owner review/merge: #415, #416, and the handoff PR
-- **Acceptance:** CI green and all three merged. Then `gh issue view 414 --json state` shows CLOSED.
-- If #416's `cargo clippy (macOS feature combos)` fails, check the `macos-native` arm first. The other arms don't compile `macos/tts/`.
+### 0. Owner review/merge: #418
+- **Acceptance:** CI green and #418 merged. Then `gh issue view 326 --json state` shows CLOSED.
+- **Owner decision:** should a lone "thank you" / "vielen dank" / "danke" really be dropped? See Open decisions.
 
 ### 1. Sweep + inline-test detector: re-run EVERY session
 Commands are in the resume block.
 
-### 2. Manual first-run GUI check for #396 (owner)
+### 2. #325: stream LLM deltas into the TTS session (the biggest voice-latency win)
+- **Acceptance:**
+  - The `SynthesisSession` opens before `llm_fut` is awaited, and `push_text` runs per delta from `on_chunk`.
+  - `finalize` runs on resolve.
+  - A mock test shows the first audio before the responder future resolves.
+- **Constraints, all from the issue:**
+  - needs an incremental, stateful markdown stripper (the `ReasoningFilter` shape);
+  - cancel must stop synthesis and drop queued samples;
+  - `FALLBACK_LINE` becomes an *append*, not a replace;
+  - the macOS-native main-thread analysis.
+- **Design note first.** It touches `inner.rs`, so split `inner.rs` (513) in the same lane, either first or as part of it.
+
+### 3. Manual first-run GUI check for #396 (owner)
 Still not watched in the real webview: `mv ~/.primer/kb ~/.primer/kb.bak`, launch the GUI, Start new → Save & start; the button should count "… 0 / 91" upward.
 
-### 3. Other bugs (host-completable; TDD each)
+### 4. Other bugs (host-completable; TDD each)
+- **#371:** the fix in the issue is small (`timeout(dur, &mut handle)`, then `handle.abort()` on `Elapsed`). First check what aborting drops on Android: the recognizer task sees a dropped stop sender as a stop (#373), so it is probably safe. Write that down in the PR.
 - **#406:** stale KB cache files are never cleaned up. Decide a pruning policy first (owner).
-- **#371:** needs a `JoinHandle::abort` design note first.
 - **#352 remaining:** item 2 needs the owner decision below; items 1 and 4 need a design note first.
-- **Older:** #315, #316, #325/#326. Run `gh issue list` to pick; read each before starting.
+- **Older:** #315, #316. Run `gh issue list`; read each before starting.
 
-### 4. Production-code splits (owner-approved lane, all feature-gated, so dual-verify)
-- **`primer-cli/src/main.rs` (1362)** is the only real offender left, and the hardest. Its `async_main` is monolithic.
-- Prefer the "one helper both binaries repeat → `primer-engine`" pattern over a mechanical slice. That moves logic *and* gives it a test seam.
-- `inner.rs` (506), `stt.rs` (504) and `cloud.rs` (503) are only marginally over the limit. Split them only if a change grows them.
+### 5. Production-code splits (owner-approved lane, all feature-gated, so dual-verify)
+- **`primer-cli/src/main.rs` (1362)** is the main offender. Prefer the "one helper both binaries repeat → `primer-engine`" pattern.
+- **`inner.rs` (513)** now grew; pair its split with #325.
+- `stt.rs` (504) and `cloud.rs` (503) are marginal.
 - **Recipe that worked for #409 / #416:**
-  1. In Python, slice the file at unique anchors (section banners are best; check that a doc-line anchor isn't repeated further down).
-  2. Assert that the pieces rebuild the whole file, and write the new files.
+  1. In Python, slice the file at unique anchors (check that no anchor repeats further down).
+  2. Assert that the pieces rebuild the whole file.
   3. `cargo clippy` lists the stale imports.
-  4. Compare the code lines with a normalised diff (drop comments and `use` lines, sort).
+  4. Compare the code lines with a normalised diff.
   5. Compare test counts with `--list | grep -c ': test$'` before and after.
 
 ### Carried / owner-or-hardware-gated
@@ -85,15 +89,18 @@ Still not watched in the real webview: `mv ~/.primer/kb ~/.primer/kb.bak`, launc
 
 ## Open decisions / risks
 
-### This session (#415)
-- **One more vendor patch to carry.** Drop it when an upstream `whisper-cpp-plus-sys` release depends on bindgen ≥ 0.72.1 (0.1.5 still pins 0.69). Check with `curl -s https://crates.io/api/v1/crates/whisper-cpp-plus-sys/<ver>/dependencies`.
-- **The vendored crate still downloads whisper.cpp from GitHub at build time.** It did before too; that is build-time only, and the runtime stays offline.
-- **Users on Linux with libclang 22+ are fixed only once #415 merges.** Before that, `LIBCLANG_PATH=/usr/lib/llvm-21/lib` is the workaround.
-- **Not checked:** whether any other bindgen-0.69 consumer (`bindgen 0.69.5` remains in the lock) breaks under clang 22. CI's speech and default arms passed on ubuntu-26.04, so none of the built ones do.
+### This session (#418)
+- **A lone "thank you" / "thanks for watching" / "you" (EN) or "vielen dank" / "danke" / "danke schön" (DE) is dropped silently.** These are the commonest Whisper silence artefacts, but a child can really say the first ones. There is a `shortcut:` comment in `silence_phrases_for`, and the PR flags it for the owner. The principled upgrade is Whisper's per-segment `no_speech_prob`, which `TranscriptSegment` discards today.
+- **The filter applies to every STT backend.** Android and macOS-native don't hallucinate the Whisper subtitle strings, but the phrase table still drops a genuine "thank you" there.
+- **No Hindi table:** the default arm is English, so a Hindi session gets the English phrases.
+- **Not done (#326's other suggestions):** Parlor's ~300 ms tail-silence padding before Whisper (it lowers how often the filter has to fire), and the `no_speech_prob` gate.
+- **The verbose `[stt] empty transcript` eprintln also fires for dropped noise.** That is harmless; the `debug!` line says which case it was.
 
-### This session (#416)
-- **No behaviour change.** CI has no `macos-native-26` arm; it was verified locally only.
-- **Local gotcha:** this session hit the stale-CMake-cache failure in `espeak-rs-sys` (`'math.h' file not found`) on the `--features …macos-native` test build. `cargo clean -p espeak-rs-sys` fixed it.
+### From #415 / #416 (merged)
+- **#415: one more vendor patch to carry.** Drop it when an upstream `whisper-cpp-plus-sys` release depends on bindgen ≥ 0.72.1 (0.1.5 still pins 0.69).
+- **#415: the vendored crate still downloads whisper.cpp from GitHub at build time.** The runtime stays offline.
+- **#416: CI has no `macos-native-26` arm;** it was verified locally only.
+- **Local gotcha:** a stale CMake cache in `espeak-rs-sys` causes `'math.h' file not found`. Run `cargo clean -p espeak-rs-sys`.
 
 ### From #410 (merged)
 - **A transient blip on a local primary now fails over at once** to the secondary (often cloud) instead of retrying locally. More turns can reach the cloud on a flaky local server. The `--fallback-backend` / router opt-in is the consent, but the owner should confirm the trade-off (it is flagged in the PR).
@@ -263,7 +270,7 @@ Still not watched in the real webview: `mv ~/.primer/kb ~/.primer/kb.bak`, launc
 
 ```bash
 cd /Users/hherb/src/primer && git status --short && git checkout main && git pull --ff-only && git log --oneline -6 && gh pr list --state open
-# Open at close: #415, #416, the handoff PR. After merge: gh issue view 414 --json state
+# Open at close: #418 (+ this brief). After merge: gh issue view 326 --json state
 S=/private/tmp/primer-scratch; mkdir -p "$S"   # or the session's scratchpad dir
 
 # === Oversized-file sweep + inline-test detector (re-verify EVERY session) ===
@@ -272,7 +279,9 @@ find crates -name '*.rs' -not -path '*/vendor/*' -not -name 'tests.rs' | xargs w
 for f in $(find crates -name '*.rs' -not -path '*/vendor/*' -not -name 'tests.rs' | xargs wc -l | awk '$1>500 && $2!="total"{print $2}'); do \
   awk '/#\[cfg\(test\)\]/{ln=NR} ln && NR==ln+1 && /^[[:space:]]*mod .*\{/{print FILENAME" inline mod @"NR}' "$f"; done
 
-# === #416: both macOS arms (test count 132 / 168) ===
+# === #418: noise guard on the voice-loop arms ===
+~/.cargo/bin/cargo test -p primer-speech --features voice-loop --lib -- noise
+# === both macOS arms (test count 140 / 176 after #418; was 132 / 168) ===
 for f in macos-native macos-native-26; do ~/.cargo/bin/cargo test -p primer-speech --features voice-loop,silero,cpal,$f -- --list 2>/dev/null | grep -c ': test$'; done
 # === #415: whisper path with the vendored bindgen 0.72.1 ===
 ~/.cargo/bin/cargo clippy -p primer-cli --features speech --all-targets -- -D warnings
@@ -307,5 +316,4 @@ for spec in "-p primer-speech --features voice-loop,silero,whisper,piper,cpal,su
 
 ## Reporting back
 
-- **#415:** Linux machines with the newest compiler tools (Ubuntu 26.04, which GitHub now uses for CI) could no longer build the Primer's voice mode. A third-party speech component used an outdated code generator. We now ship our own copy of that component with the generator updated, so voice mode builds there again with no workaround. Closes #414.
-- **#416:** a housekeeping change. The Mac's built-in text-to-speech code is now in two smaller files instead of one large one. Nothing behaves differently.
+- **#418:** in voice mode, when the room is quiet (a cough, a chair scrape), the speech recogniser sometimes "hears" words that were never said, typically "Thank you." The Primer used to answer these out loud and save them as if the child had spoken, which slowly corrupted the record of what the child has learned. Such phantom utterances are now ignored. One trade-off: a child who says *only* "thank you" is also ignored. Closes #326.
