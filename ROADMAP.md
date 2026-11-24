@@ -101,11 +101,12 @@ Step 1.2.0 (device validation) ✅ **PASSED on hardware** (RedMagic 11 Pro, 2026
 ### 2.1 — Speech-to-text
 
 - [x] `WhisperStt` streaming STT + Silero VAD (vendored).
-- [ ] Graceful ambient-noise handling.
+- [ ] Graceful ambient-noise handling. Partly done: STT hallucinations on silence (`[BLANK_AUDIO]`, "Thank you.", subtitle credits, including repeated and prefixed forms) are dropped before they become a turn (#326, #419). Still open: Whisper's `no_speech_prob` gate and tail-silence padding.
 
 ### 2.2 — Text-to-speech
 
 - [x] `PiperTts` streaming TTS (sentence-boundary chunking).
+- [ ] Stream LLM deltas into TTS so the first phrase plays before generation ends (#325; design note `docs/superpowers/specs/2026-11-25-stream-llm-into-tts-design.md`, owner decisions D1–D3 pending).
 - [ ] Warm, patient voice profile selection.
 
 ### 2.3 — Conversation flow
