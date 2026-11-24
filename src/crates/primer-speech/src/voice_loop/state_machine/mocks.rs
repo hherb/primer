@@ -1379,3 +1379,77 @@ fn ensure_active_locale_coverage_errors_when_only_voice_missing() {
     );
     assert!(msg.contains("'en'"), "must name the missing locale: {msg}");
 }
+
+/// Issue #326: an STT hallucination on silence ("[BLANK_AUDIO]", "Thank
+/// you.") is dropped like an empty transcript. It never reaches the
+/// responder (so no DialogueManager turn and no extractor/comprehension
+/// spawn), is not shown as a transcript, and the next real utterance
+/// still goes through.
+#[tokio::test]
+async fn noise_transcript_never_reaches_responder() {
+    use primer_core::speech::VadEvent;
+
+    let backends = super::LoopBackends::single_locale(
+        Arc::new(ScriptedStreamingStt::new([
+            "[BLANK_AUDIO]",
+            "",
+            "Thank you.",
+            "",
+            "hello primer",
+        ])),
+        Arc::new(MockStreamingTts::new(64)),
+        primer_core::speech::VoiceProfile::default(),
+        primer_core::i18n::Locale::English,
+    );
+
+    let (event_tx, event_rx) = tokio::sync::mpsc::channel(64);
+    for _ in 0..3 {
+        event_tx.try_send(VadEvent::SpeechStart).unwrap();
+        event_tx.try_send(VadEvent::SpeechEnd).unwrap();
+    }
+    drop(event_tx);
+
+    struct RecordingResponder(Arc<Mutex<Vec<String>>>);
+    impl super::Responder for RecordingResponder {
+        fn respond<'a>(
+            &'a mut self,
+            transcript: &'a str,
+            mut on_chunk: Box<dyn FnMut(&str) + Send + 'a>,
+        ) -> std::pin::Pin<
+            Box<dyn std::future::Future<Output = primer_core::error::Result<String>> + Send + 'a>,
+        > {
+            self.0.lock().unwrap().push(transcript.to_string());
+            Box::pin(async move {
+                on_chunk("Hi.");
+                Ok("Hi.".to_string())
+            })
+        }
+    }
+    let heard = Arc::new(Mutex::new(Vec::new()));
+
+    let observer = MockObserver::new();
+    let transcripts = super::run_loop_borrowed(
+        backends,
+        event_rx,
+        Box::new(RecordingResponder(Arc::clone(&heard))),
+        Box::new(|_| {}),
+        None,
+        false,
+        None,
+        observer.clone(),
+    )
+    .await
+    .expect("loop ok");
+
+    assert_eq!(*heard.lock().unwrap(), vec!["hello primer".to_string()]);
+    assert_eq!(transcripts, vec!["hello primer".to_string()]);
+    let shown: Vec<_> = observer
+        .events()
+        .into_iter()
+        .filter_map(|e| match e {
+            MockEvent::Transcript(t) => Some(t),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(shown, vec!["hello primer".to_string()]);
+}

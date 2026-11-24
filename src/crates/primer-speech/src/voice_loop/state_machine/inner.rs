@@ -6,6 +6,7 @@ use primer_core::consts::speech::DEFAULT_INTER_PHRASE_SILENCE_MS;
 use primer_core::error::Result;
 use primer_core::speech::SynthesisEvent;
 
+use crate::voice_loop::noise_transcript::is_noise_transcript;
 use crate::voice_loop::observer::{ExitReason, LoopObserver, TurnCompletePayload, VoiceState};
 use crate::voice_loop::quit_detect::is_quit_phrase;
 use crate::voice_loop::tts_markdown::strip_markdown_for_tts;
@@ -168,6 +169,12 @@ pub(super) async fn run_loop_inner<'r, O: LoopObserver>(
                 transcript_so_far.push_str(&new_text);
             }
 
+            // STT noise ("[BLANK_AUDIO]", "Thank you.") takes the empty
+            // path below: no LLM call, no turn, no transcript (#326).
+            if is_noise_transcript(&transcript_so_far, &backends.active_locale) {
+                tracing::debug!(target: "primer::speech", transcript = %transcript_so_far, "dropped STT noise transcript");
+                transcript_so_far.clear();
+            }
             if transcript_so_far.is_empty() {
                 if verbose {
                     eprintln!("[stt] empty transcript, looping");

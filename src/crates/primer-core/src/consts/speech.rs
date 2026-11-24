@@ -103,6 +103,13 @@ pub const BYTES_PER_MIB: u64 = 1_048_576;
 /// than a bare literal.
 pub const PERCENT_DIVISOR: u64 = 100;
 
+/// Longest transcript, in characters, that the voice loop still treats
+/// as a pure STT non-speech annotation (`[BLANK_AUDIO]`, `(no speech)`,
+/// `*sigh*`) and drops (issue #326). A longer bracketed utterance is
+/// kept, so a genuine parenthesised aside survives. The longest known
+/// Whisper annotation is about 20 characters.
+pub const NOISE_ANNOTATION_MAX_CHARS: usize = 40;
+
 /// Tunable thresholds for the macos-native-26 derived-VAD state machine.
 /// See `crates/primer-speech/src/macos26/vad.rs` and the design doc at
 /// `docs/superpowers/specs/2026-05-20-macos-native-26-design.md`.
