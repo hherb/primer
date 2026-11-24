@@ -1379,3 +1379,172 @@ fn ensure_active_locale_coverage_errors_when_only_voice_missing() {
     );
     assert!(msg.contains("'en'"), "must name the missing locale: {msg}");
 }
+
+/// Issue #326: an STT hallucination on silence ("[BLANK_AUDIO]", "Thank
+/// you.") is dropped like an empty transcript. It never reaches the
+/// responder (so no DialogueManager turn and no extractor/comprehension
+/// spawn), is not shown as a transcript, and the next real utterance
+/// still goes through.
+#[tokio::test]
+async fn noise_transcript_never_reaches_responder() {
+    use primer_core::speech::VadEvent;
+
+    let backends = super::LoopBackends::single_locale(
+        Arc::new(ScriptedStreamingStt::new([
+            "[BLANK_AUDIO]",
+            "",
+            "Thank you.",
+            "",
+            "hello primer",
+        ])),
+        Arc::new(MockStreamingTts::new(64)),
+        primer_core::speech::VoiceProfile::default(),
+        primer_core::i18n::Locale::English,
+    );
+
+    let (event_tx, event_rx) = tokio::sync::mpsc::channel(64);
+    for _ in 0..3 {
+        event_tx.try_send(VadEvent::SpeechStart).unwrap();
+        event_tx.try_send(VadEvent::SpeechEnd).unwrap();
+    }
+    drop(event_tx);
+
+    struct RecordingResponder(Arc<Mutex<Vec<String>>>);
+    impl super::Responder for RecordingResponder {
+        fn respond<'a>(
+            &'a mut self,
+            transcript: &'a str,
+            mut on_chunk: Box<dyn FnMut(&str) + Send + 'a>,
+        ) -> std::pin::Pin<
+            Box<dyn std::future::Future<Output = primer_core::error::Result<String>> + Send + 'a>,
+        > {
+            self.0.lock().unwrap().push(transcript.to_string());
+            Box::pin(async move {
+                on_chunk("Hi.");
+                Ok("Hi.".to_string())
+            })
+        }
+    }
+    let heard = Arc::new(Mutex::new(Vec::new()));
+
+    let observer = MockObserver::new();
+    let transcripts = super::run_loop_borrowed(
+        backends,
+        event_rx,
+        Box::new(RecordingResponder(Arc::clone(&heard))),
+        Box::new(|_| {}),
+        None,
+        false,
+        None,
+        observer.clone(),
+    )
+    .await
+    .expect("loop ok");
+
+    assert_eq!(*heard.lock().unwrap(), vec!["hello primer".to_string()]);
+    assert_eq!(transcripts, vec!["hello primer".to_string()]);
+    let shown: Vec<_> = observer
+        .events()
+        .into_iter()
+        .filter_map(|e| match e {
+            MockEvent::Transcript(t) => Some(t),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(shown, vec!["hello primer".to_string()]);
+}
+
+/// Runs one cancel-and-retry turn: the first STT segment reaches a
+/// responder that parks (so a mid-think SpeechStart cancels it), then the
+/// second segment is the continuation. Returns every transcript the
+/// responder was called with.
+async fn responder_calls_after_retry(
+    first: &'static str,
+    continuation: &'static str,
+    locale: primer_core::i18n::Locale,
+) -> Vec<String> {
+    use primer_core::speech::VadEvent;
+
+    let backends = super::LoopBackends::single_locale(
+        Arc::new(ScriptedStreamingStt::new(vec![first, continuation])),
+        Arc::new(MockStreamingTts::new(64)),
+        primer_core::speech::VoiceProfile::default(),
+        locale,
+    );
+    let (event_tx, event_rx) = tokio::sync::mpsc::channel(64);
+    for _ in 0..2 {
+        event_tx.try_send(VadEvent::SpeechStart).unwrap();
+        event_tx.try_send(VadEvent::SpeechEnd).unwrap();
+    }
+    drop(event_tx);
+
+    struct ParkFirstResponder(Arc<Mutex<Vec<String>>>);
+    impl super::Responder for ParkFirstResponder {
+        fn respond<'a>(
+            &'a mut self,
+            transcript: &'a str,
+            mut on_chunk: Box<dyn FnMut(&str) + Send + 'a>,
+        ) -> std::pin::Pin<
+            Box<dyn std::future::Future<Output = primer_core::error::Result<String>> + Send + 'a>,
+        > {
+            let mut calls = self.0.lock().unwrap();
+            calls.push(transcript.to_string());
+            let first_call = calls.len() == 1;
+            Box::pin(async move {
+                if first_call {
+                    std::future::pending::<()>().await;
+                }
+                on_chunk("Hi.");
+                Ok("Hi.".to_string())
+            })
+        }
+    }
+    let calls = Arc::new(Mutex::new(Vec::new()));
+    tokio::time::timeout(
+        std::time::Duration::from_secs(2),
+        super::run_loop_borrowed(
+            backends,
+            event_rx,
+            Box::new(ParkFirstResponder(Arc::clone(&calls))),
+            Box::new(|_| {}),
+            None,
+            false,
+            None,
+            MockObserver::new(),
+        ),
+    )
+    .await
+    .expect("did not deadlock")
+    .expect("loop ok");
+    calls.lock().unwrap().clone()
+}
+
+/// Issue #326 on the cancel-and-retry path: noise in the continuation is
+/// neither appended to the child's real question nor allowed to erase it
+/// (a subtitle-credit match on the accumulated text used to clear it).
+#[tokio::test]
+async fn noise_continuation_after_cancel_keeps_only_the_real_question() {
+    let q = "why is the sky blue";
+    for noise in [
+        "Thank you.",
+        "[BLANK_AUDIO]",
+        "Subtitles by the Amara.org community",
+    ] {
+        let calls = responder_calls_after_retry(q, noise, primer_core::i18n::Locale::English).await;
+        assert_eq!(
+            calls,
+            vec![q.to_string(), q.to_string()],
+            "continuation {noise:?}"
+        );
+    }
+}
+
+/// The call site passes the session's locale, not English: a German
+/// silence artefact is dropped on a German session.
+#[tokio::test]
+async fn noise_guard_uses_the_active_locale() {
+    let q = "warum ist der himmel blau";
+    let calls =
+        responder_calls_after_retry(q, "Vielen Dank.", primer_core::i18n::Locale::German).await;
+    assert_eq!(calls, vec![q.to_string(), q.to_string()]);
+}

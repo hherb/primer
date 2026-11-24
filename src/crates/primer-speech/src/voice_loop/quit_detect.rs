@@ -61,7 +61,7 @@ pub(super) fn is_quit_phrase(transcript: &str, locale: &primer_core::i18n::Local
 ///
 /// `char::is_alphanumeric` is Unicode-aware so German `ü`/`ö`/`ä` are
 /// preserved; only punctuation and non-letter symbols get trimmed.
-fn normalise_for_match(s: &str) -> String {
+pub(super) fn normalise_for_match(s: &str) -> String {
     let lower = s.to_lowercase();
     let trimmed = lower.trim_matches(|c: char| !c.is_alphanumeric());
     let mut out = String::with_capacity(trimmed.len());
