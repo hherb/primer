@@ -1,7 +1,7 @@
 # Primer — Next Session Brief
 
 **Audience:** future Claude Code session continuing work on this repo.
-**Last updated:** 2026-11-25 (UTC).
+**Last updated:** 2026-11-24 (UTC).
 
 **Open against `main`:**
 - **#420** (`fix/noise-guard-edges-419`): closes #419.
