@@ -162,19 +162,21 @@ pub(super) async fn run_loop_inner<'r, O: LoopObserver>(
                 .trim()
                 .to_string();
             stt_session = backends.stt.open_session()?;
-            if !new_text.is_empty() {
+            // STT noise ("[BLANK_AUDIO]", "Thank you.") is never appended
+            // (#326). Judged per iteration, so a noise continuation after
+            // a cancel neither joins nor erases the child's real question;
+            // noise alone leaves the transcript empty: no LLM call, no turn.
+            if is_noise_transcript(&new_text, &backends.active_locale) {
+                if !new_text.is_empty() {
+                    tracing::debug!(target: "primer::speech", transcript = %new_text, "dropped STT noise transcript");
+                }
+            } else {
                 if !transcript_so_far.is_empty() {
                     transcript_so_far.push(' ');
                 }
                 transcript_so_far.push_str(&new_text);
             }
 
-            // STT noise ("[BLANK_AUDIO]", "Thank you.") takes the empty
-            // path below: no LLM call, no turn, no transcript (#326).
-            if is_noise_transcript(&transcript_so_far, &backends.active_locale) {
-                tracing::debug!(target: "primer::speech", transcript = %transcript_so_far, "dropped STT noise transcript");
-                transcript_so_far.clear();
-            }
             if transcript_so_far.is_empty() {
                 if verbose {
                     eprintln!("[stt] empty transcript, looping");

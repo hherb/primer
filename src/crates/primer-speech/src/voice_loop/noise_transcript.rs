@@ -16,12 +16,12 @@ use primer_core::i18n::Locale;
 
 use super::quit_detect::normalise_for_match;
 
-/// Whole-utterance STT silence artefacts per locale, in the
-/// [`normalise_for_match`] form. Matched by equality, so "thank you for
-/// the story" is kept.
+/// Whole-utterance STT silence artefacts, in the [`normalise_for_match`]
+/// form. German has its own list; every other locale uses the English
+/// one. Matched by equality, so "thank you for the story" is kept.
 ///
-/// Shortcut: "thank you" / "vielen dank" are also things a child really
-/// says, and such a turn is dropped. Upgrade to Whisper's per-segment
+/// Shortcut: a child who says only one of these ("thank you", "you",
+/// "danke") is dropped too. Upgrade to Whisper's per-segment
 /// `no_speech_prob` if that proves annoying in practice.
 fn silence_phrases_for(locale: &Locale) -> &'static [&'static str] {
     match locale.pack_id() {
@@ -29,6 +29,8 @@ fn silence_phrases_for(locale: &Locale) -> &'static [&'static str] {
             "vielen dank",
             "danke",
             "danke schön",
+            "dankeschön",
+            "vielen dank fürs zuschauen",
             "tschüss und bis zum nächsten mal",
         ],
         _ => &[
@@ -146,7 +148,12 @@ mod tests {
 
     #[test]
     fn german_silence_phrases_are_per_locale() {
-        assert!(is_noise_transcript("Vielen Dank.", &Locale::German));
+        for s in ["Vielen Dank.", "Dankeschön!", "Vielen Dank fürs Zuschauen."] {
+            assert!(
+                is_noise_transcript(s, &Locale::German),
+                "{s:?} should be noise"
+            );
+        }
         assert!(!noise_en("Vielen Dank."));
         assert!(!is_noise_transcript(
             "Danke, warum ist der Himmel blau?",

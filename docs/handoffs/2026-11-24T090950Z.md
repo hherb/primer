@@ -20,10 +20,11 @@
   - equals a per-locale silence phrase (EN/DE);
   - contains a subtitle-credit marker.
   It reuses `quit_detect::normalise_for_match`, which is now `pub(super)`.
-- **The wiring:** `inner.rs` clears the transcript at the LATENT_THINK empty gate, *before* `responder.respond`. The noise then takes the existing empty path: no LLM call, no turn, no spawn, no observer transcript. It logs at `tracing::debug!(target: "primer::speech")`.
+- **The wiring:** in LATENT_THINK, `inner.rs` checks each iteration's new STT text *before* appending it to the transcript, so noise alone leaves it empty and takes the existing empty path: no LLM call, no turn, no spawn, no observer transcript. A noise continuation after a VAD cancel neither joins nor erases the child's real question (the first version checked the accumulated text and got both wrong; found by the /finalcheck review). It logs at `tracing::debug!(target: "primer::speech")`.
 - **Tests:**
   - 7 pure tests.
   - State-machine test `mocks.rs::noise_transcript_never_reaches_responder`. It was red before the wiring.
+  - Retry-path tests `noise_continuation_after_cancel_keeps_only_the_real_question` and `noise_guard_uses_the_active_locale`. Both were red before the per-iteration check.
   - `primer-speech` tests pass on the `voice-loop`, `android-native`, whisper/piper and `macos-native` arms.
   - clippy and rustdoc are clean on the same arms, plus `primer-cli --features speech`.
 - CLAUDE.md has a new bullet, and the README voice-POC line has one new sentence.
@@ -93,6 +94,7 @@ Still not watched in the real webview: `mv ~/.primer/kb ~/.primer/kb.bak`, launc
 - **A lone "thank you" / "thanks for watching" / "you" (EN) or "vielen dank" / "danke" / "danke schön" (DE) is dropped silently.** These are the commonest Whisper silence artefacts, but a child can really say the first ones. There is a `shortcut:` comment in `silence_phrases_for`, and the PR flags it for the owner. The principled upgrade is Whisper's per-segment `no_speech_prob`, which `TranscriptSegment` discards today.
 - **The filter applies to every STT backend.** Android and macOS-native don't hallucinate the Whisper subtitle strings, but the phrase table still drops a genuine "thank you" there.
 - **No Hindi table:** the default arm is English, so a Hindi session gets the English phrases.
+- **Filed from the review:** #419 (repeated or prefixed annotations such as `[BLANK_AUDIO] [BLANK_AUDIO]` still slip through; per-segment filtering is the suggested fix).
 - **Not done (#326's other suggestions):** Parlor's ~300 ms tail-silence padding before Whisper (it lowers how often the filter has to fire), and the `no_speech_prob` gate.
 - **The verbose `[stt] empty transcript` eprintln also fires for dropped noise.** That is harmless; the `debug!` line says which case it was.
 
