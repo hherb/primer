@@ -136,6 +136,8 @@ pub async fn start_voice_mode<R: tauri::Runtime>(
     // ownership of `local` must survive until then — we stash it inside
     // a tokio task wrapper that joins both.
     let wrapped_join = tokio::spawn(async move {
+        // Aborting this wrapper on a stop timeout must abort the loop too (#371).
+        let _abort_loop = super::AbortOnDrop(join.abort_handle());
         let result = join.await;
         // Now that the loop has exited, signal the audio thread + drop
         // cpal streams.

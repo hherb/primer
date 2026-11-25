@@ -466,3 +466,74 @@ async fn stop_without_a_loop_persists_the_toggle_off() {
         "no loop ran, so the text session must survive"
     );
 }
+
+/// Long enough for an aborted task to be cancelled on the test runtime.
+#[cfg(any(feature = "speech", feature = "android-native"))]
+const ABORT_OBSERVED_WITHIN: std::time::Duration = std::time::Duration::from_secs(1);
+
+/// A task that never finishes and sets the returned flag when dropped,
+/// i.e. when it is aborted.
+#[cfg(any(feature = "speech", feature = "android-native"))]
+fn spawn_stuck_task() -> (
+    tokio::task::JoinHandle<()>,
+    std::sync::Arc<std::sync::atomic::AtomicBool>,
+) {
+    use std::sync::atomic::{AtomicBool, Ordering};
+    struct SetOnDrop(std::sync::Arc<AtomicBool>);
+    impl Drop for SetOnDrop {
+        fn drop(&mut self) {
+            self.0.store(true, Ordering::SeqCst);
+        }
+    }
+    let dropped = std::sync::Arc::new(AtomicBool::new(false));
+    let guard = SetOnDrop(std::sync::Arc::clone(&dropped));
+    let handle = tokio::spawn(async move {
+        let _guard = guard;
+        std::future::pending::<()>().await;
+    });
+    (handle, dropped)
+}
+
+#[cfg(any(feature = "speech", feature = "android-native"))]
+async fn assert_dropped(flag: &std::sync::atomic::AtomicBool) {
+    tokio::time::timeout(ABORT_OBSERVED_WITHIN, async {
+        while !flag.load(std::sync::atomic::Ordering::SeqCst) {
+            tokio::time::sleep(std::time::Duration::from_millis(1)).await;
+        }
+    })
+    .await
+    .expect("stuck task was detached, not aborted");
+}
+
+/// Issue #371: a voice loop stuck past the stop timeout is aborted, not
+/// detached (dropping a tokio `JoinHandle` only detaches the task).
+#[cfg(any(feature = "speech", feature = "android-native"))]
+#[tokio::test]
+async fn join_or_abort_aborts_a_task_that_outlives_the_timeout() {
+    let (handle, dropped) = spawn_stuck_task();
+    let joined = join_or_abort(handle, std::time::Duration::from_millis(10)).await;
+    assert!(joined.is_none(), "a stuck task must report a timeout");
+    assert_dropped(&dropped).await;
+}
+
+#[cfg(any(feature = "speech", feature = "android-native"))]
+#[tokio::test]
+async fn join_or_abort_returns_a_finished_tasks_result() {
+    let joined = join_or_abort(tokio::spawn(async { 7 }), ABORT_OBSERVED_WITHIN).await;
+    assert_eq!(joined.map(Result::unwrap), Some(7));
+}
+
+/// The stored handle is a wrapper task awaiting the inner `run_loop`
+/// task; aborting the wrapper must abort the inner loop too.
+#[cfg(any(feature = "speech", feature = "android-native"))]
+#[tokio::test]
+async fn aborting_a_wrapper_aborts_the_inner_task_it_guards() {
+    let (inner, dropped) = spawn_stuck_task();
+    let wrapper = tokio::spawn(async move {
+        let _abort_inner = AbortOnDrop(inner.abort_handle());
+        let _ = inner.await;
+    });
+    tokio::task::yield_now().await;
+    wrapper.abort();
+    assert_dropped(&dropped).await;
+}

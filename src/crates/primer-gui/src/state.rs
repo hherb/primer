@@ -89,10 +89,10 @@ impl AppState {
 /// inventing a stub type.
 #[cfg(any(feature = "speech", feature = "android-native"))]
 pub struct ActiveVoiceLoop {
-    /// Join handle for the spawned voice-loop task. Dropping it aborts
-    /// the task (tokio semantics); the `stop_voice_mode` command sends
+    /// Join handle for the spawned voice-loop wrapper task. Dropping it
+    /// only detaches the task (tokio semantics), so the stop path sends
     /// to `stop_tx` first to let the loop exit cleanly, then joins with
-    /// a 5-second timeout before dropping.
+    /// a 5-second timeout and aborts the task on timeout (#371).
     pub join: tokio::task::JoinHandle<Result<(), primer_speech::voice_loop::VoiceLoopError>>,
     /// One-shot sender that signals the loop to exit at the next
     /// LISTEN→LATENT_THINK boundary. The loop drains TTS and saves the
