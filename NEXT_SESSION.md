@@ -40,8 +40,10 @@ These three are independent; each is branched from `main`, so merge them in any 
 - **`docs/superpowers/specs/2026-11-25-stream-llm-into-tts-design.md`:**
   - SPEAK goes phrase-wise through the existing `PhraseSplitter` and the whole-string `strip_markdown_for_tts`, so no incremental stripper is needed.
   - `on_chunk` only forwards deltas over a channel, so `push_text` stays on the loop task and the macOS main-thread analysis is unchanged.
-  - Speech starts at the first complete phrase; a fallback after audio has started is appended; cancel is checked between phrases.
-  - Staged as 4 PRs, gated on owner decisions D1–D3.
+  - Speech starts at the first complete phrase; a fallback after audio has started is appended; cancel is checked between phrases, and every exit from a started SPEAK runs the drain + un-gate tail.
+  - Each phrase is pushed with a trailing space; without it the TTS backends' own splitters hold every phrase until `finalize`.
+  - Staged as 4 PRs, gated on owner decisions D1–D4.
+- **#423 filed** during the review: a Stop pressed during SPEAK/LISTEN is queued and cancels the child's next question (predates #325).
 - **ROADMAP 2.1 / 2.2:** the noise-handling progress and a #325 line.
 - **README:** unchanged (its voice line already covers the noise drop).
 
@@ -63,18 +65,19 @@ These three are independent; each is branched from `main`, so merge them in any 
 ### 1. Sweep + inline-test detector: re-run EVERY session
 Commands are in the resume block.
 
-### 2. #325: owner answers D1–D3, then stages 1–3 of the design note
+### 2. #325: owner answers D1–D4, then stages 1–3 of the design note
 - **Stage 1 needs no decision**, so it can start now: a behaviour-preserving split of `inner.rs` into `think.rs` + `speak.rs`.
   - **Acceptance:** test counts are unchanged on the `voice-loop`, `macos-native` and `macos-native-26` arms; `inner.rs` is under 300 lines; every file is under 500.
 - **Stage 2:** phrase-wise SPEAK, still after the LLM completes.
-  - **Acceptance:** a mock TTS records one `push_text` per sentence.
+  - **Acceptance:** a mock TTS records one `push_text` per sentence, and a `StubTts` test (which has its own splitter) shows each pushed phrase completing before the next push.
 - **Stage 3:** streaming.
-  - **Acceptance:** the first `push_text` happens before the responder resolves. Also covered: VAD-cancel before the first phrase, the append-fallback, between-phrase cancel, and D2 (a quit phrase never reaches the responder).
+  - **Acceptance:** the first `push_text` happens before the responder resolves. Also covered: VAD-cancel before the first phrase, the append-fallback, between-phrase cancel (with `is_speaking` cleared only after the drain hook), and D2 (a quit phrase never reaches the responder).
 
 ### 3. Manual first-run GUI check for #396 (owner)
 Still not watched in the real webview: `mv ~/.primer/kb ~/.primer/kb.bak`, launch the GUI, Start new → Save & start; the button should count "… 0 / 91" upward.
 
 ### 4. Other bugs (host-completable; TDD each)
+- **#423:** drain stale `cancel_response` tokens before each LLM attempt; mock test queues a cancel during SPEAK and checks the next utterance still reaches the responder.
 - **#406:** stale KB cache files are never cleaned up. Decide a pruning policy first (owner).
 - **#352 remaining:** item 2 needs the owner decision below; items 1 and 4 need a design note first.
 - **Older:** #315, #316. Run `gh issue list`; read each before starting.
@@ -94,17 +97,18 @@ Still not watched in the real webview: `mv ~/.primer/kb ~/.primer/kb.bak`, launc
 - **#260:** Android-voice on-device acceptance; also check that a denied mic keeps the text session (#369), and that a stop which times out (#421) leaves the next session's recognizer alive.
 - **#192:** macOS-native STT + injected TTS smoke.
 - **#170 Stages B, E and F:** the OpenRAIL-M disclosure ships before any default flip.
-- **#166 item #1:** WhisperStream reuse smoke.
+- **#262 ignored test (owner):** run `reused_stream_does_not_bleed_prior_utterance` with real audio (`PRIMER_WHISPER_MODEL` + two WAVs).
 - **#135:** glib (blocked on Tauri 3).
 - **Other:** QNN token stability, NPU tuning, latency-routing calibration.
 
 ## Open decisions / risks
 
 ### This session (#420, #421, #325 note)
-- **#325 D1–D3 (owner):** see the design note.
+- **#325 D1–D4 (owner):** see the design note.
   - **D1:** streaming shrinks the "child keeps talking" window from the whole decode to the first phrase (~1–1.5 s). The recommendation is a `MIN_THINK_HOLD_MS` of ~1200 ms, tuned on the device.
   - **D2:** move the quit check before the LLM call, so a quit utterance records no DM turn.
   - **D3:** accept a bare `*` when an emphasis pair spans sentences.
+  - **D4:** a reply cut off after audio has started is spoken but not recorded in the session. The recommendation is to accept it for stage 3.
 - **#420: a parenthesised aside at an edge is dropped** ("(I think) it is the moon" → "it is the moon"). Whisper rarely brackets real words, but the hedge is lost when it does.
 - **#420: an annotation in the middle (`why [BLANK_AUDIO] is it`) is kept verbatim.**
 - **#420: the `. ! ?` sentence split also splits "4.5"**, but neither half is a silence phrase, so it is kept.
