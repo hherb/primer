@@ -6,7 +6,7 @@ use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
-use primer_core::consts::speech::MIN_THINK_HOLD;
+use primer_core::consts::speech::{MIN_THINK_HOLD, STREAM_TAIL_FLUSH_IDLE};
 use primer_core::error::{PrimerError, Result};
 use primer_core::speech::{
     Named, StreamingTextToSpeech, SynthesisEvent, SynthesisSession, VadEvent, VoiceProfile,
@@ -19,10 +19,17 @@ use crate::voice_loop::observer::{ExitReason, VoiceState};
 /// Each push: the text and when (paused-clock) it arrived.
 type PushLog = Arc<Mutex<Vec<(String, Instant)>>>;
 
+/// Presses Stop from inside the given (1-based) push, where the test
+/// itself cannot run: `push_text` is synchronous.
+type PressAt = Arc<Mutex<Option<(usize, tokio::sync::mpsc::Sender<()>)>>>;
+
 /// TTS that records every `push_text` and wakes the test on each one.
+/// Push number `fail_at` (1-based; 0 = never) returns an error.
 struct LoggingTts {
     log: PushLog,
     pushed: Arc<tokio::sync::Notify>,
+    press_at: PressAt,
+    fail_at: Arc<AtomicUsize>,
 }
 impl Named for LoggingTts {
     fn name(&self) -> &str {
@@ -37,20 +44,33 @@ impl StreamingTextToSpeech for LoggingTts {
         Ok(Box::new(LoggingSession {
             log: Arc::clone(&self.log),
             pushed: Arc::clone(&self.pushed),
+            press_at: Arc::clone(&self.press_at),
+            fail_at: Arc::clone(&self.fail_at),
         }))
     }
 }
 struct LoggingSession {
     log: PushLog,
     pushed: Arc<tokio::sync::Notify>,
+    press_at: PressAt,
+    fail_at: Arc<AtomicUsize>,
 }
 impl SynthesisSession for LoggingSession {
     fn push_text(&mut self, text: &str, _on_event: &mut dyn FnMut(SynthesisEvent)) -> Result<()> {
-        self.log
-            .lock()
-            .unwrap()
-            .push((text.to_string(), Instant::now()));
+        let n = {
+            let mut log = self.log.lock().unwrap();
+            log.push((text.to_string(), Instant::now()));
+            log.len()
+        };
         self.pushed.notify_one();
+        if let Some((at, tx)) = self.press_at.lock().unwrap().as_ref()
+            && *at == n
+        {
+            tx.try_send(()).unwrap();
+        }
+        if self.fail_at.load(Ordering::SeqCst) == n {
+            return Err(PrimerError::Speech("tts boom".into()));
+        }
         Ok(())
     }
     fn finalize(self: Box<Self>, _on_event: &mut dyn FnMut(SynthesisEvent)) -> Result<()> {
@@ -105,6 +125,8 @@ impl super::Responder for ScriptedResponder {
 struct Rig {
     log: PushLog,
     pushed: Arc<tokio::sync::Notify>,
+    press_at: PressAt,
+    fail_at: Arc<AtomicUsize>,
     calls: Arc<Mutex<Vec<String>>>,
     observer: MockObserver,
 }
@@ -113,9 +135,41 @@ fn rig() -> Rig {
     Rig {
         log: Arc::new(Mutex::new(Vec::new())),
         pushed: Arc::new(tokio::sync::Notify::new()),
+        press_at: Arc::new(Mutex::new(None)),
+        fail_at: Arc::new(AtomicUsize::new(0)),
         calls: Arc::new(Mutex::new(Vec::new())),
         observer: MockObserver::new(),
     }
+}
+
+/// An `is_speaking` flag plus a drain hook that counts its runs.
+fn gate() -> (Arc<AtomicBool>, Arc<AtomicUsize>, super::DrainHook) {
+    let speaking = Arc::new(AtomicBool::new(false));
+    let drains = Arc::new(AtomicUsize::new(0));
+    let counter = Arc::clone(&drains);
+    let hook: super::DrainHook = Box::new(move || {
+        counter.fetch_add(1, Ordering::SeqCst);
+        Box::pin(async {})
+    });
+    (speaking, drains, hook)
+}
+
+fn responder(rig: &Rig, script: Vec<Step>) -> Box<ScriptedResponder> {
+    Box::new(ScriptedResponder {
+        script,
+        calls: Arc::clone(&rig.calls),
+    })
+}
+
+fn exits(rig: &Rig) -> Vec<ExitReason> {
+    rig.observer
+        .events()
+        .into_iter()
+        .filter_map(|e| match e {
+            MockEvent::Exit(r) => Some(r),
+            _ => None,
+        })
+        .collect()
 }
 
 fn backends(
@@ -127,6 +181,8 @@ fn backends(
         Arc::new(LoggingTts {
             log: Arc::clone(&rig.log),
             pushed: Arc::clone(&rig.pushed),
+            press_at: Arc::clone(&rig.press_at),
+            fail_at: Arc::clone(&rig.fail_at),
         }),
         VoiceProfile::default(),
         primer_core::i18n::Locale::English,
@@ -279,7 +335,14 @@ async fn mid_stream_error_after_a_spoken_phrase_appends_the_fallback() {
             "Could you ask again? "
         ]
     );
-    assert_eq!(chunks(&rig), vec!["First part. ", super::FALLBACK_LINE]);
+    assert_eq!(
+        chunks(&rig),
+        vec![
+            "First part. ",
+            super::FALLBACK_SEPARATOR,
+            super::FALLBACK_LINE
+        ]
+    );
     assert!(
         rig.observer
             .events()
@@ -379,4 +442,199 @@ async fn quit_phrase_never_reaches_the_responder() {
         matches!(exits.as_slice(), [ExitReason::Keyword]),
         "{exits:?}"
     );
+}
+
+/// The reply's closing sentence rarely ends in whitespace, so the
+/// splitter holds it until the stream closes, which is only after the
+/// dialogue manager's post-reply work. It is spoken after a short pause
+/// instead.
+#[tokio::test(start_paused = true)]
+async fn final_sentence_without_trailing_space_is_spoken_after_a_pause() {
+    let rig = rig();
+    let (_handle, join) = super::run_loop(
+        backends(&rig, Arc::new(MockStreamingStt::new("tell me"))),
+        one_utterance(),
+        responder(
+            &rig,
+            vec![
+                Step::Chunk("The sun is hot. Why?"),
+                // The DM's summary refresh, after the last token.
+                Step::Sleep(Duration::from_secs(10)),
+            ],
+        ),
+        Box::new(|_| {}),
+        None,
+        false,
+        None,
+        rig.observer.clone(),
+    );
+    rig.pushed.notified().await;
+    rig.pushed.notified().await;
+    let log = rig.log.lock().unwrap().clone();
+    assert_eq!(log[1].0, "Why? ");
+    assert!(log[1].1 - log[0].1 >= STREAM_TAIL_FLUSH_IDLE);
+    assert!(log[1].1 - log[0].1 < Duration::from_secs(10), "not held");
+    assert!(!join.is_finished());
+    join.await.unwrap().unwrap();
+    assert_eq!(pushes(&rig), vec!["The sun is hot. ", "Why? "]);
+}
+
+/// An error after audio started speaks the partial sentence the child
+/// already sees, then the fallback, shown on its own paragraph.
+#[tokio::test(start_paused = true)]
+async fn mid_stream_error_speaks_the_held_partial_before_the_fallback() {
+    let rig = rig();
+    let (_handle, join) = super::run_loop(
+        backends(&rig, Arc::new(MockStreamingStt::new("tell me"))),
+        one_utterance(),
+        responder(
+            &rig,
+            vec![
+                Step::Chunk("First part. And then"),
+                Step::Sleep(Duration::from_secs(10)),
+                Step::Fail,
+            ],
+        ),
+        Box::new(|_| {}),
+        None,
+        false,
+        None,
+        rig.observer.clone(),
+    );
+    join.await.unwrap().unwrap();
+    assert_eq!(
+        pushes(&rig),
+        vec![
+            "First part. ",
+            "And then ",
+            "Sorry, I had trouble with that. ",
+            "Could you ask again? "
+        ]
+    );
+}
+
+/// Once the reply has resolved its remaining phrases are pushed back to
+/// back with no `select!` in between; Stop is still honoured before each.
+#[tokio::test(start_paused = true)]
+async fn stop_after_the_reply_resolved_skips_the_remaining_phrases() {
+    let rig = rig();
+    let (handle, join) = super::run_loop(
+        backends(&rig, Arc::new(MockStreamingStt::new("tell me"))),
+        one_utterance(),
+        responder(
+            &rig,
+            vec![
+                Step::Chunk("One. "),
+                Step::Sleep(Duration::from_secs(5)),
+                Step::Chunk("Two. Three. Four."),
+            ],
+        ),
+        Box::new(|_| {}),
+        None,
+        false,
+        None,
+        rig.observer.clone(),
+    );
+    *rig.press_at.lock().unwrap() = Some((2, handle.cancel_response_tx.clone()));
+    join.await.unwrap().unwrap();
+    assert_eq!(pushes(&rig), vec!["One. ", "Two. "]);
+    assert!(rig.observer.events().iter().any(|e| matches!(
+        e,
+        MockEvent::StateChange { state: VoiceState::Listen, hint: Some(h) } if h == "user_cancel"
+    )));
+}
+
+/// A TTS error mid-stream still drains the speaker and un-gates the mic
+/// before the loop returns the error.
+#[tokio::test(start_paused = true)]
+async fn tts_error_mid_stream_still_runs_the_end_of_turn_tail() {
+    let rig = rig();
+    rig.fail_at.store(2, Ordering::SeqCst);
+    let (speaking, drains, hook) = gate();
+    let (_handle, join) = super::run_loop(
+        backends(&rig, Arc::new(MockStreamingStt::new("tell me"))),
+        one_utterance(),
+        responder(
+            &rig,
+            vec![
+                Step::Chunk("One. Two. "),
+                Step::Sleep(Duration::from_secs(10)),
+            ],
+        ),
+        Box::new(|_| {}),
+        Some(hook),
+        false,
+        Some(Arc::clone(&speaking)),
+        rig.observer.clone(),
+    );
+    assert!(join.await.unwrap().is_err(), "the TTS error ends the loop");
+    assert_eq!(drains.load(Ordering::SeqCst), 1);
+    assert!(!speaking.load(Ordering::SeqCst), "mic un-gated");
+}
+
+/// No barge-in: the child talking during a streamed SPEAK neither cancels
+/// nor shortens the reply, and is not heard as a new turn.
+#[tokio::test(start_paused = true)]
+async fn child_speech_during_a_streamed_speak_is_ignored() {
+    let rig = rig();
+    let (tx, rx) = tokio::sync::mpsc::channel(8);
+    tx.try_send(VadEvent::SpeechStart).unwrap();
+    tx.try_send(VadEvent::SpeechEnd).unwrap();
+    let (_handle, join) = super::run_loop(
+        backends(&rig, Arc::new(MockStreamingStt::new("tell me"))),
+        rx,
+        responder(
+            &rig,
+            vec![
+                Step::Chunk("One. "),
+                Step::Sleep(Duration::from_secs(5)),
+                Step::Chunk("Two. "),
+            ],
+        ),
+        Box::new(|_| {}),
+        None,
+        false,
+        None,
+        rig.observer.clone(),
+    );
+    rig.pushed.notified().await;
+    tx.send(VadEvent::SpeechStart).await.unwrap();
+    tx.send(VadEvent::SpeechEnd).await.unwrap();
+    drop(tx);
+    let transcripts = join.await.unwrap().unwrap();
+    assert_eq!(pushes(&rig), vec!["One. ", "Two. "]);
+    assert_eq!(rig.calls.lock().unwrap().len(), 1);
+    assert_eq!(transcripts, vec!["tell me".to_string()]);
+}
+
+/// End voice mode during a streamed SPEAK exits once, after the drain.
+#[tokio::test(start_paused = true)]
+async fn external_stop_during_a_streamed_speak_exits_after_the_drain() {
+    let rig = rig();
+    let (speaking, drains, hook) = gate();
+    let (handle, join) = super::run_loop(
+        backends(&rig, Arc::new(MockStreamingStt::new("tell me"))),
+        one_utterance(),
+        responder(
+            &rig,
+            vec![
+                Step::Chunk("One. "),
+                Step::Sleep(Duration::from_secs(10)),
+                Step::Chunk("Two. "),
+            ],
+        ),
+        Box::new(|_| {}),
+        Some(hook),
+        false,
+        Some(Arc::clone(&speaking)),
+        rig.observer.clone(),
+    );
+    rig.pushed.notified().await;
+    handle.stop_tx.send(()).unwrap();
+    let transcripts = join.await.unwrap().unwrap();
+    assert_eq!(transcripts, vec!["tell me".to_string()]);
+    assert_eq!(pushes(&rig), vec!["One. "]);
+    assert!(matches!(exits(&rig).as_slice(), [ExitReason::UserStop]));
+    assert_eq!(drains.load(Ordering::SeqCst), 1);
+    assert!(!speaking.load(Ordering::SeqCst));
 }

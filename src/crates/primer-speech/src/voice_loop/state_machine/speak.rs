@@ -9,8 +9,8 @@ use std::pin::Pin;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 
-use primer_core::consts::speech::DEFAULT_INTER_PHRASE_SILENCE_MS;
-use primer_core::error::Result;
+use primer_core::consts::speech::{DEFAULT_INTER_PHRASE_SILENCE_MS, STREAM_TAIL_FLUSH_IDLE};
+use primer_core::error::{PrimerError, Result};
 use primer_core::speech::{SynthesisEvent, SynthesisSession, VadEvent};
 
 use crate::phrase_split::PhraseSplitter;
@@ -18,7 +18,7 @@ use crate::voice_loop::observer::{LoopObserver, VoiceState};
 use crate::voice_loop::tts_markdown::{raw_phrases, tts_phrase, tts_phrases};
 
 use super::think::to_inference_error;
-use super::{DrainHook, FALLBACK_LINE, LoopBackends};
+use super::{DrainHook, FALLBACK_LINE, FALLBACK_SEPARATOR, LoopBackends};
 
 /// The audio side of SPEAK, lent by [`super::inner::run_loop_inner`] for
 /// one turn: see there for `is_speaking` and the drain hook.
@@ -82,10 +82,11 @@ fn open_tts(backends: &LoopBackends) -> Result<(Box<dyn SynthesisSession>, usize
     Ok((session, silence))
 }
 
-/// The end-of-turn tail every exit from a started SPEAK runs: flush
-/// sentinel, drain hook, un-gate, drop stale VAD events. Skipping it
-/// would leave the mic gated forever; un-gating before the drain would
-/// let the speaker tail be transcribed as the next child turn.
+/// The end-of-turn tail every exit from a started SPEAK runs, a TTS
+/// error included: flush sentinel, drain hook, un-gate, drop stale VAD
+/// events. Skipping it would leave the mic gated forever; un-gating
+/// before the drain would let the speaker tail be transcribed as the
+/// next child turn.
 async fn end_of_turn(io: &mut SpeakIo<'_>, events: &mut tokio::sync::mpsc::Receiver<VadEvent>) {
     // Flush sentinel: empty Vec signals on_audio to drain any
     // resampler-leftover tail. Mock callbacks no-op on empty input.
@@ -127,8 +128,8 @@ pub(super) async fn speak<O: LoopObserver>(
     observer: &mut O,
 ) -> Result<()> {
     begin(io, observer);
-    let (mut session, silence) = open_tts(backends)?;
-    {
+    let result = (|| -> Result<()> {
+        let (mut session, silence) = open_tts(backends)?;
         let on_committed_audio = &mut *io.on_committed_audio;
         let mut on_event = |event: SynthesisEvent| match event {
             SynthesisEvent::Audio(chunk) => on_committed_audio(chunk.samples),
@@ -192,10 +193,10 @@ pub(super) async fn speak<O: LoopObserver>(
         for phrase in tts_phrases(accumulated) {
             session.push_text(&phrase, &mut on_event)?;
         }
-        session.finalize(&mut on_event)?;
-    }
+        session.finalize(&mut on_event)
+    })();
     end_of_turn(io, events).await;
-    Ok(())
+    result
 }
 
 /// SPEAK while the reply is still being generated (#325 stage 3).
@@ -207,12 +208,15 @@ pub(super) async fn speak<O: LoopObserver>(
 /// once and to TTS phrase by phrase. VAD events are ignored: the mic is
 /// gated. `push_text` stays on this task, as in [`speak`] (see the
 /// `spawn_blocking` rationale there); deltas arriving during a push wait
-/// in `deltas`.
+/// in `deltas`. A complete final sentence is spoken after
+/// `STREAM_TAIL_FLUSH_IDLE` without new text rather than when the stream
+/// closes.
 ///
-/// Stop and cancel are checked between phrases; either drops the session
-/// without `finalize`. An LLM error *appends* `FALLBACK_LINE` to what
-/// was already spoken (the spoken prefix is not recorded in the session:
-/// owner decision D4). Every exit runs the end-of-turn tail.
+/// Stop and cancel are checked before every phrase; either drops the
+/// session without `finalize`. An LLM error speaks the held partial
+/// sentence, then *appends* `FALLBACK_LINE` to what was already spoken
+/// (the spoken prefix is not recorded in the session: owner decision
+/// D4). Every exit, a TTS error included, runs the end-of-turn tail.
 #[allow(clippy::too_many_arguments)]
 pub(super) async fn speak_streaming<O: LoopObserver, F: Future<Output = Result<String>>>(
     first: Vec<String>,
@@ -228,56 +232,77 @@ pub(super) async fn speak_streaming<O: LoopObserver, F: Future<Output = Result<S
     cancel_response: &mut tokio::sync::mpsc::Receiver<()>,
 ) -> Result<SpeakOutcome> {
     begin(io, observer);
-    let (mut session, silence) = open_tts(backends)?;
-    let outcome = {
+    let result = async {
+        let (mut session, silence) = open_tts(backends)?;
         let on_committed_audio = &mut *io.on_committed_audio;
         let mut on_event = |event: SynthesisEvent| match event {
             SynthesisEvent::Audio(chunk) => on_committed_audio(chunk.samples),
             SynthesisEvent::PhraseEnd => on_committed_audio(vec![0.0_f32; silence]),
         };
-        let mut push = |session: &mut Box<dyn SynthesisSession>, raw: &str| -> Result<()> {
-            match tts_phrase(raw) {
-                Some(phrase) => session.push_text(&phrase, &mut on_event),
-                None => Ok(()),
+        let outcome = 'speak: {
+            if let Some(pressed) = say(
+                &first,
+                &mut session,
+                &mut on_event,
+                &mut external_stop,
+                cancel_response,
+            )? {
+                break 'speak pressed;
             }
-        };
-        for phrase in &first {
-            push(&mut session, phrase)?;
-        }
-        let outcome = loop {
-            tokio::select! {
-                biased;
-                _ = &mut external_stop => break SpeakOutcome::Stopped,
-                _ = cancel_response.recv() => break SpeakOutcome::Cancelled,
-                res = &mut llm_fut => {
-                    match res {
-                        Ok(_) => {
-                            // Every delta was sent before the future resolved.
-                            while let Ok(d) = deltas.try_recv() {
-                                observer.on_response_chunk(primer_turn_index, &d);
-                                for phrase in splitter.push(&d) {
-                                    push(&mut session, &phrase)?;
+            loop {
+                let phrases = tokio::select! {
+                    biased;
+                    _ = &mut external_stop => break 'speak SpeakOutcome::Stopped,
+                    _ = cancel_response.recv() => break 'speak SpeakOutcome::Cancelled,
+                    res = &mut llm_fut => {
+                        let mut rest = Vec::new();
+                        match res {
+                            Ok(_) => {
+                                // Every delta was sent before the future resolved.
+                                while let Ok(d) = deltas.try_recv() {
+                                    observer.on_response_chunk(primer_turn_index, &d);
+                                    rest.extend(splitter.push(&d));
                                 }
+                                rest.extend(splitter.flush());
                             }
-                            if let Some(tail) = splitter.flush() {
-                                push(&mut session, &tail)?;
+                            Err(e) => {
+                                // The held sentence is already on screen.
+                                rest.extend(splitter.flush());
+                                observer.on_inference_error(&to_inference_error(e));
+                                observer.on_response_chunk(primer_turn_index, FALLBACK_SEPARATOR);
+                                observer.on_response_chunk(primer_turn_index, FALLBACK_LINE);
+                                rest.extend(raw_phrases(FALLBACK_LINE));
                             }
                         }
-                        Err(e) => {
-                            observer.on_inference_error(&to_inference_error(e));
-                            observer.on_response_chunk(primer_turn_index, FALLBACK_LINE);
-                            for phrase in raw_phrases(FALLBACK_LINE) {
-                                push(&mut session, &phrase)?;
-                            }
+                        if let Some(pressed) = say(
+                            &rest,
+                            &mut session,
+                            &mut on_event,
+                            &mut external_stop,
+                            cancel_response,
+                        )? {
+                            break 'speak pressed;
                         }
+                        break 'speak SpeakOutcome::Finished;
                     }
-                    break SpeakOutcome::Finished;
-                }
-                Some(d) = deltas.recv() => {
-                    observer.on_response_chunk(primer_turn_index, &d);
-                    for phrase in splitter.push(&d) {
-                        push(&mut session, &phrase)?;
+                    Some(d) = deltas.recv() => {
+                        observer.on_response_chunk(primer_turn_index, &d);
+                        splitter.push(&d)
                     }
+                    // Re-armed on every pass, so it only fires after a pause
+                    // with no new delta.
+                    _ = tokio::time::sleep(STREAM_TAIL_FLUSH_IDLE), if splitter.ends_at_boundary() => {
+                        splitter.flush().into_iter().collect()
+                    }
+                };
+                if let Some(pressed) = say(
+                    &phrases,
+                    &mut session,
+                    &mut on_event,
+                    &mut external_stop,
+                    cancel_response,
+                )? {
+                    break 'speak pressed;
                 }
             }
         };
@@ -285,8 +310,36 @@ pub(super) async fn speak_streaming<O: LoopObserver, F: Future<Output = Result<S
             SpeakOutcome::Finished => session.finalize(&mut on_event)?,
             _ => drop(session),
         }
-        outcome
-    };
+        Ok::<_, PrimerError>(outcome)
+    }
+    .await;
     end_of_turn(io, events).await;
-    Ok(outcome)
+    result
+}
+
+/// Push `phrases` one `push_text` each, re-reading Stop and cancel before
+/// every one: a push blocks until its phrase is synthesised (on Android,
+/// spoken), so the caller's `select!` cannot see a press in between.
+/// Returns the press that cut the phrases short, if any.
+fn say(
+    phrases: &[String],
+    session: &mut Box<dyn SynthesisSession>,
+    on_event: &mut dyn FnMut(SynthesisEvent),
+    external_stop: &mut Pin<&mut tokio::sync::oneshot::Receiver<()>>,
+    cancel_response: &mut tokio::sync::mpsc::Receiver<()>,
+) -> Result<Option<SpeakOutcome>> {
+    use tokio::sync::oneshot::error::TryRecvError;
+    for raw in phrases {
+        // A dropped stop sender counts as a stop, as in the `select!`.
+        if !matches!(external_stop.try_recv(), Err(TryRecvError::Empty)) {
+            return Ok(Some(SpeakOutcome::Stopped));
+        }
+        if cancel_response.try_recv().is_ok() {
+            return Ok(Some(SpeakOutcome::Cancelled));
+        }
+        if let Some(phrase) = tts_phrase(raw) {
+            session.push_text(&phrase, on_event)?;
+        }
+    }
+    Ok(None)
 }

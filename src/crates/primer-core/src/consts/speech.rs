@@ -29,6 +29,14 @@ pub const DEFAULT_INTER_PHRASE_SILENCE_MS: u32 = 200;
 /// retried with the longer utterance. Tune on device.
 pub const MIN_THINK_HOLD: std::time::Duration = std::time::Duration::from_millis(1200);
 
+/// How long a streamed reply may sit on a complete final sentence
+/// (`"…makes it so hot?"`, no trailing whitespace yet) before SPEAK says
+/// it anyway (#325). The stream's end is only seen once the dialogue
+/// manager's post-reply work (persist, and periodically a summary LLM
+/// call) is done, so waiting for it would leave a gap before the closing
+/// question. A token after this pause just starts the next phrase.
+pub const STREAM_TAIL_FLUSH_IDLE: std::time::Duration = std::time::Duration::from_millis(300);
+
 /// `recv_timeout` slice in milliseconds for the macOS-native TTS
 /// background-path streaming drain loop. Short enough that the
 /// [`STREAM_DRAIN_TIMEOUT_SECS`] overall streaming-drain deadline

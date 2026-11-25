@@ -3,8 +3,9 @@
 //!
 //! Extracted verbatim from `state_machine.rs` so the markdown-stripping
 //! logic (and its characterisation tests) lives next to nothing but
-//! itself — SPEAK simply calls [`tts_phrases`], which splits the reply
-//! and runs [`strip_markdown_for_tts`] on each phrase. Keeping this a
+//! itself — SPEAK calls [`tts_phrases`] on a finished reply (it splits
+//! and runs [`strip_markdown_for_tts`] on each phrase) and [`tts_phrase`]
+//! on each phrase of a streamed one. Keeping this a
 //! leaf of pure functions also keeps the state machine files under the
 //! 500-line-ish guideline.
 

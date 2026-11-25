@@ -47,7 +47,7 @@ The voice loop's LATENT_THINK step (`voice_loop/state_machine/inner.rs`) awaits 
 
 - **D1: the window for continuing to speak shrinks.** Today the child can resume talking for the whole decode (~5 s on device) and the Primer retries with the longer utterance. With streaming, that window closes when the first phrase is spoken, about 1–1.5 s after `SpeechEnd`.
   - A child who pauses mid-thought for longer than that now gets an answer to half a question. That is the latency/patience trade-off at the centre of the voice pedagogy.
-  - **Option:** a minimum think hold, `consts::speech::MIN_THINK_HOLD_MS`. Speech starts no earlier than N ms after `SpeechEnd`, even when a phrase is ready.
+  - **Option:** a minimum think hold, `consts::speech::MIN_THINK_HOLD`. Speech starts no earlier than N ms after `SpeechEnd`, even when a phrase is ready.
   - **Recommendation:** ship with a hold of ~1200 ms and tune it on the device.
 - **D2: move the quit check before the LLM call.** Today "bye" is sent to the responder, so it becomes a DM turn plus an LLM call. The reply chunks are even replayed to the observer before the quit check, so the GUI already *shows* a reply to "bye"; only the SPEAK is skipped. With streaming, the Primer would start speaking a reply to "bye".
   - **Recommendation:** check `is_quit_phrase` right after STT. The quit utterance then records no DM turn and costs no LLM call.

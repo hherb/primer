@@ -26,6 +26,11 @@ pub use types::{
 /// `super::FALLBACK_LINE`.
 const FALLBACK_LINE: &str = "Sorry, I had trouble with that. Could you ask again?";
 
+/// Shown before `FALLBACK_LINE` when a streamed reply fails after part of
+/// it is already on screen; matches primer-pedagogy's
+/// `TURN_NOTICE_SEPARATOR`, which this crate cannot depend on.
+const FALLBACK_SEPARATOR: &str = "\n\n";
+
 // NOTE: The CLI's `DialogueResponder` adapter and `pub async fn run`
 // entry point stay in `primer-cli/src/speech_loop/` (CLI-specific glue);
 // the `ChannelStt` adapter and the audio threads live in sibling
