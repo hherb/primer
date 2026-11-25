@@ -11,6 +11,8 @@
 
 Plus **the docs PR** (`docs/next-session-2026-11-25b`, from `main`, independent) with this brief.
 
+**`/finalcheck` pass (2026-11-26) on all five PRs:** reviewed, fixes pushed into #425–#427 (each merged up the stack), two issues filed (#429, #430). Heads after it: #424 `ead84ca` (no findings), #425 `550f95f`, #426 `f069c3b`, #427 `ca7fabf`.
+
 **Since the last brief:**
 - **`main` is at `90c2592`.** #420, #421 and #422 are merged; #419 and #371 are CLOSED.
 - **The sweep and inline-test detector were clean at session start.**
@@ -32,12 +34,14 @@ Plus **the docs PR** (`docs/next-session-2026-11-25b`, from `main`, independent)
 - `inner.rs` 517 → 162 lines; `think.rs` (LATENT_THINK, returns a `Think` outcome) 300; `speak.rs` (SPEAK) 156.
 - **Checks:** a Python slice at asserted anchors, plus a normalised line-multiset diff. Test counts are unchanged (129 / 146 / 182 on voice-loop / macos-native / macos-native-26).
 - The commit message says `speak.rs` is 155 lines; it is 156. The force-push to fix the message was refused, so the message stays and the PR body is correct.
+- **Finalcheck:** the move was re-verified clean (20/20 tests). `state_machine/mod.rs` notes now point at `think.rs`/`speak.rs` and say `ChannelStt` + the audio threads live in `primer-speech`.
 
 ### #426 — `95f54c4`: #325 stage 2, phrase-wise SPEAK
 - `tts_markdown::tts_phrases` (pure) splits with `PhraseSplitter`, strips per phrase, and appends a trailing space (load-bearing). `speak` pushes one phrase per `push_text`.
 - **Android fix:** `AndroidTtsSession` now holds the shared `speaking` flag from the first push until the session drops. A per-push guard left a gap between phrases in which the recognizer could re-arm and hear the TTS.
 - **Drive-by:** `build_tts_supertonic_without_feature_errors_with_rebuild_hint` is cfg-gated to `not(feature = "supertonic")`. It failed on every supertonic test build.
 - **Tests:** a `StubTts`-wrapping recording TTS, two Android flag tests (one red before), and 4 pure `tts_phrases` tests (incl. the D3 case).
+- **Finalcheck:** `tts_phrases` had been inserted between `consume_digit_times`' doc and its `fn`; both docs are back on the right function.
 
 ### #427 — `49fa12d`: #325 stage 3, stream the reply into TTS (closes #325)
 - **LATENT_THINK** forwards `on_chunk` deltas over a per-attempt channel into a `PhraseSplitter`. Once the first phrase is ready **and** `MIN_THINK_HOLD` has passed, it shows the transcript plus the buffered chunks and calls `speak_streaming`.
@@ -51,6 +55,12 @@ Plus **the docs PR** (`docs/next-session-2026-11-25b`, from `main`, independent)
 - **Behaviour change:** a spurious VAD event in LATENT_THINK now keeps listening (before, it waited for the LLM alone).
 - **Tests:** 5 paused-clock tests in `state_machine/stream_tests.rs`, each mutation-checked.
 - **Docs:** CLAUDE.md voice bullets, ROADMAP 2.2 (ticked), a README voice line, and the design note's status.
+- **Finalcheck fixes (`ca7fabf`):**
+  - The closing sentence ("…so hot?", no trailing space) was held until the stream closed, i.e. after the DM's persist + periodic summary call: a multi-second gap before the question. Now spoken after `STREAM_TAIL_FLUSH_IDLE` (300 ms) with no new delta (`PhraseSplitter::ends_at_boundary`).
+  - Stop / End voice mode are re-read before every phrase push (`say`), incl. after the reply resolved and for several phrases from one delta.
+  - An LLM error after audio started speaks the held partial sentence, then the fallback; the bubble shows it after `\n\n`.
+  - `speak` / `speak_streaming` run the end-of-turn tail on a TTS error too.
+  - 6 new stream tests (5 red on the pre-fix `speak.rs`; the no-barge-in and external-stop ones are pins).
 
 ### Per-session sweep
 - **Inline-test detector:** clean.
@@ -71,7 +81,7 @@ Commands are in the resume block.
 ### 2. Hear #427 on real hardware (owner)
 - **Desktop:** `cargo run -p primer-gui --features speech` → Voice mode → ask a two-sentence question. The first sentence should start ~1.2 s after you stop, while the GUI bubble is still filling. Then press Stop mid-reply: speech stops after the current phrase, and the next question still gets an answer (#423).
 - **Also check:** "bye" ends voice mode with no reply. macOS-native CLI: decode and synthesis alternate (current-thread runtime); check it is still faster to first audio.
-- **Tune `MIN_THINK_HOLD`** if 1.2 s feels rushed or sluggish with a child.
+- **Tune `MIN_THINK_HOLD`** if 1.2 s feels rushed or sluggish with a child, and `STREAM_TAIL_FLUSH_IDLE` (300 ms) if a slow local model's mid-reply pauses split phrases audibly.
 - **Android (#260 checklist):** the per-phrase speak plus the session-held `speaking` flag, so the recognizer must stay disarmed for a whole multi-sentence reply.
 
 ### 3. #325 stage 4 (optional): `clear_speaker` hook
@@ -82,6 +92,8 @@ Commands are in the resume block.
 Still not watched in the real webview: `mv ~/.primer/kb ~/.primer/kb.bak`, launch the GUI, Start new → Save & start; the button should count "… 0 / 91" upward.
 
 ### 5. Other bugs (host-completable; TDD each)
+- **#429:** a `run_loop` `Err` (e.g. a TTS failure) is never shown in the GUI until End voice mode. Pre-existing; filed from the #427 review.
+- **#430:** in voice mode a truncation retry's apology runs on from the cut-off partial as one spoken phrase (the splitter doesn't break on `\n\n`).
 - **#406:** stale KB cache files are never cleaned up. Decide a pruning policy first (owner).
 - **#352 remaining:** item 2 needs the owner decision below; items 1 and 4 need a design note first.
 - **Older:** #315, #316. Run `gh issue list`; read each before starting.
@@ -110,8 +122,9 @@ Still not watched in the real webview: `mv ~/.primer/kb ~/.primer/kb.bak`, launc
 ### This session (#424–#427)
 - **None of #425–#427 has been heard on real audio.** All checks are mock/stub-driven (item 2).
 - **#427: the hold is measured from the start of each LLM attempt** (just after STT finalize), not from the VAD `SpeechEnd`. With Whisper's finalize latency the effective silence before speech is a bit over 1.2 s.
-- **#427: a Stop mid-reply lets the ringbuf play out** (stage 4 would fix it).
-  - Several phrases arriving in one delta are pushed back-to-back, without a cancel check between them.
+- **#427: a Stop mid-reply lets the ringbuf play out** (stage 4 would fix it). Stop is now checked before every phrase push, so no *further* phrase is synthesised.
+- **#427: `STREAM_TAIL_FLUSH_IDLE` is a heuristic.** A model that stalls >300 ms right after a `.` that isn't a sentence end ("3." before "14") gets a phrase break there; nothing is lost.
+- **#427: a cancelled streamed turn fires `on_response_complete`** (its chunks are already in a bubble); a cancel before SPEAK does not. Deliberate, but not pinned by a test.
 - **#427: a spoken-but-cut-off reply is not in the session (D4 A).** If the child replies to it, the LLM has no context for it. Revisit option B if device logs show it often.
 - **#427: the GUI now gets `on_transcript_finalized` mid-generation**, and chunks live during SPEAK. Before, both came after completion. The GUI observer handles chunks incrementally, but this is not watched in the webview.
 - **#427: spurious VAD events keep the VAD arm open** (behaviour change, see shipped).
@@ -194,7 +207,7 @@ Still not watched in the real webview: `mv ~/.primer/kb ~/.primer/kb.bak`, launc
 - **`load_jsonl` into a user-managed KB rewrites edited rows.** Those rows stay BM25-only (#389) until `primer-kb-load --reembed`.
 
 ### From #396 (merged)
-- **Manual first-run GUI check not run** (item 2 above). Progress is one event per 16-passage batch (~18 s apart on BGE-M3); the restart button's long text may wrap on a narrow modal; voice-mode rebuilds report nothing; the CLI prints only its one-line notice.
+- **Manual first-run GUI check not run** (item 4 above). Progress is one event per 16-passage batch (~18 s apart on BGE-M3); the restart button's long text may wrap on a narrow modal; voice-mode rebuilds report nothing; the CLI prints only its one-line notice.
 
 ### #352 item 2: what counts as a pointless fallback? (owner decision, unchanged)
 `--fallback-backend == --backend` with a different **model** is legitimate (small/big ollama models, or hybrid routing on one server).
