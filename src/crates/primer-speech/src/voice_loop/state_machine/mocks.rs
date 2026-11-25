@@ -1395,7 +1395,11 @@ async fn noise_transcript_never_reaches_responder() {
             "",
             "Thank you.",
             "",
-            "hello primer",
+            "[BLANK_AUDIO] [BLANK_AUDIO]",
+            "",
+            "Thank you. Thank you.",
+            "",
+            "[BLANK_AUDIO] hello primer",
         ])),
         Arc::new(MockStreamingTts::new(64)),
         primer_core::speech::VoiceProfile::default(),
@@ -1403,7 +1407,7 @@ async fn noise_transcript_never_reaches_responder() {
     );
 
     let (event_tx, event_rx) = tokio::sync::mpsc::channel(64);
-    for _ in 0..3 {
+    for _ in 0..5 {
         event_tx.try_send(VadEvent::SpeechStart).unwrap();
         event_tx.try_send(VadEvent::SpeechEnd).unwrap();
     }

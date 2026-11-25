@@ -122,6 +122,8 @@ pub async fn start_voice_mode_android<R: tauri::Runtime>(
     // Stop the recognizer-consumer task once the loop exits (it polls the
     // JNI bridge on its own oneshot; the loop's stop_tx does not reach it).
     let wrapped_join = tokio::spawn(async move {
+        // Aborting this wrapper on a stop timeout must abort the loop too (#371).
+        let _abort_loop = super::voice::AbortOnDrop(join.abort_handle());
         let result = join.await;
         let _ = recognizer_stop.send(());
         match result {
