@@ -1,6 +1,6 @@
 # Stream LLM deltas into TTS (issue #325) — design note
 
-**Status:** stages 1 (#425) and 2 (#426) implemented; stage 3 not started. Four owner decisions, D1–D4 below, gate step 3. Stage 2 follows the D3 recommendation (accept).
+**Status:** stages 1–3 implemented (#425, #426, #427); stage 4 (optional `clear_speaker`) not started. Owner decisions (2026-11-25): D1 hold of 1200 ms (`MIN_THINK_HOLD`, to tune on device), D2 quit check before the LLM, D3 accept, D4 option A.
 **Date:** 2026-11-25
 
 ## Problem

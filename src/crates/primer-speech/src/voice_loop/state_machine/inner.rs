@@ -5,9 +5,8 @@
 use primer_core::error::Result;
 
 use crate::voice_loop::observer::{ExitReason, LoopObserver, TurnCompletePayload, VoiceState};
-use crate::voice_loop::quit_detect::is_quit_phrase;
 
-use super::speak::speak;
+use super::speak::{SpeakIo, SpeakOutcome, speak};
 use super::think::{Think, think};
 use super::{DrainHook, LoopBackends, Responder};
 
@@ -86,7 +85,12 @@ pub(super) async fn run_loop_inner<'r, O: LoopObserver>(
             }
         }
 
-        // ── LATENT_THINK ──────────────────────────────────────────────
+        // ── LATENT_THINK (and a streamed SPEAK, #325) ────────────────
+        let mut io = SpeakIo {
+            on_committed_audio: on_committed_audio.as_mut(),
+            wait_for_speaker_drain: &mut wait_for_speaker_drain,
+            is_speaking: &is_speaking,
+        };
         let (transcript_so_far, accumulated, chunks) = match think(
             &backends,
             stt_session,
@@ -96,11 +100,42 @@ pub(super) async fn run_loop_inner<'r, O: LoopObserver>(
             &mut observer,
             external_stop.as_mut(),
             &mut cancel_response,
+            &mut io,
+            primer_turn_index,
         )
         .await?
         {
             Think::Stopped => return Ok(transcripts),
             Think::Cancelled => continue 'outer,
+            Think::Quit { transcript } => {
+                observer.on_transcript_finalized(&transcript);
+                transcripts.push(transcript);
+                observer.on_state_change(VoiceState::Exit, None);
+                observer.on_exit(ExitReason::Keyword);
+                return Ok(transcripts);
+            }
+            Think::Spoke {
+                transcript,
+                outcome,
+            } => {
+                let child_turn_index = transcripts.len();
+                transcripts.push(transcript);
+                if outcome == SpeakOutcome::Stopped {
+                    observer.on_state_change(VoiceState::Exit, None);
+                    observer.on_exit(ExitReason::UserStop);
+                    return Ok(transcripts);
+                }
+                observer.on_response_complete(TurnCompletePayload {
+                    session_id: uuid::Uuid::nil(),
+                    child_turn_index,
+                    primer_turn_index,
+                });
+                primer_turn_index += 1;
+                if outcome == SpeakOutcome::Cancelled {
+                    observer.on_state_change(VoiceState::Listen, Some("user_cancel"));
+                }
+                continue 'outer;
+            }
             Think::Heard {
                 transcript,
                 accumulated,
@@ -108,7 +143,7 @@ pub(super) async fn run_loop_inner<'r, O: LoopObserver>(
             } => (transcript, accumulated, chunks),
         };
 
-        // ── Quit check + commit transcript ────────────────────────────
+        // ── Commit transcript ─────────────────────────────────────────
         if transcript_so_far.is_empty() {
             continue;
         }
@@ -119,27 +154,12 @@ pub(super) async fn run_loop_inner<'r, O: LoopObserver>(
         for c in chunks {
             observer.on_response_chunk(primer_turn_index, &c);
         }
-        if is_quit_phrase(&transcript_so_far, &backends.active_locale) {
-            transcripts.push(transcript_so_far);
-            observer.on_state_change(VoiceState::Exit, None);
-            observer.on_exit(ExitReason::Keyword);
-            break 'outer;
-        }
         let child_turn_index = transcripts.len();
         transcripts.push(transcript_so_far);
 
         // ── SPEAK ─────────────────────────────────────────────────────
         if !accumulated.is_empty() {
-            speak(
-                &accumulated,
-                &backends,
-                on_committed_audio.as_mut(),
-                &mut wait_for_speaker_drain,
-                &is_speaking,
-                &mut events,
-                &mut observer,
-            )
-            .await?;
+            speak(&accumulated, &backends, &mut io, &mut events, &mut observer).await?;
         }
 
         // Always fire on_response_complete at the end of a turn, even

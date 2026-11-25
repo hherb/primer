@@ -80,15 +80,25 @@ pub(super) fn strip_markdown_for_tts(text: &str) -> String {
 /// phrase means an emphasis pair spanning two sentences stays unmatched
 /// and its markers are spoken (owner decision D3).
 pub(super) fn tts_phrases(text: &str) -> Vec<String> {
+    raw_phrases(text)
+        .iter()
+        .filter_map(|p| tts_phrase(p))
+        .collect()
+}
+
+/// `text` split into trimmed phrases, unstripped, tail included.
+pub(super) fn raw_phrases(text: &str) -> Vec<String> {
     let mut splitter = PhraseSplitter::new();
     let mut phrases = splitter.push(text);
     phrases.extend(splitter.flush());
     phrases
-        .iter()
-        .map(|p| strip_markdown_for_tts(p))
-        .filter(|p| !p.trim().is_empty())
-        .map(|p| p + " ")
-        .collect()
+}
+
+/// One splitter phrase as SPEAK pushes it: markdown-stripped with a
+/// trailing space, or `None` when nothing speakable is left.
+pub(super) fn tts_phrase(phrase: &str) -> Option<String> {
+    let stripped = strip_markdown_for_tts(phrase);
+    (!stripped.trim().is_empty()).then(|| stripped + " ")
 }
 
 fn consume_digit_times(chars: &[char], i: usize) -> Option<usize> {

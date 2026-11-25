@@ -36,3 +36,5 @@ const FALLBACK_LINE: &str = "Sorry, I had trouble with that. Could you ask again
 
 #[cfg(test)]
 mod mocks;
+#[cfg(test)]
+mod stream_tests;

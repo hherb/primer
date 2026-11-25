@@ -106,7 +106,7 @@ Step 1.2.0 (device validation) ✅ **PASSED on hardware** (RedMagic 11 Pro, 2026
 ### 2.2 — Text-to-speech
 
 - [x] `PiperTts` streaming TTS (sentence-boundary chunking).
-- [ ] Stream LLM deltas into TTS so the first phrase plays before generation ends (#325; design note `docs/superpowers/specs/2026-11-25-stream-llm-into-tts-design.md`, owner decisions D1–D4 pending).
+- [x] Stream LLM deltas into TTS so the first phrase plays before generation ends (#325, PRs #425–#427; design note `docs/superpowers/specs/2026-11-25-stream-llm-into-tts-design.md`). Speech starts at the first complete sentence, but no sooner than `MIN_THINK_HOLD` (1.2 s) after the child stops, so the child can still continue (D1); "bye" ends the session before any LLM call (D2). The hold is untuned on device; the optional `clear_speaker` hook (stage 4) is not done.
 - [ ] Warm, patient voice profile selection.
 
 ### 2.3 — Conversation flow
