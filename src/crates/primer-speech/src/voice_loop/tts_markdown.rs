@@ -3,9 +3,10 @@
 //!
 //! Extracted verbatim from `state_machine.rs` so the markdown-stripping
 //! logic (and its characterisation tests) lives next to nothing but
-//! itself — the state machine simply calls [`strip_markdown_for_tts`] on
-//! the commit boundary. Keeping this a leaf of pure functions also keeps
-//! `state_machine.rs` under the 500-line-ish guideline.
+//! itself — SPEAK simply calls [`tts_phrases`], which splits the reply
+//! and runs [`strip_markdown_for_tts`] on each phrase. Keeping this a
+//! leaf of pure functions also keeps the state machine files under the
+//! 500-line-ish guideline.
 
 use crate::phrase_split::PhraseSplitter;
 
@@ -64,14 +65,6 @@ pub(super) fn strip_markdown_for_tts(text: &str) -> String {
     out
 }
 
-/// If `chars[i]` is the start of a digit-bounded run of `*` (e.g. `*`
-/// or `**` flanked by digits), return the index just past the run.
-/// Otherwise return `None`. The caller emits " times " in that case.
-///
-/// Only ASCII integer boundaries match: `1.5*2`, `1,000*5`, and any
-/// non-ASCII numeral won't trigger the rewrite. This is the right
-/// trade-off for a children's tutor (integer multiplication dominates),
-/// and keeps the heuristic narrow enough that it never fires on prose.
 /// Split a reply into the phrases SPEAK pushes, one `push_text` each
 /// (#325 stage 2), using the same [`PhraseSplitter`] the TTS backends use.
 /// Each phrase is markdown-stripped and ends in a space: the backends'
@@ -101,6 +94,14 @@ pub(super) fn tts_phrase(phrase: &str) -> Option<String> {
     (!stripped.trim().is_empty()).then(|| stripped + " ")
 }
 
+/// If `chars[i]` is the start of a digit-bounded run of `*` (e.g. `*`
+/// or `**` flanked by digits), return the index just past the run.
+/// Otherwise return `None`. The caller emits " times " in that case.
+///
+/// Only ASCII integer boundaries match: `1.5*2`, `1,000*5`, and any
+/// non-ASCII numeral won't trigger the rewrite. This is the right
+/// trade-off for a children's tutor (integer multiplication dominates),
+/// and keeps the heuristic narrow enough that it never fires on prose.
 fn consume_digit_times(chars: &[char], i: usize) -> Option<usize> {
     if i == 0 || !chars[i - 1].is_ascii_digit() {
         return None;
