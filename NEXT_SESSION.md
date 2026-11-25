@@ -4,30 +4,48 @@
 **Last updated:** 2026-11-24 (UTC).
 
 **Open against `main`:**
-- **#418** (`fix/noise-transcript-guard-326`): closes #326. This brief rides on the same branch.
+- **#420** (`fix/noise-guard-edges-419`): closes #419.
+- **#421** (`fix/voice-stop-abort-371`): closes #371.
+- **The docs PR** (`docs/next-session-2026-11-25`) carries this brief, the #325 design note and the ROADMAP lines.
+
+These three are independent; each is branched from `main`, so merge them in any order.
 
 **Since the last brief:**
-- **`main` is at `a05a221`.** #415, #416 and #417 are merged, and #414 is CLOSED.
-- **The sweep and inline-test detector were clean at session start.** No new file is over 500 lines except `inner.rs` (see below).
+- **`main` is at `b7618f9`.** #418 is merged and #326 is CLOSED.
+- **The sweep and inline-test detector were clean at session start.** `inner.rs` was 515 lines; #420 takes it to 514.
 
 ## What we shipped this session
 
-### #418 — `def265c` (+ `f5e7fef` README): closes #326 (STT noise became a persisted child turn)
-- **The problem:** Whisper hallucinates on silence (`Thank you.`, `[BLANK_AUDIO]`, subtitle credits), and the voice loop only checked `is_empty()`. Each phantom exchange was persisted and fed the extractor and comprehension classifier. Depth promotion only goes up, so it could never be undone.
-- **New pure `voice_loop/noise_transcript.rs::is_noise_transcript(transcript, locale)`.** It rejects a transcript that:
-  - has no letter or digit;
-  - is one short `[…]` / `(…)` / `*…*` annotation (≤ `consts::speech::NOISE_ANNOTATION_MAX_CHARS` = 40, with no closer inside);
-  - equals a per-locale silence phrase (EN/DE);
-  - contains a subtitle-credit marker.
-  It reuses `quit_detect::normalise_for_match`, which is now `pub(super)`.
-- **The wiring:** in LATENT_THINK, `inner.rs` checks each iteration's new STT text *before* appending it to the transcript, so noise alone leaves it empty and takes the existing empty path: no LLM call, no turn, no spawn, no observer transcript. A noise continuation after a VAD cancel neither joins nor erases the child's real question (the first version checked the accumulated text and got both wrong; found by the /finalcheck review). It logs at `tracing::debug!(target: "primer::speech")`.
-- **Tests:**
-  - 7 pure tests.
-  - State-machine test `mocks.rs::noise_transcript_never_reaches_responder`. It was red before the wiring.
-  - Retry-path tests `noise_continuation_after_cancel_keeps_only_the_real_question` and `noise_guard_uses_the_active_locale`. Both were red before the per-iteration check.
-  - `primer-speech` tests pass on the `voice-loop`, `android-native`, whisper/piper and `macos-native` arms.
-  - clippy and rustdoc are clean on the same arms, plus `primer-cli --features speech`.
-- CLAUDE.md has a new bullet, and the README voice-POC line has one new sentence.
+### #420 — `73d7659`: closes #419 (repeated / prefixed STT noise slipped past the #326 guard)
+- **The bug:** Whisper splits a long silence into several segments. The audio thread joins them, so the guard saw `[BLANK_AUDIO] [BLANK_AUDIO]` or `Thank you. Thank you.`, and its single-annotation / whole-string rules let both through. `[BLANK_AUDIO] why is the sky blue` was also kept verbatim.
+- **Finding:** per-segment filtering, the issue's suggestion, can't work in the state machine. `backends.rs` / `backends_macos_native.rs` join the segments before `ChannelStt`, so the loop only ever sees one segment.
+- **The fix:** `noise_transcript::strip_noise(transcript, locale) -> &str` replaces `is_noise_transcript`.
+  - It strips short `[…]` / `(…)` annotations from both ends, repeatedly.
+  - It returns `""` when every sentence (split on `. ! ?`) is a silence phrase.
+  - A mid-utterance "you" or "Thank you. Why …?" is kept.
+  - `*…*` at an edge is left alone (it may be emphasis). A parenthesised spoken aside at an edge is dropped.
+- **Tests:** 2 new pure tests. `mocks.rs::noise_transcript_never_reaches_responder` now feeds the repeated and prefixed forms; it was red before the fix.
+- **Docs:** the CLAUDE.md bullet is updated.
+
+### #421 — `92d3c8c`: closes #371 (voice stop timeout detached the old loop)
+- **The fix:** `stop.rs::join_or_abort` keeps the handle and calls `abort()` on timeout. The timeout is now the named const `VOICE_LOOP_STOP_TIMEOUT`.
+- **Finding:** aborting the stored handle alone is not enough. It is a *wrapper* task that awaits the inner `run_loop` handle, and dropping that inner handle only detaches the loop. Both start paths (`voice/start.rs`, `voice_android.rs`) now hold `AbortOnDrop(join.abort_handle())`.
+- **What the abort drops:**
+  - **Desktop:** `LocalBackends` (its `Drop` sets the stop flag and joins the audio thread).
+  - **Android:** the recognizer's stop sender, which the recognizer treats as a stop (#373).
+  - **Limit:** the abort only lands at an `.await`.
+- **Tests:** three tests in `commands/voice/tests.rs`. Mutation-checked: removing either `abort()` turns its test red.
+
+### Docs PR: the #325 design note, the ROADMAP and this brief
+- **`docs/superpowers/specs/2026-11-25-stream-llm-into-tts-design.md`:**
+  - SPEAK goes phrase-wise through the existing `PhraseSplitter` and the whole-string `strip_markdown_for_tts`, so no incremental stripper is needed.
+  - `on_chunk` only forwards deltas over a channel, so `push_text` stays on the loop task and the macOS main-thread analysis is unchanged.
+  - Speech starts at the first complete phrase; a fallback after audio has started is appended; cancel is checked between phrases, and every exit from a started SPEAK runs the drain + un-gate tail.
+  - Each phrase is pushed with a trailing space; without it the TTS backends' own splitters hold every phrase until `finalize`.
+  - Staged as 4 PRs, gated on owner decisions D1–D4.
+- **#423 filed** during the review: a Stop pressed during SPEAK/LISTEN is queued and cancels the child's next question (predates #325).
+- **ROADMAP 2.1 / 2.2:** the noise-handling progress and a #325 line.
+- **README:** unchanged (its voice line already covers the noise drop).
 
 > SHAs are branch-tip commits as pushed; squash-merge gives new ones on `main`.
 
@@ -35,43 +53,38 @@
 - **Inline-test detector:** clean.
 - **Oversized production files:**
   - `primer-cli/src/main.rs`: 1362;
-  - `state_machine/inner.rs`: **513** (+7 with #418);
+  - `state_machine/inner.rs`: 514 after #420;
   - `primer-speech/src/macos/stt.rs`: 504;
   - `primer-inference/src/cloud.rs`: 503.
 
 ## What's next (concrete acceptance criteria)
 
-### 0. Owner review/merge: #418
-- **Acceptance:** CI green and #418 merged. Then `gh issue view 326 --json state` shows CLOSED.
-- **Owner decision:** should a lone "thank you" / "vielen dank" / "danke" really be dropped? See Open decisions.
+### 0. Owner review/merge: #420, #421 and the docs PR
+- **Acceptance:** CI green and all three merged. Then `gh issue view 419 --json state` and `gh issue view 371 --json state` show CLOSED.
 
 ### 1. Sweep + inline-test detector: re-run EVERY session
 Commands are in the resume block.
 
-### 2. #325: stream LLM deltas into the TTS session (the biggest voice-latency win)
-- **Acceptance:**
-  - The `SynthesisSession` opens before `llm_fut` is awaited, and `push_text` runs per delta from `on_chunk`.
-  - `finalize` runs on resolve.
-  - A mock test shows the first audio before the responder future resolves.
-- **Constraints, all from the issue:**
-  - needs an incremental, stateful markdown stripper (the `ReasoningFilter` shape);
-  - cancel must stop synthesis and drop queued samples;
-  - `FALLBACK_LINE` becomes an *append*, not a replace;
-  - the macOS-native main-thread analysis.
-- **Design note first.** It touches `inner.rs`, so split `inner.rs` (513) in the same lane, either first or as part of it.
+### 2. #325: owner answers D1–D4, then stages 1–3 of the design note
+- **Stage 1 needs no decision**, so it can start now: a behaviour-preserving split of `inner.rs` into `think.rs` + `speak.rs`.
+  - **Acceptance:** test counts are unchanged on the `voice-loop`, `macos-native` and `macos-native-26` arms; `inner.rs` is under 300 lines; every file is under 500.
+- **Stage 2:** phrase-wise SPEAK, still after the LLM completes.
+  - **Acceptance:** a mock TTS records one `push_text` per sentence, and a `StubTts` test (which has its own splitter) shows each pushed phrase completing before the next push.
+- **Stage 3:** streaming.
+  - **Acceptance:** the first `push_text` happens before the responder resolves. Also covered: VAD-cancel before the first phrase, the append-fallback, between-phrase cancel (with `is_speaking` cleared only after the drain hook), and D2 (a quit phrase never reaches the responder).
 
 ### 3. Manual first-run GUI check for #396 (owner)
 Still not watched in the real webview: `mv ~/.primer/kb ~/.primer/kb.bak`, launch the GUI, Start new → Save & start; the button should count "… 0 / 91" upward.
 
 ### 4. Other bugs (host-completable; TDD each)
-- **#371:** the fix in the issue is small (`timeout(dur, &mut handle)`, then `handle.abort()` on `Elapsed`). First check what aborting drops on Android: the recognizer task sees a dropped stop sender as a stop (#373), so it is probably safe. Write that down in the PR.
+- **#423:** drain stale `cancel_response` tokens before each LLM attempt; mock test queues a cancel during SPEAK and checks the next utterance still reaches the responder.
 - **#406:** stale KB cache files are never cleaned up. Decide a pruning policy first (owner).
 - **#352 remaining:** item 2 needs the owner decision below; items 1 and 4 need a design note first.
 - **Older:** #315, #316. Run `gh issue list`; read each before starting.
 
 ### 5. Production-code splits (owner-approved lane, all feature-gated, so dual-verify)
 - **`primer-cli/src/main.rs` (1362)** is the main offender. Prefer the "one helper both binaries repeat → `primer-engine`" pattern.
-- **`inner.rs` (513)** now grew; pair its split with #325.
+- **`inner.rs`:** see item 2, stage 1.
 - `stt.rs` (504) and `cloud.rs` (503) are marginal.
 - **Recipe that worked for #409 / #416:**
   1. In Python, slice the file at unique anchors (check that no anchor repeats further down).
@@ -81,20 +94,32 @@ Still not watched in the real webview: `mv ~/.primer/kb ~/.primer/kb.bak`, launc
   5. Compare test counts with `--list | grep -c ': test$'` before and after.
 
 ### Carried / owner-or-hardware-gated
-- **#260:** Android-voice on-device acceptance; also check that a denied mic keeps the text session (#369).
+- **#260:** Android-voice on-device acceptance; also check that a denied mic keeps the text session (#369), and that a stop which times out (#421) leaves the next session's recognizer alive.
 - **#192:** macOS-native STT + injected TTS smoke.
 - **#170 Stages B, E and F:** the OpenRAIL-M disclosure ships before any default flip.
-- **#166 item #1:** WhisperStream reuse smoke.
+- **#262 ignored test (owner):** run `reused_stream_does_not_bleed_prior_utterance` with real audio (`PRIMER_WHISPER_MODEL` + two WAVs).
 - **#135:** glib (blocked on Tauri 3).
 - **Other:** QNN token stability, NPU tuning, latency-routing calibration.
 
 ## Open decisions / risks
 
-### This session (#418)
+### This session (#420, #421, #325 note)
+- **#325 D1–D4 (owner):** see the design note.
+  - **D1:** streaming shrinks the "child keeps talking" window from the whole decode to the first phrase (~1–1.5 s). The recommendation is a `MIN_THINK_HOLD_MS` of ~1200 ms, tuned on the device.
+  - **D2:** move the quit check before the LLM call, so a quit utterance records no DM turn.
+  - **D3:** accept a bare `*` when an emphasis pair spans sentences.
+  - **D4:** a reply cut off after audio has started is spoken but not recorded in the session. The recommendation is to accept it for stage 3.
+- **#420: a parenthesised aside at an edge is dropped** ("(I think) it is the moon" → "it is the moon"). Whisper rarely brackets real words, but the hedge is lost when it does.
+- **#420: an annotation in the middle (`why [BLANK_AUDIO] is it`) is kept verbatim.**
+- **#420: the `. ! ?` sentence split also splits "4.5"**, but neither half is a silence phrase, so it is kept.
+- **#421: the abort only lands at an `.await`.** A loop wedged inside a blocking call (a whisper finalize, Android TTS `onDone`) is cancelled only when that call returns. The 5 s stop still returns on time.
+- **#421: the Android abort path has not been seen on a device** (it is in #260's checklist).
+
+### From #418 (merged)
 - **A lone "thank you" / "thanks for watching" / "you" (EN) or "vielen dank" / "danke" / "danke schön" (DE) is dropped silently.** These are the commonest Whisper silence artefacts, but a child can really say the first ones. There is a `shortcut:` comment in `silence_phrases_for`, and the PR flags it for the owner. The principled upgrade is Whisper's per-segment `no_speech_prob`, which `TranscriptSegment` discards today.
 - **The filter applies to every STT backend.** Android and macOS-native don't hallucinate the Whisper subtitle strings, but the phrase table still drops a genuine "thank you" there.
 - **No Hindi table:** the default arm is English, so a Hindi session gets the English phrases.
-- **Filed from the review:** #419 (repeated or prefixed annotations such as `[BLANK_AUDIO] [BLANK_AUDIO]` still slip through; per-segment filtering is the suggested fix).
+- **Filed from the review:** #419, fixed by #420 (at the string level, not per segment).
 - **Not done (#326's other suggestions):** Parlor's ~300 ms tail-silence padding before Whisper (it lowers how often the filter has to fire), and the `no_speech_prob` gate.
 - **The verbose `[stt] empty transcript` eprintln also fires for dropped noise.** That is harmless; the `debug!` line says which case it was.
 
@@ -272,7 +297,7 @@ Still not watched in the real webview: `mv ~/.primer/kb ~/.primer/kb.bak`, launc
 
 ```bash
 cd /Users/hherb/src/primer && git status --short && git checkout main && git pull --ff-only && git log --oneline -6 && gh pr list --state open
-# Open at close: #418 (+ this brief). After merge: gh issue view 326 --json state
+# Open at close: #420, #421, docs PR. After merge: gh issue view 419 --json state; gh issue view 371 --json state
 S=/private/tmp/primer-scratch; mkdir -p "$S"   # or the session's scratchpad dir
 
 # === Oversized-file sweep + inline-test detector (re-verify EVERY session) ===
@@ -281,9 +306,12 @@ find crates -name '*.rs' -not -path '*/vendor/*' -not -name 'tests.rs' | xargs w
 for f in $(find crates -name '*.rs' -not -path '*/vendor/*' -not -name 'tests.rs' | xargs wc -l | awk '$1>500 && $2!="total"{print $2}'); do \
   awk '/#\[cfg\(test\)\]/{ln=NR} ln && NR==ln+1 && /^[[:space:]]*mod .*\{/{print FILENAME" inline mod @"NR}' "$f"; done
 
-# === #418: noise guard on the voice-loop arms ===
+# === #418 / #420: noise guard on the voice-loop arms ===
+# === #421: voice stop abort (speech + android-native arms) ===
+~/.cargo/bin/cargo test -p primer-gui --features speech --lib -- join_or_abort aborting_a_wrapper
+~/.cargo/bin/cargo test -p primer-gui --features android-native --lib -- join_or_abort aborting_a_wrapper
 ~/.cargo/bin/cargo test -p primer-speech --features voice-loop --lib -- noise
-# === both macOS arms (test count 140 / 176 after #418; was 132 / 168) ===
+# === both macOS arms (test count 140 / 176 after #418; +2 each after #420) ===
 for f in macos-native macos-native-26; do ~/.cargo/bin/cargo test -p primer-speech --features voice-loop,silero,cpal,$f -- --list 2>/dev/null | grep -c ': test$'; done
 # === #415: whisper path with the vendored bindgen 0.72.1 ===
 ~/.cargo/bin/cargo clippy -p primer-cli --features speech --all-targets -- -D warnings
@@ -318,4 +346,6 @@ for spec in "-p primer-speech --features voice-loop,silero,whisper,piper,cpal,su
 
 ## Reporting back
 
-- **#418:** in voice mode, when the room is quiet (a cough, a chair scrape), the speech recogniser sometimes "hears" words that were never said, typically "Thank you." The Primer used to answer these out loud and save them as if the child had spoken, which slowly corrupted the record of what the child has learned. Such phantom utterances are now ignored. One trade-off: a child who says *only* "thank you" is also ignored. Closes #326.
+- **#420:** the speech recogniser sometimes "hears" the same phantom words more than once in a quiet room ("Thank you. Thank you."), or puts a silence tag in front of a real question. The Primer now ignores the repeated phantoms, and when a tag comes before a question it hears only the question. Closes #419.
+- **#421:** when voice mode was stopped while the Primer was stuck, the old voice session could keep running in the background and hold the microphone. A stuck session is now shut down properly. Closes #371.
+- **#418 (earlier):** in voice mode, when the room is quiet (a cough, a chair scrape), the speech recogniser sometimes "hears" words that were never said, typically "Thank you." The Primer used to answer these out loud and save them as if the child had spoken, which slowly corrupted the record of what the child has learned. Such phantom utterances are now ignored. One trade-off: a child who says *only* "thank you" is also ignored. Closes #326.
