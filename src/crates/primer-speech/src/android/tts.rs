@@ -22,8 +22,9 @@ const ANDROID_TTS_NOMINAL_RATE: u32 = 22_050;
 /// Android `TextToSpeech` synthesiser. Holds the bridge; each session is a
 /// thin handle that routes `push_text` to `bridge.speak`.
 ///
-/// `speaking` is a shared flag raised for the duration of every `push_text`
-/// (= while the OS is playing a phrase). The recognizer consumer
+/// `speaking` is a shared flag raised from a session's first `push_text`
+/// until the session ends (= while the OS is playing the reply, including
+/// the gaps between its phrases). The recognizer consumer
 /// ([`crate::android::stt::run_recognizer_loop`]) watches it and stops
 /// listening while it is set, so the recognizer never transcribes the
 /// Primer's own TTS (no barge-in) and re-arms fresh the instant the Primer
@@ -76,10 +77,10 @@ impl SynthesisSession for AndroidTtsSession {
         if text.trim().is_empty() {
             return Ok(());
         }
-        // Raise the shared flag for the whole blocking speak so the recognizer
-        // consumer stops listening; a guard clears it even if `speak` errors.
+        // Raise the shared flag so the recognizer consumer stops listening.
+        // It stays up between phrases and is cleared when the session drops
+        // (#325: one push per phrase).
         self.speaking.store(true, Ordering::SeqCst);
-        let _guard = SpeakingGuard(&self.speaking);
         // Blocks until the Android engine reports onDone (D3). No PCM is
         // surfaced — the OS already played it.
         self.bridge.speak(text)
@@ -90,12 +91,12 @@ impl SynthesisSession for AndroidTtsSession {
     }
 }
 
-/// Clears the `speaking` flag on drop so an error (or early return) from
-/// `bridge.speak` can never leave the recognizer paused forever.
-struct SpeakingGuard<'a>(&'a AtomicBool);
-impl Drop for SpeakingGuard<'_> {
+/// Clears the `speaking` flag when the session ends: after `finalize`, or
+/// when an error (or early return) drops it, so the recognizer can never
+/// stay paused forever.
+impl Drop for AndroidTtsSession {
     fn drop(&mut self) {
-        self.0.store(false, Ordering::SeqCst);
+        self.speaking.store(false, Ordering::SeqCst);
     }
 }
 
@@ -131,6 +132,39 @@ mod tests {
         let mut session = tts.open_session(&VoiceProfile::default()).unwrap();
         session.push_text("   ", &mut |_| {}).unwrap();
         assert!(bridge.spoken.lock().unwrap().is_empty());
+    }
+
+    /// #325 stage 2: SPEAK pushes one phrase at a time, so the flag must
+    /// stay up between pushes; a per-push clear would let the recognizer
+    /// re-arm (and hear the TTS) in the gap.
+    #[test]
+    fn speaking_stays_raised_between_phrases_until_finalize() {
+        let bridge = Arc::new(MockBridge::with_events(vec![]));
+        let tts = AndroidTts::new(Arc::clone(&bridge) as Arc<dyn AndroidSpeechBridge>);
+        let flag = tts.speaking_flag();
+        let mut session = tts.open_session(&VoiceProfile::default()).unwrap();
+        session.push_text("One. ", &mut |_| {}).unwrap();
+        assert!(flag.load(Ordering::SeqCst), "raised after the first phrase");
+        session.push_text("Two. ", &mut |_| {}).unwrap();
+        assert!(flag.load(Ordering::SeqCst));
+        session.finalize(&mut |_| {}).unwrap();
+        assert!(
+            !flag.load(Ordering::SeqCst),
+            "cleared when the session ends"
+        );
+    }
+
+    /// A session dropped without `finalize` (an error in SPEAK) must not
+    /// leave the recognizer paused forever.
+    #[test]
+    fn dropping_a_session_clears_speaking() {
+        let bridge = Arc::new(MockBridge::with_events(vec![]));
+        let tts = AndroidTts::new(Arc::clone(&bridge) as Arc<dyn AndroidSpeechBridge>);
+        let flag = tts.speaking_flag();
+        let mut session = tts.open_session(&VoiceProfile::default()).unwrap();
+        session.push_text("One. ", &mut |_| {}).unwrap();
+        drop(session);
+        assert!(!flag.load(Ordering::SeqCst));
     }
 
     #[test]

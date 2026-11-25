@@ -7,6 +7,8 @@
 //! the commit boundary. Keeping this a leaf of pure functions also keeps
 //! `state_machine.rs` under the 500-line-ish guideline.
 
+use crate::phrase_split::PhraseSplitter;
+
 /// Strip markdown emphasis markers so Piper's espeak phonemizer doesn't
 /// pronounce them ("*why*" → "asterisks why asterisks"). Paired
 /// `*emphasis*` and `**strong**` markers are removed; paired
@@ -70,6 +72,25 @@ pub(super) fn strip_markdown_for_tts(text: &str) -> String {
 /// non-ASCII numeral won't trigger the rewrite. This is the right
 /// trade-off for a children's tutor (integer multiplication dominates),
 /// and keeps the heuristic narrow enough that it never fires on prose.
+/// Split a reply into the phrases SPEAK pushes, one `push_text` each
+/// (#325 stage 2), using the same [`PhraseSplitter`] the TTS backends use.
+/// Each phrase is markdown-stripped and ends in a space: the backends'
+/// own splitters only accept a terminator followed by whitespace, so
+/// without it every phrase would be held until `finalize`. Stripping per
+/// phrase means an emphasis pair spanning two sentences stays unmatched
+/// and its markers are spoken (owner decision D3).
+pub(super) fn tts_phrases(text: &str) -> Vec<String> {
+    let mut splitter = PhraseSplitter::new();
+    let mut phrases = splitter.push(text);
+    phrases.extend(splitter.flush());
+    phrases
+        .iter()
+        .map(|p| strip_markdown_for_tts(p))
+        .filter(|p| !p.trim().is_empty())
+        .map(|p| p + " ")
+        .collect()
+}
+
 fn consume_digit_times(chars: &[char], i: usize) -> Option<usize> {
     if i == 0 || !chars[i - 1].is_ascii_digit() {
         return None;
@@ -111,7 +132,36 @@ fn find_paired_marker(
 
 #[cfg(test)]
 mod tests {
-    use super::strip_markdown_for_tts;
+    use super::{strip_markdown_for_tts, tts_phrases};
+
+    #[test]
+    fn tts_phrases_splits_strips_and_appends_a_space() {
+        assert_eq!(
+            tts_phrases("Hi there. How are *you*? Good!"),
+            vec!["Hi there. ", "How are you? ", "Good! "]
+        );
+    }
+
+    #[test]
+    fn tts_phrases_keeps_an_unterminated_tail_and_decimals() {
+        assert_eq!(
+            tts_phrases("It is 3.5 metres. Dr. Lee says so"),
+            vec!["It is 3.5 metres. ", "Dr. Lee says so "]
+        );
+    }
+
+    #[test]
+    fn tts_phrases_drops_empty_input() {
+        assert!(tts_phrases("").is_empty());
+        assert!(tts_phrases("   ").is_empty());
+    }
+
+    /// Owner decision D3 (#325 design note): an emphasis pair that spans a
+    /// sentence boundary is no longer matched, so its markers are spoken.
+    #[test]
+    fn tts_phrases_leaves_a_pair_spanning_sentences_unmatched() {
+        assert_eq!(tts_phrases("*Oh. Wow*"), vec!["*Oh. ", "Wow* "]);
+    }
 
     #[test]
     fn strips_paired_emphasis_and_strong() {
