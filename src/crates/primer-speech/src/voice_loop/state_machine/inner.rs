@@ -187,6 +187,9 @@ pub(super) async fn run_loop_inner<'r, O: LoopObserver>(
             // a cancelled-then-retried turn delivers only the second
             // attempt's chunks to the observer.
             chunk_buffer.lock().unwrap().clear();
+            // A cancel only applies to the response it was pressed against;
+            // presses queued during LISTEN/SPEAK are stale (#423).
+            while cancel_response.try_recv().is_ok() {}
 
             // Drive the LLM. `respond` returns the full accumulated text
             // as Ok(String); the on_chunk callback captures into

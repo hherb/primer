@@ -1552,3 +1552,119 @@ async fn noise_guard_uses_the_active_locale() {
         responder_calls_after_retry(q, "Vielen Dank.", primer_core::i18n::Locale::German).await;
     assert_eq!(calls, vec![q.to_string(), q.to_string()]);
 }
+
+/// Issue #423: a Stop pressed while no response is in flight (LISTEN or
+/// SPEAK) must not cancel the child's next question. Tokens queued before
+/// the utterance are stale and are dropped before the LLM attempt.
+#[tokio::test]
+async fn stale_cancel_does_not_abort_the_next_question() {
+    use primer_core::speech::VadEvent;
+
+    let backends = super::LoopBackends::single_locale(
+        Arc::new(MockStreamingStt::new("why is the sky blue")),
+        Arc::new(MockStreamingTts::new(64)),
+        primer_core::speech::VoiceProfile::default(),
+        primer_core::i18n::Locale::English,
+    );
+    let (event_tx, event_rx) = tokio::sync::mpsc::channel(8);
+    event_tx.try_send(VadEvent::SpeechStart).unwrap();
+    event_tx.try_send(VadEvent::SpeechEnd).unwrap();
+    drop(event_tx);
+
+    struct FixedResponder;
+    impl super::Responder for FixedResponder {
+        fn respond<'a>(
+            &'a mut self,
+            _transcript: &'a str,
+            mut on_chunk: Box<dyn FnMut(&str) + Send + 'a>,
+        ) -> std::pin::Pin<
+            Box<dyn std::future::Future<Output = primer_core::error::Result<String>> + Send + 'a>,
+        > {
+            Box::pin(async move {
+                on_chunk("Good question.");
+                Ok("Good question.".to_string())
+            })
+        }
+    }
+
+    let (handle, join) = super::run_loop(
+        backends,
+        event_rx,
+        Box::new(FixedResponder),
+        Box::new(|_| {}),
+        None,
+        false,
+        None,
+        MockObserver::new(),
+    );
+    // Three presses before the question; the current-thread test runtime
+    // hasn't polled the spawned loop yet, so all three are queued.
+    for _ in 0..3 {
+        handle.cancel_response_tx.try_send(()).unwrap();
+    }
+    let transcripts = tokio::time::timeout(std::time::Duration::from_secs(2), join)
+        .await
+        .expect("did not deadlock")
+        .expect("join ok")
+        .expect("loop ok");
+    assert_eq!(transcripts, vec!["why is the sky blue".to_string()]);
+}
+
+/// The #423 drain must not swallow a real Stop: a press while the response
+/// is in flight still cancels it and returns to LISTEN with `user_cancel`.
+#[tokio::test]
+async fn cancel_during_in_flight_response_still_cancels() {
+    use primer_core::speech::VadEvent;
+
+    let backends = super::LoopBackends::single_locale(
+        Arc::new(MockStreamingStt::new("why is the sky blue")),
+        Arc::new(MockStreamingTts::new(64)),
+        primer_core::speech::VoiceProfile::default(),
+        primer_core::i18n::Locale::English,
+    );
+    let (event_tx, event_rx) = tokio::sync::mpsc::channel(8);
+    event_tx.try_send(VadEvent::SpeechStart).unwrap();
+    event_tx.try_send(VadEvent::SpeechEnd).unwrap();
+    drop(event_tx);
+
+    struct ParkingResponder(Arc<tokio::sync::Notify>);
+    impl super::Responder for ParkingResponder {
+        fn respond<'a>(
+            &'a mut self,
+            _transcript: &'a str,
+            _on_chunk: Box<dyn FnMut(&str) + Send + 'a>,
+        ) -> std::pin::Pin<
+            Box<dyn std::future::Future<Output = primer_core::error::Result<String>> + Send + 'a>,
+        > {
+            let started = Arc::clone(&self.0);
+            Box::pin(async move {
+                started.notify_one();
+                std::future::pending().await
+            })
+        }
+    }
+    let started = Arc::new(tokio::sync::Notify::new());
+    let observer = MockObserver::new();
+    let (handle, join) = super::run_loop(
+        backends,
+        event_rx,
+        Box::new(ParkingResponder(Arc::clone(&started))),
+        Box::new(|_| {}),
+        None,
+        false,
+        None,
+        observer.clone(),
+    );
+    started.notified().await;
+    handle.cancel_response_tx.try_send(()).unwrap();
+    let transcripts = tokio::time::timeout(std::time::Duration::from_secs(2), join)
+        .await
+        .expect("did not deadlock")
+        .expect("join ok")
+        .expect("loop ok");
+    assert!(transcripts.is_empty());
+    assert!(observer.events().iter().any(|e| matches!(
+        e,
+        MockEvent::StateChange { state: VoiceState::Listen, hint: Some(h) } if h == "user_cancel"
+    )));
+}
