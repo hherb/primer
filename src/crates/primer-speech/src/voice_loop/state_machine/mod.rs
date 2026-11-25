@@ -7,6 +7,8 @@
 
 mod entry;
 mod inner;
+mod speak;
+mod think;
 mod types;
 
 pub use entry::{run_loop, run_loop_borrowed};
