@@ -6,7 +6,7 @@ use primer_core::consts::speech::DEFAULT_INTER_PHRASE_SILENCE_MS;
 use primer_core::error::Result;
 use primer_core::speech::SynthesisEvent;
 
-use crate::voice_loop::noise_transcript::is_noise_transcript;
+use crate::voice_loop::noise_transcript::strip_noise;
 use crate::voice_loop::observer::{ExitReason, LoopObserver, TurnCompletePayload, VoiceState};
 use crate::voice_loop::quit_detect::is_quit_phrase;
 use crate::voice_loop::tts_markdown::strip_markdown_for_tts;
@@ -154,27 +154,26 @@ pub(super) async fn run_loop_inner<'r, O: LoopObserver>(
             // mock-friendliness — production whisper supports peeking via
             // process_step but the trait surface is finalize-only today.
             let segments = stt_session.finalize()?;
-            let new_text = segments
+            let raw_text = segments
                 .iter()
                 .map(|s| s.text.as_str())
                 .collect::<Vec<_>>()
-                .join("")
-                .trim()
-                .to_string();
+                .join("");
             stt_session = backends.stt.open_session()?;
             // STT noise ("[BLANK_AUDIO]", "Thank you.") is never appended
-            // (#326). Judged per iteration, so a noise continuation after
-            // a cancel neither joins nor erases the child's real question;
-            // noise alone leaves the transcript empty: no LLM call, no turn.
-            if is_noise_transcript(&new_text, &backends.active_locale) {
-                if !new_text.is_empty() {
-                    tracing::debug!(target: "primer::speech", transcript = %new_text, "dropped STT noise transcript");
-                }
-            } else {
+            // (#326, #419). Judged per iteration, so a noise continuation
+            // after a cancel neither joins nor erases the child's real
+            // question; noise alone leaves the transcript empty: no LLM
+            // call, no turn.
+            let new_text = strip_noise(&raw_text, &backends.active_locale);
+            if new_text != raw_text.trim() {
+                tracing::debug!(target: "primer::speech", raw = %raw_text, kept = %new_text, "dropped STT noise");
+            }
+            if !new_text.is_empty() {
                 if !transcript_so_far.is_empty() {
                     transcript_so_far.push(' ');
                 }
-                transcript_so_far.push_str(&new_text);
+                transcript_so_far.push_str(new_text);
             }
 
             if transcript_so_far.is_empty() {

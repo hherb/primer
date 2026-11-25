@@ -53,23 +53,67 @@ const SUBTITLE_CREDIT_MARKERS: &[&str] = &[
     "untertitel der",
 ];
 
-/// True when `transcript` is STT noise rather than something the child
-/// said:
+/// What the child actually said, with STT noise removed. Empty when the
+/// whole transcript is noise:
 /// - it has no letter or digit at all (`"..."`, `"♪♪"`);
 /// - it is one short bracketed or asterisked annotation
-///   (`[BLANK_AUDIO]`, `(no speech)`, `*sigh*`);
-/// - it equals one of the locale's known silence artefacts;
+///   (`[BLANK_AUDIO]`, `(no speech)`, `*sigh*`), possibly repeated;
+/// - every sentence in it is one of the locale's known silence artefacts
+///   (`"Thank you. Thank you."`);
 /// - it contains a subtitle credit.
 ///
-/// Short genuine answers ("yes", "no", "4") are kept.
-pub(super) fn is_noise_transcript(transcript: &str, locale: &Locale) -> bool {
+/// Otherwise short `[…]` / `(…)` annotations at either end are dropped
+/// (`"[BLANK_AUDIO] why is the sky blue"`, issue #419) and the rest is
+/// kept verbatim. Short genuine answers ("yes", "no", "4") and a silence
+/// phrase inside real speech ("Thank you. Why …?") are kept. Whisper's
+/// segment boundaries are already gone here (the audio thread joins
+/// them), so this works on the joined string.
+pub(super) fn strip_noise<'a>(transcript: &'a str, locale: &Locale) -> &'a str {
+    let speech = strip_edge_annotations(transcript.trim());
+    let phrases = silence_phrases_for(locale);
+    let only_silence = speech
+        .split(['.', '!', '?'])
+        .map(normalise_for_match)
+        .filter(|s| !s.is_empty())
+        .all(|s| phrases.contains(&s.as_str()));
     let normalised = normalise_for_match(transcript);
-    normalised.is_empty()
-        || is_annotation(transcript.trim())
-        || silence_phrases_for(locale).contains(&normalised.as_str())
-        || SUBTITLE_CREDIT_MARKERS
-            .iter()
-            .any(|m| normalised.contains(m))
+    let credit = SUBTITLE_CREDIT_MARKERS
+        .iter()
+        .any(|m| normalised.contains(m));
+    if only_silence || credit || is_annotation(speech) {
+        ""
+    } else {
+        speech
+    }
+}
+
+/// Drops short `[…]` / `(…)` annotations at either end, repeatedly
+/// (`"[BLANK_AUDIO] [BLANK_AUDIO]"`, `"(music) why …"`). `*…*` is left
+/// alone: at an edge it is as likely emphasis (`"*really* big"`) as a
+/// sound tag. A parenthesised spoken aside at an edge ("(I think) …") is
+/// dropped too; Whisper rarely brackets real words.
+fn strip_edge_annotations(mut s: &str) -> &str {
+    let short = |tag: &str| tag.chars().count() <= NOISE_ANNOTATION_MAX_CHARS;
+    loop {
+        let before = s;
+        for (open, close) in [('[', ']'), ('(', ')')] {
+            if s.starts_with(open)
+                && let Some(end) = s.find(close)
+                && short(&s[..=end])
+            {
+                s = s[end + 1..].trim_start();
+            }
+            if s.ends_with(close)
+                && let Some(start) = s.rfind(open)
+                && short(&s[start..])
+            {
+                s = s[..start].trim_end();
+            }
+        }
+        if s == before {
+            return s;
+        }
+    }
 }
 
 /// One bracket pair (or one `*…*`) wrapping the whole string, with no
@@ -93,12 +137,45 @@ fn is_annotation(s: &str) -> bool {
 
 #[cfg(test)]
 mod tests {
-    use super::is_noise_transcript;
+    use super::strip_noise;
     use primer_core::consts::speech::NOISE_ANNOTATION_MAX_CHARS;
     use primer_core::i18n::Locale;
 
+    fn is_noise_transcript(s: &str, locale: &Locale) -> bool {
+        strip_noise(s, locale).is_empty()
+    }
+
     fn noise_en(s: &str) -> bool {
         is_noise_transcript(s, &Locale::English)
+    }
+
+    #[test]
+    fn rejects_repeated_annotations_and_silence_phrases() {
+        for s in [
+            " [BLANK_AUDIO] [BLANK_AUDIO]",
+            "[Music] (upbeat music)",
+            "Thank you. Thank you.",
+            "Thank you! You.",
+            "[BLANK_AUDIO] Thank you.",
+        ] {
+            assert!(noise_en(s), "{s:?} should be noise");
+        }
+        assert!(is_noise_transcript("Danke. Vielen Dank.", &Locale::German));
+    }
+
+    #[test]
+    fn strips_edge_annotations_around_real_speech() {
+        for (s, kept) in [
+            ("[BLANK_AUDIO] why is the sky blue", "why is the sky blue"),
+            ("why is the sky blue [BLANK_AUDIO]", "why is the sky blue"),
+            ("(coughs) [Music] is it hot? (sighs)", "is it hot?"),
+            ("*really* big", "*really* big"),
+            ("why [BLANK_AUDIO] is it", "why [BLANK_AUDIO] is it"),
+            ("Thank you. Why is it hot?", "Thank you. Why is it hot?"),
+            ("how old are you", "how old are you"),
+        ] {
+            assert_eq!(strip_noise(s, &Locale::English), kept, "{s:?}");
+        }
     }
 
     #[test]
