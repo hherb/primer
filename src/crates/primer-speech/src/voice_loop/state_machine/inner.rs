@@ -16,7 +16,8 @@ use super::{DrainHook, LoopBackends, Responder};
 /// `verbose` gates `[stt]` debug lines on stderr (the only
 /// stderr-printing site left after observer integration). Per-state
 /// transitions, transcripts, chunks, completion, errors, and exits are
-/// all delivered through `observer`.
+/// all delivered through `observer`. An `Err` (a TTS or STT backend
+/// failure) also reports `Exit` + [`ExitReason::Error`] before returning.
 ///
 /// `is_speaking` is the gate the audio thread checks to decide whether to
 /// process or discard mic samples. The state machine flips it true at the
@@ -35,13 +36,49 @@ use super::{DrainHook, LoopBackends, Responder};
 #[allow(clippy::too_many_arguments)]
 pub(super) async fn run_loop_inner<'r, O: LoopObserver>(
     backends: LoopBackends,
-    mut events: tokio::sync::mpsc::Receiver<primer_core::speech::VadEvent>,
+    events: tokio::sync::mpsc::Receiver<primer_core::speech::VadEvent>,
     mut responder: Box<dyn Responder + 'r>,
+    on_committed_audio: Box<dyn FnMut(Vec<f32>) + Send>,
+    wait_for_speaker_drain: Option<DrainHook>,
+    verbose: bool,
+    is_speaking: Option<std::sync::Arc<std::sync::atomic::AtomicBool>>,
+    mut observer: O,
+    external_stop: tokio::sync::oneshot::Receiver<()>,
+    cancel_response: tokio::sync::mpsc::Receiver<()>,
+) -> Result<Vec<String>> {
+    let result = run_loop_body(
+        backends,
+        events,
+        responder.as_mut(),
+        on_committed_audio,
+        wait_for_speaker_drain,
+        verbose,
+        is_speaking,
+        &mut observer,
+        external_stop,
+        cancel_response,
+    )
+    .await;
+    if result.is_err() {
+        // The body's `?` exits report nothing; without this the UI stays
+        // on its last state until the user ends voice mode (#429).
+        observer.on_state_change(VoiceState::Exit, None);
+        observer.on_exit(ExitReason::Error);
+    }
+    result
+}
+
+/// The loop itself; every `Ok` exit reports its own reason.
+#[allow(clippy::too_many_arguments)]
+async fn run_loop_body<O: LoopObserver>(
+    backends: LoopBackends,
+    mut events: tokio::sync::mpsc::Receiver<primer_core::speech::VadEvent>,
+    responder: &mut (dyn Responder + '_),
     mut on_committed_audio: Box<dyn FnMut(Vec<f32>) + Send>,
     mut wait_for_speaker_drain: Option<DrainHook>,
     verbose: bool,
     is_speaking: Option<std::sync::Arc<std::sync::atomic::AtomicBool>>,
-    mut observer: O,
+    observer: &mut O,
     external_stop: tokio::sync::oneshot::Receiver<()>,
     mut cancel_response: tokio::sync::mpsc::Receiver<()>,
 ) -> Result<Vec<String>> {
@@ -95,9 +132,9 @@ pub(super) async fn run_loop_inner<'r, O: LoopObserver>(
             &backends,
             stt_session,
             &mut events,
-            responder.as_mut(),
+            &mut *responder,
             verbose,
-            &mut observer,
+            observer,
             external_stop.as_mut(),
             &mut cancel_response,
             &mut io,
@@ -159,7 +196,7 @@ pub(super) async fn run_loop_inner<'r, O: LoopObserver>(
 
         // ── SPEAK ─────────────────────────────────────────────────────
         if !accumulated.is_empty() {
-            speak(&accumulated, &backends, &mut io, &mut events, &mut observer).await?;
+            speak(&accumulated, &backends, &mut io, &mut events, observer).await?;
         }
 
         // Always fire on_response_complete at the end of a turn, even
