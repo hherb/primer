@@ -1298,9 +1298,9 @@ async fn llm_error_synthesises_fallback_line() {
 
     assert_eq!(result, vec!["hello primer".to_string()]);
     let texts = captured.lock().unwrap();
-    assert_eq!(texts.len(), 1, "TTS got exactly one push_text call");
+    // One push per sentence (#325 stage 2); together they are the line.
     assert_eq!(
-        texts[0],
+        texts.concat().trim_end(),
         super::FALLBACK_LINE,
         "fallback line was synthesised after LLM error"
     );
@@ -1551,4 +1551,237 @@ async fn noise_guard_uses_the_active_locale() {
     let calls =
         responder_calls_after_retry(q, "Vielen Dank.", primer_core::i18n::Locale::German).await;
     assert_eq!(calls, vec![q.to_string(), q.to_string()]);
+}
+
+/// Issue #423: a Stop pressed while no response is in flight (LISTEN or
+/// SPEAK) must not cancel the child's next question. Tokens queued before
+/// the utterance are stale and are dropped before the LLM attempt.
+#[tokio::test]
+async fn stale_cancel_does_not_abort_the_next_question() {
+    use primer_core::speech::VadEvent;
+
+    let backends = super::LoopBackends::single_locale(
+        Arc::new(MockStreamingStt::new("why is the sky blue")),
+        Arc::new(MockStreamingTts::new(64)),
+        primer_core::speech::VoiceProfile::default(),
+        primer_core::i18n::Locale::English,
+    );
+    let (event_tx, event_rx) = tokio::sync::mpsc::channel(8);
+    event_tx.try_send(VadEvent::SpeechStart).unwrap();
+    event_tx.try_send(VadEvent::SpeechEnd).unwrap();
+    drop(event_tx);
+
+    struct FixedResponder;
+    impl super::Responder for FixedResponder {
+        fn respond<'a>(
+            &'a mut self,
+            _transcript: &'a str,
+            mut on_chunk: Box<dyn FnMut(&str) + Send + 'a>,
+        ) -> std::pin::Pin<
+            Box<dyn std::future::Future<Output = primer_core::error::Result<String>> + Send + 'a>,
+        > {
+            Box::pin(async move {
+                on_chunk("Good question.");
+                Ok("Good question.".to_string())
+            })
+        }
+    }
+
+    let (handle, join) = super::run_loop(
+        backends,
+        event_rx,
+        Box::new(FixedResponder),
+        Box::new(|_| {}),
+        None,
+        false,
+        None,
+        MockObserver::new(),
+    );
+    // Three presses before the question; the current-thread test runtime
+    // hasn't polled the spawned loop yet, so all three are queued.
+    for _ in 0..3 {
+        handle.cancel_response_tx.try_send(()).unwrap();
+    }
+    let transcripts = tokio::time::timeout(std::time::Duration::from_secs(2), join)
+        .await
+        .expect("did not deadlock")
+        .expect("join ok")
+        .expect("loop ok");
+    assert_eq!(transcripts, vec!["why is the sky blue".to_string()]);
+}
+
+/// The #423 drain must not swallow a real Stop: a press while the response
+/// is in flight still cancels it and returns to LISTEN with `user_cancel`.
+#[tokio::test]
+async fn cancel_during_in_flight_response_still_cancels() {
+    use primer_core::speech::VadEvent;
+
+    let backends = super::LoopBackends::single_locale(
+        Arc::new(MockStreamingStt::new("why is the sky blue")),
+        Arc::new(MockStreamingTts::new(64)),
+        primer_core::speech::VoiceProfile::default(),
+        primer_core::i18n::Locale::English,
+    );
+    let (event_tx, event_rx) = tokio::sync::mpsc::channel(8);
+    event_tx.try_send(VadEvent::SpeechStart).unwrap();
+    event_tx.try_send(VadEvent::SpeechEnd).unwrap();
+    drop(event_tx);
+
+    struct ParkingResponder(Arc<tokio::sync::Notify>);
+    impl super::Responder for ParkingResponder {
+        fn respond<'a>(
+            &'a mut self,
+            _transcript: &'a str,
+            _on_chunk: Box<dyn FnMut(&str) + Send + 'a>,
+        ) -> std::pin::Pin<
+            Box<dyn std::future::Future<Output = primer_core::error::Result<String>> + Send + 'a>,
+        > {
+            let started = Arc::clone(&self.0);
+            Box::pin(async move {
+                started.notify_one();
+                std::future::pending().await
+            })
+        }
+    }
+    let started = Arc::new(tokio::sync::Notify::new());
+    let observer = MockObserver::new();
+    let (handle, join) = super::run_loop(
+        backends,
+        event_rx,
+        Box::new(ParkingResponder(Arc::clone(&started))),
+        Box::new(|_| {}),
+        None,
+        false,
+        None,
+        observer.clone(),
+    );
+    started.notified().await;
+    handle.cancel_response_tx.try_send(()).unwrap();
+    let transcripts = tokio::time::timeout(std::time::Duration::from_secs(2), join)
+        .await
+        .expect("did not deadlock")
+        .expect("join ok")
+        .expect("loop ok");
+    assert!(transcripts.is_empty());
+    assert!(observer.events().iter().any(|e| matches!(
+        e,
+        MockEvent::StateChange { state: VoiceState::Listen, hint: Some(h) } if h == "user_cancel"
+    )));
+}
+
+/// #325 stage 2: SPEAK pushes one markdown-stripped phrase per
+/// `push_text`, each with a trailing space, through a TTS that has its
+/// own `PhraseSplitter` (`StubTts`). Every push completes its phrase at
+/// once (one `PhraseEnd` during that push); nothing is left for
+/// `finalize`. Without the trailing space `StubTts` would hold each
+/// phrase and the per-push counts would be 0.
+#[tokio::test]
+async fn speak_pushes_one_phrase_at_a_time_through_a_splitting_tts() {
+    use primer_core::speech::VadEvent;
+
+    /// (pushed text, PhraseEnds emitted during that push); `None` text
+    /// marks `finalize`.
+    type Log = Arc<Mutex<Vec<(Option<String>, usize)>>>;
+    struct RecordingTts(Log);
+    impl Named for RecordingTts {
+        fn name(&self) -> &str {
+            "recording-stub-tts"
+        }
+    }
+    impl StreamingTextToSpeech for RecordingTts {
+        fn sample_rate(&self) -> u32 {
+            crate::StubTts.sample_rate()
+        }
+        fn open_session(&self, voice: &VoiceProfile) -> Result<Box<dyn SynthesisSession>> {
+            Ok(Box::new(RecordingSession {
+                inner: crate::StubTts.open_session(voice)?,
+                log: Arc::clone(&self.0),
+            }))
+        }
+    }
+    struct RecordingSession {
+        inner: Box<dyn SynthesisSession>,
+        log: Log,
+    }
+    fn counting(
+        on_event: &mut dyn FnMut(SynthesisEvent),
+        ends: &mut usize,
+    ) -> impl FnMut(SynthesisEvent) {
+        move |e| {
+            if matches!(e, SynthesisEvent::PhraseEnd) {
+                *ends += 1;
+            }
+            on_event(e)
+        }
+    }
+    impl SynthesisSession for RecordingSession {
+        fn push_text(
+            &mut self,
+            text: &str,
+            on_event: &mut dyn FnMut(SynthesisEvent),
+        ) -> Result<()> {
+            let mut ends = 0;
+            self.inner
+                .push_text(text, &mut counting(on_event, &mut ends))?;
+            self.log
+                .lock()
+                .unwrap()
+                .push((Some(text.to_string()), ends));
+            Ok(())
+        }
+        fn finalize(self: Box<Self>, on_event: &mut dyn FnMut(SynthesisEvent)) -> Result<()> {
+            let mut ends = 0;
+            let log = Arc::clone(&self.log);
+            self.inner.finalize(&mut counting(on_event, &mut ends))?;
+            log.lock().unwrap().push((None, ends));
+            Ok(())
+        }
+    }
+
+    let log: Log = Arc::new(Mutex::new(Vec::new()));
+    let backends = super::LoopBackends::single_locale(
+        Arc::new(MockStreamingStt::new("tell me")),
+        Arc::new(RecordingTts(Arc::clone(&log))),
+        primer_core::speech::VoiceProfile::default(),
+        primer_core::i18n::Locale::English,
+    );
+    let (event_tx, event_rx) = tokio::sync::mpsc::channel(8);
+    event_tx.try_send(VadEvent::SpeechStart).unwrap();
+    event_tx.try_send(VadEvent::SpeechEnd).unwrap();
+    drop(event_tx);
+
+    struct Reply;
+    impl super::Responder for Reply {
+        fn respond<'a>(
+            &'a mut self,
+            _transcript: &'a str,
+            mut on_chunk: Box<dyn FnMut(&str) + Send + 'a>,
+        ) -> std::pin::Pin<
+            Box<dyn std::future::Future<Output = primer_core::error::Result<String>> + Send + 'a>,
+        > {
+            Box::pin(async move {
+                let text = "Hi there. How are *you*? Good!";
+                on_chunk(text);
+                Ok(text.to_string())
+            })
+        }
+    }
+    super::run_loop_borrowed(
+        backends,
+        event_rx,
+        Box::new(Reply),
+        Box::new(|_| {}),
+        None,
+        false,
+        None,
+        MockObserver::new(),
+    )
+    .await
+    .expect("loop ok");
+
+    let p = |s: &str| (Some(s.to_string()), 1);
+    assert_eq!(
+        *log.lock().unwrap(),
+        vec![p("Hi there. "), p("How are you? "), p("Good! "), (None, 0)]
+    );
 }

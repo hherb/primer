@@ -98,6 +98,8 @@ tempfile = "3"
 # serde_json for the always-compiled selectors.rs test module (the
 # production dep above is optional + feature-gated to piper).
 serde_json = { workspace = true }
+# Paused-clock tests for the streamed SPEAK hold (#325 stage 3).
+tokio = { workspace = true, features = ["test-util"] }
 
 [features]
 default = []
