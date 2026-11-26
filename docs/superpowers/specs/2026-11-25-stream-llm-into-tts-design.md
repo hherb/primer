@@ -1,6 +1,6 @@
 # Stream LLM deltas into TTS (issue #325) — design note
 
-**Status:** proposal, not implemented. Four owner decisions, D1–D4 below, gate step 3.
+**Status:** stages 1 (#425) and 2 (#426) implemented; stage 3 not started. Four owner decisions, D1–D4 below, gate step 3. Stage 2 follows the D3 recommendation (accept).
 **Date:** 2026-11-25
 
 ## Problem

@@ -371,6 +371,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(not(feature = "supertonic"))]
     fn build_tts_supertonic_without_feature_errors_with_rebuild_hint() {
         // The `supertonic` feature is off on the default test build, so this
         // exercises the not(feature) arm regardless of the assets passed.

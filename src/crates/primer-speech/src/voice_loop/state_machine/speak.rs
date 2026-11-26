@@ -7,7 +7,7 @@ use primer_core::error::Result;
 use primer_core::speech::{SynthesisEvent, VadEvent};
 
 use crate::voice_loop::observer::{LoopObserver, VoiceState};
-use crate::voice_loop::tts_markdown::strip_markdown_for_tts;
+use crate::voice_loop::tts_markdown::tts_phrases;
 
 use super::{DrainHook, LoopBackends};
 
@@ -23,10 +23,11 @@ pub(super) async fn speak<O: LoopObserver>(
     observer: &mut O,
 ) -> Result<()> {
     observer.on_state_change(VoiceState::Speak, None);
-    // Strip markdown so Piper doesn't pronounce '*' / '`'. The
-    // text shown to the user keeps the markdown; only the audio
-    // input to the synthesiser is stripped.
-    let tts_text = strip_markdown_for_tts(accumulated);
+    // One markdown-stripped phrase per `push_text` (#325 stage 2), so a
+    // streamed reply can start speaking at its first sentence. The text
+    // shown to the user keeps the markdown; only the audio input is
+    // stripped.
+    let phrases = tts_phrases(accumulated);
     // Gate the mic: from here until the speaker has drained, the
     // audio thread should discard incoming samples (the Primer's
     // own voice would otherwise be transcribed as the next child
@@ -123,7 +124,9 @@ pub(super) async fn speak<O: LoopObserver>(
     //   itself requires either calling `NSApplicationMain` or a
     //   GCD-main pump — see the `run_tokio_on_main` doc-comment
     //   in `primer-cli/src/main.rs`).
-    session.push_text(&tts_text, &mut on_event)?;
+    for phrase in &phrases {
+        session.push_text(phrase, &mut on_event)?;
+    }
     session.finalize(&mut on_event)?;
     // Flush sentinel: empty Vec signals on_audio to drain any
     // resampler-leftover tail. Mock callbacks no-op on empty input.
