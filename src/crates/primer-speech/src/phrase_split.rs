@@ -1,7 +1,7 @@
 //! Phrase splitter — pure text-segmentation helper for streaming TTS.
 //!
 //! Walks an accumulated buffer and emits phrases as soon as a terminator
-//! (`. ! ?`) is followed by whitespace. Used by `PiperTts` (and the
+//! (`. ! ?`) is followed by whitespace, or at a blank line. Used by `PiperTts` (and the
 //! streaming-TTS stub) because piper-rs's synthesis call is one-shot and
 //! synchronous — there is no native phrase-boundary callback to hook,
 //! so we synthesise streaming at the text layer instead. Kept separate
@@ -14,6 +14,12 @@
 //! ellipses).
 
 const PHRASE_TERMINATORS: &[char] = &['.', '!', '?'];
+
+/// A blank line: a hard phrase boundary even without a terminator (#430:
+/// the DM's truncation notice follows a cut-off partial after one). A
+/// caller that must have a pushed phrase spoken at once, whatever its
+/// ending, appends this.
+pub const PHRASE_BREAK: &str = "\n\n";
 
 /// ASCII-lowercase abbreviations that should NOT be treated as phrase
 /// boundaries. Conservative starting list — extend with evidence.
@@ -94,9 +100,37 @@ impl PhraseSplitter {
 
     /// Find the byte index *after* the next phrase boundary (and any
     /// trailing whitespace consumed with it), or `None` if the buffer
-    /// doesn't yet contain a complete phrase.
-    ///
-    /// Rules:
+    /// doesn't yet contain a complete phrase: the earlier of a
+    /// terminator boundary and a blank-line one.
+    fn find_boundary(&self) -> Option<usize> {
+        match (self.terminator_boundary(), self.blank_line_boundary()) {
+            (Some(a), Some(b)) => Some(a.min(b)),
+            (a, b) => a.or(b),
+        }
+    }
+
+    /// End of the first whitespace run holding two `\n`, if any.
+    fn blank_line_boundary(&self) -> Option<usize> {
+        let mut newlines = 0;
+        for (i, c) in self.buffer.char_indices() {
+            if !c.is_whitespace() {
+                newlines = 0;
+            } else if c == '\n' {
+                newlines += 1;
+                if newlines == 2 {
+                    let run: usize = self.buffer[i..]
+                        .chars()
+                        .take_while(|c| c.is_whitespace())
+                        .map(char::len_utf8)
+                        .sum();
+                    return Some(i + run);
+                }
+            }
+        }
+        None
+    }
+
+    /// Terminator rules:
     /// 1. `buffer[i]` must be in `PHRASE_TERMINATORS`.
     /// 2. There must exist a char at the position just after any run of
     ///    identical `.` characters starting at `i` (so `...` collapses).
@@ -105,7 +139,7 @@ impl PhraseSplitter {
     ///    is an abbreviation, no boundary.
     /// 5. Decimal guard is implicit in (3): `3.1` never qualifies because
     ///    `1` isn't whitespace.
-    fn find_boundary(&self) -> Option<usize> {
+    fn terminator_boundary(&self) -> Option<usize> {
         let mut iter = self.buffer.char_indices().peekable();
         while let Some((i, ch)) = iter.next() {
             if !PHRASE_TERMINATORS.contains(&ch) {
@@ -267,6 +301,35 @@ mod tests {
         let mut s = PhraseSplitter::new();
         let phrases = s.push("Wow! Really? ");
         assert_eq!(phrases, vec!["Wow!", "Really?"]);
+    }
+
+    #[test]
+    fn blank_line_is_a_hard_boundary_without_a_terminator() {
+        // #430: a truncated partial, the notice separator, then the apology.
+        let mut s = PhraseSplitter::new();
+        let phrases = s.push("the sun is a star that\n\nSorry, I ran out of room. ");
+        assert_eq!(
+            phrases,
+            vec!["the sun is a star that", "Sorry, I ran out of room."]
+        );
+    }
+
+    #[test]
+    fn blank_line_split_across_pushes_and_with_inner_spaces() {
+        let mut s = PhraseSplitter::new();
+        assert!(s.push("a star that\n").is_empty());
+        assert_eq!(s.push(" \t\nSorry"), vec!["a star that"]);
+        assert_eq!(s.flush(), Some("Sorry".to_string()));
+        // A single newline is not a boundary.
+        assert!(s.push("one\ntwo").is_empty());
+    }
+
+    #[test]
+    fn phrase_break_completes_any_phrase() {
+        let mut s = PhraseSplitter::new();
+        let p = format!("no terminator here{PHRASE_BREAK}");
+        assert_eq!(s.push(&p), vec!["no terminator here"]);
+        assert_eq!(s.push(&format!("Dr.{PHRASE_BREAK}")), vec!["Dr."]);
     }
 
     #[test]

@@ -9,7 +9,7 @@
 //! leaf of pure functions also keeps the state machine files under the
 //! 500-line-ish guideline.
 
-use crate::phrase_split::PhraseSplitter;
+use crate::phrase_split::{PHRASE_BREAK, PhraseSplitter};
 
 /// Strip markdown emphasis markers so Piper's espeak phonemizer doesn't
 /// pronounce them ("*why*" → "asterisks why asterisks"). Paired
@@ -68,9 +68,10 @@ pub(super) fn strip_markdown_for_tts(text: &str) -> String {
 
 /// Split a reply into the phrases SPEAK pushes, one `push_text` each
 /// (#325 stage 2), using the same [`PhraseSplitter`] the TTS backends use.
-/// Each phrase is markdown-stripped and ends in a space: the backends'
-/// own splitters only accept a terminator followed by whitespace, so
-/// without it every phrase would be held until `finalize`. Stripping per
+/// Each phrase is markdown-stripped and ends in [`PHRASE_BREAK`], so the
+/// backend's own splitter completes it on that push even with no
+/// terminator: a trailing space would hold an unterminated phrase and
+/// glue it to the next one (#430). Stripping per
 /// phrase means an emphasis pair spanning two sentences stays unmatched
 /// and its markers are spoken (owner decision D3).
 pub(super) fn tts_phrases(text: &str) -> Vec<String> {
@@ -88,11 +89,11 @@ pub(super) fn raw_phrases(text: &str) -> Vec<String> {
     phrases
 }
 
-/// One splitter phrase as SPEAK pushes it: markdown-stripped with a
-/// trailing space, or `None` when nothing speakable is left.
+/// One splitter phrase as SPEAK pushes it: markdown-stripped and ending
+/// in [`PHRASE_BREAK`], or `None` when nothing speakable is left.
 pub(super) fn tts_phrase(phrase: &str) -> Option<String> {
     let stripped = strip_markdown_for_tts(phrase);
-    (!stripped.trim().is_empty()).then(|| stripped + " ")
+    (!stripped.trim().is_empty()).then(|| stripped + PHRASE_BREAK)
 }
 
 /// If `chars[i]` is the start of a digit-bounded run of `*` (e.g. `*`
@@ -147,10 +148,20 @@ mod tests {
     use super::{strip_markdown_for_tts, tts_phrases};
 
     #[test]
-    fn tts_phrases_splits_strips_and_appends_a_space() {
+    fn tts_phrases_splits_strips_and_appends_a_phrase_break() {
         assert_eq!(
             tts_phrases("Hi there. How are *you*? Good!"),
-            vec!["Hi there. ", "How are you? ", "Good! "]
+            vec!["Hi there.\n\n", "How are you?\n\n", "Good!\n\n"]
+        );
+    }
+
+    /// #430: a truncated partial and the apology after the notice
+    /// separator are two phrases, not one run-on.
+    #[test]
+    fn tts_phrases_splits_at_a_blank_line() {
+        assert_eq!(
+            tts_phrases("a star that\n\nSorry, I ran out of room."),
+            vec!["a star that\n\n", "Sorry, I ran out of room.\n\n"]
         );
     }
 
@@ -158,7 +169,7 @@ mod tests {
     fn tts_phrases_keeps_an_unterminated_tail_and_decimals() {
         assert_eq!(
             tts_phrases("It is 3.5 metres. Dr. Lee says so"),
-            vec!["It is 3.5 metres. ", "Dr. Lee says so "]
+            vec!["It is 3.5 metres.\n\n", "Dr. Lee says so\n\n"]
         );
     }
 
@@ -172,7 +183,7 @@ mod tests {
     /// sentence boundary is no longer matched, so its markers are spoken.
     #[test]
     fn tts_phrases_leaves_a_pair_spanning_sentences_unmatched() {
-        assert_eq!(tts_phrases("*Oh. Wow*"), vec!["*Oh. ", "Wow* "]);
+        assert_eq!(tts_phrases("*Oh. Wow*"), vec!["*Oh.\n\n", "Wow*\n\n"]);
     }
 
     #[test]

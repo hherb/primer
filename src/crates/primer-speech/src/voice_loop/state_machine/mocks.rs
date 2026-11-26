@@ -1300,7 +1300,7 @@ async fn llm_error_synthesises_fallback_line() {
     let texts = captured.lock().unwrap();
     // One push per sentence (#325 stage 2); together they are the line.
     assert_eq!(
-        texts.concat().trim_end(),
+        texts.iter().map(|t| t.trim()).collect::<Vec<_>>().join(" "),
         super::FALLBACK_LINE,
         "fallback line was synthesised after LLM error"
     );
@@ -1670,11 +1670,11 @@ async fn cancel_during_in_flight_response_still_cancels() {
 }
 
 /// #325 stage 2: SPEAK pushes one markdown-stripped phrase per
-/// `push_text`, each with a trailing space, through a TTS that has its
+/// `push_text`, each ending in `PHRASE_BREAK`, through a TTS that has its
 /// own `PhraseSplitter` (`StubTts`). Every push completes its phrase at
-/// once (one `PhraseEnd` during that push); nothing is left for
-/// `finalize`. Without the trailing space `StubTts` would hold each
-/// phrase and the per-push counts would be 0.
+/// once (one `PhraseEnd` during that push), an unterminated one included
+/// (#430); nothing is left for `finalize`. With a trailing space instead,
+/// `StubTts` would hold "a star that" and glue it to the next phrase.
 #[tokio::test]
 async fn speak_pushes_one_phrase_at_a_time_through_a_splitting_tts() {
     use primer_core::speech::VadEvent;
@@ -1760,7 +1760,7 @@ async fn speak_pushes_one_phrase_at_a_time_through_a_splitting_tts() {
             Box<dyn std::future::Future<Output = primer_core::error::Result<String>> + Send + 'a>,
         > {
             Box::pin(async move {
-                let text = "Hi there. How are *you*? Good!";
+                let text = "a star that\n\nHi there. How are *you*? Good!";
                 on_chunk(text);
                 Ok(text.to_string())
             })
@@ -1782,6 +1782,12 @@ async fn speak_pushes_one_phrase_at_a_time_through_a_splitting_tts() {
     let p = |s: &str| (Some(s.to_string()), 1);
     assert_eq!(
         *log.lock().unwrap(),
-        vec![p("Hi there. "), p("How are you? "), p("Good! "), (None, 0)]
+        vec![
+            p("a star that\n\n"),
+            p("Hi there.\n\n"),
+            p("How are you?\n\n"),
+            p("Good!\n\n"),
+            (None, 0)
+        ]
     );
 }
