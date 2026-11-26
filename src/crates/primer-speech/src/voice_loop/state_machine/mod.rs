@@ -7,6 +7,8 @@
 
 mod entry;
 mod inner;
+mod speak;
+mod think;
 mod types;
 
 pub use entry::{run_loop, run_loop_borrowed};
@@ -19,16 +21,17 @@ pub use types::{
 /// through Piper just like any normal Primer turn — the child hears
 /// the apology, then we loop back to LISTEN.
 ///
-/// Lives here (not in `inner.rs` beside its consumer `handle_llm_err`)
+/// Lives here (not in `think.rs` beside its consumer `handle_llm_err`)
 /// because `mocks.rs`, a child of this module, asserts against it via
 /// `super::FALLBACK_LINE`.
 const FALLBACK_LINE: &str = "Sorry, I had trouble with that. Could you ask again?";
 
-// NOTE: The DialogueResponder adapter, ChannelStt adapter,
-// `pub async fn run` entry point, and `run_audio_thread` body all stay
-// in `primer-cli/src/speech_loop.rs` — they are CLI-specific glue around
-// the state machine. This module owns only the state machine itself
-// (`inner.rs`), its entry points (`entry.rs`), and the public
+// NOTE: The CLI's `DialogueResponder` adapter and `pub async fn run`
+// entry point stay in `primer-cli/src/speech_loop/` (CLI-specific glue);
+// the `ChannelStt` adapter and the audio threads live in sibling
+// `voice_loop` modules (`channel_stt.rs`, `backends*.rs`). This module
+// owns only the state machine itself (`inner.rs` + `think.rs` +
+// `speak.rs`), its entry points (`entry.rs`), and the public
 // types/traits the CLI and GUI both consume (`types.rs`); `mod.rs` is
 // the re-export façade plus `FALLBACK_LINE`.
 
