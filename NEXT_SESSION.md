@@ -1,99 +1,69 @@
 # Primer — Next Session Brief
 
 **Audience:** future Claude Code session continuing work on this repo.
-**Last updated:** 2026-11-25 (UTC).
+**Last updated:** 2026-11-26 (UTC).
 
-**Open against `main` (a stack; merge in this order):**
-1. **#424** (`fix/stale-cancel-423`): closes #423. CI green.
-2. **#425** (`refactor/split-voice-inner-325`, base #424): #325 stage 1.
-3. **#426** (`feat/phrasewise-speak-325`, base #425): #325 stage 2.
-4. **#427** (`feat/stream-tts-325`, base #426): #325 stage 3, closes #325.
+**Open against `main` (independent; any order):**
+1. **#431** (`fix/phrase-split-blank-line-430`): closes #430.
+2. **#432** (`fix/voice-loop-err-surfaced-429`): closes #429.
 
-Plus **the docs PR** (`docs/next-session-2026-11-25b`, from `main`, independent) with this brief.
-
-**`/finalcheck` pass (2026-11-26) on all five PRs:** reviewed, fixes pushed into #425–#427 (each merged up the stack), two issues filed (#429, #430). Heads after it: #424 `ead84ca` (no findings), #425 `550f95f`, #426 `f069c3b`, #427 `ca7fabf`.
+Plus **#433**, the docs PR (`docs/next-session-2026-11-26`, from `main`) with this brief.
 
 **Since the last brief:**
-- **`main` is at `90c2592`.** #420, #421 and #422 are merged; #419 and #371 are CLOSED.
-- **The sweep and inline-test detector were clean at session start.**
-- **The owner answered #325 D1–D4 (2026-11-25), all as recommended:**
-  - D1: a 1200 ms think hold (`MIN_THINK_HOLD`);
-  - D2: the quit check before the LLM;
-  - D3: accept a spoken bare `*`;
-  - D4: option A, a cut-off spoken prefix is not recorded.
+- **The #424 → #427 stack and the docs PR #428 are merged** (`main` at `d423be5`). #423 and #325 are CLOSED.
+- **The sweep and inline-test detector were clean at session start** (same three oversized production files).
 
 ## What we shipped this session
 
 > SHAs are branch-tip commits as pushed; squash-merge gives new ones on `main`.
 
-### #424 — `ead84ca`: closes #423 (a stale Stop cancelled the next question)
-- `think.rs` (then `inner.rs`) drains `cancel_response` right before each LLM attempt, so a press during LISTEN/SPEAK no longer cancels the child's next question.
-- **Tests:** `stale_cancel_does_not_abort_the_next_question` (red before) and `cancel_during_in_flight_response_still_cancels`. Until then nothing tested the in-flight cancel path.
+### #431 — `7aecadf`: a blank line ends a spoken phrase (closes #430)
+- **Bug:** on a truncation retry the DM streams the cut-off partial, `"\n\n"`, then the apology. `PhraseSplitter` only broke on `. ! ?` + whitespace, so the child heard "the sun is a star that Sorry, I ran out of room…" as one phrase.
+- **Second half of the same bug:** each push ended in a space, so the backend's own splitter (Piper, Supertonic, macOS, `StubTts`) held an unterminated phrase and glued it to the next push. That also hit the held partial spoken before the fallback line ("And then" + "Sorry…").
+- **Fix:**
+  - `PhraseSplitter` treats a whitespace run holding two newlines as a hard boundary. New exported `PHRASE_BREAK = "\n\n"`.
+  - `tts_phrase` ends each push with `PHRASE_BREAK` instead of `" "`, so one push is always one whole phrase for the backend.
+  - `AndroidTts` passes `text.trim()` to the OS engine.
+- **Tests:** 3 splitter tests, `tts_phrases_splits_at_a_blank_line`, the stream test `a_blank_line_ends_an_unterminated_phrase`, and the `StubTts`-backed recording test now starts with an unterminated paragraph. Mutation-checked: dropping the blank-line rule fails 6, reverting the suffix fails 15.
+- **Docs:** the CLAUDE.md markdown-before-TTS bullet and the #325 design note's "trailing space is load-bearing" paragraph.
 
-### #425 — `c2a82fa`: #325 stage 1, split `inner.rs` (behaviour-preserving)
-- `inner.rs` 517 → 162 lines; `think.rs` (LATENT_THINK, returns a `Think` outcome) 300; `speak.rs` (SPEAK) 156.
-- **Checks:** a Python slice at asserted anchors, plus a normalised line-multiset diff. Test counts are unchanged (129 / 146 / 182 on voice-loop / macos-native / macos-native-26).
-- The commit message says `speak.rs` is 155 lines; it is 156. The force-push to fix the message was refused, so the message stays and the PR body is correct.
-- **Finalcheck:** the move was re-verified clean (20/20 tests). `state_machine/mod.rs` notes now point at `think.rs`/`speak.rs` and say `ChannelStt` + the audio threads live in `primer-speech`.
+### #432 — `824c236`, `954a32e`: report a voice-loop error as an exit (closes #429)
+- **Bug:** a `run_loop` `Err` (TTS push/finalize, STT `open_session`) returned via `?` with no `on_exit`. The GUI stayed frozen on its last voice state, with the mic pipeline gone, until End voice mode.
+- **Fix:** `run_loop_inner` runs `run_loop_body` on `&mut observer`; on `Err` it logs `tracing::warn!` (target `primer::speech`) and emits `Exit` + the new `ExitReason::Error` (wire `"error"`). The GUI's existing exit listener leaves voice mode with a "Voice mode ended (error)" toast. One fix covers desktop, Android and the CLI.
+- **Tests:** the streamed TTS-error test now asserts the exit; new `tts_error_in_a_whole_reply_speak_reports_the_exit`. Both red before.
 
-### #426 — `95f54c4`: #325 stage 2, phrase-wise SPEAK
-- `tts_markdown::tts_phrases` (pure) splits with `PhraseSplitter`, strips per phrase, and appends a trailing space (load-bearing). `speak` pushes one phrase per `push_text`.
-- **Android fix:** `AndroidTtsSession` now holds the shared `speaking` flag from the first push until the session drops. A per-push guard left a gap between phrases in which the recognizer could re-arm and hear the TTS.
-- **Drive-by:** `build_tts_supertonic_without_feature_errors_with_rebuild_hint` is cfg-gated to `not(feature = "supertonic")`. It failed on every supertonic test build.
-- **Tests:** a `StubTts`-wrapping recording TTS, two Android flag tests (one red before), and 4 pure `tts_phrases` tests (incl. the D3 case).
-- **Finalcheck:** `tts_phrases` had been inserted between `consume_digit_times`' doc and its `fn`; both docs are back on the right function.
-
-### #427 — `49fa12d`: #325 stage 3, stream the reply into TTS (closes #325)
-- **LATENT_THINK** forwards `on_chunk` deltas over a per-attempt channel into a `PhraseSplitter`. Once the first phrase is ready **and** `MIN_THINK_HOLD` has passed, it shows the transcript plus the buffered chunks and calls `speak_streaming`.
-- **`speak_streaming`:**
-  - pushes phrases as they complete, with live observer chunks;
-  - checks Stop / external stop between phrases;
-  - *appends* `FALLBACK_LINE` on an error after audio has started;
-  - always runs the shared `end_of_turn` tail.
-- **D2:** `Think::Quit` is caught right after STT.
-- **Bug fixed:** the quit branch also emitted a second `Exit(UserStop)`.
-- **Behaviour change:** a spurious VAD event in LATENT_THINK now keeps listening (before, it waited for the LLM alone).
-- **Tests:** 5 paused-clock tests in `state_machine/stream_tests.rs`, each mutation-checked.
-- **Docs:** CLAUDE.md voice bullets, ROADMAP 2.2 (ticked), a README voice line, and the design note's status.
-- **Finalcheck fixes (`ca7fabf`):**
-  - The closing sentence ("…so hot?", no trailing space) was held until the stream closed, i.e. after the DM's persist + periodic summary call: a multi-second gap before the question. Now spoken after `STREAM_TAIL_FLUSH_IDLE` (300 ms) with no new delta (`PhraseSplitter::ends_at_boundary`).
-  - Stop / End voice mode are re-read before every phrase push (`say`), incl. after the reply resolved and for several phrases from one delta.
-  - An LLM error after audio started speaks the held partial sentence, then the fallback; the bubble shows it after `\n\n`.
-  - `speak` / `speak_streaming` run the end-of-turn tail on a TTS error too.
-  - 6 new stream tests (5 red on the pre-fix `speak.rs`; the no-barge-in and external-stop ones are pins).
+### Checks run
+- **Both PRs:** all 5 `primer-speech` feature arms; clippy on the supertonic and android-native arms; fmt; rustdoc.
+- **#432 only:** `primer-gui --features speech` (313); clippy on the GUI-speech and CLI-speech arms. The full workspace test pass was left to CI (only `primer-speech` changed).
 
 ### Per-session sweep
 - **Inline-test detector:** clean.
-- **Oversized production files:**
-  - `primer-cli/src/main.rs`: 1362;
-  - `primer-speech/src/macos/stt.rs`: 504;
-  - `primer-inference/src/cloud.rs`: 503.
-- **`inner.rs` is off the list** (182 after #427); every `state_machine/*.rs` production file is under 320.
+- **Oversized production files (unchanged):** `primer-cli/src/main.rs` 1362, `primer-speech/src/macos/stt.rs` 504, `primer-inference/src/cloud.rs` 503. `inner.rs` is 220 after #432.
 
 ## What's next (concrete acceptance criteria)
 
-### 0. Owner review/merge: the #424 → #427 stack, then the docs PR
-- **Acceptance:** CI green on each PR; merge #424, #425, #426, #427 in order, checking each retargeted diff. Then `gh issue view 423 --json state` and `gh issue view 325 --json state` show CLOSED.
+### 0. Owner review/merge: #431, #432, then the docs PR #433
+- **Acceptance:** CI green on each; after merge `gh issue view 430 --json state` and `gh issue view 429 --json state` show CLOSED. Both touch `state_machine/stream_tests.rs` a few lines apart; after the first merges, check the second still merges (`gh pr view <N> --json mergeable`).
 
 ### 1. Sweep + inline-test detector: re-run EVERY session
 Commands are in the resume block.
 
-### 2. Hear #427 on real hardware (owner)
-- **Desktop:** `cargo run -p primer-gui --features speech` → Voice mode → ask a two-sentence question. The first sentence should start ~1.2 s after you stop, while the GUI bubble is still filling. Then press Stop mid-reply: speech stops after the current phrase, and the next question still gets an answer (#423).
-- **Also check:** "bye" ends voice mode with no reply. macOS-native CLI: decode and synthesis alternate (current-thread runtime); check it is still faster to first audio.
-- **Tune `MIN_THINK_HOLD`** if 1.2 s feels rushed or sluggish with a child, and `STREAM_TAIL_FLUSH_IDLE` (300 ms) if a slow local model's mid-reply pauses split phrases audibly.
-- **Android (#260 checklist):** the per-phrase speak plus the session-held `speaking` flag, so the recognizer must stay disarmed for a whole multi-sentence reply.
+### 2. Hear #427 (+ #431, #432) on real hardware (owner)
+- **Desktop:** `cargo run -p primer-gui --features speech` → Voice mode → ask a two-sentence question. The first sentence should start ~1.2 s after you stop, while the bubble is still filling. Press Stop mid-reply: speech stops after the current phrase, and the next question still gets an answer (#423).
+- **Also check:** "bye" ends voice mode with no reply. macOS-native CLI: still faster to first audio.
+- **#431:** a reply with a blank line between paragraphs should pause there instead of running on.
+- **#432:** mock coverage only (`tts_error_in_a_whole_reply_speak_reports_the_exit`). There is no easy on-device trigger: Piper loads the voice into memory at start, so changing the path or deleting the file mid-session never fails a running loop. If a real TTS error ever happens, the UI should leave voice mode with "Voice mode ended (error)".
+- **Tune `MIN_THINK_HOLD`** (1.2 s) and `STREAM_TAIL_FLUSH_IDLE` (300 ms) if needed.
+- **Android (#260 checklist):** per-phrase speak + session-held `speaking` flag.
 
 ### 3. #325 stage 4 (optional): `clear_speaker` hook
-- `LoopBackends` gets an optional `clear_speaker` that empties the ringbuf, so a Stop silences at once instead of playing out the buffered audio.
-- **Acceptance:** a mock test where a cancel between phrases calls `clear_speaker` before the drain hook. Owner call whether it's worth it after item 2.
+- `LoopBackends` gets an optional `clear_speaker` that empties the ringbuf, so a Stop silences at once.
+- **Acceptance:** a mock test where a cancel between phrases calls `clear_speaker` before the drain hook. Owner call after item 2.
 
-### 4. Manual first-run GUI check for #396 (owner)
-Still not watched in the real webview: `mv ~/.primer/kb ~/.primer/kb.bak`, launch the GUI, Start new → Save & start; the button should count "… 0 / 91" upward.
+### 4. Manual first-run GUI check for PR #396 (owner)
+`mv ~/.primer/kb ~/.primer/kb.bak`, launch the GUI, Start new → Save & start; the button should count "… 0 / 91" upward.
 
 ### 5. Other bugs (host-completable; TDD each)
-- **#429:** a `run_loop` `Err` (e.g. a TTS failure) is never shown in the GUI until End voice mode. Pre-existing; filed from the #427 review.
-- **#430:** in voice mode a truncation retry's apology runs on from the cut-off partial as one spoken phrase (the splitter doesn't break on `\n\n`).
 - **#406:** stale KB cache files are never cleaned up. Decide a pruning policy first (owner).
 - **#352 remaining:** item 2 needs the owner decision below; items 1 and 4 need a design note first.
 - **Older:** #315, #316. Run `gh issue list`; read each before starting.
@@ -113,13 +83,21 @@ Still not watched in the real webview: `mv ~/.primer/kb ~/.primer/kb.bak`, launc
 - **#260:** Android-voice on-device acceptance. Also check that a denied mic keeps the text session (#369), that a stop which times out (#421) leaves the next session's recognizer alive, and the #426/#427 per-phrase speak.
 - **#192:** macOS-native STT + injected TTS smoke.
 - **#170 Stages B, E and F:** the OpenRAIL-M disclosure ships before any default flip.
-- **#262 ignored test (owner):** run `reused_stream_does_not_bleed_prior_utterance` with real audio (`PRIMER_WHISPER_MODEL` + two WAVs).
+- **Whisper reuse ignored test (owner, from PR #262):** run `reused_stream_does_not_bleed_prior_utterance` in `primer-speech/tests/whisper_stream_reuse.rs` with real audio.
 - **#135:** glib (blocked on Tauri 3).
 - **Other:** QNN token stability, NPU tuning, latency-routing calibration.
 
 ## Open decisions / risks
 
-### This session (#424–#427)
+### This session (#431, #432)
+- **#431 (owner call from #430): the truncated partial is still spoken**, now as its own phrase. It is already on screen; dropping it in voice mode would need the DM to mark which chunks are the cut-off attempt.
+- **#431: any blank line in a reply now ends a phrase**, also in the middle of a sentence an LLM wraps across a blank line (rare). Nothing is lost, only a pause is added.
+- **#431: the pushed text now ends in `"\n\n"`.** Piper / Supertonic / macOS / `StubTts` trim phrases before synthesis and Android gets `trim()`ed text, so no engine sees the newlines. A future backend that synthesises `push_text` input verbatim must trim too.
+- **#432: the GUI toast says only "error".** The detail is in `gui.log` (`primer::speech` warn). The text session the voice build created stays in `state.session`, exactly as after a "bye" exit.
+- **#432: an `Err` now emits `Exit` before the join resolves.** `stop_voice_mode` still returns the `Err` if the user presses End voice mode afterwards; the frontend already left voice mode on the exit event.
+- **Neither PR has been heard on real audio** (item 2).
+
+### From #424–#427 (merged)
 - **None of #425–#427 has been heard on real audio.** All checks are mock/stub-driven (item 2).
 - **#427: the hold is measured from the start of each LLM attempt** (just after STT finalize), not from the VAD `SpeechEnd`. With Whisper's finalize latency the effective silence before speech is a bit over 1.2 s.
 - **#427: a Stop mid-reply lets the ringbuf play out** (stage 4 would fix it). Stop is now checked before every phrase push, so no *further* phrase is synthesised.
@@ -127,7 +105,7 @@ Still not watched in the real webview: `mv ~/.primer/kb ~/.primer/kb.bak`, launc
 - **#427: a cancelled streamed turn fires `on_response_complete`** (its chunks are already in a bubble); a cancel before SPEAK does not. Deliberate, but not pinned by a test.
 - **#427: a spoken-but-cut-off reply is not in the session (D4 A).** If the child replies to it, the LLM has no context for it. Revisit option B if device logs show it often.
 - **#427: the GUI now gets `on_transcript_finalized` mid-generation**, and chunks live during SPEAK. Before, both came after completion. The GUI observer handles chunks incrementally, but this is not watched in the webview.
-- **#427: spurious VAD events keep the VAD arm open** (behaviour change, see shipped).
+- **#427: spurious VAD events keep the VAD arm open** (behaviour change; see the #427 section of `docs/handoffs/2026-11-25T100104Z.md`).
 - **#426: D3:** an emphasis pair spanning a sentence boundary speaks its `*`.
 - **#424: a Stop pressed during STT finalize**, a few ms before the LLM call, is dropped as stale.
 
@@ -260,6 +238,8 @@ Still not watched in the real webview: `mv ~/.primer/kb ~/.primer/kb.bak`, launc
 
 ## Patterns to reuse, not reinvent
 
+- **Reporting a generic loop's `?` exits once (new, #432):** instead of adding a report before every `?`, rename the body (`run_loop_body`), give it `&mut O`, and have the old entry point call it and report on `Err`. Inside the body, pass `observer` (not `&mut observer`) to helpers taking `&mut O`: it reborrows implicitly.
+- **A hard boundary that survives a second splitter (new, #431):** when text passes through two splitters (the voice loop's, then each TTS backend's), make the first one's output end in a token the second treats as a hard boundary (`PHRASE_BREAK`), so an unterminated phrase is never re-glued. Test it through `StubTts` (it has its own splitter); a recording mock without one cannot catch it.
 - **Paused-clock async tests (new, #427):** `#[tokio::test(start_paused = true)]` (needs tokio `test-util`; `primer-speech` has it as a dev-dependency). A `tokio::time::sleep` in a mock responder, or a `sleep_until` hold in the code under test, auto-advances as soon as every task is idle, so a 1.2 s hold or a 10 s "still generating" sleep costs nothing. Record `tokio::time::Instant::now()` in a mock to assert *when* something happened. Wake the test with a `tokio::sync::Notify` from the mock instead of polling.
 - **Stacked PRs (new):** when several PRs edit one file, branch each from the previous one and open it with `gh pr create --base <previous-branch>`. Say "merge in order" in each body. GitHub retargets the next PR to `main` when its base merges (with the squash merges used here, check that the retargeted diff is still clean).
 - **One `loop { select! }` instead of nested selects (new, #427):** the old LATENT_THINK had three near-copies of a select for "events open", "events closed", and "spurious event". A loop with `if <cond>` preconditions on arms (`events.recv(), if events_open`, `sleep_until(..), if !ready.is_empty()`) and `Some(d) = rx.recv()` patterns covers every case in one place, and `break <outcome>` gives the loop a value.
@@ -312,7 +292,7 @@ Still not watched in the real webview: `mv ~/.primer/kb ~/.primer/kb.bak`, launc
   4. Restore the file.
 - **Python `sub()` edits:** a helper that asserts the match count stops before the write.
 - **Bug-fix recipe:**
-  1. Branch off `origin/main`, and check `git branch --show-current` **before** editing. This session again started #314 on the previous fix's branch, and had to `git stash` → `checkout main` → `checkout -b` → `stash pop` before committing.
+  1. Branch off `origin/main`, and check `git branch --show-current` **before** editing. An earlier session started #314 on the previous fix's branch, and had to `git stash` → `checkout main` → `checkout -b` → `stash pop` before committing.
   2. Failing test, then fix, then green.
   3. Test + clippy each touched crate, plus its feature arms. Then fmt and rustdoc.
   4. `git grep` the docs for drift.
@@ -328,7 +308,7 @@ Still not watched in the real webview: `mv ~/.primer/kb ~/.primer/kb.bak`, launc
 
 ```bash
 cd /Users/hherb/src/primer && git status --short && git checkout main && git pull --ff-only && git log --oneline -8 && gh pr list --state open
-# Open at close: #424 -> #425 -> #426 -> #427 (stack), docs PR. After merge: gh issue view 423 --json state; gh issue view 325 --json state
+# Open at close: #431 (#430), #432 (#429), #433 (docs) — independent. After merge: gh issue view 430 --json state; gh issue view 429 --json state
 S=/private/tmp/primer-scratch; mkdir -p "$S"   # or the session's scratchpad dir
 
 # === Oversized-file sweep + inline-test detector (re-verify EVERY session) ===
@@ -337,10 +317,10 @@ find crates -name '*.rs' -not -path '*/vendor/*' -not -name 'tests.rs' | xargs w
 for f in $(find crates -name '*.rs' -not -path '*/vendor/*' -not -name 'tests.rs' | xargs wc -l | awk '$1>500 && $2!="total"{print $2}'); do \
   awk '/#\[cfg\(test\)\]/{ln=NR} ln && NR==ln+1 && /^[[:space:]]*mod .*\{/{print FILENAME" inline mod @"NR}' "$f"; done
 
-# === #424-#427: voice loop on every speech arm (stream_tests needs tokio test-util, already a dev-dep) ===
+# === #424-#427, #431, #432: voice loop on every speech arm (stream_tests needs tokio test-util, already a dev-dep) ===
 for f in voice-loop voice-loop,silero,cpal,macos-native voice-loop,silero,cpal,macos-native-26 android-native,voice-loop voice-loop,silero,whisper,piper,cpal,supertonic; do \
   echo "== $f"; ~/.cargo/bin/cargo test -p primer-speech --features $f 2>&1 | grep -E 'FAILED|panicked|^error'; done
-~/.cargo/bin/cargo test -p primer-speech --features voice-loop --lib -- stream_tests stale_cancel cancel_during speak_pushes tts_phrases
+~/.cargo/bin/cargo test -p primer-speech --features voice-loop --lib -- stream_tests stale_cancel cancel_during speak_pushes tts_phrases phrase_split tts_error
 ~/.cargo/bin/cargo test -p primer-speech --features android-native --lib -- android::tts
 # === #421: voice stop abort (speech + android-native arms) ===
 ~/.cargo/bin/cargo test -p primer-gui --features speech --lib -- join_or_abort aborting_a_wrapper
@@ -378,5 +358,5 @@ for spec in "-p primer-speech --features voice-loop,silero,whisper,piper,cpal,su
 
 ## Reporting back
 
-- **#424:** pressing Stop while the Primer was talking (or while it was listening) used to cancel the child's *next* question, so it went unanswered. A Stop now only stops the answer it was pressed against. Closes #423.
-- **#425–#427:** in voice mode the Primer used to stay silent until it had worked out its whole answer, often 5 seconds or more. It now starts speaking its first sentence about 1.2 seconds after the child stops talking, and keeps talking as the rest of the answer is worked out. The short wait is deliberate: a child who pauses mid-thought can still carry on, and the Primer then answers the whole question. Saying "bye" now ends the session at once, without the Primer first composing a reply. Closes #325.
+- **#431:** when the Primer runs out of room mid-answer and starts again, voice mode used to run the cut-off sentence straight into the apology ("the sun is a star that Sorry, I ran out of room"). It now pauses between them. Closes #430.
+- **#432:** if the voice engine failed mid-answer, the screen used to freeze on "speaking" until an adult pressed End voice mode. It now leaves voice mode at once and says "Voice mode ended (error)". Closes #429.
