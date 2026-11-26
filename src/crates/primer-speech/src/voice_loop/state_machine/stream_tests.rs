@@ -570,6 +570,35 @@ async fn tts_error_mid_stream_still_runs_the_end_of_turn_tail() {
     assert!(join.await.unwrap().is_err(), "the TTS error ends the loop");
     assert_eq!(drains.load(Ordering::SeqCst), 1);
     assert!(!speaking.load(Ordering::SeqCst), "mic un-gated");
+    // #429: the UI is told the loop ended, not left frozen on SPEAK.
+    assert_eq!(exits(&rig), vec![ExitReason::Error]);
+    assert!(rig.observer.events().iter().any(|e| matches!(
+        e,
+        MockEvent::StateChange {
+            state: VoiceState::Exit,
+            ..
+        }
+    )));
+}
+
+/// #429: a TTS error in a non-streamed SPEAK (the reply resolved before
+/// the hold) also reports the exit.
+#[tokio::test(start_paused = true)]
+async fn tts_error_in_a_whole_reply_speak_reports_the_exit() {
+    let rig = rig();
+    rig.fail_at.store(1, Ordering::SeqCst);
+    let (_handle, join) = super::run_loop(
+        backends(&rig, Arc::new(MockStreamingStt::new("tell me"))),
+        one_utterance(),
+        responder(&rig, vec![Step::Chunk("Hi.")]),
+        Box::new(|_| {}),
+        None,
+        false,
+        None,
+        rig.observer.clone(),
+    );
+    assert!(join.await.unwrap().is_err());
+    assert_eq!(exits(&rig), vec![ExitReason::Error]);
 }
 
 /// No barge-in: the child talking during a streamed SPEAK neither cancels
