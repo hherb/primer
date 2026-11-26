@@ -59,9 +59,10 @@ pub(super) async fn run_loop_inner<'r, O: LoopObserver>(
         cancel_response,
     )
     .await;
-    if result.is_err() {
+    if let Err(e) = &result {
         // The body's `?` exits report nothing; without this the UI stays
         // on its last state until the user ends voice mode (#429).
+        tracing::warn!(target: "primer::speech", "voice loop ended with an error: {e}");
         observer.on_state_change(VoiceState::Exit, None);
         observer.on_exit(ExitReason::Error);
     }
