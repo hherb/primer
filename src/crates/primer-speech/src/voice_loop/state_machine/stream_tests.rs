@@ -241,7 +241,7 @@ async fn first_phrase_is_spoken_before_the_responder_resolves() {
     );
     rig.pushed.notified().await;
     let (first, at) = rig.log.lock().unwrap()[0].clone();
-    assert_eq!(first, "Hello there. ");
+    assert_eq!(first, "Hello there.\n\n");
     assert!(at - start >= MIN_THINK_HOLD, "held for {:?}", at - start);
     assert!(
         at - start < Duration::from_secs(10),
@@ -252,7 +252,7 @@ async fn first_phrase_is_spoken_before_the_responder_resolves() {
     let transcripts = join.await.unwrap().unwrap();
     drop(handle);
     assert_eq!(transcripts, vec!["tell me".to_string()]);
-    assert_eq!(pushes(&rig), vec!["Hello there. ", "How are you? "]);
+    assert_eq!(pushes(&rig), vec!["Hello there.\n\n", "How are you?\n\n"]);
     // Observer sees every delta exactly once, in order.
     assert_eq!(chunks(&rig), vec!["Hello there. How", " are you?"]);
     assert!(
@@ -301,7 +301,7 @@ async fn vad_cancel_during_the_hold_still_retries() {
         *rig.calls.lock().unwrap(),
         vec!["why is".to_string(), "why is the sky blue".to_string()]
     );
-    assert_eq!(pushes(&rig), vec!["Ok. "]);
+    assert_eq!(pushes(&rig), vec!["Ok.\n\n"]);
 }
 
 /// An error after audio has started appends the fallback line instead
@@ -330,9 +330,9 @@ async fn mid_stream_error_after_a_spoken_phrase_appends_the_fallback() {
     assert_eq!(
         pushes(&rig),
         vec![
-            "First part. ",
-            "Sorry, I had trouble with that. ",
-            "Could you ask again? "
+            "First part.\n\n",
+            "Sorry, I had trouble with that.\n\n",
+            "Could you ask again?\n\n"
         ]
     );
     assert_eq!(
@@ -393,7 +393,7 @@ async fn cancel_between_phrases_stops_pushing_and_drains_before_ungating() {
     handle.cancel_response_tx.try_send(()).unwrap();
     join.await.unwrap().unwrap();
 
-    assert_eq!(pushes(&rig), vec!["One. "]);
+    assert_eq!(pushes(&rig), vec!["One.\n\n"]);
     assert_eq!(drains.load(Ordering::SeqCst), 1);
     assert!(
         gated_at_drain.load(Ordering::SeqCst),
@@ -471,12 +471,12 @@ async fn final_sentence_without_trailing_space_is_spoken_after_a_pause() {
     rig.pushed.notified().await;
     rig.pushed.notified().await;
     let log = rig.log.lock().unwrap().clone();
-    assert_eq!(log[1].0, "Why? ");
+    assert_eq!(log[1].0, "Why?\n\n");
     assert!(log[1].1 - log[0].1 >= STREAM_TAIL_FLUSH_IDLE);
     assert!(log[1].1 - log[0].1 < Duration::from_secs(10), "not held");
     assert!(!join.is_finished());
     join.await.unwrap().unwrap();
-    assert_eq!(pushes(&rig), vec!["The sun is hot. ", "Why? "]);
+    assert_eq!(pushes(&rig), vec!["The sun is hot.\n\n", "Why?\n\n"]);
 }
 
 /// An error after audio started speaks the partial sentence the child
@@ -505,10 +505,10 @@ async fn mid_stream_error_speaks_the_held_partial_before_the_fallback() {
     assert_eq!(
         pushes(&rig),
         vec![
-            "First part. ",
-            "And then ",
-            "Sorry, I had trouble with that. ",
-            "Could you ask again? "
+            "First part.\n\n",
+            "And then\n\n",
+            "Sorry, I had trouble with that.\n\n",
+            "Could you ask again?\n\n"
         ]
     );
 }
@@ -537,7 +537,7 @@ async fn stop_after_the_reply_resolved_skips_the_remaining_phrases() {
     );
     *rig.press_at.lock().unwrap() = Some((2, handle.cancel_response_tx.clone()));
     join.await.unwrap().unwrap();
-    assert_eq!(pushes(&rig), vec!["One. ", "Two. "]);
+    assert_eq!(pushes(&rig), vec!["One.\n\n", "Two.\n\n"]);
     assert!(rig.observer.events().iter().any(|e| matches!(
         e,
         MockEvent::StateChange { state: VoiceState::Listen, hint: Some(h) } if h == "user_cancel"
@@ -570,6 +570,35 @@ async fn tts_error_mid_stream_still_runs_the_end_of_turn_tail() {
     assert!(join.await.unwrap().is_err(), "the TTS error ends the loop");
     assert_eq!(drains.load(Ordering::SeqCst), 1);
     assert!(!speaking.load(Ordering::SeqCst), "mic un-gated");
+    // #429: the UI is told the loop ended, not left frozen on SPEAK.
+    assert_eq!(exits(&rig), vec![ExitReason::Error]);
+    assert!(rig.observer.events().iter().any(|e| matches!(
+        e,
+        MockEvent::StateChange {
+            state: VoiceState::Exit,
+            ..
+        }
+    )));
+}
+
+/// #429: a TTS error in a non-streamed SPEAK (the reply resolved before
+/// the hold) also reports the exit.
+#[tokio::test(start_paused = true)]
+async fn tts_error_in_a_whole_reply_speak_reports_the_exit() {
+    let rig = rig();
+    rig.fail_at.store(1, Ordering::SeqCst);
+    let (_handle, join) = super::run_loop(
+        backends(&rig, Arc::new(MockStreamingStt::new("tell me"))),
+        one_utterance(),
+        responder(&rig, vec![Step::Chunk("Hi.")]),
+        Box::new(|_| {}),
+        None,
+        false,
+        None,
+        rig.observer.clone(),
+    );
+    assert!(join.await.unwrap().is_err());
+    assert_eq!(exits(&rig), vec![ExitReason::Error]);
 }
 
 /// No barge-in: the child talking during a streamed SPEAK neither cancels
@@ -602,7 +631,7 @@ async fn child_speech_during_a_streamed_speak_is_ignored() {
     tx.send(VadEvent::SpeechEnd).await.unwrap();
     drop(tx);
     let transcripts = join.await.unwrap().unwrap();
-    assert_eq!(pushes(&rig), vec!["One. ", "Two. "]);
+    assert_eq!(pushes(&rig), vec!["One.\n\n", "Two.\n\n"]);
     assert_eq!(rig.calls.lock().unwrap().len(), 1);
     assert_eq!(transcripts, vec!["tell me".to_string()]);
 }
@@ -633,8 +662,48 @@ async fn external_stop_during_a_streamed_speak_exits_after_the_drain() {
     handle.stop_tx.send(()).unwrap();
     let transcripts = join.await.unwrap().unwrap();
     assert_eq!(transcripts, vec!["tell me".to_string()]);
-    assert_eq!(pushes(&rig), vec!["One. "]);
+    assert_eq!(pushes(&rig), vec!["One.\n\n"]);
     assert!(matches!(exits(&rig).as_slice(), [ExitReason::UserStop]));
     assert_eq!(drains.load(Ordering::SeqCst), 1);
     assert!(!speaking.load(Ordering::SeqCst));
+}
+
+/// #430: on a truncation retry the DM streams the cut-off partial, the
+/// blank-line notice separator, then the apology. They are spoken as
+/// separate phrases, the unterminated partial first, while the retry is
+/// still generating.
+#[tokio::test(start_paused = true)]
+async fn a_blank_line_ends_an_unterminated_phrase() {
+    let rig = rig();
+    let (_handle, join) = super::run_loop(
+        backends(&rig, Arc::new(MockStreamingStt::new("tell me"))),
+        one_utterance(),
+        responder(
+            &rig,
+            vec![
+                Step::Chunk("the sun is a star that"),
+                Step::Chunk("\n\n"),
+                Step::Chunk("Sorry, I ran out of room. "),
+                Step::Sleep(Duration::from_secs(10)),
+                Step::Chunk("The sun is a star."),
+            ],
+        ),
+        Box::new(|_| {}),
+        None,
+        false,
+        None,
+        rig.observer.clone(),
+    );
+    rig.pushed.notified().await;
+    assert_eq!(pushes(&rig)[0], "the sun is a star that\n\n");
+    assert!(!join.is_finished(), "spoken while the retry generates");
+    join.await.unwrap().unwrap();
+    assert_eq!(
+        pushes(&rig),
+        vec![
+            "the sun is a star that\n\n",
+            "Sorry, I ran out of room.\n\n",
+            "The sun is a star.\n\n"
+        ]
+    );
 }

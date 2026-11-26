@@ -45,6 +45,8 @@ pub enum ExitReason {
     MicError,
     /// Speaker output stream errored.
     SpeakerError,
+    /// The loop returned an error (e.g. a TTS backend failure, #429).
+    Error,
 }
 
 impl ExitReason {
@@ -58,6 +60,7 @@ impl ExitReason {
             Self::Keyword => "keyword",
             Self::MicError => "mic_error",
             Self::SpeakerError => "speaker_error",
+            Self::Error => "error",
         }
     }
 }
@@ -129,6 +132,7 @@ mod tests {
         assert_eq!(ExitReason::Keyword.name(), "keyword");
         assert_eq!(ExitReason::MicError.name(), "mic_error");
         assert_eq!(ExitReason::SpeakerError.name(), "speaker_error");
+        assert_eq!(ExitReason::Error.name(), "error");
     }
 
     #[test]
