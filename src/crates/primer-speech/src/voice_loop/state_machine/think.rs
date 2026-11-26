@@ -4,12 +4,16 @@
 
 use std::pin::Pin;
 
-use primer_core::error::Result;
+use primer_core::consts::speech::MIN_THINK_HOLD;
+use primer_core::error::{InferenceError, PrimerError, Result};
 use primer_core::speech::{TranscriptionSession, VadEvent};
 
+use crate::phrase_split::PhraseSplitter;
 use crate::voice_loop::noise_transcript::strip_noise;
 use crate::voice_loop::observer::{ExitReason, LoopObserver, VoiceState};
+use crate::voice_loop::quit_detect::is_quit_phrase;
 
+use super::speak::{SpeakIo, SpeakOutcome, speak_streaming};
 use super::{FALLBACK_LINE, LoopBackends, Responder};
 
 /// How LATENT_THINK ended.
@@ -26,13 +30,22 @@ pub(super) enum Think {
         accumulated: String,
         chunks: Vec<String>,
     },
+    /// A quit phrase, caught before any LLM call (owner decision D2).
+    Quit { transcript: String },
+    /// The reply streamed into TTS while it was generated (#325 stage 3);
+    /// the transcript and the chunks were already sent to the observer.
+    Spoke {
+        transcript: String,
+        outcome: SpeakOutcome,
+    },
 }
 
 /// Handle an LLM error inside the LATENT_THINK select arms.
 ///
-/// Surfaces the typed error to the observer, then **drops** any chunks
-/// the partial attempt managed to push into `chunk_buffer` and replaces
-/// them with a single synthetic FALLBACK_LINE chunk. The replay loop
+/// Used only before audio has started (after that, `speak_streaming`
+/// appends the fallback instead). Surfaces the typed error to the
+/// observer, then **drops** any chunks the partial attempt collected and
+/// replaces them with a single synthetic FALLBACK_LINE chunk. The replay loop
 /// downstream will deliver that one chunk to the observer, so the GUI
 /// chat bubble shows exactly the text TTS will speak — no truncated
 /// pre-error stream stuck on screen.
@@ -50,19 +63,24 @@ pub(super) enum Think {
 /// Returns the text the caller should set `accumulated` to (which then
 /// flows into TTS synthesis).
 fn handle_llm_err<O: LoopObserver>(
-    err: primer_core::error::PrimerError,
-    chunk_buffer: &std::sync::Arc<std::sync::Mutex<Vec<String>>>,
+    err: PrimerError,
+    chunks: &mut Vec<String>,
     observer: &mut O,
 ) -> String {
-    let inference_err = match err {
-        primer_core::error::PrimerError::Inference(inf) => inf,
-        other => other.to_string().into(),
-    };
-    observer.on_inference_error(&inference_err);
-    let mut chunks = chunk_buffer.lock().unwrap();
+    observer.on_inference_error(&to_inference_error(err));
     chunks.clear();
     chunks.push(FALLBACK_LINE.to_string());
     FALLBACK_LINE.to_string()
+}
+
+/// The typed error for the observer: an `Inference` error keeps its
+/// variant; any other `PrimerError` becomes `Other` (dev-facing text the
+/// i18n layer redacts).
+pub(super) fn to_inference_error(err: PrimerError) -> InferenceError {
+    match err {
+        PrimerError::Inference(inf) => inf,
+        other => other.to_string().into(),
+    }
 }
 
 /// The LATENT_THINK state: see [`super::inner::run_loop_inner`] for the
@@ -77,6 +95,8 @@ pub(super) async fn think<'r, O: LoopObserver>(
     observer: &mut O,
     mut external_stop: Pin<&mut tokio::sync::oneshot::Receiver<()>>,
     cancel_response: &mut tokio::sync::mpsc::Receiver<()>,
+    io: &mut SpeakIo<'_>,
+    primer_turn_index: usize,
 ) -> Result<Think> {
     // Loop here so a SpeechStart-cancel can resume listening with
     // the same whisper session and re-attempt the LLM call once the
@@ -91,15 +111,6 @@ pub(super) async fn think<'r, O: LoopObserver>(
     // iteration's new tokens with a single separating space, after
     // both halves have already been `.trim()`'d.
     let mut transcript_so_far = String::new();
-    let mut accumulated = String::new();
-    // Per-turn chunk accumulator. Captured by the on_chunk closure
-    // passed to the responder; replayed onto the observer after the
-    // future resolves so we keep the streaming semantics (one
-    // observer.on_response_chunk per actual chunk) without trying to
-    // re-borrow `observer` mutably inside a closure that already
-    // borrows `'r`.
-    let chunk_buffer: std::sync::Arc<std::sync::Mutex<Vec<String>>> =
-        std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
     loop {
         // Peek (finalize-and-reopen since whisper-cpp-plus has no
         // partial-extract API exposed here): we accept the slight
@@ -132,57 +143,55 @@ pub(super) async fn think<'r, O: LoopObserver>(
             if verbose {
                 eprintln!("[stt] empty transcript, looping");
             }
-            break;
+            return Ok(Think::Heard {
+                transcript: transcript_so_far,
+                accumulated: String::new(),
+                chunks: Vec::new(),
+            });
         }
 
-        // Reset the chunk buffer at the top of each LLM attempt so
-        // a cancelled-then-retried turn delivers only the second
-        // attempt's chunks to the observer.
-        chunk_buffer.lock().unwrap().clear();
+        // D2 (#325): a quit phrase ends the session before any LLM call,
+        // so it records no DM turn and nothing is said in reply.
+        if is_quit_phrase(&transcript_so_far, &backends.active_locale) {
+            return Ok(Think::Quit {
+                transcript: transcript_so_far,
+            });
+        }
+
         // A cancel only applies to the response it was pressed against;
         // presses queued during LISTEN/SPEAK are stale (#423).
         while cancel_response.try_recv().is_ok() {}
 
-        // Drive the LLM. `respond` returns the full accumulated text
-        // as Ok(String); the on_chunk callback captures into
-        // `chunk_buffer` for later observer replay.
-        let chunk_buffer_for_cb = std::sync::Arc::clone(&chunk_buffer);
+        // Drive the LLM. `on_chunk` only forwards each delta; it never
+        // touches TTS, so `push_text` stays on this task. The channel and
+        // the splitter are fresh per attempt, so a cancelled attempt's
+        // partial sentence never prefixes the retry's first phrase.
+        let (delta_tx, mut delta_rx) = tokio::sync::mpsc::unbounded_channel::<String>();
         let on_chunk: Box<dyn FnMut(&str) + Send + 'r> = Box::new(move |c: &str| {
-            chunk_buffer_for_cb.lock().unwrap().push(c.to_string());
+            let _ = delta_tx.send(c.to_string());
         });
         let llm_fut = responder.respond(&transcript_so_far, on_chunk);
         tokio::pin!(llm_fut);
 
-        // Wait for either: (a) llm done, (b) VAD SpeechStart (cancel),
-        // (c) external stop, (d) external cancel-response.
-        // If the VAD event channel is both closed AND drained, we can
-        // complete the LLM unconditionally — no more events will arrive.
-        // Note: is_closed() alone returns true even with buffered messages
-        // (when all senders are dropped), so we must also check is_empty().
-        #[derive(PartialEq, Eq)]
+        // Deltas so far, for the observer; complete phrases not yet
+        // spoken; the partial sentence after them.
+        let mut chunks: Vec<String> = Vec::new();
+        let mut ready: Vec<String> = Vec::new();
+        let mut splitter = PhraseSplitter::new();
+        // D1: speech starts no earlier than this, so the child can still
+        // resume (and the turn is retried) even when a phrase is ready.
+        let hold_until = tokio::time::Instant::now() + MIN_THINK_HOLD;
+        let mut events_open = true;
+        let mut accumulated = String::new();
+
         enum LatentResult {
             Completed,
             CancelledByVad,
             CancelledByUser,
             Stopped,
+            StartSpeaking,
         }
-        let outcome: LatentResult = if events.is_closed() && events.is_empty() {
-            // No more VAD events possible: complete the LLM unconditionally.
-            // Still poll external_stop / cancel_response so the loop
-            // remains responsive to those.
-            tokio::select! {
-                biased;
-                _ = &mut external_stop => LatentResult::Stopped,
-                _ = cancel_response.recv() => LatentResult::CancelledByUser,
-                res = &mut llm_fut => {
-                    accumulated = match res {
-                        Ok(text) => text,
-                        Err(e) => handle_llm_err(e, &chunk_buffer, observer),
-                    };
-                    LatentResult::Completed
-                }
-            }
-        } else {
+        let outcome = loop {
             // `biased` ensures the LLM future gets polled before
             // events.recv() — without it, select!'s random order can
             // resolve a queued SpeechStart-cancel before the LLM
@@ -192,54 +201,36 @@ pub(super) async fn think<'r, O: LoopObserver>(
             // the parking future has been polled at least once.
             tokio::select! {
                 biased;
-                _ = &mut external_stop => LatentResult::Stopped,
-                _ = cancel_response.recv() => LatentResult::CancelledByUser,
+                _ = &mut external_stop => break LatentResult::Stopped,
+                _ = cancel_response.recv() => break LatentResult::CancelledByUser,
                 res = &mut llm_fut => {
                     accumulated = match res {
-                        Ok(text) => text,
-                        Err(e) => handle_llm_err(e, &chunk_buffer, observer),
+                        Ok(text) => {
+                            // Every delta was sent before the future resolved.
+                            while let Ok(d) = delta_rx.try_recv() {
+                                chunks.push(d);
+                            }
+                            text
+                        }
+                        Err(e) => handle_llm_err(e, &mut chunks, observer),
                     };
-                    LatentResult::Completed
+                    break LatentResult::Completed;
                 }
-                event = events.recv() => {
-                    match event {
-                        Some(VadEvent::SpeechStart) => {
-                            // Cancel: drop the future, loop back, keep listening.
-                            LatentResult::CancelledByVad
-                        }
-                        Some(VadEvent::SpeechEnd) | Some(VadEvent::None) => {
-                            // Spurious — shouldn't happen during LATENT_THINK
-                            // since we entered on SpeechEnd. Treat as
-                            // continue-waiting by completing the LLM.
-                            tokio::select! {
-                                biased;
-                                _ = &mut external_stop => LatentResult::Stopped,
-                                _ = cancel_response.recv() => LatentResult::CancelledByUser,
-                                res = &mut llm_fut => {
-                                    accumulated = match res {
-                                        Ok(text) => text,
-                                        Err(e) => handle_llm_err(e, &chunk_buffer, observer),
-                                    };
-                                    LatentResult::Completed
-                                }
-                            }
-                        }
-                        None => {
-                            // Channel just closed mid-select: complete the LLM.
-                            tokio::select! {
-                                biased;
-                                _ = &mut external_stop => LatentResult::Stopped,
-                                _ = cancel_response.recv() => LatentResult::CancelledByUser,
-                                res = &mut llm_fut => {
-                                    accumulated = match res {
-                                        Ok(text) => text,
-                                        Err(e) => handle_llm_err(e, &chunk_buffer, observer),
-                                    };
-                                    LatentResult::Completed
-                                }
-                            }
-                        }
-                    }
+                event = events.recv(), if events_open => match event {
+                    // The child resumed: drop the future, keep listening.
+                    Some(VadEvent::SpeechStart) => break LatentResult::CancelledByVad,
+                    // Spurious (we entered on SpeechEnd): keep waiting.
+                    Some(_) => {}
+                    // Channel closed and drained: no more VAD events can
+                    // arrive, so wait for the LLM alone.
+                    None => events_open = false,
+                },
+                Some(d) = delta_rx.recv() => {
+                    ready.extend(splitter.push(&d));
+                    chunks.push(d);
+                }
+                _ = tokio::time::sleep_until(hold_until), if !ready.is_empty() => {
+                    break LatentResult::StartSpeaking;
                 }
             }
         };
@@ -251,17 +242,14 @@ pub(super) async fn think<'r, O: LoopObserver>(
                 return Ok(Think::Stopped);
             }
             LatentResult::CancelledByUser => {
-                // Back to LISTEN with a `user_cancel` hint. Drop the
-                // chunks accumulated for this aborted attempt.
-                chunk_buffer.lock().unwrap().clear();
+                // Back to LISTEN with a `user_cancel` hint; this attempt's
+                // chunks are dropped with it.
                 observer.on_state_change(VoiceState::Listen, Some("user_cancel"));
                 return Ok(Think::Cancelled);
             }
             LatentResult::CancelledByVad => {
-                // VAD-cancel-on-resumed-speech: drop chunks from the
-                // aborted attempt, signal the LISTEN transition, then
-                // wait for the next SpeechEnd to retry.
-                chunk_buffer.lock().unwrap().clear();
+                // VAD-cancel-on-resumed-speech: signal the LISTEN
+                // transition, then wait for the next SpeechEnd to retry.
                 observer.on_state_change(VoiceState::Listen, Some("child_resumed"));
                 loop {
                     tokio::select! {
@@ -287,14 +275,37 @@ pub(super) async fn think<'r, O: LoopObserver>(
                 observer.on_state_change(VoiceState::LatentThink, None);
                 continue;
             }
-            LatentResult::Completed => break,
+            LatentResult::Completed => {
+                return Ok(Think::Heard {
+                    transcript: transcript_so_far.clone(),
+                    accumulated,
+                    chunks,
+                });
+            }
+            LatentResult::StartSpeaking => {
+                observer.on_transcript_finalized(&transcript_so_far);
+                for c in &chunks {
+                    observer.on_response_chunk(primer_turn_index, c);
+                }
+                let outcome = speak_streaming(
+                    ready,
+                    splitter,
+                    llm_fut.as_mut(),
+                    &mut delta_rx,
+                    backends,
+                    io,
+                    events,
+                    observer,
+                    primer_turn_index,
+                    external_stop.as_mut(),
+                    cancel_response,
+                )
+                .await?;
+                return Ok(Think::Spoke {
+                    transcript: transcript_so_far.clone(),
+                    outcome,
+                });
+            }
         }
     }
-
-    let chunks = std::mem::take(&mut *chunk_buffer.lock().unwrap());
-    Ok(Think::Heard {
-        transcript: transcript_so_far,
-        accumulated,
-        chunks,
-    })
 }

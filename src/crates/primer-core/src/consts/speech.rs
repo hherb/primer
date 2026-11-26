@@ -23,6 +23,20 @@ pub const DEFAULT_MIC_SILENCE_MS: u32 = 600;
 /// `SynthesisEvent::PhraseEnd` doc comment.
 pub const DEFAULT_INTER_PHRASE_SILENCE_MS: u32 = 200;
 
+/// Minimum wait after the child stops talking before the Primer starts
+/// speaking a streamed reply, even when a phrase is ready (#325, owner
+/// decision D1). Until then the child can still resume and the turn is
+/// retried with the longer utterance. Tune on device.
+pub const MIN_THINK_HOLD: std::time::Duration = std::time::Duration::from_millis(1200);
+
+/// How long a streamed reply may sit on a complete final sentence
+/// (`"…makes it so hot?"`, no trailing whitespace yet) before SPEAK says
+/// it anyway (#325). The stream's end is only seen once the dialogue
+/// manager's post-reply work (persist, and periodically a summary LLM
+/// call) is done, so waiting for it would leave a gap before the closing
+/// question. A token after this pause just starts the next phrase.
+pub const STREAM_TAIL_FLUSH_IDLE: std::time::Duration = std::time::Duration::from_millis(300);
+
 /// `recv_timeout` slice in milliseconds for the macOS-native TTS
 /// background-path streaming drain loop. Short enough that the
 /// [`STREAM_DRAIN_TIMEOUT_SECS`] overall streaming-drain deadline

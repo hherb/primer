@@ -66,6 +66,20 @@ impl PhraseSplitter {
         }
     }
 
+    /// Whether the buffer ends on a phrase boundary that only lacks the
+    /// whitespace [`Self::push`] waits for (`"Why?"`, not `"Dr."` or
+    /// `"How"`). A streaming caller can [`Self::flush`] such a tail after
+    /// a pause instead of holding it until the stream closes.
+    pub fn ends_at_boundary(&self) -> bool {
+        if self.buffer.trim().is_empty() {
+            return false;
+        }
+        let probe = Self {
+            buffer: format!("{} ", self.buffer),
+        };
+        probe.find_boundary().is_some()
+    }
+
     fn drain_completed(&mut self) -> Vec<String> {
         let mut out = Vec::new();
         while let Some(end) = self.find_boundary() {
@@ -208,6 +222,23 @@ mod tests {
         // Next push starts with whitespace, completing the boundary, and contains its own.
         let p1 = s.push(" World. ");
         assert_eq!(p1, vec!["Hello.", "World."]);
+    }
+
+    #[test]
+    fn ends_at_boundary_only_for_a_complete_unspaced_sentence() {
+        let at = |text: &str| {
+            let mut s = PhraseSplitter::new();
+            assert!(s.push(text).is_empty(), "{text:?} already split");
+            s.ends_at_boundary()
+        };
+        assert!(at("What makes it hot?"));
+        assert!(at("Wow!"));
+        assert!(at("Wait..."));
+        assert!(!at("Ask Dr."), "abbreviation");
+        assert!(!at("It is 3"), "no terminator");
+        assert!(!at("How"));
+        assert!(!at("   "));
+        assert!(!PhraseSplitter::new().ends_at_boundary());
     }
 
     #[test]

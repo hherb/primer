@@ -3,8 +3,9 @@
 //!
 //! Extracted verbatim from `state_machine.rs` so the markdown-stripping
 //! logic (and its characterisation tests) lives next to nothing but
-//! itself — SPEAK simply calls [`tts_phrases`], which splits the reply
-//! and runs [`strip_markdown_for_tts`] on each phrase. Keeping this a
+//! itself — SPEAK calls [`tts_phrases`] on a finished reply (it splits
+//! and runs [`strip_markdown_for_tts`] on each phrase) and [`tts_phrase`]
+//! on each phrase of a streamed one. Keeping this a
 //! leaf of pure functions also keeps the state machine files under the
 //! 500-line-ish guideline.
 
@@ -73,15 +74,25 @@ pub(super) fn strip_markdown_for_tts(text: &str) -> String {
 /// phrase means an emphasis pair spanning two sentences stays unmatched
 /// and its markers are spoken (owner decision D3).
 pub(super) fn tts_phrases(text: &str) -> Vec<String> {
+    raw_phrases(text)
+        .iter()
+        .filter_map(|p| tts_phrase(p))
+        .collect()
+}
+
+/// `text` split into trimmed phrases, unstripped, tail included.
+pub(super) fn raw_phrases(text: &str) -> Vec<String> {
     let mut splitter = PhraseSplitter::new();
     let mut phrases = splitter.push(text);
     phrases.extend(splitter.flush());
     phrases
-        .iter()
-        .map(|p| strip_markdown_for_tts(p))
-        .filter(|p| !p.trim().is_empty())
-        .map(|p| p + " ")
-        .collect()
+}
+
+/// One splitter phrase as SPEAK pushes it: markdown-stripped with a
+/// trailing space, or `None` when nothing speakable is left.
+pub(super) fn tts_phrase(phrase: &str) -> Option<String> {
+    let stripped = strip_markdown_for_tts(phrase);
+    (!stripped.trim().is_empty()).then(|| stripped + " ")
 }
 
 /// If `chars[i]` is the start of a digit-bounded run of `*` (e.g. `*`
