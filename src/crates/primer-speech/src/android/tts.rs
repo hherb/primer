@@ -83,7 +83,7 @@ impl SynthesisSession for AndroidTtsSession {
         self.speaking.store(true, Ordering::SeqCst);
         // Blocks until the Android engine reports onDone (D3). No PCM is
         // surfaced — the OS already played it.
-        self.bridge.speak(text)
+        self.bridge.speak(text.trim())
     }
 
     fn finalize(self: Box<Self>, _on_event: &mut dyn FnMut(SynthesisEvent)) -> Result<()> {
