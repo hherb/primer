@@ -7,7 +7,7 @@
 1. **#431** (`fix/phrase-split-blank-line-430`): closes #430.
 2. **#432** (`fix/voice-loop-err-surfaced-429`): closes #429.
 
-Plus **the docs PR** (`docs/next-session-2026-11-26`, from `main`) with this brief.
+Plus **#433**, the docs PR (`docs/next-session-2026-11-26`, from `main`) with this brief.
 
 **Since the last brief:**
 - **The #424 → #427 stack and the docs PR #428 are merged** (`main` at `d423be5`). #423 and #325 are CLOSED.
@@ -32,8 +32,9 @@ Plus **the docs PR** (`docs/next-session-2026-11-26`, from `main`) with this bri
 - **Fix:** `run_loop_inner` runs `run_loop_body` on `&mut observer`; on `Err` it logs `tracing::warn!` (target `primer::speech`) and emits `Exit` + the new `ExitReason::Error` (wire `"error"`). The GUI's existing exit listener leaves voice mode with a "Voice mode ended (error)" toast. One fix covers desktop, Android and the CLI.
 - **Tests:** the streamed TTS-error test now asserts the exit; new `tts_error_in_a_whole_reply_speak_reports_the_exit`. Both red before.
 
-### Checks run (both PRs)
-- All 5 `primer-speech` feature arms; `primer-gui --features speech` (313); clippy on the supertonic, android-native, GUI-speech and CLI-speech arms; fmt; rustdoc. The full workspace test pass was left to CI (only `primer-speech` changed).
+### Checks run
+- **Both PRs:** all 5 `primer-speech` feature arms; clippy on the supertonic and android-native arms; fmt; rustdoc.
+- **#432 only:** `primer-gui --features speech` (313); clippy on the GUI-speech and CLI-speech arms. The full workspace test pass was left to CI (only `primer-speech` changed).
 
 ### Per-session sweep
 - **Inline-test detector:** clean.
@@ -41,7 +42,7 @@ Plus **the docs PR** (`docs/next-session-2026-11-26`, from `main`) with this bri
 
 ## What's next (concrete acceptance criteria)
 
-### 0. Owner review/merge: #431, #432, then the docs PR
+### 0. Owner review/merge: #431, #432, then the docs PR #433
 - **Acceptance:** CI green on each; after merge `gh issue view 430 --json state` and `gh issue view 429 --json state` show CLOSED. Both touch `state_machine/stream_tests.rs` a few lines apart; after the first merges, check the second still merges (`gh pr view <N> --json mergeable`).
 
 ### 1. Sweep + inline-test detector: re-run EVERY session
@@ -51,7 +52,7 @@ Commands are in the resume block.
 - **Desktop:** `cargo run -p primer-gui --features speech` → Voice mode → ask a two-sentence question. The first sentence should start ~1.2 s after you stop, while the bubble is still filling. Press Stop mid-reply: speech stops after the current phrase, and the next question still gets an answer (#423).
 - **Also check:** "bye" ends voice mode with no reply. macOS-native CLI: still faster to first audio.
 - **#431:** a reply with a blank line between paragraphs should pause there instead of running on.
-- **#432:** to force it, point Settings → Speech at a broken Piper voice path *after* a start (or kill the voice file mid-session): the UI should leave voice mode with "Voice mode ended (error)".
+- **#432:** mock coverage only (`tts_error_in_a_whole_reply_speak_reports_the_exit`). There is no easy on-device trigger: Piper loads the voice into memory at start, so changing the path or deleting the file mid-session never fails a running loop. If a real TTS error ever happens, the UI should leave voice mode with "Voice mode ended (error)".
 - **Tune `MIN_THINK_HOLD`** (1.2 s) and `STREAM_TAIL_FLUSH_IDLE` (300 ms) if needed.
 - **Android (#260 checklist):** per-phrase speak + session-held `speaking` flag.
 
@@ -59,7 +60,7 @@ Commands are in the resume block.
 - `LoopBackends` gets an optional `clear_speaker` that empties the ringbuf, so a Stop silences at once.
 - **Acceptance:** a mock test where a cancel between phrases calls `clear_speaker` before the drain hook. Owner call after item 2.
 
-### 4. Manual first-run GUI check for #396 (owner)
+### 4. Manual first-run GUI check for PR #396 (owner)
 `mv ~/.primer/kb ~/.primer/kb.bak`, launch the GUI, Start new → Save & start; the button should count "… 0 / 91" upward.
 
 ### 5. Other bugs (host-completable; TDD each)
@@ -82,7 +83,7 @@ Commands are in the resume block.
 - **#260:** Android-voice on-device acceptance. Also check that a denied mic keeps the text session (#369), that a stop which times out (#421) leaves the next session's recognizer alive, and the #426/#427 per-phrase speak.
 - **#192:** macOS-native STT + injected TTS smoke.
 - **#170 Stages B, E and F:** the OpenRAIL-M disclosure ships before any default flip.
-- **#262 ignored test (owner):** run `reused_stream_does_not_bleed_prior_utterance` with real audio.
+- **Whisper reuse ignored test (owner, from PR #262):** run `reused_stream_does_not_bleed_prior_utterance` in `primer-speech/tests/whisper_stream_reuse.rs` with real audio.
 - **#135:** glib (blocked on Tauri 3).
 - **Other:** QNN token stability, NPU tuning, latency-routing calibration.
 
@@ -104,7 +105,7 @@ Commands are in the resume block.
 - **#427: a cancelled streamed turn fires `on_response_complete`** (its chunks are already in a bubble); a cancel before SPEAK does not. Deliberate, but not pinned by a test.
 - **#427: a spoken-but-cut-off reply is not in the session (D4 A).** If the child replies to it, the LLM has no context for it. Revisit option B if device logs show it often.
 - **#427: the GUI now gets `on_transcript_finalized` mid-generation**, and chunks live during SPEAK. Before, both came after completion. The GUI observer handles chunks incrementally, but this is not watched in the webview.
-- **#427: spurious VAD events keep the VAD arm open** (behaviour change, see shipped).
+- **#427: spurious VAD events keep the VAD arm open** (behaviour change; see the #427 section of `docs/handoffs/2026-11-25T100104Z.md`).
 - **#426: D3:** an emphasis pair spanning a sentence boundary speaks its `*`.
 - **#424: a Stop pressed during STT finalize**, a few ms before the LLM call, is dropped as stale.
 
@@ -291,7 +292,7 @@ Commands are in the resume block.
   4. Restore the file.
 - **Python `sub()` edits:** a helper that asserts the match count stops before the write.
 - **Bug-fix recipe:**
-  1. Branch off `origin/main`, and check `git branch --show-current` **before** editing. This session again started #314 on the previous fix's branch, and had to `git stash` → `checkout main` → `checkout -b` → `stash pop` before committing.
+  1. Branch off `origin/main`, and check `git branch --show-current` **before** editing. An earlier session started #314 on the previous fix's branch, and had to `git stash` → `checkout main` → `checkout -b` → `stash pop` before committing.
   2. Failing test, then fix, then green.
   3. Test + clippy each touched crate, plus its feature arms. Then fmt and rustdoc.
   4. `git grep` the docs for drift.
@@ -307,7 +308,7 @@ Commands are in the resume block.
 
 ```bash
 cd /Users/hherb/src/primer && git status --short && git checkout main && git pull --ff-only && git log --oneline -8 && gh pr list --state open
-# Open at close: #431 (#430), #432 (#429), docs PR — independent. After merge: gh issue view 430 --json state; gh issue view 429 --json state
+# Open at close: #431 (#430), #432 (#429), #433 (docs) — independent. After merge: gh issue view 430 --json state; gh issue view 429 --json state
 S=/private/tmp/primer-scratch; mkdir -p "$S"   # or the session's scratchpad dir
 
 # === Oversized-file sweep + inline-test detector (re-verify EVERY session) ===
