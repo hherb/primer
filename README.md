@@ -332,7 +332,9 @@ Project-local `.env` wins over the home file. Both are gitignored. See `.env.exa
 --knowledge-db <path>           Path to SQLite knowledge base (default: with an embedder,
                                 an embedded cache under ~/.primer/kb/, one per model and
                                 seed-corpus folder — the first run embeds the corpus,
-                                which can take a few minutes; without one, in-memory)
+                                which can take a few minutes, unless a cache for the same
+                                model exists to start from; the folder is safe to delete;
+                                without an embedder, in-memory)
 --session-db <path>             Path to SQLite session store
                                 (default: ~/.primer/<slugified-name>.db, created if missing)
 --resume <uuid>                 Resume a past session by UUID. Reads from --session-db; errors if
