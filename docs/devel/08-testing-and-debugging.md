@@ -78,7 +78,7 @@ These are two different tools. Use the right one.
 [comprehension] gravity=Aware(0.55) mass=Familiar(0.78) (llm:cloud:claude-sonnet-4-6)
 ```
 
-The lines are produced by the CLI directly from `dm.last_intent()`, `dm.last_assessment()`, `dm.last_extraction()`, and `dm.last_comprehension()` in [primer-cli/src/main.rs](../../src/crates/primer-cli/src/main.rs). They reflect the engine's view of the just-completed turn. Stdout stays clean — the child still sees only the Primer's response — so you can pipe stdout into a log file and read `--verbose` output live on the terminal.
+The lines are produced by the CLI directly from `dm.last_intent()`, `dm.last_assessment()`, `dm.last_extraction()`, and `dm.last_comprehension()` in [primer-cli/src/repl.rs](../../src/crates/primer-cli/src/repl.rs). They reflect the engine's view of the just-completed turn. Stdout stays clean — the child still sees only the Primer's response — so you can pipe stdout into a log file and read `--verbose` output live on the terminal.
 
 > **Note on identifier asymmetry:** the classifier emits `llm:{model}`, while the extractor and comprehension emit `llm:{backend}:{model}`. The classifier shipped first and predates the convention; if you grep stderr for an identifier, account for both shapes.
 
