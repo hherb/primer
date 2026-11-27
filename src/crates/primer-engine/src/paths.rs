@@ -107,6 +107,11 @@ impl KnowledgeDb {
     }
 }
 
+/// Hex digits of the seed-dir hash in a cache file name (a zero-padded
+/// `u64`), so the cache housekeeping can tell a hashed name from a
+/// legacy `<slug>.db` (#406).
+pub(crate) const SEED_DIR_HASH_HEX_LEN: usize = 16;
+
 /// FNV-1a 64-bit offset basis and prime (the algorithm's constants).
 const FNV1A_OFFSET: u64 = 0xcbf2_9ce4_8422_2325;
 const FNV1A_PRIME: u64 = 0x0000_0100_0000_01b3;
@@ -157,9 +162,10 @@ pub fn resolve_knowledge_db(
         (Some(home), Some(model)) if !no_persist => {
             let name = match seed_dir {
                 Some(dir) => format!(
-                    "{}-{:016x}.db",
+                    "{}-{:0w$x}.db",
                     slug(model),
-                    fnv1a_64(dir.as_os_str().as_encoded_bytes())
+                    fnv1a_64(dir.as_os_str().as_encoded_bytes()),
+                    w = SEED_DIR_HASH_HEX_LEN
                 ),
                 None => format!("{}.db", slug(model)),
             };
