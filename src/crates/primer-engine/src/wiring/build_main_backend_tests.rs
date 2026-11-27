@@ -1,3 +1,4 @@
+use super::backend::fallback_is_identical;
 use super::*;
 use primer_core::router::RouterMode;
 
@@ -179,13 +180,74 @@ async fn misconfigured_fallback_reports_fallback_dropped_notice() {
 }
 
 /// Both legs built ⇒ no notice, for the fallback wrap and the router alike.
+/// One server with a small and a big model is a legitimate pairing (#352).
 #[tokio::test]
 async fn wrapped_legs_report_no_notice() {
     for mode in [RouterMode::LocalOnly, RouterMode::Hybrid] {
         let p = params(Some("stub"), None, mode);
-        let (_, notice) = build_main_backend("stub", "m".into(), &p).await.unwrap();
+        let (_, notice) = build_main_backend("ollama", "m".into(), &p).await.unwrap();
         assert_eq!(notice, None, "mode {mode}");
+
+        let p = params(Some("ollama"), Some("big"), mode);
+        let (_, notice) = build_main_backend("ollama", "small".into(), &p)
+            .await
+            .unwrap();
+        assert_eq!(notice, None, "mode {mode}: same kind, other model");
     }
+}
+
+/// A fallback with the same kind AND model as the primary adds no
+/// protection, so both paths report it (#352 item 2). A leg that ignores
+/// its model (stub) counts as the same model; a cloud fallback compares
+/// its resolved default.
+#[tokio::test]
+async fn an_identical_fallback_reports_no_protection() {
+    use primer_core::consts::inference::DEFAULT_CLOUD_MODEL;
+    for mode in [RouterMode::LocalOnly, RouterMode::Hybrid] {
+        let p = params(Some("ollama"), Some("llama3.2"), mode);
+        let (b, notice) = build_main_backend("ollama", "llama3.2".into(), &p)
+            .await
+            .unwrap();
+        assert_eq!(b.name(), "ollama", "the session still runs");
+        assert_eq!(
+            notice,
+            Some(BackendNotice::FallbackIdentical {
+                fallback: "ollama".into(),
+                fallback_model: Some("llama3.2".into()),
+            }),
+            "mode {mode}"
+        );
+
+        let p = params(Some("stub"), None, mode);
+        let (_, notice) = build_main_backend("stub", "m".into(), &p).await.unwrap();
+        assert!(
+            matches!(&notice, Some(BackendNotice::FallbackIdentical { fallback, fallback_model: None }) if fallback == "stub"),
+            "mode {mode}: got {notice:?}"
+        );
+
+        let mut p = params(Some("cloud"), None, mode);
+        p.api_key = Some("test-key".into());
+        let (_, notice) = build_main_backend("cloud", DEFAULT_CLOUD_MODEL.into(), &p)
+            .await
+            .unwrap();
+        assert!(
+            matches!(&notice, Some(BackendNotice::FallbackIdentical { .. })),
+            "mode {mode}: got {notice:?}"
+        );
+    }
+}
+
+#[test]
+fn identical_fallback_rule() {
+    assert!(fallback_is_identical("ollama", "a", "ollama", Some("a")));
+    assert!(fallback_is_identical("stub", "m", "stub", None));
+    assert!(!fallback_is_identical("ollama", "a", "ollama", Some("b")));
+    assert!(!fallback_is_identical(
+        "ollama",
+        "a",
+        "openai-compat",
+        Some("a")
+    ));
 }
 
 /// The router path reports the same degradations as the fallback path.
@@ -229,6 +291,22 @@ fn notice_messages_name_legs_and_reason() {
         msg.contains("ollama") && msg.contains("cloud") && msg.contains("connection refused"),
         "{msg}"
     );
+
+    let same = BackendNotice::FallbackIdentical {
+        fallback: "ollama".into(),
+        fallback_model: Some("llama3.2".into()),
+    };
+    let msg = same.to_string();
+    assert!(
+        msg.contains("ollama") && msg.contains("llama3.2") && msg.contains("--fallback-model"),
+        "{msg}"
+    );
+    let msg = BackendNotice::FallbackIdentical {
+        fallback: "stub".into(),
+        fallback_model: None,
+    }
+    .to_string();
+    assert!(msg.contains("'stub'") && !msg.contains("model '"), "{msg}");
 }
 
 /// A cloud fallback carries its *resolved* model in the notice (the default
