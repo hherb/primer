@@ -8,11 +8,11 @@
 2. **#435** (`fix/pointless-fallback-notice-352`): #352 item 2 (the issue stays open for items 1 and 4).
 3. **#436** (`refactor/cli-main-split`): behaviour-preserving split of `primer-cli/src/main.rs`.
 
-Plus the docs PR (`docs/next-session-2026-11-27`, from `main`) with this brief.
+Plus the docs PR #437 (`docs/next-session-2026-11-27`, from `main`) with this brief.
 
 **Since the last brief:**
 - **#431, #432 and the docs PR #433 are merged** (`main` at `3f99eea`). #430 and #429 are CLOSED.
-- **The sweep and inline-test detector were clean at session start.**
+- **The sweep and inline-test detector showed nothing new at session start.** `primer-cli/src/main.rs` (1362) was the one known oversized file, and #436 splits it.
 - **Owner decisions taken this session:** #406 = "legacy delete + copy-seed"; #352 item 2 = option (a), same kind **and** model.
 
 ## What we shipped this session
@@ -39,10 +39,10 @@ Plus the docs PR (`docs/next-session-2026-11-27`, from `main`) with this brief.
   - The same kind with a different model reports nothing.
   - It replaces the kind-only `tracing::warn!` on the fallback path; the router path had no check before.
 - **The CLI and GUI already render notices generically** (`Warning:` line, `#backend-notice-banner`), so neither needed a code change.
-- **Size split:** `BackendNotice`, its `Display` and `served_identity` moved verbatim to the new `wiring/notice.rs`, so `backend.rs` is 451 lines (from 542). The `pub` surface is unchanged.
+- **Size split:** `BackendNotice`, its `Display` and `served_identity` moved verbatim to the new `wiring/notice.rs`, so `backend.rs` is 451 lines (it would have been 542 with the new code; main has 489). The `pub` surface is unchanged.
 - **Mutation-checked:** a kind-only rule fails 2 tests.
 
-### #436 — `d628bc3`: `primer-cli/src/main.rs` split (1362 → 399)
+### #436 — `d628bc3`: `primer-cli/src/main.rs` split (1362 → 386)
 - **New files:** `cli.rs` (the clap `Cli`, re-exported as `crate::Cli`), `setup/{inference,session,embedder}.rs` (one startup step each, returning `Inference` / `SessionSetup` / `Option<Arc<dyn Embedder>>`), `repl.rs` (the text loop).
 - **Verified** with the usual recipe:
   - The anchors were asserted, and the pieces rebuild the original.
@@ -59,14 +59,14 @@ Plus the docs PR (`docs/next-session-2026-11-27`, from `main`) with this brief.
 
 ### Per-session sweep
 - **Inline-test detector:** clean.
-- **Oversized production files:** `primer-speech/src/macos/stt.rs` 504, `primer-inference/src/cloud.rs` 503. `primer-cli/src/main.rs` is 399 after #436.
+- **Oversized production files:** `primer-speech/src/macos/stt.rs` 504, `primer-inference/src/cloud.rs` 503. `primer-cli/src/main.rs` is 386 after #436.
 - **Local gotcha:** `primer-gui`'s build script panicked with a seed dir under an old session's scratchpad worktree (`…/wt427/data/seed`), a stale build-script artefact. `cargo clean -p primer-gui` fixed it (it removed 20 GiB).
 
 ## What's next (concrete acceptance criteria)
 
 ### 0. Owner review/merge: #434, #435, #436, then the docs PR
 - **Acceptance:** CI green on each; after #434 merges, `gh issue view 406 --json state` shows CLOSED.
-- **Overlaps:** #434 and #435 both edit CLAUDE.md, but different bullets. After the first merges, check the others still merge (`gh pr view <N> --json mergeable`).
+- **Overlaps:** #434, #435 and #436 all edit CLAUDE.md, but different bullets (#436's "Hybrid retrieval is default-on" edit sits two lines above #434's RRF-bullet edit). After the first merges, check the others still merge (`gh pr view <N> --json mergeable`).
 
 ### 1. Sweep + inline-test detector: re-run EVERY session
 Commands are in the resume block.
@@ -93,7 +93,7 @@ Commands are in the resume block.
 
 ### 6. Production-code splits (owner-approved lane, all feature-gated, so dual-verify)
 - `stt.rs` (504) and `cloud.rs` (503) are marginal; split only if an edit grows them.
-- **Optional follow-up to #436:** `setup/inference.rs` and `setup/session.rs` still call `std::process::exit` on user errors. Returning `anyhow` errors would make them testable, but it changes the exit codes (2 for router errors).
+- **Optional follow-up to #436:** `setup/inference.rs`, `setup/session.rs` and `setup/embedder.rs` still call `std::process::exit` on user errors. Returning `anyhow` errors would make them testable, but it changes the exit codes (2 for router errors).
 - **Recipe that worked for #409 / #416 / #425 / #436:**
   1. In Python, slice the file at unique, asserted anchors.
   2. Assert that the pieces rebuild the whole file.
@@ -192,7 +192,7 @@ Commands are in the resume block.
 - **#362's pin covers `build_classifier` only.** Extractor and comprehension were already pinned by their ids.
 
 ### From #405 (merged; #401)
-- **Upgrade cost:** fixed by #434. The legacy `<model>.db` seeds the new hashed cache and is then deleted.
+- **Upgrade cost:** fixed by #434 (still open). The legacy `<model>.db` seeds the new hashed cache and is then deleted.
 - **Orphans accumulate**, one per seed dir ever used (a few MB each). #434 deletes only the legacy `<model>.db` and makes a new folder's first run cheap (copy-seed).
 - **A moved checkout or a renamed app bundle is a new folder**, so it costs one full re-embed.
 - **No seed files found** falls back to `<model>.db`, the legacy name.
@@ -241,7 +241,6 @@ Commands are in the resume block.
 - **#385:** a resume right after a turn can block for up to the background budget (10 s worst case).
 - **#384:** `finish()` only recovers a complete-but-unterminated final unit.
 - **#381:** a `force` reembed clears the locale's vectors up front. A model still used by another locale stays pinned at its old dim.
-- **#382:** a *write* failure in a later seed file still leaves earlier files committed (`shortcut:` in `load_seed_files`).
 - **#374:** a corrupt `embedding_models` row is a hard retrieval error (intended).
 - **#369 residual:** a session-build failure after the close still loses the text session (`shortcut:` in `start.rs`).
 - **#370:** v9 drop/rename runs with `foreign_keys = ON`.
@@ -349,7 +348,7 @@ for f in $(find crates -name '*.rs' -not -path '*/vendor/*' -not -name 'tests.rs
 # === #434 / #435 / #436 regression checks ===
 ~/.cargo/bin/cargo test -p primer-engine --lib -- knowledge:: build_main_backend
 ~/.cargo/bin/cargo test -p primer-knowledge --lib snapshot_db
-for f in "" speech qnn llamacpp "speech,macos-native" "speech,macos-native-26"; do echo "== $f"; ~/.cargo/bin/cargo clippy -p primer-cli ${f:+--features $f} --all-targets -- -D warnings 2>&1 | grep -E '^error'; done
+for f in "" speech qnn llamacpp "speech,macos-native" "speech,macos-native-26"; do echo "== $f"; ~/.cargo/bin/cargo clippy -p primer-cli ${f:+--features} ${f:+$f} --all-targets -- -D warnings 2>&1 | grep -E '^error'; done
 
 # === #424-#427, #431, #432: voice loop on every speech arm (stream_tests needs tokio test-util, already a dev-dep) ===
 for f in voice-loop voice-loop,silero,cpal,macos-native voice-loop,silero,cpal,macos-native-26 android-native,voice-loop voice-loop,silero,whisper,piper,cpal,supertonic; do \
@@ -394,4 +393,4 @@ for spec in "-p primer-speech --features voice-loop,silero,whisper,piper,cpal,su
 
 - **#434:** a new copy of the project, or the first start after an upgrade, used to spend about a minute and a half rebuilding the knowledge library from scratch, and left the old copy on disk forever. It now starts from the library already on the machine, rebuilds only what changed, and deletes the old copy. Closes #406.
 - **#435:** setting the backup AI to the very same server and model as the main one quietly gave no protection. The app now says so in its warning banner. Part of #352.
-- **#436:** the command-line program's 1,362-line main file is now five smaller files, with nothing changed for users.
+- **#436:** the command-line program's 1,362-line main file is now split into seven smaller files, with nothing changed for users.
