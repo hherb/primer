@@ -14,6 +14,7 @@ use primer_core::inference::InferenceBackend;
 use primer_inference::stub::StubBackend;
 
 use super::BackendParams;
+use super::notice::BackendNotice;
 
 /// Outcome of the main-backend construction decision. See the truth table
 /// in docs/superpowers/specs/2026-06-05-local-cloud-fallback-design.md.
@@ -27,73 +28,6 @@ pub enum MainBackendPlan {
     Wrapped,
     /// Nothing usable; surface the primary's construction error.
     Fail,
-}
-
-/// A non-fatal degradation of the configured fallback / router legs,
-/// returned by [`build_main_backend`] so a UI can tell the user instead of
-/// leaving it in a `tracing::warn!` nobody sees (issues #347, #338).
-/// `reason` is the failed leg's construction error, rendered verbatim.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum BackendNotice {
-    /// The configured fallback could not be built; the primary serves alone,
-    /// so there is no fallback if it fails mid-session (plan `PrimaryAlone`).
-    FallbackDropped { fallback: String, reason: String },
-    /// The primary could not be built; every turn goes to the fallback
-    /// (plan `SecondaryAlone`). `fallback_model` is its resolved model.
-    PrimaryUnavailable {
-        primary: String,
-        fallback: String,
-        fallback_model: Option<String>,
-        reason: String,
-    },
-}
-
-impl std::fmt::Display for BackendNotice {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match self {
-            Self::FallbackDropped { fallback, reason } => write!(
-                f,
-                "Fallback backend '{fallback}' is disabled for this session: {reason}"
-            ),
-            Self::PrimaryUnavailable {
-                primary,
-                fallback,
-                reason,
-                ..
-            } => write!(
-                f,
-                "Backend '{primary}' is unavailable, so this session uses the \
-                 fallback backend '{fallback}': {reason}"
-            ),
-        }
-    }
-}
-
-/// The `(backend kind, model)` that actually serves turns. Normally the
-/// configured primary; but under [`BackendNotice::PrimaryUnavailable`] every
-/// turn goes to the fallback, so return that instead. Both binaries feed it
-/// to the subsystem builders (whose ids are provenance records, issue #351)
-/// and the GUI sidebar shows it (issue #338). `served_name` is the
-/// constructed backend's `name()`, used when the fallback has no model.
-pub fn served_identity(
-    kind: &str,
-    main_model: &str,
-    notice: Option<&BackendNotice>,
-    served_name: &str,
-) -> (String, String) {
-    match notice {
-        Some(BackendNotice::PrimaryUnavailable {
-            fallback,
-            fallback_model,
-            ..
-        }) => (
-            fallback.clone(),
-            fallback_model
-                .clone()
-                .unwrap_or_else(|| served_name.to_string()),
-        ),
-        _ => (kind.to_string(), main_model.to_string()),
-    }
 }
 
 /// Pure decision: given whether each leg built and whether a fallback was
@@ -229,6 +163,41 @@ async fn build_secondary_leg(
     }
 }
 
+/// True when the fallback leg is the primary over again: the same kind and
+/// the same model. A fallback whose resolved model is `None` (a backend that
+/// ignores the model, such as stub) matches on kind alone. Same kind with a
+/// different model is legitimate (a small and a big model on one server).
+pub(super) fn fallback_is_identical(
+    primary_kind: &str,
+    primary_model: &str,
+    fallback_kind: &str,
+    fallback_model: Option<&str>,
+) -> bool {
+    primary_kind == fallback_kind && fallback_model.is_none_or(|m| m == primary_model)
+}
+
+/// The `Wrapped` notice: [`BackendNotice::FallbackIdentical`] when the
+/// fallback is the primary over again, else none.
+fn identical_fallback_notice(
+    primary_name: &str,
+    primary_model: &str,
+    fb_name: String,
+    fb_model: Option<String>,
+) -> Option<BackendNotice> {
+    if !fallback_is_identical(primary_name, primary_model, &fb_name, fb_model.as_deref()) {
+        return None;
+    }
+    tracing::warn!(
+        backend = primary_name,
+        model = primary_model,
+        "fallback backend and model equal the main ones; no resilience gain"
+    );
+    Some(BackendNotice::FallbackIdentical {
+        fallback: fb_name,
+        fallback_model: fb_model,
+    })
+}
+
 /// The `SecondaryAlone` notice: `e` is the primary's construction error.
 fn primary_unavailable(
     primary_name: &str,
@@ -259,7 +228,8 @@ fn primary_unavailable(
 ///
 /// The second tuple element reports a `PrimaryAlone` / `SecondaryAlone`
 /// degradation of a configured fallback (or router) as a [`BackendNotice`];
-/// it is `None` when nothing was configured or both legs built.
+/// on `Wrapped` it is [`BackendNotice::FallbackIdentical`] when the fallback
+/// is the primary's kind and model over again, else `None`.
 pub async fn build_main_backend(
     primary_name: &str,
     primary_model: String,
@@ -273,17 +243,7 @@ pub async fn build_main_backend(
         return build_router_backend(primary_name, primary_model, params).await;
     }
 
-    // Warn on a pointless same-backend fallback (still works, just no resilience).
-    if let Some(fb) = params.fallback_backend.as_deref() {
-        if fb == primary_name {
-            tracing::warn!(
-                backend = primary_name,
-                "fallback backend equals the main backend; no resilience gain"
-            );
-        }
-    }
-
-    let primary = build_backend(primary_name, primary_model, params).await;
+    let primary = build_backend(primary_name, primary_model.clone(), params).await;
 
     let Some(fb_name) = params.fallback_backend.clone() else {
         // No fallback configured: today's behavior verbatim.
@@ -301,7 +261,8 @@ pub async fn build_main_backend(
             // because both is_ok() were true.
             let primary = primary.expect("Wrapped implies primary built");
             let secondary = secondary.expect("Wrapped implies secondary built");
-            Ok((Arc::new(FallbackBackend::new(primary, secondary)), None))
+            let notice = identical_fallback_notice(primary_name, &primary_model, fb_name, fb_model);
+            Ok((Arc::new(FallbackBackend::new(primary, secondary)), notice))
         }
         MainBackendPlan::SecondaryAlone => {
             tracing::warn!(
@@ -364,20 +325,21 @@ async fn build_router_backend(
         ));
     };
 
-    let primary = build_backend(primary_name, primary_model, params).await;
+    let primary = build_backend(primary_name, primary_model.clone(), params).await;
     let (secondary, fb_model) = build_secondary_leg(&fb_name, params).await;
 
     match plan_main_backend(primary.is_ok(), true, secondary.is_ok()) {
         MainBackendPlan::Wrapped => {
             let primary = primary.expect("Wrapped implies primary built");
             let secondary = secondary.expect("Wrapped implies secondary built");
+            let notice = identical_fallback_notice(primary_name, &primary_model, fb_name, fb_model);
             let router = RouterBackend::with_ttft_budget(
                 primary,
                 secondary,
                 params.router_mode,
                 params.primary_ttft_budget_ms,
             );
-            Ok((Arc::new(router), None))
+            Ok((Arc::new(router), notice))
         }
         MainBackendPlan::SecondaryAlone => {
             tracing::warn!(
