@@ -288,5 +288,27 @@ impl KnowledgeBase for SqliteKnowledgeBase {
     }
 }
 
+/// Copy the SQLite database at `src` into the new file `dst` as one
+/// consistent snapshot (`VACUUM INTO`), so a copy taken while another
+/// process writes `src` is never torn. `src` is opened read-only: it is
+/// never created, migrated or written. Fails if `dst` already exists.
+/// Used to start a new knowledge-base cache from an existing one (#406).
+pub fn snapshot_db(src: &Path, dst: &Path) -> Result<()> {
+    let err = |e: rusqlite::Error| {
+        PrimerError::Knowledge(format!(
+            "snapshot {} to {}: {e}",
+            src.display(),
+            dst.display()
+        ))
+    };
+    let conn = Connection::open_with_flags(src, rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY)
+        .map_err(err)?;
+    let dst = dst.to_str().ok_or_else(|| {
+        PrimerError::Knowledge(format!("snapshot to non-UTF-8 path {}", dst.display()))
+    })?;
+    conn.execute("VACUUM INTO ?1", [dst]).map_err(err)?;
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests;
