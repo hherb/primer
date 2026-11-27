@@ -1,49 +1,72 @@
 # Primer — Next Session Brief
 
 **Audience:** future Claude Code session continuing work on this repo.
-**Last updated:** 2026-11-26 (UTC).
+**Last updated:** 2026-11-27 (UTC).
 
 **Open against `main` (independent; any order):**
-1. **#431** (`fix/phrase-split-blank-line-430`): closes #430.
-2. **#432** (`fix/voice-loop-err-surfaced-429`): closes #429.
+1. **#434** (`fix/kb-cache-cleanup-406`): closes #406.
+2. **#435** (`fix/pointless-fallback-notice-352`): #352 item 2 (the issue stays open for items 1 and 4).
+3. **#436** (`refactor/cli-main-split`): behaviour-preserving split of `primer-cli/src/main.rs`.
 
-Plus **#433**, the docs PR (`docs/next-session-2026-11-26`, from `main`) with this brief.
+Plus the docs PR (`docs/next-session-2026-11-27`, from `main`) with this brief.
 
 **Since the last brief:**
-- **The #424 → #427 stack and the docs PR #428 are merged** (`main` at `d423be5`). #423 and #325 are CLOSED.
-- **The sweep and inline-test detector were clean at session start** (same three oversized production files).
+- **#431, #432 and the docs PR #433 are merged** (`main` at `3f99eea`). #430 and #429 are CLOSED.
+- **The sweep and inline-test detector were clean at session start.**
+- **Owner decisions taken this session:** #406 = "legacy delete + copy-seed"; #352 item 2 = option (a), same kind **and** model.
 
 ## What we shipped this session
 
 > SHAs are branch-tip commits as pushed; squash-merge gives new ones on `main`.
 
-### #431 — `7aecadf`: a blank line ends a spoken phrase (closes #430)
-- **Bug:** on a truncation retry the DM streams the cut-off partial, `"\n\n"`, then the apology. `PhraseSplitter` only broke on `. ! ?` + whitespace, so the child heard "the sun is a star that Sorry, I ran out of room…" as one phrase.
-- **Second half of the same bug:** each push ended in a space, so the backend's own splitter (Piper, Supertonic, macOS, `StubTts`) held an unterminated phrase and glued it to the next push. That also hit the held partial spoken before the fallback line ("And then" + "Sorry…").
-- **Fix:**
-  - `PhraseSplitter` treats a whitespace run holding two newlines as a hard boundary. New exported `PHRASE_BREAK = "\n\n"`.
-  - `tts_phrase` ends each push with `PHRASE_BREAK` instead of `" "`, so one push is always one whole phrase for the backend.
-  - `AndroidTts` passes `text.trim()` to the OS engine.
-- **Tests:** 3 splitter tests, `tts_phrases_splits_at_a_blank_line`, the stream test `a_blank_line_ends_an_unterminated_phrase`, and the `StubTts`-backed recording test now starts with an unterminated paragraph. Mutation-checked: dropping the blank-line rule fails 6, reverting the suffix fails 15.
-- **Docs:** the CLAUDE.md markdown-before-TTS bullet and the #325 design note's "trailing space is load-bearing" paragraph.
+### #434 — `9208049`: a new KB cache starts from an existing one; the legacy file is deleted (closes #406)
+- **Bug:** since #401 each seed-corpus folder has its own cache. So a new worktree, a fresh clone, or an upgrade from the pre-#401 `<model>.db` re-embedded the whole corpus (~100 s on BGE-M3), and the old file was never deleted.
+- **Fix** (`primer-engine/src/knowledge/cache.rs`, called from `open_prepared_kb`):
+  - **Copy-seed:** a cache file that doesn't exist yet starts as a snapshot of the newest same-model cache. The top-up then re-embeds only the passages that differ and prunes the rest.
+  - **The snapshot** is the new `primer_knowledge::snapshot_db`: the source is opened read-only and copied with `VACUUM INTO` into a per-process temp file, then hard-linked into place. The link fails if the cache appeared meanwhile, so a concurrent start is never clobbered.
+  - **Legacy delete:** once a hashed cache is ready, the legacy `<model>.db` beside it (and its `-journal`) is deleted. By then it has already seeded the new cache.
+  - **Both steps are soft** (they log a `warn!` on failure).
+  - **Not done (owner decision):** other folders' caches are kept. README and CLAUDE.md say `~/.primer/kb/` is safe to delete.
+- **Tests:**
+  - 2 `snapshot_db` tests in `primer-knowledge`.
+  - 3 end-to-end tests in `primer-engine/src/knowledge/tests.rs`: only the diff is embedded, the source is untouched, another model's cache is never the source, the legacy file seeds and is then deleted, and an unhashed cache keeps its own file.
+  - 3 pure name-parsing tests.
+- **Mutation-checked:** removing the copy-seed call fails 2 tests; removing the legacy delete fails 1.
 
-### #432 — `824c236`, `954a32e`: report a voice-loop error as an exit (closes #429)
-- **Bug:** a `run_loop` `Err` (TTS push/finalize, STT `open_session`) returned via `?` with no `on_exit`. The GUI stayed frozen on its last voice state, with the mic pipeline gone, until End voice mode.
-- **Fix:** `run_loop_inner` runs `run_loop_body` on `&mut observer`; on `Err` it logs `tracing::warn!` (target `primer::speech`) and emits `Exit` + the new `ExitReason::Error` (wire `"error"`). The GUI's existing exit listener leaves voice mode with a "Voice mode ended (error)" toast. One fix covers desktop, Android and the CLI.
-- **Tests:** the streamed TTS-error test now asserts the exit; new `tts_error_in_a_whole_reply_speak_reports_the_exit`. Both red before.
+### #435 — `ba38cc6`: an identical fallback is a `BackendNotice` (#352 item 2)
+- **New notice:** `BackendNotice::FallbackIdentical { fallback, fallback_model }`, returned with a `Wrapped` build on **both** the fallback and the router paths, when the fallback has the same kind **and** the same resolved model.
+  - A model-less leg (stub) matches on kind alone.
+  - The same kind with a different model reports nothing.
+  - It replaces the kind-only `tracing::warn!` on the fallback path; the router path had no check before.
+- **The CLI and GUI already render notices generically** (`Warning:` line, `#backend-notice-banner`), so neither needed a code change.
+- **Size split:** `BackendNotice`, its `Display` and `served_identity` moved verbatim to the new `wiring/notice.rs`, so `backend.rs` is 451 lines (from 542). The `pub` surface is unchanged.
+- **Mutation-checked:** a kind-only rule fails 2 tests.
+
+### #436 — `d628bc3`: `primer-cli/src/main.rs` split (1362 → 399)
+- **New files:** `cli.rs` (the clap `Cli`, re-exported as `crate::Cli`), `setup/{inference,session,embedder}.rs` (one startup step each, returning `Inference` / `SessionSetup` / `Option<Arc<dyn Embedder>>`), `repl.rs` (the text loop).
+- **Verified** with the usual recipe:
+  - The anchors were asserted, and the pieces rebuild the original.
+  - The multiset line diff shows only the wrappers, imports, `pub(crate)` and four intended body edits.
+  - 24 tests before and after.
+  - Clippy is clean on 8 feature arms, and a stub REPL smoke run behaves as before.
 
 ### Checks run
-- **Both PRs:** all 5 `primer-speech` feature arms; clippy on the supertonic and android-native arms; fmt; rustdoc.
-- **#432 only:** `primer-gui --features speech` (313); clippy on the GUI-speech and CLI-speech arms. The full workspace test pass was left to CI (only `primer-speech` changed).
+- **#434:** `cargo test -p primer-engine -p primer-knowledge -p primer-gui` (129 / 51 / 259); clippy + rustdoc on both crates; fmt.
+- **#435:** `cargo test -p primer-engine -p primer-gui -p primer-cli`; clippy + rustdoc on `primer-engine`.
+- **#436:** see above.
+- **Not run locally:** the full workspace test pass and the Android cross-compile (CI runs both).
+- **CI at close:** #434 green; #435 and #436 were still running.
 
 ### Per-session sweep
 - **Inline-test detector:** clean.
-- **Oversized production files (unchanged):** `primer-cli/src/main.rs` 1362, `primer-speech/src/macos/stt.rs` 504, `primer-inference/src/cloud.rs` 503. `inner.rs` is 220 after #432.
+- **Oversized production files:** `primer-speech/src/macos/stt.rs` 504, `primer-inference/src/cloud.rs` 503. `primer-cli/src/main.rs` is 399 after #436.
+- **Local gotcha:** `primer-gui`'s build script panicked with a seed dir under an old session's scratchpad worktree (`…/wt427/data/seed`), a stale build-script artefact. `cargo clean -p primer-gui` fixed it (it removed 20 GiB).
 
 ## What's next (concrete acceptance criteria)
 
-### 0. Owner review/merge: #431, #432, then the docs PR #433
-- **Acceptance:** CI green on each; after merge `gh issue view 430 --json state` and `gh issue view 429 --json state` show CLOSED. Both touch `state_machine/stream_tests.rs` a few lines apart; after the first merges, check the second still merges (`gh pr view <N> --json mergeable`).
+### 0. Owner review/merge: #434, #435, #436, then the docs PR
+- **Acceptance:** CI green on each; after #434 merges, `gh issue view 406 --json state` shows CLOSED.
+- **Overlaps:** #434 and #435 both edit CLAUDE.md, but different bullets. After the first merges, check the others still merge (`gh pr view <N> --json mergeable`).
 
 ### 1. Sweep + inline-test detector: re-run EVERY session
 Commands are in the resume block.
@@ -64,20 +87,21 @@ Commands are in the resume block.
 `mv ~/.primer/kb ~/.primer/kb.bak`, launch the GUI, Start new → Save & start; the button should count "… 0 / 91" upward.
 
 ### 5. Other bugs (host-completable; TDD each)
-- **#406:** stale KB cache files are never cleaned up. Decide a pruning policy first (owner).
-- **#352 remaining:** item 2 needs the owner decision below; items 1 and 4 need a design note first.
-- **Older:** #315, #316. Run `gh issue list`; read each before starting.
+- **#352 item 1:** a per-turn "served by" signal when a `FallbackBackend` / `RouterBackend` fails over mid-session. It needs a design note first: a turn-complete payload field plus a GUI pill or banner.
+- **#352 item 4:** mislabelled classifier rows from before #363. Design note first; related to #316 (the id-format migration).
+- **Older:** #315 (Hindi SOV prefixes), #316. Run `gh issue list`; read each before starting.
 
 ### 6. Production-code splits (owner-approved lane, all feature-gated, so dual-verify)
-- **`primer-cli/src/main.rs` (1362)** is the main offender. Prefer the "one helper both binaries repeat → `primer-engine`" pattern.
-- `stt.rs` (504) and `cloud.rs` (503) are marginal.
-- **Recipe that worked for #409 / #416 / #425:**
+- `stt.rs` (504) and `cloud.rs` (503) are marginal; split only if an edit grows them.
+- **Optional follow-up to #436:** `setup/inference.rs` and `setup/session.rs` still call `std::process::exit` on user errors. Returning `anyhow` errors would make them testable, but it changes the exit codes (2 for router errors).
+- **Recipe that worked for #409 / #416 / #425 / #436:**
   1. In Python, slice the file at unique, asserted anchors.
   2. Assert that the pieces rebuild the whole file.
   3. `cargo clippy` lists the stale imports.
   4. Compare the code lines with a normalised diff (a multiset of stripped lines).
   5. Compare test counts with `--list | grep -c ': test$'` before and after.
   - Save the script to the scratchpad and chain follow-up edits with `&&`: a failed assert must stop them.
+  - For a big `async fn` body, wrap each moved block in a `fn` that takes `&Cli` and returns a struct whose fields have the *same names* as the old locals. The caller then destructures it, and the rest of the body is unchanged.
 
 ### Carried / owner-or-hardware-gated
 - **#260:** Android-voice on-device acceptance. Also check that a denied mic keeps the text session (#369), that a stop which times out (#421) leaves the next session's recognizer alive, and the #426/#427 per-phrase speak.
@@ -89,7 +113,16 @@ Commands are in the resume block.
 
 ## Open decisions / risks
 
-### This session (#431, #432)
+### This session (#434, #435, #436)
+- **#434: other folders' caches still accumulate,** one per folder ever used (a few MB each), by owner choice. Only the legacy `<model>.db` is deleted.
+- **#434: a copied cache carries every locale of its source.** Each locale is topped up and pruned the first time it is opened, so another folder's DE passages sit in the copy until a DE session starts.
+- **#434: "newest" means the newest mtime.** That is usually the most recently embedded cache, but a cache that was only opened (nothing written) keeps its old mtime.
+- **#434: an older pre-#401 binary** run on the same machine recreates `<model>.db` and pays one embed.
+- **#435: llamacpp and qnn legs** read their GGUF path or bundle from shared params, so two such legs are the same model in practice. They are flagged only when their configured model strings also match.
+- **#435: the notice is English-only and operator-facing,** like the others.
+- **#436: no behaviour change was intended,** but there are many `cfg` arms. The Android cross-compile was left to CI.
+
+### From #431 / #432 (merged)
 - **#431 (owner call from #430): the truncated partial is still spoken**, now as its own phrase. It is already on screen; dropping it in voice mode would need the DM to mark which chunks are the cut-off attempt.
 - **#431: any blank line in a reply now ends a phrase**, also in the middle of a sentence an LLM wraps across a blank line (rare). Nothing is lost, only a pause is added.
 - **#431: the pushed text now ends in `"\n\n"`.** Piper / Supertonic / macOS / `StubTts` trim phrases before synthesis and Android gets `trim()`ed text, so no engine sees the newlines. A future backend that synthesises `push_text` input verbatim must trim too.
@@ -159,8 +192,8 @@ Commands are in the resume block.
 - **#362's pin covers `build_classifier` only.** Extractor and comprehension were already pinned by their ids.
 
 ### From #405 (merged; #401)
-- **Upgrade cost:** existing `~/.primer/kb/<model>.db` caches are orphaned (safe to delete). The first start after upgrading re-embeds into the new file: ~100 s on BGE-M3 for EN, again for DE.
-- **Orphans accumulate**, one per seed dir ever used (a few MB each). Nothing cleans them.
+- **Upgrade cost:** fixed by #434. The legacy `<model>.db` seeds the new hashed cache and is then deleted.
+- **Orphans accumulate**, one per seed dir ever used (a few MB each). #434 deletes only the legacy `<model>.db` and makes a new folder's first run cheap (copy-seed).
 - **A moved checkout or a renamed app bundle is a new folder**, so it costs one full re-embed.
 - **No seed files found** falls back to `<model>.db`, the legacy name.
 - **The CLI's KB caller has no test seam.** Only the GUI caller is pinned.
@@ -186,14 +219,6 @@ Commands are in the resume block.
 
 ### From #396 (merged)
 - **Manual first-run GUI check not run** (item 4 above). Progress is one event per 16-passage batch (~18 s apart on BGE-M3); the restart button's long text may wrap on a narrow modal; voice-mode rebuilds report nothing; the CLI prints only its one-line notice.
-
-### #352 item 2: what counts as a pointless fallback? (owner decision, unchanged)
-`--fallback-backend == --backend` with a different **model** is legitimate (small/big ollama models, or hybrid routing on one server).
-- (a) notice only when kind **and** model match;
-- (b) kind-only, worded as "no protection if the server goes down";
-- (c) drop the item and keep the `tracing::warn!`.
-
-**Recommendation:** (a), and downgrade or drop today's kind-only warn on the router path.
 
 ### From #394 (merged)
 - **First-run cost is large:** ~106 s for BGE-M3 over 91 EN passages on an M-series Mac. The first `--language de` run pays again for its 66 passages. Weaker hardware will be slower. Android stays `--embedder-backend none` (#157), so no cache is built there.
@@ -237,6 +262,10 @@ Commands are in the resume block.
 
 
 ## Patterns to reuse, not reinvent
+
+- **Copying a SQLite file safely (new, #434):** use `VACUUM INTO` on a `SQLITE_OPEN_READ_ONLY` connection (`primer_knowledge::snapshot_db`), not `fs::copy`, which can tear while another process writes. Write into a per-process temp file, then `std::fs::hard_link` it into place: unlike `rename`, a hard link fails if the target exists, so a concurrent winner's open file is never replaced.
+- **Splitting a long `async fn` (new, #436):** move each block into a `fn(cli: &Cli) -> Struct`, where the struct's fields have the same names as the old locals, and destructure at the call site (`let Inference { backend, notice, .. } = build_inference(&cli).await;`). The rest of the body needs no edit. Watch for moves out of the owned struct (`cli.session_db` → `.clone()`) and `&cli` → `cli`.
+- **A notice for a misconfiguration that still works (new, #435):** keep the rule a pure `fn(..) -> bool` tested on its own, and build the notice only in the `Wrapped` arm, so a real degradation (`FallbackDropped` / `PrimaryUnavailable`) still wins.
 
 - **Reporting a generic loop's `?` exits once (new, #432):** instead of adding a report before every `?`, rename the body (`run_loop_body`), give it `&mut O`, and have the old entry point call it and report on `Err`. Inside the body, pass `observer` (not `&mut observer`) to helpers taking `&mut O`: it reborrows implicitly.
 - **A hard boundary that survives a second splitter (new, #431):** when text passes through two splitters (the voice loop's, then each TTS backend's), make the first one's output end in a token the second treats as a hard boundary (`PHRASE_BREAK`), so an unterminated phrase is never re-glued. Test it through `StubTts` (it has its own splitter); a recording mock without one cannot catch it.
@@ -308,7 +337,7 @@ Commands are in the resume block.
 
 ```bash
 cd /Users/hherb/src/primer && git status --short && git checkout main && git pull --ff-only && git log --oneline -8 && gh pr list --state open
-# Open at close: #431 (#430), #432 (#429), #433 (docs) — independent. After merge: gh issue view 430 --json state; gh issue view 429 --json state
+# Open at close: #434 (#406), #435 (#352 item 2), #436 (CLI split), docs PR — independent. After merge: gh issue view 406 --json state
 S=/private/tmp/primer-scratch; mkdir -p "$S"   # or the session's scratchpad dir
 
 # === Oversized-file sweep + inline-test detector (re-verify EVERY session) ===
@@ -316,6 +345,11 @@ cd /Users/hherb/src/primer/src
 find crates -name '*.rs' -not -path '*/vendor/*' -not -name 'tests.rs' | xargs wc -l | awk '$1>500 && $2!="total"' | sort -rn
 for f in $(find crates -name '*.rs' -not -path '*/vendor/*' -not -name 'tests.rs' | xargs wc -l | awk '$1>500 && $2!="total"{print $2}'); do \
   awk '/#\[cfg\(test\)\]/{ln=NR} ln && NR==ln+1 && /^[[:space:]]*mod .*\{/{print FILENAME" inline mod @"NR}' "$f"; done
+
+# === #434 / #435 / #436 regression checks ===
+~/.cargo/bin/cargo test -p primer-engine --lib -- knowledge:: build_main_backend
+~/.cargo/bin/cargo test -p primer-knowledge --lib snapshot_db
+for f in "" speech qnn llamacpp "speech,macos-native" "speech,macos-native-26"; do echo "== $f"; ~/.cargo/bin/cargo clippy -p primer-cli ${f:+--features $f} --all-targets -- -D warnings 2>&1 | grep -E '^error'; done
 
 # === #424-#427, #431, #432: voice loop on every speech arm (stream_tests needs tokio test-util, already a dev-dep) ===
 for f in voice-loop voice-loop,silero,cpal,macos-native voice-loop,silero,cpal,macos-native-26 android-native,voice-loop voice-loop,silero,whisper,piper,cpal,supertonic; do \
@@ -358,5 +392,6 @@ for spec in "-p primer-speech --features voice-loop,silero,whisper,piper,cpal,su
 
 ## Reporting back
 
-- **#431:** when the Primer runs out of room mid-answer and starts again, voice mode used to run the cut-off sentence straight into the apology ("the sun is a star that Sorry, I ran out of room"). It now pauses between them. Closes #430.
-- **#432:** if the voice engine failed mid-answer, the screen used to freeze on "speaking" until an adult pressed End voice mode. It now leaves voice mode at once and says "Voice mode ended (error)". Closes #429.
+- **#434:** a new copy of the project, or the first start after an upgrade, used to spend about a minute and a half rebuilding the knowledge library from scratch, and left the old copy on disk forever. It now starts from the library already on the machine, rebuilds only what changed, and deletes the old copy. Closes #406.
+- **#435:** setting the backup AI to the very same server and model as the main one quietly gave no protection. The app now says so in its warning banner. Part of #352.
+- **#436:** the command-line program's 1,362-line main file is now five smaller files, with nothing changed for users.
