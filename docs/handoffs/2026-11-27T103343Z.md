@@ -55,7 +55,7 @@ Plus the docs PR (`docs/next-session-2026-11-27`, from `main`) with this brief.
 - **#435:** `cargo test -p primer-engine -p primer-gui -p primer-cli`; clippy + rustdoc on `primer-engine`.
 - **#436:** see above.
 - **Not run locally:** the full workspace test pass and the Android cross-compile (CI runs both).
-- **CI at close:** #434 green; #435 and #436 were still running.
+- **CI at close:** all checks green on #434, #435 and #436.
 
 ### Per-session sweep
 - **Inline-test detector:** clean.
