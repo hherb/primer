@@ -166,7 +166,7 @@ Ok(assessment)
 
 **6. Wire the spawn/await pattern** into the dialogue manager in [background.rs](../../src/crates/primer-pedagogy/src/dialogue_manager/background.rs) following the classifier model. Hold the classifier as `Arc<dyn ToneClassifier>` because `tokio::spawn` requires `'static`. Either add a third branch to `await_pending_background` or join it onto the existing classifier branch — depends on whether tone needs to influence intent (parallel branch) or just track longitudinally (fire-and-forget).
 
-**7. Add CLI flags** following the `--classifier-*` template in [primer-cli/src/main.rs](../../src/crates/primer-cli/src/main.rs): `--tone-backend`, `--tone-model`, `--tone-timeout-ms`. Default to mirroring the main `--backend` / `--model` so the simple case requires zero new flags. Update the flags reference in [CLAUDE.md](../../CLAUDE.md).
+**7. Add CLI flags** following the `--classifier-*` template in [primer-cli/src/cli.rs](../../src/crates/primer-cli/src/cli.rs): `--tone-backend`, `--tone-model`, `--tone-timeout-ms`. Default to mirroring the main `--backend` / `--model` so the simple case requires zero new flags. Update the flags reference in [CLAUDE.md](../../CLAUDE.md).
 
 **8. Soft-fail tracing.** Confirm every error path inside `LlmToneClassifier` produces a `tracing::warn!(classifier = %self.identifier, ...)` line and returns `ToneAssessment::unknown_low_confidence(...)`. Never return `Result::Err` from the public API on the hot path. Follow the test pattern in [primer-classifier/src/llm.rs](../../src/crates/primer-classifier/src/llm.rs) — the `classify_returns_unknown_on_*` tests pin every error branch.
 

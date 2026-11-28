@@ -20,7 +20,8 @@ use primer_extractor::{
 };
 
 use super::BackendParams;
-use super::backend::{BackendNotice, build_backend, served_identity};
+use super::backend::build_backend;
+use super::notice::{BackendNotice, served_identity};
 
 /// Why a subsystem's `--*-model` override has no effect, or `None` when it
 /// does (or there is none). The subsystem resolves to the deterministic stub,

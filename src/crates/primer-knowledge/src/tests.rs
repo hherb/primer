@@ -1326,3 +1326,40 @@ async fn insert_seed_new_inserts_replaces_and_prunes_in_one_call() {
         )
         .expect("FTS index must stay consistent with its content table");
 }
+
+#[test]
+fn snapshot_db_copies_a_consistent_db_and_leaves_the_source_untouched() {
+    let dir = tempfile::tempdir().unwrap();
+    let src = dir.path().join("src.db");
+    let kb = SqliteKnowledgeBase::open_for_locale(&src, Locale::English).unwrap();
+    kb.insert_passage("p1", "test:source", "the quick brown fox")
+        .unwrap();
+    let before = std::fs::read(&src).unwrap();
+
+    let dst = dir.path().join("dst.db");
+    // While `kb` still holds the source open, as another process might.
+    snapshot_db(&src, &dst).unwrap();
+    assert_eq!(std::fs::read(&src).unwrap(), before, "source not written");
+    drop(kb);
+
+    let copy = SqliteKnowledgeBase::open_for_locale(&dst, Locale::English).unwrap();
+    assert_eq!(copy.passage_count().unwrap(), 1);
+}
+
+#[test]
+fn snapshot_db_refuses_an_existing_destination_and_a_missing_source() {
+    let dir = tempfile::tempdir().unwrap();
+    let src = dir.path().join("src.db");
+    drop(SqliteKnowledgeBase::open_for_locale(&src, Locale::English).unwrap());
+    let dst = dir.path().join("dst.db");
+    std::fs::write(&dst, b"keep me").unwrap();
+    assert!(snapshot_db(&src, &dst).is_err());
+    assert_eq!(std::fs::read(&dst).unwrap(), b"keep me");
+
+    let missing = dir.path().join("missing.db");
+    assert!(snapshot_db(&missing, &dir.path().join("x.db")).is_err());
+    assert!(
+        !missing.exists(),
+        "a read-only open never creates the source"
+    );
+}

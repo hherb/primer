@@ -1,9 +1,8 @@
 //! Command-line argument parse/validation helpers for the `primer` REPL.
 //!
 //! Extracted from `main.rs` so the entry point keeps only runtime wiring.
-//! The [`crate::Cli`] struct itself stays in the crate root; these free
-//! helpers reach its private fields through descendant-module visibility,
-//! so no field needed to be made `pub(crate)` for the split.
+//! The [`crate::Cli`] struct lives in `cli.rs` (re-exported at the crate
+//! root); these free helpers read its `pub(crate)` fields.
 
 // `Path` + `PrimerError` are only referenced by `validate_speech_assets`,
 // so their imports carry the same cfg gate as that fn to avoid an
