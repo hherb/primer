@@ -15,13 +15,18 @@ use primer_knowledge::SqliteKnowledgeBase;
 
 use crate::paths::{KnowledgeDb, create_private_dir_all};
 
+mod cache;
+
 /// Open `db` under `locale` and run `primer_kb_load::prepare_kb` with the
 /// policy the variant implies:
 ///
 /// - [`KnowledgeDb::Cache`]: its parent dir is created owner-only, the
 ///   `seed_files` corpus is topped up (new and edited passages land,
 ///   removed ones are pruned), and every passage without a vector is
-///   embedded.
+///   embedded. A cache file that does not exist yet starts as a copy of
+///   the newest cache for the same model, so it embeds only what differs,
+///   and once a hashed cache is ready the pre-#401 `<slug>.db` beside it
+///   is deleted (#406; both steps only log on failure).
 /// - [`KnowledgeDb::Explicit`]: seeded only when empty and never
 ///   embedded. The user manages it with `primer-kb-load --reembed`.
 /// - [`KnowledgeDb::InMemory`]: seeded, and embedded when an embedder is
@@ -51,6 +56,7 @@ pub async fn open_prepared_kb(
     };
     if is_cache && let Some(dir) = path.parent() {
         create_private_dir_all(dir).map_err(|e| fail("creating the directory of", &e))?;
+        cache::seed_from_sibling(&path);
     }
     let kb =
         SqliteKnowledgeBase::open_for_locale(&path, locale).map_err(|e| fail("opening", &e))?;
@@ -61,6 +67,9 @@ pub async fn open_prepared_kb(
     let stats = primer_kb_load::prepare_kb(&kb, seed_files, is_cache, embed_with, on_progress)
         .await
         .map_err(|e| fail("seeding", &e))?;
+    if is_cache {
+        cache::remove_legacy_sibling(&path);
+    }
     tracing::info!(
         target: "primer::startup",
         path = %path.display(),

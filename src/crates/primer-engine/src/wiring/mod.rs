@@ -27,15 +27,16 @@ use std::path::{Path, PathBuf};
 
 mod backend;
 mod embedders;
+mod notice;
 mod subsystems;
 
 pub use backend::{
-    BackendNotice, MainBackendPlan, build_backend, build_main_backend, plan_main_backend,
-    resolve_fallback_model, served_identity,
+    MainBackendPlan, build_backend, build_main_backend, plan_main_backend, resolve_fallback_model,
 };
 pub use embedders::{
     build_fastembed_embedder, build_ollama_embedder, build_openai_compat_embedder,
 };
+pub use notice::{BackendNotice, served_identity};
 pub use subsystems::{
     ServedSubsystems, SubsystemSettings, build_classifier, build_comprehension, build_extractor,
     build_served_subsystems,
