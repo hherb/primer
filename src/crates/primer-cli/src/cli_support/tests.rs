@@ -1,8 +1,8 @@
 //! Tests for the CLI parse/validation helpers and `Cli` parsing.
 //!
-//! Relocated verbatim from `main.rs`. `Cli` lives in the crate root, so it
-//! is reached via `crate::Cli`; the helpers live in the parent module
-//! (`super`).
+//! Relocated verbatim from `main.rs`. `Cli` lives in `cli.rs` and is
+//! reached via its crate-root re-export `crate::Cli`; the helpers live in
+//! the parent module (`super`).
 
 #[cfg(test)]
 mod cli_parse_tests {
